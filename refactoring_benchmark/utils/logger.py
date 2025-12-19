@@ -27,6 +27,7 @@ def setup_logging(log_dir: str = "logs") -> None:
 def get_logger(
     name: str,
     use_file: bool = True,
+    use_stdout: bool = True,
     level: int = logging.INFO
 ) -> logging.Logger:
     """
@@ -52,6 +53,11 @@ def get_logger(
 
     logger = logging.getLogger(name)
     logger.setLevel(level)
+    
+    logger.propagate = False
+    if logger.handlers:
+        for handler in logger.handlers[:]:
+            logger.removeHandler(handler)
 
     # Avoid duplicate handlers if get_logger is called multiple times
     if not logger.handlers:
@@ -59,10 +65,11 @@ def get_logger(
         console_fmt = logging.Formatter("%(levelname)s: %(message)s")
 
         # Console Handler (always added)
-        ch = logging.StreamHandler(sys.stdout)
-        ch.setFormatter(console_fmt)
-        ch.setLevel(level)
-        logger.addHandler(ch)
+        if use_stdout:
+            ch = logging.StreamHandler(sys.stdout)
+            ch.setFormatter(console_fmt)
+            ch.setLevel(level)
+            logger.addHandler(ch)
 
         # File Handler (optional)
         if use_file:

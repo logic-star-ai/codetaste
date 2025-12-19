@@ -24,7 +24,7 @@ bootstrap_logger = get_logger("bootstrap")
 
 # --- DOCKER SETUP ---
 try:
-    client: docker.DockerClient = docker.from_env()
+    client: docker.DockerClient = docker.from_env(timeout=300)
     client.ping()
 except Exception as e:
     bootstrap_logger.error(f"Docker Connection Failed: {e}")
@@ -61,7 +61,7 @@ def stream_exec(container: DockerContainer, cmd: List[str], env: Optional[dict] 
             try:
                 # Log JSON updates if the agent outputs them
                 json_obj = json.loads(acc)
-                bootstrap_logger.info(f"Agent JSON: {json.dumps(json_obj, indent=2)}")
+                stream_logger.info(f"Agent JSON: {json.dumps(json_obj, indent=2)}")
                 acc = ""
             except json.JSONDecodeError:
                 pass
@@ -114,7 +114,7 @@ def bootstrap_instance(row: InstanceRow) -> None:
 
     try:
         # Clone & Checkout
-        instance_logger = get_logger(f"bootstrap-{row.owner}-{row.repo}-{row.commit_hash}", use_file=True)
+        instance_logger = get_logger(f"bootstrap-{row.owner}-{row.repo}-{row.commit_hash[:8]}", use_file=True, use_stdout=False)
         instance_logger.info(f"-> Shallow Cloning of {row.repo}...")
         url = f"https://github.com/{row.owner}/{row.repo}.git"
         for cmd in [
@@ -138,31 +138,28 @@ def bootstrap_instance(row: InstanceRow) -> None:
             "stream-json",
         ]
 
-        raw_log = stream_exec(container, agent_cmd, env={"ANTHROPIC_API_KEY": API_KEY or ""})
-
-        with open(f"{LOG_DIR}/setup_{row.repo}.log", "w") as f:
-            f.write(raw_log)
+        stream_exec(container, agent_cmd, env={"ANTHROPIC_API_KEY": API_KEY or ""}, stream_logger=instance_logger)
 
         # Metrics Capture - Golden
         instance_logger.info("\n-> Verifying Golden Metrics...")
-        container.exec_run("git reset --hard HEAD && git clean -fd")
+        container.exec_run("git reset --hard HEAD && git clean -xdf")
         container.exec_run(f"git checkout {row.golden_commit_hash}")
         golden_m = capture_metrics(container)
 
         if golden_m.failed == -1:
-            instance_logger.error("❌ Failed to parse Golden Metrics. Agent likely failed setup.")
+            bootstrap_logger.error("❌ Failed to parse Golden Metrics. Agent likely failed setup.")
             return
 
-        instance_logger.info(f"✅ Golden Metrics: {golden_m.model_dump()}")
+        bootstrap_logger.info(f"✅ Golden Metrics: {golden_m.model_dump()}")
 
         # Switch to Buggy
-        instance_logger.info(f"-> Regressing to Pre-Refactoring: {row.commit_hash}")
-        container.exec_run("git reset --hard HEAD && git clean -fd")
+        bootstrap_logger.info(f"-> Regressing to Pre-Refactoring: {row.commit_hash}")
+        container.exec_run("git reset --hard HEAD && git clean -xdf")
         container.exec_run(f"git checkout {row.commit_hash}")
 
         # Metrics Capture - Buggy
         pre_refactor_m: Metrics = capture_metrics(container)
-        instance_logger.info(f"📉 Start Metrics (Pre-Refactoring): {pre_refactor_m.model_dump()}")
+        bootstrap_logger.info(f"📉 Start Metrics (Pre-Refactoring): {pre_refactor_m.model_dump()}")
 
         # Save Metadata via Pydantic
         meta = InstanceMetadata(
