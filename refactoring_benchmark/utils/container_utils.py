@@ -69,3 +69,26 @@ def copy_to_container(container: DockerContainer, src_content: bytes, dst_path: 
         tar.addfile(info, BytesIO(src_content))
     stream.seek(0)
     container.put_archive(os.path.dirname(dst_path), stream.read())
+
+
+def extract_folder_from_container(
+    container: DockerContainer, container_path: str, local_dest: str
+) -> None:
+    """
+    Extract a folder from a container to the local filesystem.
+
+    Args:
+        container: Docker container instance
+        container_path: Path to folder inside the container
+        local_dest: Local destination directory to extract to
+
+    Raises:
+        Exception: If extraction fails
+    """
+    bits, stat = container.get_archive(container_path)
+    stream = BytesIO()
+    for chunk in bits:
+        stream.write(chunk)
+    stream.seek(0)
+    with tarfile.open(fileobj=stream, mode="r") as tar:
+        tar.extractall(path=local_dest)

@@ -2,6 +2,7 @@
 import csv
 import json
 import os
+import shlex
 import sys
 import tarfile
 from io import BytesIO
@@ -13,7 +14,11 @@ from docker.models.containers import Container as DockerContainer
 from refactoring_benchmark.utils.prompts import SETUP_PROMPT_LANG, SETUP_PROMPT_PYTHON
 from refactoring_benchmark.utils.models import InstanceRow, Metrics, InstanceMetadata
 from refactoring_benchmark.utils.logger import setup_logging, get_logger
-from refactoring_benchmark.utils.container_utils import stream_exec, copy_to_container
+from refactoring_benchmark.utils.container_utils import (
+    stream_exec,
+    copy_to_container,
+    extract_folder_from_container,
+)
 
 # --- CONFIGURATION ---
 CSV_FILE = "instances.csv"
@@ -54,7 +59,6 @@ def run_test_metrics(container: DockerContainer) -> Metrics:
     except Exception:
         return Metrics(passed=0, failed=-1, total=0, error="Crashed")
 
-# There are 3 outcomes : 1) Setup successful for parent & child 2) Setup successful for child only 3) Setup failed completely. Should be stored somewhere.
 def bootstrap_setup_phase(instance_row: InstanceRow) -> Optional[str]:
     """
     Phase 1: Setup environment and verify tests.
@@ -62,15 +66,24 @@ def bootstrap_setup_phase(instance_row: InstanceRow) -> Optional[str]:
     This phase:
     - Clones repository at golden commit
     - Runs Claude agent to set up environment
-    - Captures golden metrics
-    - Saves scripts if criteria met (total >= 10, passed >= 30%)
-    - If criteria not met, commits base image as-is
+    - Captures golden metrics (post-refactoring)
     - Switches to pre-refactoring commit
-    - Captures pre-refactoring metrics
+    - Captures base metrics (pre-refactoring)
+    - Saves scripts if criteria met (total >= 10, passed >= 30%)
     - Commits as {identifier}__setup image
 
+    Setup Outcomes (stored in InstanceMetadata):
+    1. Both successful: is_success_base=True, is_success_golden=True
+       - Ideal case: Tests work on both commits
+    2. Base only: is_success_base=True, is_success_golden=False
+       - Tests work on pre-refactoring commit only
+    3. Golden only: is_success_base=False, is_success_golden=True
+       - Tests work on post-refactoring commit only
+    4. Both failed: is_success_base=False, is_success_golden=False
+       - Agent setup failed or tests don't meet criteria on either commit
+
     Args:
-        row: Instance configuration from CSV
+        instance_row: Instance configuration from CSV
 
     Returns:
         Setup image name if successful, None otherwise
@@ -82,6 +95,13 @@ def bootstrap_setup_phase(instance_row: InstanceRow) -> Optional[str]:
     base_img = f"benchmark-base-{instance_row.language}"
 
     try:
+        client.images.get(setup_image)
+        bootstrap_logger.info(f"⏭️  SKIPPING: Setup image already exists: {setup_image}")
+        return setup_image
+    except:
+        pass  # Image doesn't exist, proceed with setup
+
+    try:
         # Make sure base images exists and is up to date
         container: DockerContainer = client.containers.run(
             base_img,
@@ -90,20 +110,21 @@ def bootstrap_setup_phase(instance_row: InstanceRow) -> Optional[str]:
             working_dir="/testbed",
         )
     except Exception as e:
-        bootstrap_logger.error(f"❌ Image {base_img} failed: {e}") # TODO: Resort to basic base image
+        bootstrap_logger.error(f"❌ Image {base_img} failed: {e}")
+        # TODO: Resort to basic base image if language-specific base fails
         return None
-    # TODO: If setup image exists, skip...
     try:
         # Clone & Checkout
         instance_logger = get_logger(f"bootstrap-{instance_row.owner}-{instance_row.repo}-{instance_row.commit_hash[:8]}", use_file=True, use_stdout=False)
         instance_logger.info(f"Shallow Cloning of {instance_row.repo}...")
         repo_url = f"https://github.com/{instance_row.owner}/{instance_row.repo}.git"
-        container.exec_run([
+        for cmd in [
             "git init .",
             f"git remote add origin {repo_url}",
             f"git fetch --depth 2 origin {instance_row.golden_commit_hash}",
             f"git checkout {instance_row.golden_commit_hash}",
-        ])
+        ]:
+            container.exec_run(cmd)
 
         # Agent Execution
         prompt = SETUP_PROMPT_LANG[instance_row.language]
@@ -134,26 +155,23 @@ def bootstrap_setup_phase(instance_row: InstanceRow) -> Optional[str]:
         is_setup_base_success = base_metrics.total >= 10 and base_metrics.passed >= base_metrics.total * 0.3 and base_metrics.failed != -1
 
         if is_setup_base_success or is_setup_golden_success:
-            bootstrap_logger.info(f"✅ Agent setup at least partially successful. Committing setup image.")
+            # At least one commit has working tests - save the agent's setup
+            bootstrap_logger.info(f"✅ Agent setup successful (base={is_setup_base_success}, golden={is_setup_golden_success}). Committing setup image.")
             container.commit(repository=setup_image, tag=None)
-            bootstrap_logger.info(f"✅ Saved {setup_image}.")
-        if not is_setup_golden_success:
-            bootstrap_logger.error(f"❌ Agent likely failed setup. Defaulting to base image.")
-            container.commit(repository=setup_image, tag=None) # TODO: Make this correctly use the base image.
-            bootstrap_logger.info(f"✅ Saved {setup_image} (base image).")
+            bootstrap_logger.info(f"✅ Saved {setup_image}")
+        else:
+            # Both base and golden failed - agent setup failed completely. Default to base image.
+            bootstrap_logger.error(f"❌ Agent setup failed for both base and golden commits.")
+            bootstrap_logger.info(f"-> Tagging base image as setup image (no agent setup applied).")
+            base_image = client.images.get(base_img)
+            base_image.tag(repository=setup_image, tag=None)
+            bootstrap_logger.info(f"✅ Tagged {base_img} as {setup_image}")
 
         # Save Scripts & Metadata
         scripts_dir = os.path.join(instance_dir, "scripts")
         os.makedirs(scripts_dir, exist_ok=True)
         try:
-            # TODO: Extracting folder from container should be a utility function
-            bits, stat = container.get_archive("/scripts")
-            stream = BytesIO()
-            for chunk in bits:
-                stream.write(chunk)
-            stream.seek(0)
-            with tarfile.open(fileobj=stream, mode='r') as tar:
-                tar.extractall(path=instance_dir)
+            extract_folder_from_container(container, "/scripts", instance_dir)
             bootstrap_logger.info(f"✅ Saved scripts to {scripts_dir}")
         except Exception as e:
             bootstrap_logger.warning(f"⚠️  Failed to save scripts: {e}")
@@ -162,22 +180,35 @@ def bootstrap_setup_phase(instance_row: InstanceRow) -> Optional[str]:
         meta = InstanceMetadata(
             owner=instance_row.owner,
             repo=instance_row.repo,
-            base_metrics=base_metrics,
+            golden_metrics=golden_metrics,
             start_metrics=base_metrics,
             base_hash=instance_row.commit_hash,
             golden_commit_hash=instance_row.golden_commit_hash,
-            setup_success=is_setup_golden_success,
+            is_success_base=is_setup_base_success,
+            is_success_golden=is_setup_golden_success,
         )
 
-        escaped_meta = meta.model_dump_json().replace("'", "'\\''") # TODO: use shlex.quote instead
+        meta_dict = meta.model_dump()
+        quoted_meta = shlex.quote(json.dumps(meta_dict))
         container.exec_run(
-            f"bash -c 'echo \"{escaped_meta}\" > /home/benchmarker/benchmark_meta.json'"
+            f"bash -c 'echo {quoted_meta} > /home/benchmarker/benchmark_meta.json'"
         )
+        with open(os.path.join(instance_dir, "metadata.json"), "w") as f:
+            json.dump(meta_dict, f, indent=2)
         return setup_image
 
     except Exception as e:
-        bootstrap_logger.exception(f"💥 Setup Phase Failed miserably: {instance_row.repo}.\n{e}")
-        # TODO: On failure try one more time to save the base image as setup image
+        bootstrap_logger.exception(f"💥 Setup Phase Failed catastrophically: {instance_row.repo}.\n{e}")
+        bootstrap_logger.info("-> Tagging base image as setup image fallback...")
+        try:
+            # Tag the base image as setup image (don't save broken container state)
+            base_image = client.images.get(base_img)
+            base_image.tag(repository=setup_image, tag=None)
+            bootstrap_logger.info(f"✅ Tagged {base_img} as {setup_image} (fallback)")
+            return setup_image
+        except Exception as tag_err:
+            bootstrap_logger.error(f"❌ Failed to tag base image: {tag_err}")
+            return None
     finally:
         bootstrap_logger.info("Cleaning up setup container...")
         try:
@@ -362,19 +393,19 @@ def bootstrap_instance(row: InstanceRow) -> None:
         bootstrap_logger.error("❌ Setup phase failed. Aborting bootstrap.")
         return
 
-    # Phase 2: Runtime
-    bootstrap_logger.info("=" * 60)
-    bootstrap_logger.info("PHASE 2: RUNTIME")
-    bootstrap_logger.info("=" * 60)
-    final_image = bootstrap_runtime_phase(row, setup_image)
+    # # Phase 2: Runtime
+    # bootstrap_logger.info("=" * 60)
+    # bootstrap_logger.info("PHASE 2: RUNTIME")
+    # bootstrap_logger.info("=" * 60)
+    # final_image = bootstrap_runtime_phase(row, setup_image)
 
-    if final_image is None:
-        bootstrap_logger.error("❌ Runtime phase failed. Setup image preserved but bootstrap incomplete.")
-        return
+    # if final_image is None:
+    #     bootstrap_logger.error("❌ Runtime phase failed. Setup image preserved but bootstrap incomplete.")
+    #     return
 
-    bootstrap_logger.info(f"{'='*60}")
-    bootstrap_logger.info(f"✨ SUCCESS: {final_image}")
-    bootstrap_logger.info(f"{'='*60}")
+    # bootstrap_logger.info(f"{'='*60}")
+    # bootstrap_logger.info(f"✨ SUCCESS: {final_image}")
+    # bootstrap_logger.info(f"{'='*60}")
 
 
 def main():
