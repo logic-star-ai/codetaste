@@ -1,3 +1,5 @@
+SUMMARY_PROMPT = "Once you have completed the task, briefly write a concise summary of the testing setup in `/scripts/SUMMARY.md` of the form: # Summary \n...\n## System Dependencies \n...\n## Python Environment \n...\n## Testing Framework \n...\n## Additional Notes"
+
 SETUP_PROMPT_PYTHON = (
     "Task: Configure the Python environment and validation scripts for the repository in /testbed/.\n"
     "Constraints:\n"
@@ -12,4 +14,8 @@ SETUP_PROMPT_PYTHON = (
     "6. VERIFICATION: Execute '/scripts/run_tests' **on both the current commit and its first parent**; confirm the JSON outputs match the actual test results. If a linter is setup, try that it works after sourcing '/scripts/setup_env.sh'. Proceed without asking for permission.\n"
     "Use conda to install the right Python distribution. "
     "Any dependencies or python environments that you install globally, outside of /testbed/, are preserved and do not need to be re-installed in /scripts/setup_env.sh."
-)
+) + "\n" + SUMMARY_PROMPT
+
+SETUP_PROMPT_LANG = {
+    "python": SETUP_PROMPT_PYTHON,
+}

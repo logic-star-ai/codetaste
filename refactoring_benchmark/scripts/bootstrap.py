@@ -1,17 +1,19 @@
-"""Bootstrap script for creating benchmark container images."""
+"""Creating benchmark instance images in two phases: setup and runtime injection."""
 import csv
 import json
-import logging
 import os
 import sys
-from typing import List, Optional, Any, cast
+import tarfile
+from io import BytesIO
+from typing import Optional
 
 import docker
 from docker.models.containers import Container as DockerContainer
 
-from refactoring_benchmark.utils.prompts import SETUP_PROMPT_PYTHON
+from refactoring_benchmark.utils.prompts import SETUP_PROMPT_LANG, SETUP_PROMPT_PYTHON
 from refactoring_benchmark.utils.models import InstanceRow, Metrics, InstanceMetadata
 from refactoring_benchmark.utils.logger import setup_logging, get_logger
+from refactoring_benchmark.utils.container_utils import stream_exec, copy_to_container
 
 # --- CONFIGURATION ---
 CSV_FILE = "instances.csv"
@@ -32,43 +34,7 @@ except Exception as e:
     sys.exit(1)
 
 
-def stream_exec(container: DockerContainer, cmd: List[str], env: Optional[dict] = None, stream_logger: Optional[logging.Logger] = None) -> str:
-    """
-    Execute a command in the container and stream its output.
-
-    Args:
-        container: Docker container instance
-        cmd: Command to execute as a list of strings
-        env: Optional environment variables
-
-    Returns:
-        Complete output from the command
-    """
-    if stream_logger is None:
-        stream_logger = bootstrap_logger
-
-    full_output = []
-    exec_instance = container.exec_run(
-        cmd=cmd, environment=env or {}, stream=True, tty=True
-    )
-
-    acc = ""
-    for chunk in cast(Any, exec_instance.output):
-        if chunk:
-            decoded = chunk.decode("utf-8", errors="replace")
-            acc += decoded
-            full_output.append(decoded)
-            try:
-                # Log JSON updates if the agent outputs them
-                json_obj = json.loads(acc)
-                stream_logger.info(f"Agent JSON: {json.dumps(json_obj, indent=2)}")
-                acc = ""
-            except json.JSONDecodeError:
-                pass
-    return "".join(full_output)
-
-
-def capture_metrics(container: DockerContainer) -> Metrics:
+def run_test_metrics(container: DockerContainer) -> Metrics:
     """
     Capture test metrics from the container.
 
@@ -88,20 +54,35 @@ def capture_metrics(container: DockerContainer) -> Metrics:
     except Exception:
         return Metrics(passed=0, failed=-1, total=0, error="Crashed")
 
-
-def bootstrap_instance(row: InstanceRow) -> None:
+# There are 3 outcomes : 1) Setup successful for parent & child 2) Setup successful for child only 3) Setup failed completely. Should be stored somewhere.
+def bootstrap_setup_phase(instance_row: InstanceRow) -> Optional[str]:
     """
-    Bootstrap a single benchmark instance.
+    Phase 1: Setup environment and verify tests.
+
+    This phase:
+    - Clones repository at golden commit
+    - Runs Claude agent to set up environment
+    - Captures golden metrics
+    - Saves scripts if criteria met (total >= 10, passed >= 30%)
+    - If criteria not met, commits base image as-is
+    - Switches to pre-refactoring commit
+    - Captures pre-refactoring metrics
+    - Commits as {identifier}__setup image
 
     Args:
         row: Instance configuration from CSV
-    """
-    bootstrap_logger.info(f"{'='*60}")
-    bootstrap_logger.info(f"🚀 STARTING: {row.owner}/{row.repo}")
-    bootstrap_logger.info(f"{'='*60}")
 
-    base_img = f"benchmark-base-{row.language}"
+    Returns:
+        Setup image name if successful, None otherwise
+    """
+    instance_dir = os.path.join("instance_images", instance_row.repo, instance_row.owner, instance_row.commit_hash[:8])
+    image_identifier = f"localhost/benchmark/{instance_row.owner}__{instance_row.repo}-{instance_row.commit_hash[:8]}"
+    setup_image = f"{image_identifier}__setup"
+
+    base_img = f"benchmark-base-{instance_row.language}"
+
     try:
+        # Make sure base images exists and is up to date
         container: DockerContainer = client.containers.run(
             base_img,
             detach=True,
@@ -109,25 +90,24 @@ def bootstrap_instance(row: InstanceRow) -> None:
             working_dir="/testbed",
         )
     except Exception as e:
-        bootstrap_logger.error(f"Image {base_img} failed: {e}")
-        return
-
+        bootstrap_logger.error(f"❌ Image {base_img} failed: {e}") # TODO: Resort to basic base image
+        return None
+    # TODO: If setup image exists, skip...
     try:
         # Clone & Checkout
-        instance_logger = get_logger(f"bootstrap-{row.owner}-{row.repo}-{row.commit_hash[:8]}", use_file=True, use_stdout=False)
-        instance_logger.info(f"-> Shallow Cloning of {row.repo}...")
-        url = f"https://github.com/{row.owner}/{row.repo}.git"
-        for cmd in [
+        instance_logger = get_logger(f"bootstrap-{instance_row.owner}-{instance_row.repo}-{instance_row.commit_hash[:8]}", use_file=True, use_stdout=False)
+        instance_logger.info(f"Shallow Cloning of {instance_row.repo}...")
+        repo_url = f"https://github.com/{instance_row.owner}/{instance_row.repo}.git"
+        container.exec_run([
             "git init .",
-            f"git remote add origin {url}",
-            f"git fetch --depth 2 origin {row.golden_commit_hash}",
-            f"git checkout {row.golden_commit_hash}",
-        ]:
-            container.exec_run(cmd)
+            f"git remote add origin {repo_url}",
+            f"git fetch --depth 2 origin {instance_row.golden_commit_hash}",
+            f"git checkout {instance_row.golden_commit_hash}",
+        ])
 
         # Agent Execution
-        prompt = SETUP_PROMPT_PYTHON if row.language.lower() == "python" else ""
-        instance_logger.info("-> Claude Agent is taking control...")
+        prompt = SETUP_PROMPT_LANG[instance_row.language]
+        instance_logger.info("Claude Agent is taking control...")
         agent_cmd = [
             "claude",
             "-p",
@@ -141,49 +121,201 @@ def bootstrap_instance(row: InstanceRow) -> None:
         stream_exec(container, agent_cmd, env={"ANTHROPIC_API_KEY": API_KEY or ""}, stream_logger=instance_logger)
 
         # Metrics Capture - Golden
-        instance_logger.info("\n-> Verifying Golden Metrics...")
         container.exec_run("git reset --hard HEAD && git clean -xdf")
-        container.exec_run(f"git checkout {row.golden_commit_hash}")
-        golden_m = capture_metrics(container)
-
-        if golden_m.failed == -1:
-            bootstrap_logger.error("❌ Failed to parse Golden Metrics. Agent likely failed setup.")
-            return
-
-        bootstrap_logger.info(f"✅ Golden Metrics: {golden_m.model_dump()}")
-
-        # Switch to Buggy
-        bootstrap_logger.info(f"-> Regressing to Pre-Refactoring: {row.commit_hash}")
+        container.exec_run(f"git checkout {instance_row.golden_commit_hash}")
+        golden_metrics = run_test_metrics(container)
+        is_setup_golden_success = golden_metrics.total >= 10 and golden_metrics.passed >= golden_metrics.total * 0.3 and golden_metrics.failed != -1
+        bootstrap_logger.info(f"Golden Metrics (Post-Refactoring): {golden_metrics.model_dump()}")
+        # Switch to Pre-Refactoring
         container.exec_run("git reset --hard HEAD && git clean -xdf")
-        container.exec_run(f"git checkout {row.commit_hash}")
+        container.exec_run(f"git checkout {instance_row.commit_hash}")
+        base_metrics: Metrics = run_test_metrics(container)
+        bootstrap_logger.info(f"Base Metrics (Pre-Refactoring): {base_metrics.model_dump()}")
+        is_setup_base_success = base_metrics.total >= 10 and base_metrics.passed >= base_metrics.total * 0.3 and base_metrics.failed != -1
 
-        # Metrics Capture - Buggy
-        pre_refactor_m: Metrics = capture_metrics(container)
-        bootstrap_logger.info(f"📉 Start Metrics (Pre-Refactoring): {pre_refactor_m.model_dump()}")
+        if is_setup_base_success or is_setup_golden_success:
+            bootstrap_logger.info(f"✅ Agent setup at least partially successful. Committing setup image.")
+            container.commit(repository=setup_image, tag=None)
+            bootstrap_logger.info(f"✅ Saved {setup_image}.")
+        if not is_setup_golden_success:
+            bootstrap_logger.error(f"❌ Agent likely failed setup. Defaulting to base image.")
+            container.commit(repository=setup_image, tag=None) # TODO: Make this correctly use the base image.
+            bootstrap_logger.info(f"✅ Saved {setup_image} (base image).")
+
+        # Save Scripts & Metadata
+        scripts_dir = os.path.join(instance_dir, "scripts")
+        os.makedirs(scripts_dir, exist_ok=True)
+        try:
+            # TODO: Extracting folder from container should be a utility function
+            bits, stat = container.get_archive("/scripts")
+            stream = BytesIO()
+            for chunk in bits:
+                stream.write(chunk)
+            stream.seek(0)
+            with tarfile.open(fileobj=stream, mode='r') as tar:
+                tar.extractall(path=instance_dir)
+            bootstrap_logger.info(f"✅ Saved scripts to {scripts_dir}")
+        except Exception as e:
+            bootstrap_logger.warning(f"⚠️  Failed to save scripts: {e}")
 
         # Save Metadata via Pydantic
         meta = InstanceMetadata(
-            owner=row.owner,
-            repo=row.repo,
-            golden_metrics=golden_m,
-            start_metrics=pre_refactor_m,
-            hashes={"golden": row.golden_commit_hash, "buggy": row.commit_hash},
+            owner=instance_row.owner,
+            repo=instance_row.repo,
+            base_metrics=base_metrics,
+            start_metrics=base_metrics,
+            base_hash=instance_row.commit_hash,
+            golden_commit_hash=instance_row.golden_commit_hash,
+            setup_success=is_setup_golden_success,
         )
 
-        escaped_meta = meta.model_dump_json().replace("'", "'\\''")
+        escaped_meta = meta.model_dump_json().replace("'", "'\\''") # TODO: use shlex.quote instead
         container.exec_run(
             f"bash -c 'echo \"{escaped_meta}\" > /home/benchmarker/benchmark_meta.json'"
         )
-
-        # Commit
-        tag = f"localhost/benchmark/{row.owner}-{row.repo}:{row.commit_hash[:8]}"
-        container.commit(repository=tag.split(":")[0], tag=tag.split(":")[1])
-        bootstrap_logger.info(f"✨ SUCCESS: {tag}")
+        return setup_image
 
     except Exception as e:
-        bootstrap_logger.exception(f"💥 CRITICAL FAILURE: {row.repo}")
+        bootstrap_logger.exception(f"💥 Setup Phase Failed miserably: {instance_row.repo}.\n{e}")
+        # TODO: On failure try one more time to save the base image as setup image
     finally:
-        bootstrap_logger.info("-> Cleaning up container...")
+        bootstrap_logger.info("Cleaning up setup container...")
+        try:
+            container.stop(timeout=1)
+            container.remove(force=True)
+        except Exception as net_err:
+            if "permission denied" in str(net_err):
+                bootstrap_logger.info("Container removed (swallowed Podman netns warning).")
+            else:
+                bootstrap_logger.warning(f"Cleanup warning: {net_err}")
+
+
+def bootstrap_runtime_phase(row: InstanceRow, setup_image: str) -> Optional[str]:
+    """
+    Phase 2: Inject runtime components and security hardening.
+
+    This phase:
+    - Starts container from setup image
+    - Injects entrypoint script
+    - Injects security rules (hidden from agent)
+    - Injects task descriptions (visible to agent)
+    - Commits as {identifier}__runtime image
+
+    Args:
+        row: Instance configuration from CSV
+        setup_image: Name of the setup image to build upon
+
+    Returns:
+        Runtime image name if successful, None otherwise
+    """
+    image_identifier = f"localhost/benchmark/{row.owner}__{row.repo}-{row.commit_hash[:8]}"
+    runtime_image = f"{image_identifier}__runtime"
+
+    try:
+        container: DockerContainer = client.containers.run(
+            setup_image,
+            detach=True,
+            working_dir="/testbed",
+        )
+    except Exception as e:
+        bootstrap_logger.error(f"❌ Failed to start container from {setup_image}: {e}")
+        return None
+
+    try:
+        # =========================================================
+        # Runtime Injection & Security Hardening
+        # =========================================================
+
+        # 1. Inject Entrypoint Script
+        try:
+            # Path relative to project root (2 levels up from scripts/)
+            entrypoint_path = os.path.join(os.path.dirname(__file__), "..", "..", "entrypoint.sh")
+            with open(entrypoint_path, "rb") as f:
+                entrypoint_script = f.read()
+
+            bootstrap_logger.info("-> Injecting runtime entrypoint...")
+            copy_to_container(container, entrypoint_script, "/usr/local/bin/entrypoint.sh")
+            container.exec_run("sudo chmod +x /usr/local/bin/entrypoint.sh")
+        except FileNotFoundError:
+            bootstrap_logger.error("❌ entrypoint.sh not found in project root!")
+            return None
+
+        # 2. Inject Rule Files (Security Critical)
+        # Look for rules in: assets/rules/{owner}/{repo}/{hash[:8]}/
+        project_root = os.path.join(os.path.dirname(__file__), "..", "..")
+        rules_dir = os.path.join(project_root, "assets", "rules", row.owner, row.repo, row.commit_hash[:8])
+
+        if os.path.exists(rules_dir):
+            bootstrap_logger.info(f"-> Injecting security rules from {rules_dir}...")
+
+            # Ensure /rules directory exists
+            container.exec_run("sudo mkdir -p /rules")
+
+            # Copy all rule files from the directory
+            for filename in os.listdir(rules_dir):
+                file_path = os.path.join(rules_dir, filename)
+                if os.path.isfile(file_path):
+                    with open(file_path, "rb") as f:
+                        rule_content = f.read()
+
+                    # Place in /rules with the same filename
+                    copy_to_container(container, rule_content, f"/rules/{filename}")
+                    bootstrap_logger.info(f"   → Copied {filename}")
+
+            # LOCKDOWN: Set owner to root and mode to 700.
+            # 'benchmarker' cannot read this. 'agent_user' cannot read this.
+            # Only 'sudo opengrep' (in eval_rule) can read this.
+            container.exec_run("sudo chown -R root:root /rules")
+            container.exec_run("sudo chmod -R 700 /rules")
+        else:
+            bootstrap_logger.warning(f"-> No rules found at {rules_dir}")
+
+        # 3. Inject Task Description (Visible to Agent)
+        # Look for task description in: assets/descriptions/{owner}/{repo}/{hash[:8]}/
+        task_desc_dir = os.path.join(project_root, "assets", "descriptions", row.owner, row.repo, row.commit_hash[:8])
+
+        if os.path.exists(task_desc_dir):
+            bootstrap_logger.info(f"-> Injecting task description from {task_desc_dir}...")
+
+            # Ensure /task_description directory exists
+            container.exec_run("sudo mkdir -p /task_description")
+
+            # Copy all description files from the directory
+            for filename in os.listdir(task_desc_dir):
+                file_path = os.path.join(task_desc_dir, filename)
+                if os.path.isfile(file_path):
+                    with open(file_path, "rb") as f:
+                        desc_content = f.read()
+
+                    # Place in /task_description with the same filename
+                    copy_to_container(container, desc_content, f"/task_description/{filename}")
+                    bootstrap_logger.info(f"   → Copied {filename}")
+
+            # Make readable by benchmarker (and later by agent_user during inference)
+            # Agent can read this to understand the refactoring task
+            container.exec_run("sudo chown -R benchmarker:benchmarker /task_description")
+            container.exec_run("sudo chmod -R 755 /task_description")
+        else:
+            bootstrap_logger.warning(f"-> No task description found at {task_desc_dir}")
+
+        # 4. Commit with Entrypoint Configuration
+        # We bake the entrypoint into the image configuration.
+        # This replaces the default CMD from the Dockerfile.
+        bootstrap_logger.info(f"-> Committing runtime image: {runtime_image}")
+        container.commit(
+            repository=runtime_image.split(":")[0],
+            tag=runtime_image.split(":")[1] if ":" in runtime_image else None,
+            conf={"Entrypoint": ["/usr/local/bin/entrypoint.sh"]}
+        )
+        bootstrap_logger.info(f"✨ Runtime Phase Complete: {runtime_image}")
+
+        return runtime_image
+
+    except Exception as e:
+        bootstrap_logger.exception(f"💥 Runtime Phase Failed: {row.repo}")
+        return None
+    finally:
+        bootstrap_logger.info("-> Cleaning up runtime container...")
         try:
             container.stop(timeout=1)
             container.remove(force=True)
@@ -192,6 +324,57 @@ def bootstrap_instance(row: InstanceRow) -> None:
                 bootstrap_logger.info("-> Container removed (swallowed Podman netns warning).")
             else:
                 bootstrap_logger.warning(f"-> Cleanup warning: {net_err}")
+
+
+def bootstrap_instance(row: InstanceRow) -> None:
+    """
+    Bootstrap a single benchmark instance in two phases.
+
+    Phase 1 (Setup): Environment setup and test verification
+    Phase 2 (Runtime): Security hardening and runtime injection
+
+    Args:
+        row: Instance configuration from CSV
+    """
+    bootstrap_logger.info(f"{'='*60}")
+    bootstrap_logger.info(f"🚀 STARTING: {row.owner}/{row.repo}/{row.commit_hash[:8]}")
+    bootstrap_logger.info(f"{'='*60}")
+
+    # Check if instance already exists
+    instance_dir = os.path.join("instance_images", row.repo, row.owner, row.commit_hash[:8])
+    runtime_image = f"localhost/benchmark/{row.owner}__{row.repo}-{row.commit_hash[:8]}__runtime"
+
+    # Check if runtime image already exists
+    try:
+        client.images.get(runtime_image)
+        bootstrap_logger.info(f"⏭️  SKIPPING: Runtime image already exists: {runtime_image}")
+        return
+    except:
+        pass  # Image doesn't exist, proceed with bootstrap
+
+    # Phase 1: Setup
+    bootstrap_logger.info("=" * 60)
+    bootstrap_logger.info("PHASE 1: SETUP")
+    bootstrap_logger.info("=" * 60)
+    setup_image = bootstrap_setup_phase(row)
+
+    if setup_image is None:
+        bootstrap_logger.error("❌ Setup phase failed. Aborting bootstrap.")
+        return
+
+    # Phase 2: Runtime
+    bootstrap_logger.info("=" * 60)
+    bootstrap_logger.info("PHASE 2: RUNTIME")
+    bootstrap_logger.info("=" * 60)
+    final_image = bootstrap_runtime_phase(row, setup_image)
+
+    if final_image is None:
+        bootstrap_logger.error("❌ Runtime phase failed. Setup image preserved but bootstrap incomplete.")
+        return
+
+    bootstrap_logger.info(f"{'='*60}")
+    bootstrap_logger.info(f"✨ SUCCESS: {final_image}")
+    bootstrap_logger.info(f"{'='*60}")
 
 
 def main():
