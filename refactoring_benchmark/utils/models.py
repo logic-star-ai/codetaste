@@ -1,6 +1,6 @@
 """Pydantic models for data validation and type safety."""
-from pydantic import BaseModel, Field
-from typing import Optional, Dict
+from pydantic import BaseModel
+from typing import Literal, Optional, Dict
 
 
 class InstanceRow(BaseModel):
@@ -9,6 +9,7 @@ class InstanceRow(BaseModel):
     repo: str
     golden_commit_hash: str
     commit_hash: str
+    category: str
     language: str
 
 
@@ -27,4 +28,7 @@ class InstanceMetadata(BaseModel):
     repo: str
     golden_metrics: Metrics
     start_metrics: Metrics
-    hashes: Dict[str, str]
+    base_hash: str
+    golden_commit_hash: str
+    is_success_base: bool # Indicating if tests appear to be running correctly on base
+    is_success_golden: bool

@@ -59,24 +59,22 @@ def get_logger(
         for handler in logger.handlers[:]:
             logger.removeHandler(handler)
 
-    # Avoid duplicate handlers if get_logger is called multiple times
-    if not logger.handlers:
-        file_fmt = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-        console_fmt = logging.Formatter("%(levelname)s: %(message)s")
+    file_fmt = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+    console_fmt = logging.Formatter("%(levelname)s: %(message)s")
 
-        # Console Handler (always added)
-        if use_stdout:
-            ch = logging.StreamHandler(sys.stdout)
-            ch.setFormatter(console_fmt)
-            ch.setLevel(level)
-            logger.addHandler(ch)
+    # Console Handler (always added)
+    if use_stdout:
+        ch = logging.StreamHandler(sys.stdout)
+        ch.setFormatter(console_fmt)
+        ch.setLevel(level)
+        logger.addHandler(ch)
 
-        # File Handler (optional)
-        if use_file:
-            log_file = os.path.join(_LOG_DIR, f"{name}.log")
-            fh = logging.FileHandler(log_file)
-            fh.setFormatter(file_fmt)
-            fh.setLevel(level)
-            logger.addHandler(fh)
+    # File Handler (optional)
+    if use_file:
+        log_file = os.path.join(_LOG_DIR, f"{name}.log")
+        fh = logging.FileHandler(log_file)
+        fh.setFormatter(file_fmt)
+        fh.setLevel(level)
+        logger.addHandler(fh)
 
     return logger
