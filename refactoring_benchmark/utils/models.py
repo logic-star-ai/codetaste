@@ -21,7 +21,7 @@ class InstanceRow(BaseModel):
     @property
     def id(self) -> str:
         """Instance ID: {owner}__{repo}-{short_hash}"""
-        return f"{self.owner}__{self.repo}-{self.short_hash}"
+        return f"{self.owner}__{self.repo}-{self.short_hash}".lower()
 
     @property
     def image_identifier(self) -> str:

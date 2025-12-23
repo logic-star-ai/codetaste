@@ -97,7 +97,7 @@ function create_restricted_user() {
         sudo chmod -R 755 "/task_description"
     fi
 
-    echo "-> [Security] Granting agent access to Python environments..."
+    echo "-> [Security] Setting permissions ..."
     sudo chmod -R 777 /home/benchmarker 
     sudo chmod -R 777 /opt
 }
