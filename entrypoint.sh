@@ -8,6 +8,7 @@ DIFF_INPUT="/input/patch.diff"
 DIFF_OUTPUT="/output/prediction.diff"
 SARIF_OUTPUT="/output/rules.sarif"
 RULES_DIR="/rules"
+TASK_DESC_DIR="/task_description"
 
 # Ensure we are in the repo
 cd "$REPO_ROOT"
@@ -38,6 +39,7 @@ function block_network() {
     echo "127.0.0.1 raw.githubusercontent.com" | sudo tee -a /etc/hosts > /dev/null
     echo "127.0.0.1 gist.github.com"           | sudo tee -a /etc/hosts > /dev/null
     echo "127.0.0.1 codeload.github.com"       | sudo tee -a /etc/hosts > /dev/null
+    echo "127.0.0.1 www.github.com"            | sudo tee -a /etc/hosts > /dev/null
 }
 
 function sanitize_git() {
@@ -71,9 +73,9 @@ function create_restricted_user() {
     echo "-> [Security] Transferring repo ownership to agent_user..."
     sudo chown -R agent_user:agent_user "$REPO_ROOT"
 
-    # Ensure agent can write to output directory
+    # Ensure agent can write to output directory (and benchmarker can write diff later)
     if [ -d "/output" ]; then
-        sudo chown -R agent_user:agent_user "/output"
+        sudo chmod -R 777 "/output"
     fi
 
     # Allow agent to execute the mounted agent script
@@ -81,11 +83,18 @@ function create_restricted_user() {
         sudo chmod -R 755 "/agent"
     fi
 
+    if [ -d "/scripts" ]; then
+        sudo chmod -R 755 "/scripts"
+    fi
+
     # Ensure agent can read task descriptions
     if [ -d "/task_description" ]; then
         sudo chown -R agent_user:agent_user "/task_description"
         sudo chmod -R 755 "/task_description"
     fi
+
+    echo "-> [Security] Granting agent access to Python environments..."
+    sudo chmod -R 777 /home/benchmarker /opt/python /opt/conda
 }
 
 # --- Main Mode Logic ---
@@ -98,6 +107,9 @@ case "$1" in
         block_network
         reset_env       # Revert to clean 'Buggy' commit
         sanitize_git    # Delete the 'Golden' commit artifacts
+
+        PRE_AGENT_HASH=$(git rev-parse HEAD)
+
         create_restricted_user # Prepare user
 
         if [ ! -f "$AGENT_SCRIPT" ]; then
@@ -107,11 +119,13 @@ case "$1" in
 
         # 2. Restricted Execution (As 'agent_user')
         echo "=== Dropping Privileges: Switching to 'agent_user' ==="
-        chmod +x "$AGENT_SCRIPT"
 
         # Run agent. -E preserves ENV vars (Conda PATH, API Keys, etc.)
         # agent_user CANNOT sudo, CANNOT access /rules, CANNOT reach GitHub
-        if sudo -E -u agent_user "$AGENT_SCRIPT"; then
+        if sudo -E -u agent_user bash -c '
+            [ -f /scripts/setup_env.sh ] && source /scripts/setup_env.sh
+            exec "$0" "$@"
+        ' "$AGENT_SCRIPT" "$(cat "$TASK_DESC_DIR/description.md")"; then
             echo "=== Agent finished successfully ==="
         else
             echo "=== Agent failed with exit code $? ==="
@@ -119,9 +133,13 @@ case "$1" in
 
         # 3. Harvest Results
         echo "=== Extracting Diff ==="
-        # We diff against the sanitized HEAD.
-        # Output is owned by agent_user, but we can read it.
-        git diff HEAD > "$DIFF_OUTPUT"
+        # Transfer ownership back to benchmarker to allow git operations
+        sudo chown -R benchmarker:benchmarker "$REPO_ROOT"
+        # Save the diff between pre- and post-agent run
+        cd "$REPO_ROOT"
+        git config --global --add safe.directory "$REPO_ROOT"
+        git add -A
+        git diff "$PRE_AGENT_HASH" > "$DIFF_OUTPUT"
         echo "Diff saved to $DIFF_OUTPUT"
         ;;
 
@@ -149,7 +167,7 @@ case "$1" in
 
         echo "Running Opengrep..."
         # Uses sudo to read the locked /rules directory (root:root 700)
-        sudo opengrep scan --rules "$RULES_DIR" --format sarif --output "$SARIF_OUTPUT" .
+        opengrep scan --rules "$RULES_DIR" --format sarif --output "$SARIF_OUTPUT" .
 
         # Fix ownership so the host can read the result
         sudo chown benchmarker:benchmarker "$SARIF_OUTPUT"
