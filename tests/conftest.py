@@ -58,7 +58,7 @@ def sample_metrics() -> Metrics:
 @pytest.fixture
 def mock_instance_dir(temp_dir: Path, sample_instance_row: InstanceRow) -> Path:
     """Create a mock instance directory structure."""
-    instance_dir = temp_dir / "instance_images" / sample_instance_row.repo / sample_instance_row.owner / sample_instance_row.commit_hash[:8]
+    instance_dir = temp_dir / sample_instance_row.instance_dir()
     instance_dir.mkdir(parents=True)
     return instance_dir
 

@@ -87,9 +87,8 @@ def bootstrap_setup_phase(instance_row: InstanceRow) -> Optional[str]:
     Returns:
         Setup image name if successful, None otherwise
     """
-    instance_dir = os.path.join("instance_images", instance_row.repo, instance_row.owner, instance_row.commit_hash[:8])
-    image_identifier = f"localhost/benchmark/{instance_row.owner}__{instance_row.repo}-{instance_row.commit_hash[:8]}"
-    setup_image = f"{image_identifier}__setup"
+    instance_dir = instance_row.instance_dir()
+    setup_image = instance_row.setup_image
 
     base_img = f"benchmark-base-{instance_row.language}"
 
@@ -114,7 +113,7 @@ def bootstrap_setup_phase(instance_row: InstanceRow) -> Optional[str]:
         return None
     try:
         # Clone & Checkout
-        instance_logger = get_logger(f"bootstrap-{instance_row.owner}-{instance_row.repo}-{instance_row.commit_hash[:8]}", use_file=True, use_stdout=False)
+        instance_logger = get_logger(f"bootstrap-{instance_row.id}", use_file=True, use_stdout=False)
         instance_logger.info(f"Shallow Cloning of {instance_row.repo}...")
         repo_url = f"https://github.com/{instance_row.owner}/{instance_row.repo}.git"
         for cmd in [
@@ -143,6 +142,7 @@ def bootstrap_setup_phase(instance_row: InstanceRow) -> Optional[str]:
         # Metrics Capture - Golden
         container.exec_run("git reset --hard HEAD && git clean -xdf")
         container.exec_run(f"git checkout {instance_row.golden_commit_hash}")
+        bootstrap_logger.info("Capturing Golden (Post-Refactoring) Test Metrics...")
         golden_metrics = run_test_metrics(container)
         is_setup_golden_success = golden_metrics.total >= 10 and golden_metrics.passed >= golden_metrics.total * 0.3 and golden_metrics.failed != -1
         bootstrap_logger.info(f"Golden Metrics (Post-Refactoring): {golden_metrics.model_dump()}")
@@ -238,8 +238,7 @@ def bootstrap_runtime_phase(row: InstanceRow, setup_image: str) -> Optional[str]
     Returns:
         Runtime image name if successful, None otherwise
     """
-    image_identifier = f"localhost/benchmark/{row.owner}__{row.repo}-{row.commit_hash[:8]}"
-    runtime_image = f"{image_identifier}__runtime"
+    runtime_image = row.runtime_image
 
     try:
         client.images.get(runtime_image)
@@ -279,7 +278,7 @@ def bootstrap_runtime_phase(row: InstanceRow, setup_image: str) -> Optional[str]
 
         # 2. Inject Rule Files (Security Critical)
         # Look for rules in: assets/rules/{owner}/{repo}/{hash[:8]}/
-        rules_dir = os.path.join(PROJECT_ROOT, "assets", "rules", row.owner, row.repo, row.commit_hash[:8])
+        rules_dir = os.path.join(PROJECT_ROOT, row.asset_dir("rules"))
 
         if os.path.exists(rules_dir):
             bootstrap_logger.info(f"-> Injecting security rules from {rules_dir}...")
@@ -304,7 +303,7 @@ def bootstrap_runtime_phase(row: InstanceRow, setup_image: str) -> Optional[str]
 
         # 3. Inject Task Description (Visible to Agent)
         # Look for task description in: assets/descriptions/{owner}/{repo}/{hash[:8]}/
-        task_desc_dir = os.path.join(PROJECT_ROOT, "assets", "descriptions", row.owner, row.repo, row.commit_hash[:8])
+        task_desc_dir = os.path.join(PROJECT_ROOT, row.asset_dir("descriptions"))
 
         if os.path.exists(task_desc_dir):
             bootstrap_logger.info(f"-> Injecting task description from {task_desc_dir}...")
@@ -369,12 +368,11 @@ def bootstrap_instance(row: InstanceRow) -> None:
         row: Instance configuration from CSV
     """
     bootstrap_logger.info(f"{'='*60}")
-    bootstrap_logger.info(f"🚀 STARTING: {row.owner}/{row.repo}/{row.commit_hash[:8]}")
+    bootstrap_logger.info(f"🚀 STARTING: {row.display_path}")
     bootstrap_logger.info(f"{'='*60}")
 
     # Check if instance already exists
-    instance_dir = os.path.join("instance_images", row.repo, row.owner, row.commit_hash[:8])
-    runtime_image = f"localhost/benchmark/{row.owner}__{row.repo}-{row.commit_hash[:8]}__runtime"
+    runtime_image = row.runtime_image
 
     # Check if runtime image already exists
     try:

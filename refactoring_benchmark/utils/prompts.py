@@ -12,8 +12,8 @@ SETUP_PROMPT_PYTHON = (
     "2. DEPS: Identify and install necessary system-level dependencies using sudo (non-interactive) and project-level dependencies. \n"
     "3. NEVER modify files in /testbed/, except for files and folders that appear in .gitignore (e.g. .venv). This means that `git status` should show no changes after running tests.\n"
     "4. SCRIPTS:\n"
-    "   - Create '/scripts/setup_env.sh': When executed, this script sets up the entire project environment. It SHOULD NOT install system-level dependencies. Use `uv` for speed or `conda` for complex environments.\n"
-    "   - Create '/scripts/run_tests': Source '/scripts/setup_env.sh' and executes the test suite. These scripts must remain functional even if /testbed/ is checked out to HEAD~1.\n"
+    "   - Create '/scripts/setup_env.sh': When executed, this script sets up the entire project environment. It SHOULD NOT install system-level dependencies. Use `uv` for speed or `conda` for complex environments. It should not require sudo rights.\n"
+    "   - Create '/scripts/run_tests': Source '/scripts/setup_env.sh' and executes the test suite (or a relatively large representative subset of it, but finish within maximum 10 minutes). These scripts must remain functional even if /testbed/ is checked out to HEAD~1.\n"
     "5. OUTPUT: The '/scripts/run_tests' script must output a single JSON line as its final stdout: "
     '{"passed": int, "failed": int, "skipped": int, "total": int}. Ensure no logs appear after this JSON object.\n'
     "6. VERIFICATION: Execute '/scripts/run_tests' on both the current commit and HEAD~1; confirm the JSON outputs match the actual test results. Proceed without asking for permission.\n\n"
@@ -31,9 +31,9 @@ SETUP_PROMPT_JAVASCRIPT = (
     "3. NEVER modify files in /testbed/, except for files and folders that appear in .gitignore (e.g., node_modules, .next, dist). "
     "This means that `git status` should show no changes after running tests.\n"
     "4. SCRIPTS:\n"
-    "   - Create '/scripts/setup_env.sh': When executed, this script sets up the entire project environment. It SHOULD NOT install system-level dependencies. "
+    "   - Create '/scripts/setup_env.sh': When executed, this script sets up the entire project environment. It SHOULD NOT install system-level dependencies. It should not require sudo rights."
     "Use `nvm` to switch Node versions if necessary and the detected package manager for installation.\n"
-    "   - Create '/scripts/run_tests': Source '/scripts/setup_env.sh' and executes the test suite. "
+    "   - Create '/scripts/run_tests': Source '/scripts/setup_env.sh' and executes the test suite (or a relatively large representative subset of it, but finish within maximum 10 minutes). "
     "These scripts must remain functional even if /testbed/ is checked out to HEAD~1.\n"
     "5. OUTPUT: The '/scripts/run_tests' script must output a single JSON line as its final stdout: "
     '{"passed": int, "failed": int, "skipped": int, "total": int}. '
@@ -46,6 +46,6 @@ SETUP_PROMPT_JAVASCRIPT = (
 
 SETUP_PROMPT_LANG = {
     "python": SETUP_PROMPT_PYTHON,
-    "javascript": SETUP_PROMPT_JS,
-    "typescript": SETUP_PROMPT_JS,
+    "javascript": SETUP_PROMPT_JAVASCRIPT,
+    "typescript": SETUP_PROMPT_JAVASCRIPT,
 }

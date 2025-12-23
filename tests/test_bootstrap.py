@@ -24,7 +24,7 @@ class TestGitCommitVerification:
 
         This test checks already-bootstrapped images (run bootstrap first).
         """
-        setup_image = f"localhost/benchmark/{sample_instance_row.owner}__{sample_instance_row.repo}-{sample_instance_row.commit_hash[:8]}__setup"
+        setup_image = sample_instance_row.setup_image
 
         try:
             docker_client.images.get(setup_image)
@@ -39,7 +39,7 @@ class TestGitCommitVerification:
             current_hash = get_git_commit_hash(container, "/testbed")
 
             assert verify_git_state(container, sample_instance_row.commit_hash), (
-                f"Setup image should be at base commit {sample_instance_row.commit_hash[:8]}, "
+                f"Setup image should be at base commit {sample_instance_row.short_hash}, "
                 f"but is at {current_hash[:8]}"
             )
         finally:
@@ -58,7 +58,7 @@ class TestGitCommitVerification:
 
         This test checks already-bootstrapped images (run bootstrap first).
         """
-        runtime_image = f"localhost/benchmark/{sample_instance_row.owner}__{sample_instance_row.repo}-{sample_instance_row.commit_hash[:8]}__runtime"
+        runtime_image = sample_instance_row.runtime_image
 
         try:
             docker_client.images.get(runtime_image)
@@ -82,7 +82,7 @@ class TestGitCommitVerification:
             current_hash = get_git_commit_hash(container, "/testbed")
 
             assert verify_git_state(container, sample_instance_row.commit_hash), (
-                f"Runtime image should be at base commit {sample_instance_row.commit_hash[:8]}, "
+                f"Runtime image should be at base commit {sample_instance_row.short_hash}, "
                 f"but is at {current_hash[:8]}"
             )
         finally:
@@ -95,7 +95,7 @@ class TestGitCommitVerification:
     @pytest.mark.integration
     def test_metadata_matches_commits(self, sample_instance_row: InstanceRow):
         """Test that saved metadata has correct commit hashes."""
-        metadata_path = Path(f"instance_images/{sample_instance_row.repo}/{sample_instance_row.owner}/{sample_instance_row.commit_hash[:8]}/metadata.json")
+        metadata_path = Path(sample_instance_row.instance_dir()) / "metadata.json"
 
         if not metadata_path.exists():
             pytest.skip(f"Metadata not found: {metadata_path}. Run bootstrap first.")
