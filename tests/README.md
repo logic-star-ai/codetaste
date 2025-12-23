@@ -54,7 +54,7 @@ This is the PRIMARY test requirement - it ensures the critical invariant that co
 
 **How the mock works**:
 - In real bootstrap: `stream_exec()` runs the `claude` CLI command
-- The Claude agent (not stream_exec) creates `/scripts/run_tests` and `/scripts/setup_env.sh` files
+- The Claude agent (not stream_exec) creates `/scripts/run_tests`, `/scripts/setup_system.sh`, and `/scripts/setup_shell.sh` files
 - In tests: We mock `stream_exec` to detect Claude CLI calls and create those scripts directly
 - This simulates Claude's output without requiring API calls or credentials
 

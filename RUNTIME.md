@@ -279,7 +279,8 @@ done
 ```
 /testbed/                      # Repository code (starts at buggy commit)
 /scripts/
-  ├── setup_env.sh             # Environment setup (created by Claude)
+  ├── setup_system.sh          # Runtime system setup: start services (created by Claude)
+  ├── setup_shell.sh           # Shell environment setup (created by Claude)
   └── run_tests                # Test runner (created by Claude)
 /rules/                        # Static analysis rules (root-only, mode 700)
   ├── rules_positive.yml       # Rules for good patterns (HIDDEN from agent)

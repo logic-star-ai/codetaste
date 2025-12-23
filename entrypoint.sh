@@ -21,13 +21,17 @@ function reset_env() {
     git reset --hard HEAD > /dev/null 2>&1
     git clean -xdf > /dev/null 2>&1
 
-    echo "-> [Setup] Sourcing environment..."
-    # Source the environment script created by Claude during bootstrap
-    if [ -f "/scripts/setup_env.sh" ]; then
-        source /scripts/setup_env.sh
+    echo "-> [Setup] Running system setup (if needed)..."
+    if [ -f "/scripts/setup_system.sh" ]; then
+        sudo bash /scripts/setup_system.sh || true
+    fi
+
+    echo "-> [Setup] Sourcing shell environment..."
+    # Source the shell environment script created by Claude during bootstrap
+    if [ -f "/scripts/setup_shell.sh" ]; then
+        source /scripts/setup_shell.sh || true
     else
-        echo "Error: /scripts/setup_env.sh not found."
-        exit 1
+        echo "Error: /scripts/setup_shell.sh not found."
     fi
 }
 
@@ -94,7 +98,8 @@ function create_restricted_user() {
     fi
 
     echo "-> [Security] Granting agent access to Python environments..."
-    sudo chmod -R 777 /home/benchmarker /opt/python /opt/conda
+    sudo chmod -R 777 /home/benchmarker 
+    sudo chmod -R 777 /opt
 }
 
 # --- Main Mode Logic ---
@@ -123,7 +128,7 @@ case "$1" in
         # Run agent. -E preserves ENV vars (Conda PATH, API Keys, etc.)
         # agent_user CANNOT sudo, CANNOT access /rules, CANNOT reach GitHub
         if sudo -E -u agent_user bash -c '
-            [ -f /scripts/setup_env.sh ] && source /scripts/setup_env.sh
+            [ -f /scripts/setup_shell.sh ] && source /scripts/setup_shell.sh || true
             exec "$0" "$@"
         ' "$AGENT_SCRIPT" "$(cat "$TASK_DESC_DIR/description.md")"; then
             echo "=== Agent finished successfully ==="

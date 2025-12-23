@@ -48,7 +48,13 @@ def run_test_metrics(container: DockerContainer) -> Metrics:
     Returns:
         Metrics object with test results
     """
-    res = container.exec_run("/scripts/run_tests")
+    res = container.exec_run([
+        "bash",
+        "-c",
+        "/scripts/setup_system.sh || true && "
+        "source /scripts/setup_shell.sh || true && "
+        "/scripts/run_tests"
+    ])
     try:
         output = res.output
         assert isinstance(output, bytes), "Expected bytes output from exec_run"
