@@ -4,8 +4,6 @@ import json
 import os
 import shlex
 import sys
-import tarfile
-from io import BytesIO
 from typing import Optional
 
 import docker
@@ -24,6 +22,7 @@ from refactoring_benchmark.utils.container_utils import (
 CSV_FILE = "instances.csv"
 API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 LOG_DIR = "logs"
+PROJECT_ROOT = os.path.join(os.path.dirname(__file__), "..", "..")
 
 # Initialize logging infrastructure
 setup_logging(LOG_DIR)
@@ -190,7 +189,7 @@ def bootstrap_setup_phase(instance_row: InstanceRow) -> Optional[str]:
 
         meta_dict = meta.model_dump()
         quoted_meta = shlex.quote(json.dumps(meta_dict))
-        container.exec_run(
+        container.exec_run( # TODO: redundant?
             f"bash -c 'echo {quoted_meta} > /home/benchmarker/benchmark_meta.json'"
         )
         with open(os.path.join(instance_dir, "metadata.json"), "w") as f:
@@ -243,6 +242,13 @@ def bootstrap_runtime_phase(row: InstanceRow, setup_image: str) -> Optional[str]
     runtime_image = f"{image_identifier}__runtime"
 
     try:
+        client.images.get(runtime_image)
+        bootstrap_logger.info(f"⏭️  SKIPPING: Setup image already exists: {runtime_image}")
+        return runtime_image
+    except:
+        pass
+
+    try:
         container: DockerContainer = client.containers.run(
             setup_image,
             detach=True,
@@ -260,7 +266,7 @@ def bootstrap_runtime_phase(row: InstanceRow, setup_image: str) -> Optional[str]
         # 1. Inject Entrypoint Script
         try:
             # Path relative to project root (2 levels up from scripts/)
-            entrypoint_path = os.path.join(os.path.dirname(__file__), "..", "..", "entrypoint.sh")
+            entrypoint_path = os.path.join(PROJECT_ROOT, "entrypoint.sh")
             with open(entrypoint_path, "rb") as f:
                 entrypoint_script = f.read()
 
@@ -273,14 +279,13 @@ def bootstrap_runtime_phase(row: InstanceRow, setup_image: str) -> Optional[str]
 
         # 2. Inject Rule Files (Security Critical)
         # Look for rules in: assets/rules/{owner}/{repo}/{hash[:8]}/
-        project_root = os.path.join(os.path.dirname(__file__), "..", "..")
-        rules_dir = os.path.join(project_root, "assets", "rules", row.owner, row.repo, row.commit_hash[:8])
+        rules_dir = os.path.join(PROJECT_ROOT, "assets", "rules", row.owner, row.repo, row.commit_hash[:8])
 
         if os.path.exists(rules_dir):
             bootstrap_logger.info(f"-> Injecting security rules from {rules_dir}...")
 
             # Ensure /rules directory exists
-            container.exec_run("sudo mkdir -p /rules")
+            container.exec_run("mkdir -p /rules")
 
             # Copy all rule files from the directory
             for filename in os.listdir(rules_dir):
@@ -293,17 +298,13 @@ def bootstrap_runtime_phase(row: InstanceRow, setup_image: str) -> Optional[str]
                     copy_to_container(container, rule_content, f"/rules/{filename}")
                     bootstrap_logger.info(f"   → Copied {filename}")
 
-            # LOCKDOWN: Set owner to root and mode to 700.
-            # 'benchmarker' cannot read this. 'agent_user' cannot read this.
-            # Only 'sudo opengrep' (in eval_rule) can read this.
-            container.exec_run("sudo chown -R root:root /rules")
             container.exec_run("sudo chmod -R 700 /rules")
         else:
             bootstrap_logger.warning(f"-> No rules found at {rules_dir}")
 
         # 3. Inject Task Description (Visible to Agent)
         # Look for task description in: assets/descriptions/{owner}/{repo}/{hash[:8]}/
-        task_desc_dir = os.path.join(project_root, "assets", "descriptions", row.owner, row.repo, row.commit_hash[:8])
+        task_desc_dir = os.path.join(PROJECT_ROOT, "assets", "descriptions", row.owner, row.repo, row.commit_hash[:8])
 
         if os.path.exists(task_desc_dir):
             bootstrap_logger.info(f"-> Injecting task description from {task_desc_dir}...")
@@ -334,8 +335,8 @@ def bootstrap_runtime_phase(row: InstanceRow, setup_image: str) -> Optional[str]
         # This replaces the default CMD from the Dockerfile.
         bootstrap_logger.info(f"-> Committing runtime image: {runtime_image}")
         container.commit(
-            repository=runtime_image.split(":")[0],
-            tag=runtime_image.split(":")[1] if ":" in runtime_image else None,
+            repository=runtime_image,
+            tag=None,
             conf={"Entrypoint": ["/usr/local/bin/entrypoint.sh"]}
         )
         bootstrap_logger.info(f"✨ Runtime Phase Complete: {runtime_image}")
@@ -393,19 +394,19 @@ def bootstrap_instance(row: InstanceRow) -> None:
         bootstrap_logger.error("❌ Setup phase failed. Aborting bootstrap.")
         return
 
-    # # Phase 2: Runtime
-    # bootstrap_logger.info("=" * 60)
-    # bootstrap_logger.info("PHASE 2: RUNTIME")
-    # bootstrap_logger.info("=" * 60)
-    # final_image = bootstrap_runtime_phase(row, setup_image)
+    # Phase 2: Runtime
+    bootstrap_logger.info("=" * 60)
+    bootstrap_logger.info("PHASE 2: RUNTIME")
+    bootstrap_logger.info("=" * 60)
+    final_image = bootstrap_runtime_phase(row, setup_image)
 
-    # if final_image is None:
-    #     bootstrap_logger.error("❌ Runtime phase failed. Setup image preserved but bootstrap incomplete.")
-    #     return
+    if final_image is None:
+        bootstrap_logger.error("❌ Runtime phase failed. Setup image preserved but bootstrap incomplete.")
+        return
 
-    # bootstrap_logger.info(f"{'='*60}")
-    # bootstrap_logger.info(f"✨ SUCCESS: {final_image}")
-    # bootstrap_logger.info(f"{'='*60}")
+    bootstrap_logger.info(f"{'='*60}")
+    bootstrap_logger.info(f"✨ SUCCESS: {final_image}")
+    bootstrap_logger.info(f"{'='*60}")
 
 
 def main():
