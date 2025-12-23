@@ -1,66 +1,74 @@
 FROM ubuntu:24.04
-ENV DEBIAN_FRONTEND=noninteractive
 
-# 1. Install System Tools + Sudo
-RUN apt-get update && apt-get install -y \
-    curl git wget jq unzip sudo \
-    build-essential gcc g++ clang \
+# 1. Environment & Global Configs
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    LANG=en_US.UTF-8 \
+    LANGUAGE=en_US:en \
+    LC_ALL=en_US.UTF-8 \
+    CONDA_DIR=/opt/conda \
+    CONDA_PLUGINS_AUTO_ACCEPT_TOS=true \
+    UV_PYTHON_INSTALL_DIR=/opt/python \
+    PATH="/opt/conda/bin:/home/benchmarker/.local/bin:/opt/python/bin:$PATH"
+
+# 2. System Core & Build Essentials
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl git wget jq unzip sudo locales ca-certificates \
+    build-essential gcc g++ clang cmake pkg-config \
+    gcc-12 g++-12 \
     python3 python3-pip python3-venv python3-dev python3-xlib \
-    libssl-dev zlib1g-dev \
+    libssl-dev zlib1g-dev libffi-dev libsqlite3-dev \
+    libbz2-dev liblzma-dev libxml2-dev libxslt1-dev \
+    libjpeg-dev libpng-dev libtiff-dev libfreetype6-dev \
     libmysqlclient-dev libpq-dev libldap2-dev libsasl2-dev \
+    && locale-gen en_US.UTF-8 \
     && rm -rf /var/lib/apt/lists/*
 
-# 2. Install Miniconda
+# 3. Install Miniconda & UV
 ENV CONDA_PLUGINS_AUTO_ACCEPT_TOS=true
 ENV CONDA_DIR=/opt/conda
 RUN wget --quiet https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O ~/miniconda.sh && \
     /bin/bash ~/miniconda.sh -b -p $CONDA_DIR && \
     rm ~/miniconda.sh && \
-    $CONDA_DIR/bin/conda clean -a -y
-
-# Add Conda to PATH for all users
+    $CONDA_DIR/bin/conda clean -afy
 ENV PATH=$CONDA_DIR/bin:$PATH
 
-# Install Opengrep
-RUN curl -fsSL https://raw.githubusercontent.com/opengrep/opengrep/v1.8.2/install.sh | bash
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
-# 3. Agent Tooling
-# Note: Ubuntu 24.04 creates a "conflict" with standard nodejs/npm packages sometimes. 
-# Ensuring we get a clean install.
-RUN apt-get update && apt-get install -y nodejs npm
-RUN npm install -g @anthropic-ai/claude-code
+# 4. Node.js & Agent Tools
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y nodejs \
+    && npm install -g @anthropic-ai/claude-code \
+    && rm -rf /var/lib/apt/lists/*
 
-# 4. Create User and Grant Passwordless Sudo
+# 5. Create User, Folders, and Permissions
 RUN useradd -m -s /bin/bash benchmarker && \
-    echo "benchmarker ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
+    echo "benchmarker ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers && \
+    mkdir -p /scripts /rules /testbed /opt/python && \
+    chown -R benchmarker:benchmarker /scripts /rules /testbed /opt/python $CONDA_DIR
 
-# 5. Fix Permissions
-# Critical: Give the user ownership of conda so they can create envs without sudo
-RUN chown -R benchmarker:benchmarker $CONDA_DIR
-
-# CREATE DIRECTORY /SCRIPTS FOR BENCHMARK SCRIPTS
-RUN mkdir /scripts
-RUN chown benchmarker:benchmarker /scripts
-
-RUN mkdir /rules
-RUN chown benchmarker:benchmarker /rules
-
-WORKDIR /testbed
-RUN chown benchmarker:benchmarker /testbed
-
-# 6. Switch to User
 USER benchmarker
+WORKDIR /testbed
 
-# 7. Initialize and Configure Conda (The Fixes)
-RUN conda init bash
-RUN conda config --add channels conda-forge && \
-    conda config --set channel_priority strict && \
+# 6. Global Tooling
+RUN curl -fsSL https://raw.githubusercontent.com/opengrep/opengrep/v1.8.2/install.sh | bash
+ENV PATH="/home/benchmarker/.opengrep/cli/latest:$PATH"
+
+# 7. Python Version Pre-caching (2016-2025 Era Support)
+RUN conda init bash && \
+    conda config --add channels conda-forge && \
     conda config --set always_yes true && \
-    conda install pytest tox cython && \
-    conda clean -afy
+    uv python install 3.8 3.9 3.10 3.11 3.12 3.13
 
-RUN pip install --no-cache-dir --upgrade pip setuptools && \
-    pip install --no-cache-dir tox cython pytest
+# 8. Pre-install Core Benchmark Libraries
+RUN uv venv /home/benchmarker/.venv --python 3.12 && \
+    . /home/benchmarker/.venv/bin/activate && \
+    uv pip install pytest tox cython numpy pandas scipy matplotlib setuptools wheel hatchling flit-core
 
+# Sync Conda core tools as requested
+RUN conda install pytest tox cython && conda clean -afy
+
+ENV PATH="/home/benchmarker/.venv/bin:$PATH"
 ENV ANTHROPIC_API_KEY="" 
 CMD ["sleep", "infinity"]
