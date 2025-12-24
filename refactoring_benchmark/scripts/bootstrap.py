@@ -79,6 +79,7 @@ def bootstrap_setup_phase(instance_row: InstanceRow) -> Optional[str]:
             environment={"ANTHROPIC_API_KEY": API_KEY},
             working_dir="/testbed",
         )
+        container.exec_run("echo 'Starting setup phase...'")
     except Exception as e:
         bootstrap_logger.error(f"❌ Image {base_img} failed: {e}")
         return None
@@ -241,7 +242,7 @@ def bootstrap_runtime_phase(row: InstanceRow, setup_image: str) -> Optional[str]
                 bootstrap_logger.warning(f"-> Cleanup warning: {net_err}")
 
 
-def bootstrap_instance(row: InstanceRow) -> None:
+def bootstrap_instance(row: InstanceRow, use_base_image_as_setup: bool = False) -> None:
     """Bootstrap a single benchmark instance in two phases."""
     bootstrap_logger.info(f"{row.display_path}")
 
@@ -252,6 +253,15 @@ def bootstrap_instance(row: InstanceRow) -> None:
         return
     except:
         pass
+    if use_base_image_as_setup:
+        base_img = f"benchmark-base-{row.language}"
+        try:
+            base_image = client.images.get(base_img)
+            base_image.tag(repository=row.setup_image, tag=None)
+            bootstrap_logger.info(f"[{row.id}]: Tagged {base_img} as {row.setup_image} (manual override).")
+        except Exception as e:
+            bootstrap_logger.error(f"[{row.id}]: ❌ Failed to tag base image: {e}")
+            return
 
     setup_image = bootstrap_setup_phase(row)
     if setup_image is None:
@@ -269,8 +279,18 @@ async def bootstrap_parallel(instances: list[InstanceRow], degree: int):
 
     async def sem_task(instance: InstanceRow):
         async with semaphore:
-            # Since docker-py is blocking, we wrap it in to_thread
-            return await asyncio.to_thread(bootstrap_instance, instance)
+            for attempt in range(2):
+                try:
+                    return await asyncio.wait_for(
+                        asyncio.to_thread(bootstrap_instance, instance), 
+                        timeout=3600
+                    )
+                except asyncio.TimeoutError:
+                    bootstrap_logger.error(
+                        f"⚠️ Attempt {attempt + 1} timed out (60 min) for {instance.id}. "
+                        f"{'Restarting...' if attempt < 1 else 'Max retries reached.'}"
+                    )
+            return asyncio.wait_for(asyncio.to_thread(bootstrap_instance, instance, use_base_image_as_setup=True), timeout=3600)
 
     tasks = [sem_task(inst) for inst in instances]
     await asyncio.gather(*tasks)
