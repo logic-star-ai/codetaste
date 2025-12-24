@@ -177,7 +177,7 @@ def bootstrap_setup_phase(instance_row: InstanceRow) -> Optional[str]:
 def bootstrap_runtime_phase(row: InstanceRow, setup_image: str) -> Optional[str]:
     """Phase 2: Inject runtime components and security hardening."""
     runtime_image = row.runtime_image
-
+    instance_logger = get_logger(f"bootstrap-{row.id}", use_file=True, use_stdout=False)
     try:
         client.images.get(runtime_image)
         bootstrap_logger.info(f"[{row.id}]: ⏭️  SKIPPING: Runtime image already exists: {runtime_image}")
@@ -218,7 +218,28 @@ def bootstrap_runtime_phase(row: InstanceRow, setup_image: str) -> Optional[str]
             container.exec_run("sudo chown -R benchmarker:benchmarker /task_description")
             container.exec_run("sudo chmod -R 755 /task_description")
         bootstrap_logger.info(f"[{row.id}]: 🚚 Injected runtime components: /rules, /task_description")
-        # 4. Commit
+
+        # 4. Lobotomize git
+        git_cmds = [
+            "git reset --hard HEAD && git clean -xdf",
+            f"git checkout {row.commit_hash}",
+            "git remote remove origin || true",
+            "rm -f .git/FETCH_HEAD",
+            "git reflog expire --expire=now --all",
+            "git gc --prune=now --aggressive > /dev/null 2>&1 || true"
+        ]
+        for cmd in git_cmds:
+            res = container.exec_run(
+                ["bash", "-c", cmd],
+            )
+            instance_logger.info(f"[{row.id}]: Git Command: {cmd}\nOutput: {res.output.decode() if res.output else 'No Output'}")
+        instance_logger.info(f"[{row.id}]: 🧠 Lobotomized git repository.")
+        res = container.exec_run(
+            ["bash", "-c", "source /scripts/setup_shell.sh || true"],
+        )
+        instance_logger.info(f"[{row.id}]: Setup shell output: {res.output.decode() if res.output else 'No Output'}")
+
+        # 5. Commit
         container.commit(
             repository=runtime_image,
             tag=None,
