@@ -4,6 +4,8 @@ set -e
 # --- Configuration ---
 REPO_ROOT="/testbed"
 AGENT_SCRIPT="/agent/run_agent"
+AGENT_SETUP_SCRIPT="/agent/setup_agent.sh"
+AGENT_SYSTEM_SETUP_SCRIPT="/agent/setup_system.sh"
 DIFF_INPUT="/input/patch.diff"
 DIFF_OUTPUT="/output/prediction.diff"
 SARIF_OUTPUT="/output/rules.sarif"
@@ -19,17 +21,11 @@ cd "$REPO_ROOT"
 
 # --- Helper Functions ---
 
-function reset_env() {
-    # Run as benchmarker (Privileged)
-    echo "-> [Setup] Resetting git state..."
-    git reset --hard HEAD > /dev/null 2>&1
-    git clean -xdf > /dev/null 2>&1
-
+function setup_env() {
     echo "-> [Setup] Running system setup (if needed)..."
     if [ -f "/scripts/setup_system.sh" ]; then
         sudo bash /scripts/setup_system.sh || true
     fi
-
     echo "-> [Setup] Sourcing shell environment..."
     if [ -f "/scripts/setup_shell.sh" ]; then
         source /scripts/setup_shell.sh || true
@@ -48,17 +44,6 @@ function block_network() {
     echo "127.0.0.1 www.github.com"            | sudo tee -a /etc/hosts > /dev/null
 }
 
-function sanitize_git() {
-    echo "-> [Security] Sanitizing Git History (Deleting the Future)..."
-    if git remote | grep -q origin; then
-        git remote remove origin
-    fi
-    rm -f .git/FETCH_HEAD
-    git reflog expire --expire=now --all
-    git gc --prune=now --aggressive > /dev/null 2>&1 || true
-    echo "-> [Security] Git history scrubbed. Only HEAD remains."
-}
-
 function create_restricted_user() {
     if ! id "agent_user" &>/dev/null; then
         echo "-> [Security] Creating restricted 'agent_user'..."
@@ -71,27 +56,17 @@ function create_restricted_user() {
     if [ -d "/output" ]; then sudo chmod -R 777 "/output"; fi
     if [ -d "/agent" ]; then sudo chmod -R 755 "/agent"; fi
     if [ -d "/scripts" ]; then sudo chmod -R 755 "/scripts"; fi
-
-    if [ -d "/task_description" ]; then
-        sudo chown -R agent_user:agent_user "/task_description"
-        sudo chmod -R 755 "/task_description"
-    fi
-
+    if [ -d "/task_description" ]; then sudo chmod -R 755 "/task_description"; fi
     sudo chmod -R 777 /home/benchmarker 
     sudo chmod -R 777 /opt
 }
 
 # --- Main Mode Logic ---
-
+setup_env
 case "$1" in
     "inference")
-        echo "=== Mode: Inference ==="
-
-        reset_env       
-        sanitize_git    
+        echo "=== Mode: Inference ==="       
         block_network
-
-        # 3. Finalize Permissions
         PRE_AGENT_HASH=$(git rev-parse HEAD)
         create_restricted_user 
 
@@ -99,11 +74,15 @@ case "$1" in
             echo "Error: Agent script not found at $AGENT_SCRIPT"
             exit 1
         fi
-
+        if [ -f "$AGENT_SYSTEM_SETUP_SCRIPT" ]; then
+            echo "=== Running Agent System Setup Script ==="
+            sudo bash "$AGENT_SYSTEM_SETUP_SCRIPT"
+        fi
         # 4. Restricted Execution
         echo "=== Dropping Privileges: Switching to 'agent_user' ==="
         if sudo -E -u agent_user bash -c '
             [ -f /scripts/setup_shell.sh ] && source /scripts/setup_shell.sh || true
+            [ -f "$AGENT_SETUP_SCRIPT" ] && source "$AGENT_SETUP_SCRIPT"
             exec "$0" "$@"
         ' "$AGENT_SCRIPT" "$(cat "$TASK_DESC_DIR/description.md")"; then
             echo "=== Agent finished successfully ==="
@@ -123,7 +102,6 @@ case "$1" in
 
     "eval_test")
         echo "=== Mode: Evaluation (Test) ==="
-        reset_env
 
         if [ -f "$DIFF_INPUT" ]; then
             echo "Applying patch from $DIFF_INPUT..."
@@ -136,7 +114,6 @@ case "$1" in
 
     "eval_rule")
         echo "=== Mode: Evaluation (Static Analysis) ==="
-        reset_env
 
         if [ -f "$DIFF_INPUT" ]; then
             echo "Applying patch from $DIFF_INPUT..."
