@@ -206,7 +206,6 @@ def bootstrap_runtime_phase(row: InstanceRow, setup_image: str) -> Optional[str]
                 file_path = os.path.join(rules_dir, filename)
                 with open(file_path, "rb") as f:
                     copy_to_container(container, f.read(), f"/rules/{filename}")
-            container.exec_run("sudo chmod -R 700 /rules")
 
         # 3. Inject Task Descriptions
         task_desc_dir = os.path.join(PROJECT_ROOT, row.asset_dir("descriptions"))

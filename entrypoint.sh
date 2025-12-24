@@ -27,7 +27,6 @@ function reset_env() {
     fi
 
     echo "-> [Setup] Sourcing shell environment..."
-    # Source the shell environment script created by Claude during bootstrap
     if [ -f "/scripts/setup_shell.sh" ]; then
         source /scripts/setup_shell.sh || true
     else
@@ -37,7 +36,6 @@ function reset_env() {
 
 function block_network() {
     echo "-> [Security] Sinkholing GitHub domains..."
-    # Redirect GitHub to localhost to prevent fetching external code/solutions
     echo "127.0.0.1 github.com"                | sudo tee -a /etc/hosts > /dev/null
     echo "127.0.0.1 api.github.com"            | sudo tee -a /etc/hosts > /dev/null
     echo "127.0.0.1 raw.githubusercontent.com" | sudo tee -a /etc/hosts > /dev/null
@@ -48,23 +46,13 @@ function block_network() {
 
 function sanitize_git() {
     echo "-> [Security] Sanitizing Git History (Deleting the Future)..."
-
-    # 1. Remove remote to prevent fetching
     if git remote | grep -q origin; then
         git remote remove origin
     fi
-
-    # 2. Kill references to the Golden commit
     rm -f .git/FETCH_HEAD
-
-    # 3. Expire reflogs (removes "undo" history that might point to Golden)
     git reflog expire --expire=now --all
-
-    # 4. Prune unreachable objects (The Golden Commit itself)
-    # This physically removes the commit object from disk
     git gc --prune=now --aggressive > /dev/null 2>&1 || true
-
-    echo "-> [Security] Git history scrubbed. Only HEAD (Buggy) remains."
+    echo "-> [Security] Git history scrubbed. Only HEAD remains."
 }
 
 function create_restricted_user() {
@@ -73,31 +61,18 @@ function create_restricted_user() {
         sudo useradd -m -s /bin/bash agent_user
     fi
 
-    # Grant agent_user FULL rights to the repo (they need to edit code)
     echo "-> [Security] Transferring repo ownership to agent_user..."
     sudo chown -R agent_user:agent_user "$REPO_ROOT"
 
-    # Ensure agent can write to output directory (and benchmarker can write diff later)
-    if [ -d "/output" ]; then
-        sudo chmod -R 777 "/output"
-    fi
+    if [ -d "/output" ]; then sudo chmod -R 777 "/output"; fi
+    if [ -d "/agent" ]; then sudo chmod -R 755 "/agent"; fi
+    if [ -d "/scripts" ]; then sudo chmod -R 755 "/scripts"; fi
 
-    # Allow agent to execute the mounted agent script
-    if [ -d "/agent" ]; then
-        sudo chmod -R 755 "/agent"
-    fi
-
-    if [ -d "/scripts" ]; then
-        sudo chmod -R 755 "/scripts"
-    fi
-
-    # Ensure agent can read task descriptions
     if [ -d "/task_description" ]; then
         sudo chown -R agent_user:agent_user "/task_description"
         sudo chmod -R 755 "/task_description"
     fi
 
-    echo "-> [Security] Setting permissions ..."
     sudo chmod -R 777 /home/benchmarker 
     sudo chmod -R 777 /opt
 }
@@ -108,25 +83,21 @@ case "$1" in
     "inference")
         echo "=== Mode: Inference ==="
 
-        # 1. Privileged Setup (As 'benchmarker')
+        reset_env       
+        sanitize_git    
         block_network
-        reset_env       # Revert to clean 'Buggy' commit
-        sanitize_git    # Delete the 'Golden' commit artifacts
 
+        # 3. Finalize Permissions
         PRE_AGENT_HASH=$(git rev-parse HEAD)
-
-        create_restricted_user # Prepare user
+        create_restricted_user 
 
         if [ ! -f "$AGENT_SCRIPT" ]; then
             echo "Error: Agent script not found at $AGENT_SCRIPT"
             exit 1
         fi
 
-        # 2. Restricted Execution (As 'agent_user')
+        # 4. Restricted Execution
         echo "=== Dropping Privileges: Switching to 'agent_user' ==="
-
-        # Run agent. -E preserves ENV vars (Conda PATH, API Keys, etc.)
-        # agent_user CANNOT sudo, CANNOT access /rules, CANNOT reach GitHub
         if sudo -E -u agent_user bash -c '
             [ -f /scripts/setup_shell.sh ] && source /scripts/setup_shell.sh || true
             exec "$0" "$@"
@@ -136,11 +107,9 @@ case "$1" in
             echo "=== Agent failed with exit code $? ==="
         fi
 
-        # 3. Harvest Results
+        # 5. Harvest Results
         echo "=== Extracting Diff ==="
-        # Transfer ownership back to benchmarker to allow git operations
         sudo chown -R benchmarker:benchmarker "$REPO_ROOT"
-        # Save the diff between pre- and post-agent run
         cd "$REPO_ROOT"
         git config --global --add safe.directory "$REPO_ROOT"
         git add -A
@@ -171,8 +140,8 @@ case "$1" in
         fi
 
         echo "Running Opengrep..."
-        # Uses sudo to read the locked /rules directory (root:root 700)
-        opengrep scan --rules "$RULES_DIR" --format sarif --output "$SARIF_OUTPUT" .
+        sudo chmod -R 755 "$RULES_DIR"
+        opengrep scan --timeout-threshold 0 --timeout 0 --max-memory 0 -f "$RULES_DIR" --sarif-output "$SARIF_OUTPUT" .
 
         # Fix ownership so the host can read the result
         sudo chown benchmarker:benchmarker "$SARIF_OUTPUT"
@@ -184,3 +153,5 @@ case "$1" in
         exit 1
         ;;
 esac
+
+
