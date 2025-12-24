@@ -4,7 +4,6 @@ import json
 import os
 import subprocess
 import sys
-from pathlib import Path
 from typing import Optional, Dict, Any
 
 from refactoring_benchmark.utils.logger import get_logger, setup_logging
@@ -25,7 +24,8 @@ class EvaluationResult:
     def __init__(self, instance_id: str):
         self.instance_id = instance_id
         self.test_metrics: Optional[Metrics] = None
-        self.rule_results: Optional[Dict[str, Any]] = None
+        self.rule_results_positive: Optional[Dict[str, Any]] = None
+        self.rule_results_negative: Optional[Dict[str, Any]] = None
         self.test_success: bool = False
         self.rule_success: bool = False
         self.error: Optional[str] = None
@@ -46,8 +46,11 @@ class EvaluationResult:
                 "total": self.test_metrics.total,
             }
 
-        if self.rule_results:
-            result["rule_results"] = self.rule_results
+        if self.rule_results_positive:
+            result["rule_results_positive"] = self.rule_results_positive
+
+        if self.rule_results_negative:
+            result["rule_results_negative"] = self.rule_results_negative
 
         if self.error:
             result["error"] = self.error
@@ -121,26 +124,61 @@ def run_test_evaluation(instance_row: InstanceRow) -> Optional[Metrics]:
         return None
 
 
-def run_rule_evaluation(instance_row: InstanceRow) -> Optional[Dict[str, Any]]:
+def parse_sarif_results(sarif_path: str) -> Optional[Dict[str, Any]]:
+    """
+    Parse SARIF file and extract key metrics.
+
+    Args:
+        sarif_path: Path to SARIF file
+
+    Returns:
+        Dictionary with findings count and path
+    """
+    if not os.path.exists(sarif_path):
+        return None
+
+    try:
+        with open(sarif_path, 'r') as f:
+            sarif_data = json.load(f)
+
+        # Extract key metrics from SARIF
+        total_results = 0
+        if "runs" in sarif_data:
+            for run in sarif_data["runs"]:
+                if "results" in run:
+                    total_results += len(run["results"])
+
+        return {
+            "total_findings": total_results,
+            "sarif_path": sarif_path,
+        }
+    except Exception as e:
+        eval_logger.error(f"Failed to parse SARIF at {sarif_path}: {e}")
+        return None
+
+
+def run_rule_evaluation(instance_row: InstanceRow) -> tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
     """
     Run rule-based (static analysis) evaluation on a benchmark instance.
+    Runs separate scans for positive and negative rules.
 
     Args:
         instance_row: The benchmark instance row to evaluate
 
     Returns:
-        Rule evaluation results if successful, None otherwise
+        Tuple of (positive_results, negative_results)
     """
     instance_output_dir = os.path.join(PROJECT_ROOT, instance_row.instance_dir("output"))
     prediction_diff = os.path.join(instance_output_dir, "prediction.diff")
 
     if not os.path.exists(prediction_diff):
         eval_logger.warning(f"[{instance_row.id}]: No prediction.diff found at {prediction_diff}")
-        return None
+        return None, None
 
     eval_logger.info(f"[{instance_row.id}]: Running rule evaluation...")
 
-    sarif_output = os.path.join(instance_output_dir, "rules.sarif")
+    sarif_output_positive = os.path.join(instance_output_dir, "rules_positive.sarif")
+    sarif_output_negative = os.path.join(instance_output_dir, "rules_negative.sarif")
 
     try:
         run_cmds = [
@@ -153,7 +191,7 @@ def run_rule_evaluation(instance_row: InstanceRow) -> Optional[Dict[str, Any]]:
 
         eval_logger.info(f"[{instance_row.id}]: Running: {' '.join(run_cmds)}")
 
-        result = subprocess.run(
+        subprocess.run(
             run_cmds,
             cwd=PROJECT_ROOT,
             capture_output=True,
@@ -161,35 +199,28 @@ def run_rule_evaluation(instance_row: InstanceRow) -> Optional[Dict[str, Any]]:
             timeout=600  # 10 minute timeout
         )
 
-        # Parse SARIF output
-        if os.path.exists(sarif_output):
-            with open(sarif_output, 'r') as f:
-                sarif_data = json.load(f)
+        # Parse both SARIF outputs
+        positive_results = parse_sarif_results(sarif_output_positive)
+        negative_results = parse_sarif_results(sarif_output_negative)
 
-            # Extract key metrics from SARIF
-            total_results = 0
-            if "runs" in sarif_data:
-                for run in sarif_data["runs"]:
-                    if "results" in run:
-                        total_results += len(run["results"])
-
-            rule_results = {
-                "total_findings": total_results,
-                "sarif_path": sarif_output,
-            }
-
-            eval_logger.info(f"[{instance_row.id}]: Rule findings: {total_results}")
-            return rule_results
+        if positive_results:
+            eval_logger.info(f"[{instance_row.id}]: Positive rule findings: {positive_results['total_findings']}")
         else:
-            eval_logger.warning(f"[{instance_row.id}]: SARIF output not found at {sarif_output}")
-            return None
+            eval_logger.warning(f"[{instance_row.id}]: No positive SARIF output found")
+
+        if negative_results:
+            eval_logger.info(f"[{instance_row.id}]: Negative rule findings: {negative_results['total_findings']}")
+        else:
+            eval_logger.warning(f"[{instance_row.id}]: No negative SARIF output found")
+
+        return positive_results, negative_results
 
     except subprocess.TimeoutExpired:
         eval_logger.error(f"[{instance_row.id}]: Rule evaluation timed out")
-        return None
+        return None, None
     except Exception as e:
         eval_logger.error(f"[{instance_row.id}]: Rule evaluation failed: {e}")
-        return None
+        return None, None
 
 
 def evaluate_instance(instance_row: InstanceRow) -> EvaluationResult:
@@ -218,20 +249,23 @@ def evaluate_instance(instance_row: InstanceRow) -> EvaluationResult:
         return result
 
 
-    # Run rule evaluation
-    rule_results = run_rule_evaluation(instance_row)
-    if rule_results:
-        result.rule_results = rule_results
-        # Consider rule successful if evaluation completed (findings are informative)
-        result.rule_success = True
+    # Run rule evaluation (both positive and negative)
+    positive_results, negative_results = run_rule_evaluation(instance_row)
+    if positive_results:
+        result.rule_results_positive = positive_results
+    if negative_results:
+        result.rule_results_negative = negative_results
 
-    # Run test evaluation
-    # TODO: THE FILE IS CURRENTLY JUST BOILERPLATE TO SEE IF ENTRYPOINT WORKS CORRECTLY
-    test_metrics = run_test_evaluation(instance_row)
-    if test_metrics:
-        result.test_metrics = test_metrics
-        # Consider test successful if no failures and at least some tests passed
-        result.test_success = test_metrics.failed == 0 and test_metrics.passed > 0
+    # Consider rule successful if at least one evaluation completed
+    result.rule_success = positive_results is not None or negative_results is not None
+
+    # # Run test evaluation
+    # # TODO: THE FILE IS CURRENTLY JUST BOILERPLATE TO SEE IF ENTRYPOINT WORKS CORRECTLY
+    # test_metrics = run_test_evaluation(instance_row)
+    # if test_metrics:
+    #     result.test_metrics = test_metrics
+    #     # Consider test successful if no failures and at least some tests passed
+    #     result.test_success = test_metrics.failed == 0 and test_metrics.passed > 0
 
     # Log summary
     eval_logger.info(f"\n[{instance_row.id}] Summary:")
@@ -239,8 +273,10 @@ def evaluate_instance(instance_row: InstanceRow) -> EvaluationResult:
     if result.test_metrics:
         eval_logger.info(f"  Test Metrics: {result.test_metrics.model_dump()}")
     eval_logger.info(f"  Rule Success: {result.rule_success}")
-    if result.rule_results:
-        eval_logger.info(f"  Rule Findings: {result.rule_results.get('total_findings', 0)}")
+    if result.rule_results_positive:
+        eval_logger.info(f"  Positive Rule Findings: {result.rule_results_positive.get('total_findings', 0)}")
+    if result.rule_results_negative:
+        eval_logger.info(f"  Negative Rule Findings: {result.rule_results_negative.get('total_findings', 0)}")
 
     return result
 

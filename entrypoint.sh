@@ -7,7 +7,11 @@ AGENT_SCRIPT="/agent/run_agent"
 DIFF_INPUT="/input/patch.diff"
 DIFF_OUTPUT="/output/prediction.diff"
 SARIF_OUTPUT="/output/rules.sarif"
+SARIF_OUTPUT_POSITIVE="/output/rules_positive.sarif"
+SARIF_OUTPUT_NEGATIVE="/output/rules_negative.sarif"
 RULES_DIR="/rules"
+RULES_POSITIVE="/rules/rules_positive.yml"
+RULES_NEGATIVE="/rules/rules_negative.yml"
 TASK_DESC_DIR="/task_description"
 
 # Ensure we are in the repo
@@ -139,13 +143,30 @@ case "$1" in
             git apply "$DIFF_INPUT" --allow-empty
         fi
 
-        echo "Running Opengrep..."
+        echo "Running Opengrep with positive rules..."
         sudo chmod -R 755 "$RULES_DIR"
-        opengrep scan --timeout-threshold 0 --timeout 0 --max-memory 0 -f "$RULES_DIR" --sarif-output "$SARIF_OUTPUT" .
 
-        # Fix ownership so the host can read the result
-        sudo chown benchmarker:benchmarker "$SARIF_OUTPUT"
-        echo "SARIF output saved to $SARIF_OUTPUT"
+        # Scan with positive rules
+        if [ -f "$RULES_POSITIVE" ]; then
+            echo "-> Scanning with positive rules: $RULES_POSITIVE"
+            opengrep scan --timeout-threshold 0 --timeout 0 --max-memory 0 -f "$RULES_POSITIVE" --sarif-output "$SARIF_OUTPUT_POSITIVE" .
+            sudo chown benchmarker:benchmarker "$SARIF_OUTPUT_POSITIVE"
+            echo "-> Positive SARIF output saved to $SARIF_OUTPUT_POSITIVE"
+        else
+            echo "-> Warning: Positive rules not found at $RULES_POSITIVE"
+        fi
+
+        # Scan with negative rules
+        if [ -f "$RULES_NEGATIVE" ]; then
+            echo "-> Scanning with negative rules: $RULES_NEGATIVE"
+            opengrep scan --timeout-threshold 0 --timeout 0 --max-memory 0 -f "$RULES_NEGATIVE" --sarif-output "$SARIF_OUTPUT_NEGATIVE" .
+            sudo chown benchmarker:benchmarker "$SARIF_OUTPUT_NEGATIVE"
+            echo "-> Negative SARIF output saved to $SARIF_OUTPUT_NEGATIVE"
+        else
+            echo "-> Warning: Negative rules not found at $RULES_NEGATIVE"
+        fi
+
+        echo "=== Static analysis complete ==="
         ;;
 
     *)
