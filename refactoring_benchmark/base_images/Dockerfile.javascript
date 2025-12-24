@@ -58,6 +58,9 @@ RUN mkdir -p /home/benchmarker/.cache/npm-warmup && \
 RUN echo "benchmarker ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers && \
     mkdir -p /scripts /rules /testbed && useradd -m -s /bin/bash benchmarker && \
     chown -R benchmarker:benchmarker /scripts /rules /testbed
+
+RUN chmod -R 777 /home/benchmarker 
+
 USER benchmarker
 WORKDIR /testbed
 ENV ANTHROPIC_API_KEY=""

@@ -2,9 +2,11 @@
 import logging
 import os
 import sys
+import threading
 from typing import Optional
 
 _LOG_DIR: Optional[str] = None
+_logger_lock = threading.Lock()
 
 
 def setup_logging(log_dir: str = "logs") -> None:
@@ -32,6 +34,7 @@ def get_logger(
 ) -> logging.Logger:
     """
     Get or create a logger with the specified configuration.
+    Thread-safe for parallel execution.
 
     Args:
         name: Name of the logger (typically module name or component name)
@@ -51,30 +54,32 @@ def get_logger(
     if _LOG_DIR is None:
         raise RuntimeError("setup_logging() must be called before get_logger()")
 
-    logger = logging.getLogger(name)
-    logger.setLevel(level)
-    
-    logger.propagate = False
-    if logger.handlers:
-        for handler in logger.handlers[:]:
-            logger.removeHandler(handler)
+    # Thread-safe logger configuration
+    with _logger_lock:
+        logger = logging.getLogger(name)
+        logger.setLevel(level)
 
-    file_fmt = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-    console_fmt = logging.Formatter("%(levelname)s: %(message)s")
+        logger.propagate = False
+        if logger.handlers:
+            for handler in logger.handlers[:]:
+                logger.removeHandler(handler)
 
-    # Console Handler (always added)
-    if use_stdout:
-        ch = logging.StreamHandler(sys.stdout)
-        ch.setFormatter(console_fmt)
-        ch.setLevel(level)
-        logger.addHandler(ch)
+        file_fmt = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+        console_fmt = logging.Formatter("%(levelname)s: %(message)s")
 
-    # File Handler (optional)
-    if use_file:
-        log_file = os.path.join(_LOG_DIR, f"{name}.log")
-        fh = logging.FileHandler(log_file)
-        fh.setFormatter(file_fmt)
-        fh.setLevel(level)
-        logger.addHandler(fh)
+        # Console Handler (always added)
+        if use_stdout:
+            ch = logging.StreamHandler(sys.stdout)
+            ch.setFormatter(console_fmt)
+            ch.setLevel(level)
+            logger.addHandler(ch)
+
+        # File Handler (optional)
+        if use_file:
+            log_file = os.path.join(_LOG_DIR, f"{name}.log")
+            fh = logging.FileHandler(log_file)
+            fh.setFormatter(file_fmt)
+            fh.setLevel(level)
+            logger.addHandler(fh)
 
     return logger
