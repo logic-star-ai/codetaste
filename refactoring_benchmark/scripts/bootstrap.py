@@ -45,9 +45,10 @@ def run_test_metrics(container: DockerContainer) -> Metrics:
     res = container.exec_run([
         "bash",
         "-c",
+        "timeout 5m bash -c '"
         "/scripts/setup_system.sh || true && "
         "source /scripts/setup_shell.sh || true && "
-        "/scripts/run_tests"
+        "/scripts/run_tests'"
     ])
     try:
         output = res.output
@@ -79,7 +80,7 @@ def bootstrap_setup_phase(instance_row: InstanceRow) -> Optional[str]:
             environment={"ANTHROPIC_API_KEY": API_KEY},
             working_dir="/testbed",
         )
-        container.exec_run("echo 'Starting setup phase...'")
+        container.exec_run(["bash", "-c", "timeout 5m echo 'Starting setup phase...'"])
     except Exception as e:
         bootstrap_logger.error(f"❌ Image {base_img} failed: {e}")
         return None
@@ -95,25 +96,27 @@ def bootstrap_setup_phase(instance_row: InstanceRow) -> Optional[str]:
             f"git fetch --depth 2 origin {instance_row.golden_commit_hash}",
             f"git checkout {instance_row.golden_commit_hash}",
         ]:
-            container.exec_run(cmd)
+            container.exec_run(["bash", "-c", f"timeout 5m {cmd}"])
 
         prompt = SETUP_PROMPT_LANG[instance_row.language]
         instance_logger.info("Claude Agent is taking control...")
+        
+        # Wrapped claude command in 60 minute timeout
         agent_cmd = [
-            "claude", "-p", prompt, "--dangerously-skip-permissions",
-            "--verbose", "--output-format", "stream-json",
+            "bash", "-c",
+            f"timeout 60m claude -p {shlex.quote(prompt)} --dangerously-skip-permissions "
+            "--verbose --output-format stream-json"
         ]
-
         stream_exec(container, agent_cmd, env={"ANTHROPIC_API_KEY": API_KEY or ""}, stream_logger=instance_logger)
 
-        container.exec_run("git reset --hard HEAD && git clean -xdf")
-        container.exec_run(f"git checkout {instance_row.golden_commit_hash}")
+        container.exec_run(["bash", "-c", "timeout 5m git reset --hard HEAD && git clean -xdf"])
+        container.exec_run(["bash", "-c", f"timeout 5m git checkout {instance_row.golden_commit_hash}"])
         bootstrap_logger.info(f"[{instance_row.id}]: Capturing Golden (Post-Refactoring) Test Metrics...")
         golden_metrics = run_test_metrics(container)
         is_setup_golden_success = golden_metrics.total >= 10 and golden_metrics.passed >= golden_metrics.total * 0.3 and golden_metrics.failed != -1
         bootstrap_logger.info(f"[{instance_row.id}]: Golden Metrics (Post-Refactoring): {golden_metrics.model_dump()}")
-        container.exec_run("git reset --hard HEAD && git clean -xdf")
-        container.exec_run(f"git checkout {instance_row.commit_hash}")
+        container.exec_run(["bash", "-c", "timeout 5m git reset --hard HEAD && git clean -xdf"])
+        container.exec_run(["bash", "-c", f"timeout 5m git checkout {instance_row.commit_hash}"])
         base_metrics: Metrics = run_test_metrics(container)
         is_setup_base_success = base_metrics.total >= 10 and base_metrics.passed >= base_metrics.total * 0.3 and base_metrics.failed != -1
 
@@ -196,12 +199,12 @@ def bootstrap_runtime_phase(row: InstanceRow, setup_image: str) -> Optional[str]
         entrypoint_path = os.path.join(PROJECT_ROOT, "entrypoint.sh")
         with open(entrypoint_path, "rb") as f:
             copy_to_container(container, f.read(), "/usr/local/bin/entrypoint.sh")
-        container.exec_run("sudo chmod +x /usr/local/bin/entrypoint.sh")
+        container.exec_run(["bash", "-c", "timeout 5m sudo chmod +x /usr/local/bin/entrypoint.sh"])
 
         # 2. Inject Rules
         rules_dir = os.path.join(PROJECT_ROOT, row.asset_dir("rules"))
         if os.path.exists(rules_dir):
-            container.exec_run("mkdir -p /rules")
+            container.exec_run(["bash", "-c", "timeout 5m mkdir -p /rules"])
             for filename in os.listdir(rules_dir):
                 file_path = os.path.join(rules_dir, filename)
                 with open(file_path, "rb") as f:
@@ -210,13 +213,13 @@ def bootstrap_runtime_phase(row: InstanceRow, setup_image: str) -> Optional[str]
         # 3. Inject Task Descriptions
         task_desc_dir = os.path.join(PROJECT_ROOT, row.asset_dir("descriptions"))
         if os.path.exists(task_desc_dir):
-            container.exec_run("sudo mkdir -p /task_description")
+            container.exec_run(["bash", "-c", "timeout 5m sudo mkdir -p /task_description"])
             for filename in os.listdir(task_desc_dir):
                 file_path = os.path.join(task_desc_dir, filename)
                 with open(file_path, "rb") as f:
                     copy_to_container(container, f.read(), f"/task_description/{filename}")
-            container.exec_run("sudo chown -R benchmarker:benchmarker /task_description")
-            container.exec_run("sudo chmod -R 755 /task_description")
+            container.exec_run(["bash", "-c", "timeout 5m sudo chown -R benchmarker:benchmarker /task_description"])
+            container.exec_run(["bash", "-c", "timeout 5m sudo chmod -R 755 /task_description"])
         bootstrap_logger.info(f"[{row.id}]: 🚚 Injected runtime components: /rules, /task_description")
 
         # 4. Lobotomize git
@@ -230,12 +233,12 @@ def bootstrap_runtime_phase(row: InstanceRow, setup_image: str) -> Optional[str]
         ]
         for cmd in git_cmds:
             res = container.exec_run(
-                ["bash", "-c", cmd],
+                ["bash", "-c", f"timeout 5m {cmd}"],
             )
             instance_logger.info(f"[{row.id}]: Git Command: {cmd}\nOutput: {res.output.decode() if res.output else 'No Output'}")
         instance_logger.info(f"[{row.id}]: 🧠 Lobotomized git repository.")
         res = container.exec_run(
-            ["bash", "-c", "source /scripts/setup_shell.sh || true"],
+            ["bash", "-c", "timeout 5m bash -c 'source /scripts/setup_shell.sh || true'"],
         )
         instance_logger.info(f"[{row.id}]: Setup shell output: {res.output.decode() if res.output else 'No Output'}")
 
@@ -303,14 +306,14 @@ async def bootstrap_parallel(instances: list[InstanceRow], degree: int):
                 try:
                     return await asyncio.wait_for(
                         asyncio.to_thread(bootstrap_instance, instance), 
-                        timeout=3600
+                        timeout=4800
                     )
                 except asyncio.TimeoutError:
                     bootstrap_logger.error(
-                        f"⚠️ Attempt {attempt + 1} timed out (60 min) for {instance.id}. "
+                        f"⚠️ Attempt {attempt + 1} timed out (80 min) for {instance.id}. "
                         f"{'Restarting...' if attempt < 1 else 'Max retries reached.'}"
                     )
-            return asyncio.wait_for(asyncio.to_thread(bootstrap_instance, instance, use_base_image_as_setup=True), timeout=3600)
+            return asyncio.wait_for(asyncio.to_thread(bootstrap_instance, instance, use_base_image_as_setup=True), timeout=4800)
 
     tasks = [sem_task(inst) for inst in instances]
     await asyncio.gather(*tasks)

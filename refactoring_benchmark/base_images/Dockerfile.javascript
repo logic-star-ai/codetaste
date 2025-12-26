@@ -13,11 +13,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libjpeg-dev libpng-dev libtiff-dev libfreetype6-dev \
     libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 \
     libxkbcommon0 libxcomposite1 libxdamage1 libxext6 libxfixes3 \
+    vim \
     libxrandr2 libgbm1 && locale-gen en_US.UTF-8 \
     && rm -rf /var/lib/apt/lists/*
-
-RUN curl -fsSL https://raw.githubusercontent.com/opengrep/opengrep/v1.8.2/install.sh | bash
-ENV PATH="/home/benchmarker/.opengrep/cli/latest:$PATH"
 
 # 2. Define NVM directory and Node version
 ENV NVM_DIR /opt/nvm
@@ -60,8 +58,11 @@ RUN echo "benchmarker ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers && \
     chown -R benchmarker:benchmarker /scripts /rules /testbed
 
 RUN chmod -R 777 /home/benchmarker 
-
 USER benchmarker
+
+RUN curl -fsSL https://raw.githubusercontent.com/opengrep/opengrep/v1.8.2/install.sh | bash
+ENV PATH="/home/benchmarker/.opengrep/cli/latest:$PATH"
+
 WORKDIR /testbed
 ENV ANTHROPIC_API_KEY=""
 CMD ["sleep", "infinity"]
