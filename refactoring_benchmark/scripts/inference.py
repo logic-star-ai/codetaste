@@ -184,7 +184,7 @@ def main():
 
     inference_logger.info(f"Loaded {len(instances)} instances")
 
-    instances_to_run = instances[:8]
+    instances_to_run = instances
     inference_logger.info(f"Running inference on {len(instances_to_run)} instances (max {MAX_CONCURRENT_INSTANCES} concurrent)")
 
     # Run instances in parallel

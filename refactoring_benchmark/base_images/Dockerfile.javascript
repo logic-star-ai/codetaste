@@ -57,6 +57,7 @@ RUN echo "benchmarker ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers && \
     mkdir -p /scripts /rules /testbed && useradd -m -s /bin/bash benchmarker && \
     chown -R benchmarker:benchmarker /scripts /rules /testbed
 
+RUN chmod -R 700 /rules
 RUN chmod -R 777 /home/benchmarker 
 USER benchmarker
 
