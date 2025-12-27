@@ -97,11 +97,12 @@ case "$1" in
             [ -f /scripts/setup_shell.sh ] && source /scripts/setup_shell.sh
             [ -f "$1" ] && source "$1"
             shift 1
-            exec bash "$@"
+            bash "$@"
         ' -- "$AGENT_SETUP_SCRIPT" "$AGENT_SCRIPT" "$(cat "$TASK_DESC_DIR/description.md")"; then
             echo "=== Agent finished successfully ==="
         else
             echo "=== Agent failed with exit code $? ==="
+            exit $?
         fi
 
         # Harvest Results

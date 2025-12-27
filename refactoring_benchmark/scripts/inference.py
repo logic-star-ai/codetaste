@@ -44,7 +44,7 @@ def execute_instance(instance_row: InstanceRow, force: bool = False) -> bool:
     """
     # Create instance-specific logger
     instance_logger = get_logger(
-        f"{instance_row.id}__inference",
+        f"inference-{instance_row.id}",
         use_file=True,
         use_stdout=False
     )
