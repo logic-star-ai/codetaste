@@ -22,6 +22,15 @@ TASK_DESC_DIR="/task_description"
 cd "$REPO_ROOT"
 
 # --- Helper Functions ---
+function preserve_env() {
+    echo "-> [Security] Applying Sudo Environment Fix (Disabling secure_path/env_reset)..."
+    # We use tee to create a new sudoers override file
+    echo 'Defaults !env_reset' | sudo tee /etc/sudoers.d/testbed_env > /dev/null
+    echo 'Defaults !secure_path' | sudo tee -a /etc/sudoers.d/testbed_env > /dev/null
+    # Explicitly keep critical variables to handle edge-case sudo configurations
+    echo 'Defaults env_keep += "PATH VIRTUAL_ENV PYTHONPATH NODE_PATH NVM_DIR NVM_BIN"' | sudo tee -a /etc/sudoers.d/testbed_env > /dev/null
+    sudo chmod 0440 /etc/sudoers.d/testbed_env
+}
 
 function setup_env() {
     echo "-> [Setup] Running system setup (if needed)..."
@@ -45,9 +54,9 @@ function create_restricted_user() {
         echo "-> [Security] Creating restricted 'agent_user'..."
         sudo useradd -m -s /bin/bash agent_user
     fi
-    echo "-> [Security] Transferring repo ownership to agent_user..."
-    sudo chown -R agent_user:agent_user "$REPO_ROOT"
 }
+
+preserve_env
 
 # Permissions
 if [ -d "/output" ]; then sudo chmod -R 777 "/output"; fi
@@ -56,6 +65,7 @@ if [ -d "/scripts" ]; then sudo chmod -R 755 "/scripts"; fi
 if [ -d "/task_description" ]; then sudo chmod -R 755 "/task_description"; fi
 sudo chmod -R 777 /home/benchmarker
 sudo chmod -R 777 /opt
+
 # basic setup
 PRE_AGENT_HASH=$(git rev-parse HEAD)
 export PYTHONIOENCODING=utf-8
@@ -67,22 +77,28 @@ case "$1" in
         echo "=== Mode: Inference ==="
         block_network
         create_restricted_user
+        
         if [ ! -f "$AGENT_SCRIPT" ]; then
             echo "Error: Agent script not found at $AGENT_SCRIPT"
             exit 1
         fi
+        
         if [ -f "$AGENT_SYSTEM_SETUP_SCRIPT" ]; then
             echo "=== Running Agent System Setup Script ==="
             sudo bash "$AGENT_SYSTEM_SETUP_SCRIPT"
         fi
 
+        echo "[Security] Transferring repo ownership to agent_user..."
+        sudo chown -R agent_user:agent_user "$REPO_ROOT"
+        
         # Restricted Execution
         echo "=== Dropping Privileges: Switching to 'agent_user' ==="
         if sudo -E -u agent_user bash -c '
             [ -f /scripts/setup_shell.sh ] && source /scripts/setup_shell.sh
-            [ -f "$AGENT_SETUP_SCRIPT" ] && source "$AGENT_SETUP_SCRIPT"
-            exec "$0" "$@"
-        ' "$AGENT_SCRIPT" "$(cat "$TASK_DESC_DIR/description.md")"; then
+            [ -f "$1" ] && source "$1"
+            shift 1
+            exec bash "$@"
+        ' -- "$AGENT_SETUP_SCRIPT" "$AGENT_SCRIPT" "$(cat "$TASK_DESC_DIR/description.md")"; then
             echo "=== Agent finished successfully ==="
         else
             echo "=== Agent failed with exit code $? ==="
