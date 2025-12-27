@@ -204,7 +204,7 @@ class TestStreamExec:
 
         try:
             # Execute simple command
-            output = stream_exec(container, ["echo", "Hello World"], env={})
+            output, _ = stream_exec(container, ["echo", "Hello World"], env={})
 
             assert "Hello World" in output
 
@@ -230,7 +230,7 @@ class TestStreamExec:
 
         try:
             # Execute command that uses environment variable
-            output = stream_exec(
+            output, _ = stream_exec(
                 container,
                 ["bash", "-c", "echo $TEST_VAR"],
                 env={"TEST_VAR": "test_value"}
@@ -260,7 +260,7 @@ class TestStreamExec:
 
         try:
             # Execute command with multiple lines of output
-            output = stream_exec(
+            output, _ = stream_exec(
                 container,
                 ["bash", "-c", "echo 'line1'; echo 'line2'; echo 'line3'"],
                 env={}

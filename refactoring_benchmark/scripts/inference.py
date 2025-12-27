@@ -81,7 +81,7 @@ def execute_instance(instance_row: InstanceRow, force: bool = False) -> bool:
             detach=True,
             environment={"ANTHROPIC_API_KEY": API_KEY},
             volumes={
-                agent_dir: {"bind": "/agent", "mode": "ro"},
+                agent_dir: {"bind": "/agent", "mode": "rw"},
                 instance_output_dir: {"bind": "/output", "mode": "rw"},
             },
             working_dir="/testbed",
@@ -184,7 +184,7 @@ def main():
 
     inference_logger.info(f"Loaded {len(instances)} instances")
 
-    instances_to_run = instances[:2]
+    instances_to_run = instances[:8]
     inference_logger.info(f"Running inference on {len(instances_to_run)} instances (max {MAX_CONCURRENT_INSTANCES} concurrent)")
 
     # Run instances in parallel

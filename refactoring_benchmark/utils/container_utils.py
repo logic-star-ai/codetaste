@@ -49,7 +49,7 @@ def stream_exec(
                 acc = ""
             except json.JSONDecodeError:
                 pass
-    return "".join(full_output)
+    return "".join(full_output), exec_instance.exit_code
 
 
 def copy_to_container(container: DockerContainer, src_content: bytes, dst_path: str):

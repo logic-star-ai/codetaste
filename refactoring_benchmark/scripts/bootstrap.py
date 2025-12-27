@@ -107,38 +107,23 @@ def bootstrap_setup_phase(instance_row: InstanceRow) -> Optional[str]:
             f"timeout 60m claude -p {shlex.quote(prompt)} --dangerously-skip-permissions "
             "--verbose --output-format stream-json"
         ]
-        stream_exec(container, agent_cmd, env={"ANTHROPIC_API_KEY": API_KEY or ""}, stream_logger=instance_logger)
+        out, exit_code = stream_exec(container, agent_cmd, env={"ANTHROPIC_API_KEY": API_KEY or ""}, stream_logger=instance_logger)
+        if exit_code == 124:
+            bootstrap_logger.error(f"[{instance_row.id}]: ⏳ Agent timed out (60m limit reached).")
+            raise TimeoutError(f"Agent exceeded 60m time limit for {instance_row.id}")
 
-        container.exec_run(["bash", "-c", "timeout 5m git reset --hard HEAD && git clean -xdf"])
+        container.exec_run(["bash", "-c", "timeout 5m git reset --hard HEAD && git clean -xdff"])
         container.exec_run(["bash", "-c", f"timeout 5m git checkout {instance_row.golden_commit_hash}"])
         bootstrap_logger.info(f"[{instance_row.id}]: Capturing Golden (Post-Refactoring) Test Metrics...")
         golden_metrics = run_test_metrics(container)
         is_setup_golden_success = golden_metrics.total >= 10 and golden_metrics.passed >= golden_metrics.total * 0.3 and golden_metrics.failed != -1
         bootstrap_logger.info(f"[{instance_row.id}]: Golden Metrics (Post-Refactoring): {golden_metrics.model_dump()}")
-        container.exec_run(["bash", "-c", "timeout 5m git reset --hard HEAD && git clean -xdf"])
+        container.exec_run(["bash", "-c", "timeout 5m git reset --hard HEAD && git clean -xdff"])
         container.exec_run(["bash", "-c", f"timeout 5m git checkout {instance_row.commit_hash}"])
         base_metrics: Metrics = run_test_metrics(container)
         is_setup_base_success = base_metrics.total >= 10 and base_metrics.passed >= base_metrics.total * 0.3 and base_metrics.failed != -1
 
-        if is_setup_base_success or is_setup_golden_success:
-            bootstrap_logger.info(f"[{instance_row.id}]: ✅ Agent setup successful (base={is_setup_base_success}, golden={is_setup_golden_success}). Committing setup image.")
-            container.commit(repository=setup_image, tag=None)
-            bootstrap_logger.info(f"✅ Saved {setup_image}")
-        else:
-            bootstrap_logger.error(f"[{instance_row.id}]: ❌ Agent setup failed for both base and golden commits.")
-            bootstrap_logger.info(f"[{instance_row.id}]: -> Tagging base image as setup image (no agent setup applied).")
-            base_image = client.images.get(base_img)
-            base_image.tag(repository=setup_image, tag=None)
-            bootstrap_logger.info(f"[{instance_row.id}]: ✅ Tagged {base_img} as {setup_image}")
-
-        scripts_dir = os.path.join(instance_dir, "scripts")
-        os.makedirs(scripts_dir, exist_ok=True)
-        try:
-            extract_folder_from_container(container, "/scripts", instance_dir)
-            bootstrap_logger.info(f"[{instance_row.id}]: ✅ Saved scripts to {scripts_dir}")
-        except Exception as e:
-            bootstrap_logger.warning(f"[{instance_row.id}]: ⚠️  Failed to save scripts: {e}")
-
+        # Save metadata
         meta = InstanceMetadata(
             owner=instance_row.owner,
             repo=instance_row.repo,
@@ -149,18 +134,48 @@ def bootstrap_setup_phase(instance_row: InstanceRow) -> Optional[str]:
             is_success_base=is_setup_base_success,
             is_success_golden=is_setup_golden_success,
         )
-
         meta_dict = meta.model_dump()
         with open(os.path.join(instance_dir, "metadata.json"), "w") as f:
             json.dump(meta_dict, f, indent=2)
+
+        # save image if successful, else raise error and resort to base image
+        if is_setup_base_success or is_setup_golden_success:
+            bootstrap_logger.info(f"[{instance_row.id}]: ✅ Agent setup successful (base={is_setup_base_success}, golden={is_setup_golden_success}). Committing setup image.")
+            container.commit(repository=setup_image, tag=None)
+            bootstrap_logger.info(f"✅ Saved {setup_image}")
+        else:
+            bootstrap_logger.error(f"[{instance_row.id}]: ❌ Agent setup failed for both base and golden commits.")
+            container.stop(timeout=1)
+            container.remove(force=True)
+            raise RuntimeError("Agent setup failed for both base and golden commits.")
+
+        scripts_dir = os.path.join(instance_dir, "scripts")
+        os.makedirs(scripts_dir, exist_ok=True)
+        try:
+            extract_folder_from_container(container, "/scripts", instance_dir)
+            bootstrap_logger.info(f"[{instance_row.id}]: ✅ Saved scripts to {scripts_dir}")
+        except Exception as e:
+            bootstrap_logger.warning(f"[{instance_row.id}]: ⚠️  Failed to save scripts: {e}")
         return setup_image
 
     except Exception as e:
-        bootstrap_logger.exception(f"💥 Setup Phase Failed: {instance_row.repo}")
+        bootstrap_logger.exception(f"💥 Setup Phase Failed: {instance_row.repo}. Resorting to base image. \n{e}")
         try:
-            base_image = client.images.get(base_img)
-            base_image.tag(repository=setup_image, tag=None)
+            container: DockerContainer = client.containers.run(
+                base_img,
+                detach=True,
+                environment={"ANTHROPIC_API_KEY": API_KEY},
+                working_dir="/testbed",
+            )
+            for cmd in [
+                "git init .",
+                f"git remote add origin {repo_url}",
+                f"git fetch --depth 2 origin {instance_row.commit_hash}",
+                f"git checkout {instance_row.commit_hash}",
+            ]:
+                container.exec_run(["bash", "-c", f"timeout 5m {cmd}"])
             bootstrap_logger.info(f"[{instance_row.id}]: Tagged {base_img} as {setup_image} (fallback)")
+            container.commit(repository=setup_image, tag=None)
             return setup_image
         except Exception as tag_err:
             bootstrap_logger.error(f"[{instance_row.id}]: ❌ Failed to tag base image: {tag_err}")
@@ -224,7 +239,7 @@ def bootstrap_runtime_phase(row: InstanceRow, setup_image: str) -> Optional[str]
 
         # 4. Lobotomize git
         git_cmds = [
-            "git reset --hard HEAD && git clean -xdf",
+            "git reset --hard HEAD && git clean -xdff",
             f"git checkout {row.commit_hash}",
             "git remote remove origin || true",
             "rm -f .git/FETCH_HEAD",
@@ -235,6 +250,8 @@ def bootstrap_runtime_phase(row: InstanceRow, setup_image: str) -> Optional[str]
             res = container.exec_run(
                 ["bash", "-c", f"timeout 5m {cmd}"],
             )
+            if res.exit_code == 124:
+                raise TimeoutError(f"Git command timed out: {cmd}")
             instance_logger.info(f"[{row.id}]: Git Command: {cmd}\nOutput: {res.output.decode() if res.output else 'No Output'}")
         instance_logger.info(f"[{row.id}]: 🧠 Lobotomized git repository.")
         res = container.exec_run(
@@ -308,7 +325,7 @@ async def bootstrap_parallel(instances: list[InstanceRow], degree: int):
                         asyncio.to_thread(bootstrap_instance, instance), 
                         timeout=4800
                     )
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     bootstrap_logger.error(
                         f"⚠️ Attempt {attempt + 1} timed out (80 min) for {instance.id}. "
                         f"{'Restarting...' if attempt < 1 else 'Max retries reached.'}"

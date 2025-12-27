@@ -45,28 +45,26 @@ function create_restricted_user() {
         echo "-> [Security] Creating restricted 'agent_user'..."
         sudo useradd -m -s /bin/bash agent_user
     fi
-
     echo "-> [Security] Transferring repo ownership to agent_user..."
     sudo chown -R agent_user:agent_user "$REPO_ROOT"
-
-    # Set permissions for various directories
-    if [ -d "/output" ]; then sudo chmod -R 777 "/output"; fi
-    if [ -d "/agent" ]; then sudo chmod -R 755 "/agent"; fi
-    if [ -d "/scripts" ]; then sudo chmod -R 755 "/scripts"; fi
-    if [ -d "/task_description" ]; then sudo chmod -R 755 "/task_description"; fi
-    sudo chmod -R 777 /home/benchmarker
-    sudo chmod -R 777 /opt
 }
 
-
+# Permissions
+if [ -d "/output" ]; then sudo chmod -R 777 "/output"; fi
+if [ -d "/agent" ]; then sudo chmod -R 755 "/agent"; fi
+if [ -d "/scripts" ]; then sudo chmod -R 755 "/scripts"; fi
+if [ -d "/task_description" ]; then sudo chmod -R 755 "/task_description"; fi
+sudo chmod -R 777 /home/benchmarker
+sudo chmod -R 777 /opt
+# basic setup
 PRE_AGENT_HASH=$(git rev-parse HEAD)
 export PYTHONIOENCODING=utf-8
 export LC_ALL=C.UTF-8
+setup_env
 
 case "$1" in
     "inference")
         echo "=== Mode: Inference ==="
-        setup_env
         block_network
         create_restricted_user
         if [ ! -f "$AGENT_SCRIPT" ]; then
@@ -81,7 +79,7 @@ case "$1" in
         # Restricted Execution
         echo "=== Dropping Privileges: Switching to 'agent_user' ==="
         if sudo -E -u agent_user bash -c '
-            [ -f /scripts/setup_shell.sh ] && source /scripts/setup_shell.sh || true
+            [ -f /scripts/setup_shell.sh ] && source /scripts/setup_shell.sh
             [ -f "$AGENT_SETUP_SCRIPT" ] && source "$AGENT_SETUP_SCRIPT"
             exec "$0" "$@"
         ' "$AGENT_SCRIPT" "$(cat "$TASK_DESC_DIR/description.md")"; then
@@ -104,7 +102,7 @@ case "$1" in
     "eval_test")
         echo "=== Mode: Evaluation (Test) ==="
         git reset --hard --recurse-submodules HEAD
-        git clean -xdf
+        git clean -xdff
         git checkout "$PRE_AGENT_HASH"
         if [ -f "$DIFF_INPUT" ]; then
             echo "Applying patch from $DIFF_INPUT..."
@@ -120,7 +118,7 @@ case "$1" in
     "eval_rule")
         echo "=== Mode: Evaluation (Static Analysis) ==="
         git reset --hard --recurse-submodules HEAD
-        git clean -xdf
+        git clean -xdff
         git checkout "$PRE_AGENT_HASH"
         if [ -f "$DIFF_INPUT" ]; then
             echo "Applying patch from $DIFF_INPUT..."
