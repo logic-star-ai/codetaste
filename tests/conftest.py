@@ -4,24 +4,24 @@ import tempfile
 from pathlib import Path
 from typing import Generator
 import pytest
-import docker
+import podman
 
 from refactoring_benchmark.utils.models import InstanceRow, Metrics
 
 
 @pytest.fixture(scope="session")
-def docker_client() -> docker.DockerClient:
-    """Provide a Docker client for tests."""
+def docker_client() -> podman.PodmanClient:
+    """Provide a Podman client for tests (fixture named docker_client for backward compatibility)."""
     try:
         # use podman
         uid = os.getuid()
         DOCKER_HOST=f"unix:///run/user/${uid}/podman/podman.sock"
         DOCKER_HOST = os.environ.get("DOCKER_HOST", DOCKER_HOST)
-        client = docker.from_env(timeout=300, environment={"DOCKER_HOST": DOCKER_HOST})
+        client = podman.from_env(timeout=300, environment={"DOCKER_HOST": DOCKER_HOST})
         client.ping()
         return client
     except Exception as e:
-        pytest.skip(f"Docker not available: {e}")
+        pytest.skip(f"Podman not available: {e}")
 
 
 @pytest.fixture
@@ -64,7 +64,7 @@ def mock_instance_dir(temp_dir: Path, sample_instance_row: InstanceRow) -> Path:
 
 
 @pytest.fixture
-def cleanup_test_images(docker_client: docker.DockerClient) -> Generator[None, None, None]:
+def cleanup_test_images(docker_client: podman.PodmanClient) -> Generator[None, None, None]:
     """Clean up any test images created during tests."""
     yield
     # Clean up test images after test completes

@@ -7,8 +7,8 @@ import sys
 import asyncio  # Added for parallelization
 from typing import Optional
 
-import docker
-from docker.models.containers import Container as DockerContainer
+import podman
+from podman.domain.containers import Container as PodmanContainer
 
 from refactoring_benchmark.utils.prompts import SETUP_PROMPT_LANG, SETUP_PROMPT_PYTHON
 from refactoring_benchmark.utils.models import InstanceRow, Metrics, InstanceMetadata
@@ -30,17 +30,17 @@ MAX_CONCURRENT_INSTANCES = 5
 setup_logging(LOG_DIR)
 bootstrap_logger = get_logger("bootstrap")
 
-# --- DOCKER SETUP ---
+# --- PODMAN SETUP ---
 try:
-    client: docker.DockerClient = docker.from_env(timeout=300)
+    client: podman.PodmanClient = podman.from_env(timeout=300)
     client.ping()
 except Exception as e:
-    bootstrap_logger.error(f"Docker Connection Failed: {e}")
+    bootstrap_logger.error(f"Podman Connection Failed: {e}")
     bootstrap_logger.error("Run: export DOCKER_HOST=unix:///run/user/$(id -u)/podman/podman.sock")
     sys.exit(1)
 
 
-def run_test_metrics(container: DockerContainer) -> Metrics:
+def run_test_metrics(container: PodmanContainer) -> Metrics:
     """Capture test metrics from the container."""
     res = container.exec_run([
         "bash",
@@ -64,7 +64,7 @@ def bootstrap_setup_phase(instance_row: InstanceRow) -> Optional[str]:
     """Phase 1: Setup environment and verify tests."""
     instance_dir = instance_row.instance_dir()
     setup_image = instance_row.setup_image
-    base_img = f"benchmark-base-{instance_row.language}"
+    base_img = f"benchmark-base-all" # f"benchmark-base-{instance_row.language}"
 
     try:
         client.images.get(setup_image)
@@ -74,7 +74,7 @@ def bootstrap_setup_phase(instance_row: InstanceRow) -> Optional[str]:
         pass
 
     try:
-        container: DockerContainer = client.containers.run(
+        container: PodmanContainer = client.containers.run(
             base_img,
             detach=True,
             environment={"ANTHROPIC_API_KEY": API_KEY},
@@ -161,7 +161,7 @@ def bootstrap_setup_phase(instance_row: InstanceRow) -> Optional[str]:
     except Exception as e:
         bootstrap_logger.exception(f"💥 Setup Phase Failed: {instance_row.repo}. Resorting to base image. \n{e}")
         try:
-            container: DockerContainer = client.containers.run(
+            container: PodmanContainer = client.containers.run(
                 base_img,
                 detach=True,
                 environment={"ANTHROPIC_API_KEY": API_KEY},
@@ -204,7 +204,7 @@ def bootstrap_runtime_phase(row: InstanceRow, setup_image: str) -> Optional[str]
         pass
 
     try:
-        container: DockerContainer = client.containers.run(setup_image, detach=True, working_dir="/testbed")
+        container: PodmanContainer = client.containers.run(setup_image, detach=True, working_dir="/testbed")
     except Exception as e:
         bootstrap_logger.error(f"❌ Failed to start container from {setup_image}: {e}")
         return None

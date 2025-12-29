@@ -1,6 +1,6 @@
 """Tests for container utilities."""
 import pytest
-import docker
+import podman
 from pathlib import Path
 
 from refactoring_benchmark.utils.container_utils import (
@@ -15,7 +15,7 @@ class TestCopyToContainer:
     """Tests for copy_to_container function."""
 
     @pytest.mark.slow
-    def test_copy_file_to_container(self, docker_client: docker.DockerClient):
+    def test_copy_file_to_container(self, docker_client: podman.PodmanClient):
         """Test copying a file to a container."""
         container = docker_client.containers.run(
             "benchmark-base-python",
@@ -44,7 +44,7 @@ class TestCopyToContainer:
                     raise net_err
 
     @pytest.mark.slow
-    def test_copy_script_with_execution_permissions(self, docker_client: docker.DockerClient):
+    def test_copy_script_with_execution_permissions(self, docker_client: podman.PodmanClient):
         """Test that copied scripts have execution permissions."""
         container = docker_client.containers.run(
             "benchmark-base-python",
@@ -77,7 +77,7 @@ class TestCopyToContainer:
                     raise net_err
 
     @pytest.mark.slow
-    def test_copy_to_nested_path(self, docker_client: docker.DockerClient):
+    def test_copy_to_nested_path(self, docker_client: podman.PodmanClient):
         """Test copying to a nested directory path."""
         container = docker_client.containers.run(
             "benchmark-base-python",
@@ -113,7 +113,7 @@ class TestExtractFolderFromContainer:
     """Tests for extract_folder_from_container function."""
 
     @pytest.mark.slow
-    def test_extract_folder(self, docker_client: docker.DockerClient, temp_dir: Path):
+    def test_extract_folder(self, docker_client: podman.PodmanClient, temp_dir: Path):
         """Test extracting a folder from container."""
         container = docker_client.containers.run(
             "benchmark-base-python",
@@ -153,7 +153,7 @@ class TestExtractFolderFromContainer:
                     print("Partially, skipping container removal due to permission denied error.", net_err)
 
     @pytest.mark.slow
-    def test_extract_folder_preserves_structure(self, docker_client: docker.DockerClient, temp_dir: Path):
+    def test_extract_folder_preserves_structure(self, docker_client: podman.PodmanClient, temp_dir: Path):
         """Test that extraction preserves directory structure."""
         container = docker_client.containers.run(
             "benchmark-base-python",
@@ -193,7 +193,7 @@ class TestStreamExec:
     """Tests for stream_exec function."""
 
     @pytest.mark.slow
-    def test_stream_exec_simple_command(self, docker_client: docker.DockerClient):
+    def test_stream_exec_simple_command(self, docker_client: podman.PodmanClient):
         """Test stream_exec with a simple command."""
         setup_logging("/tmp/logs")
         container = docker_client.containers.run(
@@ -219,7 +219,7 @@ class TestStreamExec:
                     raise net_err
 
     @pytest.mark.slow
-    def test_stream_exec_with_environment(self, docker_client: docker.DockerClient):
+    def test_stream_exec_with_environment(self, docker_client: podman.PodmanClient):
         """Test stream_exec with environment variables."""
         setup_logging("/tmp/logs")
         container = docker_client.containers.run(
@@ -249,7 +249,7 @@ class TestStreamExec:
                     raise net_err
 
     @pytest.mark.slow
-    def test_stream_exec_multiline_output(self, docker_client: docker.DockerClient):
+    def test_stream_exec_multiline_output(self, docker_client: podman.PodmanClient):
         """Test stream_exec handles multiline output."""
         setup_logging("/tmp/logs")
         container = docker_client.containers.run(

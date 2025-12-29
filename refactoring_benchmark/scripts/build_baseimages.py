@@ -3,8 +3,8 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Tuple
 
-import docker
-from docker.models.containers import Container as DockerContainer
+import podman
+from podman.domain.containers import Container as PodmanContainer
 
 from refactoring_benchmark.utils.logger import setup_logging, get_logger
 
@@ -17,13 +17,13 @@ LOG_DIR = PROJECT_ROOT / "logs"
 setup_logging(str(LOG_DIR))
 logger = get_logger("build-baseimages")
 
-# Initialize Docker client
+# Initialize Podman client
 try:
-    client: docker.DockerClient = docker.from_env(timeout=300)
+    client: podman.PodmanClient = podman.from_env(timeout=300)
     client.ping()
-    logger.info("Docker connection established")
+    logger.info("Podman connection established")
 except Exception as e:
-    logger.error(f"Docker connection failed: {e}")
+    logger.error(f"Podman connection failed: {e}")
     logger.error("Run: export DOCKER_HOST=unix:///run/user/$(id -u)/podman/podman.sock")
     sys.exit(1)
 
@@ -71,7 +71,7 @@ def build_image(language: str, dockerfile_path: Path) -> Tuple[bool, str]:
 
             logger.info(f"Removing existing image {image_tag}")
             client.images.remove(image_tag, force=True)
-        except docker.errors.ImageNotFound:
+        except podman.errors.ImageNotFound:
             pass
 
         # Build the image
@@ -93,7 +93,7 @@ def build_image(language: str, dockerfile_path: Path) -> Tuple[bool, str]:
         logger.info(f"Successfully built {image_tag} (ID: {image.short_id})")
         return True, image_tag
 
-    except docker.errors.BuildError as e:
+    except podman.errors.BuildError as e:
         logger.error(f"Failed to build {image_tag}: {e}")
         for line in e.build_log:
             if 'stream' in line:
@@ -116,7 +116,7 @@ def verify_image(image_tag: str) -> Tuple[bool, List[str]]:
     """
     logger.info(f"Verifying {image_tag}...")
 
-    container: DockerContainer = None
+    container: PodmanContainer = None
     failed_tests = []
 
     try:

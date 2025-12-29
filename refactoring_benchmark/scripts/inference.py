@@ -4,7 +4,7 @@ import csv
 import os
 import sys
 
-import docker
+import podman
 
 from refactoring_benchmark.utils.logger import get_logger, setup_logging
 from refactoring_benchmark.utils.models import InstanceRow
@@ -21,12 +21,12 @@ MAX_CONCURRENT_INSTANCES = 3
 setup_logging(LOG_DIR)
 inference_logger = get_logger("inference")
 
-# --- Docker/Podman Client Setup ---
+# --- Podman Client Setup ---
 try:
-    client: docker.DockerClient = docker.from_env(timeout=300)
+    client: podman.PodmanClient = podman.from_env(timeout=300)
     client.ping()
 except Exception as e:
-    inference_logger.error(f"Docker/Podman connection failed: {e}")
+    inference_logger.error(f"Podman connection failed: {e}")
     inference_logger.error("Hint: export DOCKER_HOST=unix:///run/user/$(id -u)/podman/podman.sock")
     sys.exit(1)
 
@@ -113,20 +113,20 @@ def execute_instance(instance_row: InstanceRow, force: bool = False) -> bool:
             instance_logger.error(f"❌ Container exited with code {exit_code}")
             return False
 
-    except docker.errors.ContainerError as e:
+    except podman.errors.ContainerError as e:
         inference_logger.error(f"[{instance_row.id}]: ❌ Container error (exit code {e.exit_status})")
         instance_logger.error(f"❌ Container error (exit code {e.exit_status})")
         if e.stderr:
             instance_logger.error(f"Error output: {e.stderr.decode()}")
         return False
-    except docker.errors.ImageNotFound:
+    except podman.errors.ImageNotFound:
         inference_logger.error(f"[{instance_row.id}]: ❌ Runtime image not found: {instance_row.runtime_image}")
         instance_logger.error(f"❌ Runtime image not found: {instance_row.runtime_image}")
         instance_logger.error("Run bootstrap first to create the image")
         return False
-    except docker.errors.APIError as e:
-        inference_logger.error(f"[{instance_row.id}]: ❌ Docker API error: {e}")
-        instance_logger.error(f"❌ Docker API error: {e}")
+    except podman.errors.APIError as e:
+        inference_logger.error(f"[{instance_row.id}]: ❌ Podman API error: {e}")
+        instance_logger.error(f"❌ Podman API error: {e}")
         return False
     except Exception as e:
         inference_logger.exception(f"[{instance_row.id}]: ❌ Unexpected error: {e}")

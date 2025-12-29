@@ -6,11 +6,11 @@ import tarfile
 from io import BytesIO
 from typing import Any, List, Optional, cast
 
-from docker.models.containers import Container as DockerContainer
+from podman.domain.containers import Container as PodmanContainer
 
 
 def stream_exec(
-    container: DockerContainer,
+    container: PodmanContainer,
     cmd: List[str],
     env: Optional[dict] = None,
     stream_logger: Optional[logging.Logger] = None,
@@ -52,7 +52,7 @@ def stream_exec(
     return "".join(full_output), exec_instance.exit_code
 
 
-def copy_to_container(container: DockerContainer, src_content: bytes, dst_path: str):
+def copy_to_container(container: PodmanContainer, src_content: bytes, dst_path: str):
     """
     Copy a file into a container via tar stream.
 
@@ -72,7 +72,7 @@ def copy_to_container(container: DockerContainer, src_content: bytes, dst_path: 
 
 
 def extract_folder_from_container(
-    container: DockerContainer, container_path: str, local_dest: str
+    container: PodmanContainer, container_path: str, local_dest: str
 ) -> None:
     """
     Extract a folder from a container to the local filesystem.

@@ -4,7 +4,7 @@ import time
 from pathlib import Path
 
 import pytest
-import docker
+import podman
 
 from refactoring_benchmark.scripts.bootstrap import run_test_metrics
 from refactoring_benchmark.utils.models import InstanceRow, Metrics
@@ -17,7 +17,7 @@ class TestGitCommitVerification:
 
     @pytest.mark.integration
     def test_setup_image_at_base_commit(
-        self, docker_client: docker.DockerClient, sample_instance_row: InstanceRow
+        self, docker_client: podman.PodmanClient, sample_instance_row: InstanceRow
     ):
         """
         Test that setup image has repository at base commit.
@@ -28,7 +28,7 @@ class TestGitCommitVerification:
 
         try:
             docker_client.images.get(setup_image)
-        except docker.errors.ImageNotFound:
+        except podman.errors.ImageNotFound:
             pytest.skip(f"Setup image not found: {setup_image}. Run bootstrap first.")
 
         container = docker_client.containers.run(
@@ -51,7 +51,7 @@ class TestGitCommitVerification:
 
     @pytest.mark.integration
     def test_runtime_image_at_base_commit(
-        self, docker_client: docker.DockerClient, sample_instance_row: InstanceRow
+        self, docker_client: podman.PodmanClient, sample_instance_row: InstanceRow
     ):
         """
         Test that runtime image has repository at base commit.
@@ -62,7 +62,7 @@ class TestGitCommitVerification:
 
         try:
             docker_client.images.get(runtime_image)
-        except docker.errors.ImageNotFound:
+        except podman.errors.ImageNotFound:
             pytest.skip(f"Runtime image not found: {runtime_image}. Run bootstrap first.")
 
         container = docker_client.containers.run(
