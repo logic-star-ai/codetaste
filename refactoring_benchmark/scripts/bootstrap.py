@@ -4,16 +4,20 @@ import json
 import os
 import shlex
 import sys
-import asyncio  # Added for parallelization
+import asyncio
+import time
 from typing import Optional
 
 import podman
 from podman.domain.containers import Container as PodmanContainer
+from podman.errors import APIError
 
-from refactoring_benchmark.utils.prompts import SETUP_PROMPT_LANG, SETUP_PROMPT_PYTHON
+from refactoring_benchmark.utils.prompts import BOOTSTRAP_PROMPT
 from refactoring_benchmark.utils.models import InstanceRow, Metrics, InstanceMetadata
 from refactoring_benchmark.utils.logger import setup_logging, get_logger
 from refactoring_benchmark.utils.container_utils import (
+    podman_exec_logged,
+    stop_and_remove_container,
     stream_exec,
     copy_to_container,
     extract_folder_from_container,
@@ -32,7 +36,7 @@ bootstrap_logger = get_logger("bootstrap")
 
 # --- PODMAN SETUP ---
 try:
-    client: podman.PodmanClient = podman.from_env(timeout=300)
+    client: podman.PodmanClient = podman.from_env(timeout=4000)
     client.ping()
 except Exception as e:
     bootstrap_logger.error(f"Podman Connection Failed: {e}")
@@ -40,20 +44,30 @@ except Exception as e:
     sys.exit(1)
 
 
+def classify_setup_quality(base_metrics: Metrics, golden_metrics: Metrics) -> str:
+    """Classify setup quality based on test validity."""
+    base_valid = base_metrics.total >= 10 and base_metrics.failed != -1
+    golden_valid = golden_metrics.total >= 10 and golden_metrics.failed != -1
+    return {
+        (True, True): "both_valid",
+        (True, False): "only_base_valid",
+        (False, True): "only_golden_valid",
+        (False, False): "neither_valid"
+    }[(base_valid, golden_valid)]
+
+
 def run_test_metrics(container: PodmanContainer) -> Metrics:
     """Capture test metrics from the container."""
-    res = container.exec_run([
-        "bash",
-        "-c",
+    # exec_run returns (exit_code, output_bytes) tuple
+    command = (
         "timeout 5m bash -c '"
-        "/scripts/setup_system.sh || true && "
-        "source /scripts/setup_shell.sh || true && "
+        "sudo /scripts/setup_system.sh || true; "
+        "source /scripts/setup_shell.sh || true; "
         "/scripts/run_tests'"
-    ])
+    )
     try:
-        output = res.output
-        assert isinstance(output, bytes), "Expected bytes output from exec_run"
-        output = output.decode().strip().split("\n")
+        exit_code, (stdout_bytes, stderr_bytes) = podman_exec_logged(container, ["bash", "-c", command], bootstrap_logger)
+        output = stdout_bytes.decode().strip().split("\n")
         data = json.loads(output[-1])
         return Metrics(**data)
     except Exception:
@@ -64,7 +78,7 @@ def bootstrap_setup_phase(instance_row: InstanceRow) -> Optional[str]:
     """Phase 1: Setup environment and verify tests."""
     instance_dir = instance_row.instance_dir()
     setup_image = instance_row.setup_image
-    base_img = f"benchmark-base-all" # f"benchmark-base-{instance_row.language}"
+    base_img = f"benchmark/benchmark-base-all"
 
     try:
         client.images.get(setup_image)
@@ -96,9 +110,9 @@ def bootstrap_setup_phase(instance_row: InstanceRow) -> Optional[str]:
             f"git fetch --depth 2 origin {instance_row.golden_commit_hash}",
             f"git checkout {instance_row.golden_commit_hash}",
         ]:
-            container.exec_run(["bash", "-c", f"timeout 5m {cmd}"])
+            podman_exec_logged(container, ["bash", "-c", f"timeout 5m {cmd}"], instance_logger)
 
-        prompt = SETUP_PROMPT_LANG[instance_row.language]
+        prompt = BOOTSTRAP_PROMPT
         instance_logger.info("Claude Agent is taking control...")
         
         # Wrapped claude command in 60 minute timeout
@@ -107,23 +121,24 @@ def bootstrap_setup_phase(instance_row: InstanceRow) -> Optional[str]:
             f"timeout 60m claude -p {shlex.quote(prompt)} --dangerously-skip-permissions "
             "--verbose --output-format stream-json"
         ]
-        out, exit_code = stream_exec(container, agent_cmd, env={"ANTHROPIC_API_KEY": API_KEY or ""}, stream_logger=instance_logger)
+        exit_code, output = stream_exec(container, agent_cmd, env={"ANTHROPIC_API_KEY": API_KEY or ""}, stream_logger=instance_logger)
         if exit_code == 124:
             bootstrap_logger.error(f"[{instance_row.id}]: ⏳ Agent timed out (60m limit reached).")
             raise TimeoutError(f"Agent exceeded 60m time limit for {instance_row.id}")
 
-        container.exec_run(["bash", "-c", "timeout 5m git reset --hard HEAD && git clean -xdff"])
-        container.exec_run(["bash", "-c", f"timeout 5m git checkout {instance_row.golden_commit_hash}"])
+        podman_exec_logged(container, ["bash", "-c", "timeout 5m git reset --hard HEAD && git clean -xdff"], instance_logger)
+        podman_exec_logged(container, ["bash", "-c", f"timeout 5m git checkout {instance_row.golden_commit_hash}"], instance_logger)
         bootstrap_logger.info(f"[{instance_row.id}]: Capturing Golden (Post-Refactoring) Test Metrics...")
         golden_metrics = run_test_metrics(container)
         is_setup_golden_success = golden_metrics.total >= 10 and golden_metrics.passed >= golden_metrics.total * 0.3 and golden_metrics.failed != -1
         bootstrap_logger.info(f"[{instance_row.id}]: Golden Metrics (Post-Refactoring): {golden_metrics.model_dump()}")
-        container.exec_run(["bash", "-c", "timeout 5m git reset --hard HEAD && git clean -xdff"])
-        container.exec_run(["bash", "-c", f"timeout 5m git checkout {instance_row.commit_hash}"])
+        podman_exec_logged(container, ["bash", "-c", "timeout 5m git reset --hard HEAD && git clean -xdff"], instance_logger)
+        podman_exec_logged(container, ["bash", "-c", f"timeout 5m git checkout {instance_row.commit_hash}"], instance_logger)
         base_metrics: Metrics = run_test_metrics(container)
         is_setup_base_success = base_metrics.total >= 10 and base_metrics.passed >= base_metrics.total * 0.3 and base_metrics.failed != -1
 
         # Save metadata
+        setup_quality = classify_setup_quality(base_metrics, golden_metrics)
         meta = InstanceMetadata(
             owner=instance_row.owner,
             repo=instance_row.repo,
@@ -133,33 +148,36 @@ def bootstrap_setup_phase(instance_row: InstanceRow) -> Optional[str]:
             golden_commit_hash=instance_row.golden_commit_hash,
             is_success_base=is_setup_base_success,
             is_success_golden=is_setup_golden_success,
+            setup_quality=setup_quality,
         )
+        bootstrap_logger.info(f"[{instance_row.id}]: Setup quality: {setup_quality}")
         meta_dict = meta.model_dump()
         with open(os.path.join(instance_dir, "metadata.json"), "w") as f:
             json.dump(meta_dict, f, indent=2)
 
         # save image if successful, else raise error and resort to base image
-        if is_setup_base_success or is_setup_golden_success:
+        is_atleast_one_success = is_setup_base_success or is_setup_golden_success
+        try:
+            save_directory = instance_dir + ("/failed_scripts" if not is_atleast_one_success else "")
+            extract_folder_from_container(container, "/scripts", save_directory)
+            bootstrap_logger.info(f"[{instance_row.id}]: ✅ Saved scripts to {save_directory}/scripts")
+        except Exception as e:
+            bootstrap_logger.warning(f"[{instance_row.id}]: ⚠️ Failed to save scripts: {e}")
+
+        if is_atleast_one_success:
             bootstrap_logger.info(f"[{instance_row.id}]: ✅ Agent setup successful (base={is_setup_base_success}, golden={is_setup_golden_success}). Committing setup image.")
             container.commit(repository=setup_image, tag=None)
             bootstrap_logger.info(f"✅ Saved {setup_image}")
-        else:
-            bootstrap_logger.error(f"[{instance_row.id}]: ❌ Agent setup failed for both base and golden commits.")
-            container.stop(timeout=1)
-            container.remove(force=True)
-            raise RuntimeError("Agent setup failed for both base and golden commits.")
+            return setup_image
 
-        scripts_dir = os.path.join(instance_dir, "scripts")
-        os.makedirs(scripts_dir, exist_ok=True)
-        try:
-            extract_folder_from_container(container, "/scripts", instance_dir)
-            bootstrap_logger.info(f"[{instance_row.id}]: ✅ Saved scripts to {scripts_dir}")
-        except Exception as e:
-            bootstrap_logger.warning(f"[{instance_row.id}]: ⚠️  Failed to save scripts: {e}")
-        return setup_image
+        # Cleanup and raise error for fallback
+        bootstrap_logger.error(f"[{instance_row.id}]: ❌ Agent setup failed for both base and golden commits.")
+        stop_and_remove_container(container)
+        raise RuntimeError("Agent setup failed for both base and golden commits.")
+
 
     except Exception as e:
-        bootstrap_logger.exception(f"💥 Setup Phase Failed: {instance_row.repo}. Resorting to base image. \n{e}")
+        bootstrap_logger.exception(f"💥 Setup Phase Failed: {instance_row.repo}. Resorting to base image and cloning repository. \n{e}")
         try:
             container: PodmanContainer = client.containers.run(
                 base_img,
@@ -173,8 +191,7 @@ def bootstrap_setup_phase(instance_row: InstanceRow) -> Optional[str]:
                 f"git fetch --depth 2 origin {instance_row.commit_hash}",
                 f"git checkout {instance_row.commit_hash}",
             ]:
-                container.exec_run(["bash", "-c", f"timeout 5m {cmd}"])
-            bootstrap_logger.info(f"[{instance_row.id}]: Tagged {base_img} as {setup_image} (fallback)")
+                podman_exec_logged(container, ["bash", "-c", f"timeout 5m {cmd}"], instance_logger)
             container.commit(repository=setup_image, tag=None)
             return setup_image
         except Exception as tag_err:
@@ -182,14 +199,7 @@ def bootstrap_setup_phase(instance_row: InstanceRow) -> Optional[str]:
             return None
     finally:
         bootstrap_logger.info("Cleaning up setup container...")
-        try:
-            container.stop(timeout=1)
-            container.remove(force=True)
-        except Exception as net_err:
-            if "permission denied" in str(net_err):
-                bootstrap_logger.info("Container removed (swallowed Podman netns warning).")
-            else:
-                bootstrap_logger.warning(f"Cleanup warning: {net_err}")
+        stop_and_remove_container(container)
 
 
 def bootstrap_runtime_phase(row: InstanceRow, setup_image: str) -> Optional[str]:
@@ -228,13 +238,13 @@ def bootstrap_runtime_phase(row: InstanceRow, setup_image: str) -> Optional[str]
         # 3. Inject Task Descriptions
         task_desc_dir = os.path.join(PROJECT_ROOT, row.asset_dir("descriptions"))
         if os.path.exists(task_desc_dir):
-            container.exec_run(["bash", "-c", "timeout 5m sudo mkdir -p /task_description"])
+            podman_exec_logged(container, ["bash", "-c", "timeout 5m sudo mkdir -p /task_description"], instance_logger)
             for filename in os.listdir(task_desc_dir):
                 file_path = os.path.join(task_desc_dir, filename)
                 with open(file_path, "rb") as f:
                     copy_to_container(container, f.read(), f"/task_description/{filename}")
-            container.exec_run(["bash", "-c", "timeout 5m sudo chown -R benchmarker:benchmarker /task_description"])
-            container.exec_run(["bash", "-c", "timeout 5m sudo chmod -R 755 /task_description"])
+            podman_exec_logged(container, ["bash", "-c", "timeout 5m sudo chown -R benchmarker:benchmarker /task_description"], instance_logger)
+            podman_exec_logged(container, ["bash", "-c", "timeout 5m sudo chmod -R 755 /task_description"], instance_logger)
         bootstrap_logger.info(f"[{row.id}]: 🚚 Injected runtime components: /rules, /task_description")
 
         # 4. Lobotomize git
@@ -247,17 +257,19 @@ def bootstrap_runtime_phase(row: InstanceRow, setup_image: str) -> Optional[str]
             "git gc --prune=now --aggressive > /dev/null 2>&1 || true"
         ]
         for cmd in git_cmds:
-            res = container.exec_run(
-                ["bash", "-c", f"timeout 5m {cmd}"],
-            )
-            if res.exit_code == 124:
+            # exec_run returns (exit_code, output_bytes) tuple
+            exit_code, (stdout_bytes, stderr_bytes) = podman_exec_logged(container, ["bash", "-c", f"timeout 5m {cmd}"], instance_logger)
+            if exit_code == 124:
                 raise TimeoutError(f"Git command timed out: {cmd}")
-            instance_logger.info(f"[{row.id}]: Git Command: {cmd}\nOutput: {res.output.decode() if res.output else 'No Output'}")
+            instance_logger.info(f"[{row.id}]: Git Command: {cmd}\nOutput: {stdout_bytes.decode() if stdout_bytes else 'No Output'}\nErrors: {stderr_bytes.decode() if stderr_bytes else 'No Errors'}")
         instance_logger.info(f"[{row.id}]: 🧠 Lobotomized git repository.")
-        res = container.exec_run(
+        # exec_run returns (exit_code, output_bytes) tuple
+        exit_code, (stdout_bytes, stderr_bytes) = container.exec_run(
             ["bash", "-c", "timeout 5m bash -c 'source /scripts/setup_shell.sh || true'"],
+            demux=True
         )
-        instance_logger.info(f"[{row.id}]: Setup shell output: {res.output.decode() if res.output else 'No Output'}")
+        podman_exec_logged(container, ["bash", "-c", "timeout 5m sudo /scripts/setup_system.sh || true"], instance_logger)
+        podman_exec_logged(container, ["bash", "-c", "timeout 5m bash -c 'source /scripts/setup_shell.sh || true'"], instance_logger)
 
         # 5. Commit
         container.commit(
@@ -272,14 +284,7 @@ def bootstrap_runtime_phase(row: InstanceRow, setup_image: str) -> Optional[str]
         bootstrap_logger.exception(f"[{row.id}]: 💥 Runtime Phase Failed: {row.repo}\n{e}")
         return None
     finally:
-        try:
-            container.stop(timeout=1)
-            container.remove(force=True)
-        except Exception as net_err:
-            if "permission denied" in str(net_err):
-                bootstrap_logger.info("-> Container removed (swallowed Podman netns warning).")
-            else:
-                bootstrap_logger.warning(f"-> Cleanup warning: {net_err}")
+        stop_and_remove_container(container)
 
 
 def bootstrap_instance(row: InstanceRow, use_base_image_as_setup: bool = False) -> None:
@@ -294,7 +299,7 @@ def bootstrap_instance(row: InstanceRow, use_base_image_as_setup: bool = False) 
     except:
         pass
     if use_base_image_as_setup:
-        base_img = f"benchmark-base-{row.language}"
+        base_img = f"benchmark-base-all"
         try:
             base_image = client.images.get(base_img)
             base_image.tag(repository=row.setup_image, tag=None)
@@ -352,7 +357,7 @@ def main():
         return
 
     # Trigger the async parallel loop
-    asyncio.run(bootstrap_parallel(instances, MAX_CONCURRENT_INSTANCES))
+    asyncio.run(bootstrap_parallel(instances[2:9], MAX_CONCURRENT_INSTANCES))
 
 
 if __name__ == "__main__":

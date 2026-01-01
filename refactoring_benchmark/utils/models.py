@@ -71,3 +71,4 @@ class InstanceMetadata(BaseModel):
     golden_commit_hash: str
     is_success_base: bool # Indicating if tests appear to be running correctly on base
     is_success_golden: bool
+    setup_quality: str = "both_valid"  # "both_valid", "only_base_valid", "only_golden_valid", "neither_valid"
