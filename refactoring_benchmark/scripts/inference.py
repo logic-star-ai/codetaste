@@ -77,7 +77,7 @@ def execute_instance(instance_row: InstanceRow, force: bool = False) -> bool:
         instance_logger.info("Running container in inference mode...")
         container = client.containers.run(
             instance_row.runtime_image,
-            command="inference",
+            command=["inference"],
             detach=True,
             environment={"ANTHROPIC_API_KEY": API_KEY},
             volumes={

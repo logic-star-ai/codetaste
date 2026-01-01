@@ -20,7 +20,7 @@ class TestCopyToContainer:
         container = docker_client.containers.run(
             "benchmark-base-python",
             detach=True,
-            command="sleep 60"
+            command=["sleep", "60"]
         )
 
         try:
@@ -29,9 +29,12 @@ class TestCopyToContainer:
             copy_to_container(container, test_content, "/tmp/test_file.txt")
 
             # Verify file exists and has correct content
-            result = container.exec_run("cat /tmp/test_file.txt")
-            assert result.exit_code == 0
-            assert result.output == test_content
+            # exec_run returns (exit_code, output_bytes) tuple
+            # Use tty=True to avoid stream multiplexing framing
+            exit_code, output_bytes = container.exec_run("cat /tmp/test_file.txt", tty=True)
+            assert exit_code == 0
+            # TTY mode converts \n to \r\n, normalize for comparison
+            assert output_bytes.replace(b'\r\n', b'\n') == test_content
 
         finally:
             try:
@@ -49,7 +52,7 @@ class TestCopyToContainer:
         container = docker_client.containers.run(
             "benchmark-base-python",
             detach=True,
-            command="sleep 60"
+            command=["sleep", "60"]
         )
 
         try:
@@ -58,13 +61,15 @@ class TestCopyToContainer:
             copy_to_container(container, script_content, "/tmp/test_script.sh")
 
             # Verify it's executable
-            result = container.exec_run("test -x /tmp/test_script.sh")
-            assert result.exit_code == 0, "Script should be executable"
+            # exec_run returns (exit_code, output_bytes) tuple
+            exit_code, output_bytes = container.exec_run("test -x /tmp/test_script.sh")
+            assert exit_code == 0, "Script should be executable"
 
             # Verify it can be executed
-            result = container.exec_run("/tmp/test_script.sh")
-            assert result.exit_code == 0
-            assert b"Hello" in result.output
+            # exec_run returns (exit_code, output_bytes) tuple
+            exit_code, output_bytes = container.exec_run("/tmp/test_script.sh")
+            assert exit_code == 0
+            assert b"Hello" in output_bytes
 
         finally:
             try:
@@ -82,7 +87,7 @@ class TestCopyToContainer:
         container = docker_client.containers.run(
             "benchmark-base-python",
             detach=True,
-            command="sleep 60"
+            command=["sleep", "60"]
         )
 
         try:
@@ -94,9 +99,12 @@ class TestCopyToContainer:
             copy_to_container(container, test_content, "/tmp/nested/deep/path/file.txt")
 
             # Verify
-            result = container.exec_run("cat /tmp/nested/deep/path/file.txt")
-            assert result.exit_code == 0
-            assert result.output == test_content
+            # exec_run returns (exit_code, output_bytes) tuple
+            # Use tty=True to avoid stream multiplexing framing
+            exit_code, output_bytes = container.exec_run("cat /tmp/nested/deep/path/file.txt", tty=True)
+            assert exit_code == 0
+            # TTY mode converts \n to \r\n, normalize for comparison
+            assert output_bytes.replace(b'\r\n', b'\n') == test_content
 
         finally:
             try:
@@ -118,7 +126,7 @@ class TestExtractFolderFromContainer:
         container = docker_client.containers.run(
             "benchmark-base-python",
             detach=True,
-            command="sleep 60"
+            command=["sleep", "60"]
         )
 
         try:
@@ -158,7 +166,7 @@ class TestExtractFolderFromContainer:
         container = docker_client.containers.run(
             "benchmark-base-python",
             detach=True,
-            command="sleep 60"
+            command=["sleep", "60"]
         )
 
         try:
@@ -199,12 +207,12 @@ class TestStreamExec:
         container = docker_client.containers.run(
             "benchmark-base-python",
             detach=True,
-            command="sleep 60"
+            command=["sleep", "60"]
         )
 
         try:
             # Execute simple command
-            output, _ = stream_exec(container, ["echo", "Hello World"], env={})
+            _, output = stream_exec(container, ["echo", "Hello World"], env={})
 
             assert "Hello World" in output
 
@@ -225,12 +233,12 @@ class TestStreamExec:
         container = docker_client.containers.run(
             "benchmark-base-python",
             detach=True,
-            command="sleep 60"
+            command=["sleep", "60"]
         )
 
         try:
             # Execute command that uses environment variable
-            output, _ = stream_exec(
+            _, output = stream_exec(
                 container,
                 ["bash", "-c", "echo $TEST_VAR"],
                 env={"TEST_VAR": "test_value"}
@@ -255,12 +263,12 @@ class TestStreamExec:
         container = docker_client.containers.run(
             "benchmark-base-python",
             detach=True,
-            command="sleep 60"
+            command=["sleep", "60"]
         )
 
         try:
             # Execute command with multiple lines of output
-            output, _ = stream_exec(
+            _, output = stream_exec(
                 container,
                 ["bash", "-c", "echo 'line1'; echo 'line2'; echo 'line3'"],
                 env={}

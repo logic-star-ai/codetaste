@@ -32,7 +32,7 @@ class TestGitCommitVerification:
             pytest.skip(f"Setup image not found: {setup_image}. Run bootstrap first.")
 
         container = docker_client.containers.run(
-            setup_image, detach=True, command="sleep 10"
+            setup_image, detach=True, command=["sleep", "10"]
         )
 
         try:
@@ -110,12 +110,12 @@ class TestGitCommitVerification:
 class TestMetricsCapture:
     """Tests for metrics capture and validation."""
 
-    def test_run_test_metrics_success(self, docker_client: docker.DockerClient):
+    def test_run_test_metrics_success(self, docker_client: podman.PodmanClient):
         """Test successful metrics capture from container."""
         container = docker_client.containers.run(
             "benchmark-base-python",
             detach=True,
-            command="sleep 60"
+            command=["sleep", "60"]
         )
 
         try:
@@ -148,12 +148,12 @@ echo '{test_output}'
             except:
                 pass
 
-    def test_run_test_metrics_failure(self, docker_client: docker.DockerClient):
+    def test_run_test_metrics_failure(self, docker_client: podman.PodmanClient):
         """Test metrics capture when test script fails."""
         container = docker_client.containers.run(
             "benchmark-base-python",
             detach=True,
-            command="sleep 60"
+            command=["sleep", "60"]
         )
 
         try:

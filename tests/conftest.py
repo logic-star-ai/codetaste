@@ -30,16 +30,15 @@ def temp_dir() -> Generator[Path, None, None]:
     with tempfile.TemporaryDirectory() as tmpdir:
         yield Path(tmpdir)
 
-
 @pytest.fixture
 def sample_instance_row() -> InstanceRow:
     """Provide a sample InstanceRow for testing."""
     return InstanceRow(
-        owner="autokey",
-        repo="autokey",
-        commit_hash="9309c4fe9c7410546eb83c4ba912075f6dc3b092",
-        golden_commit_hash="85b948e7cd0f10f0e2918aad99014d8b848fbe6f",
-        category="structural",
+        owner="huggingface",
+        repo="transformers",
+        commit_hash="5e1fd4e204d81f2f66f8c164433e62ea5f4d0467",
+        golden_commit_hash="893ad04fad145904ccb71e4e858e4134c32226b6",
+        category="abstraction",
         language="python"
     )
 
@@ -91,13 +90,15 @@ def get_git_commit_hash(container, cwd: str = "/testbed") -> str:
     Returns:
         Current commit hash (full 40 characters)
     """
-    result = container.exec_run(
+    # exec_run returns (exit_code, output_bytes) tuple
+    exit_code, (stdout_bytes, stderr_bytes) = container.exec_run(
         "git rev-parse HEAD",
-        workdir=cwd
+        workdir=cwd,
+        demux=True
     )
-    if result.exit_code != 0:
-        raise RuntimeError(f"Failed to get git commit: {result.output.decode()}")
-    return result.output.decode().strip()
+    if exit_code != 0:
+        raise RuntimeError(f"Failed to get git commit: {stderr_bytes.decode() if stderr_bytes else 'No error message'}")
+    return stdout_bytes.decode().strip()
 
 
 def verify_git_state(container, expected_hash: str, cwd: str = "/testbed") -> bool:
@@ -128,8 +129,9 @@ def container_file_exists(container, path: str) -> bool:
     Returns:
         True if file exists, False otherwise
     """
-    result = container.exec_run(f"test -f {path}")
-    return result.exit_code == 0
+    # exec_run returns (exit_code, output_bytes) tuple
+    exit_code, output_bytes = container.exec_run(f"test -f {path}")
+    return exit_code == 0
 
 
 def container_dir_exists(container, path: str) -> bool:
@@ -143,8 +145,9 @@ def container_dir_exists(container, path: str) -> bool:
     Returns:
         True if directory exists, False otherwise
     """
-    result = container.exec_run(f"test -d {path}")
-    return result.exit_code == 0
+    # exec_run returns (exit_code, output_bytes) tuple
+    exit_code, output_bytes = container.exec_run(f"test -d {path}")
+    return exit_code == 0
 
 
 def get_file_permissions(container, path: str) -> str:
@@ -158,10 +161,11 @@ def get_file_permissions(container, path: str) -> str:
     Returns:
         Permission string (e.g., "755", "700")
     """
-    result = container.exec_run(f"stat -c '%a' {path}")
-    if result.exit_code != 0:
-        raise RuntimeError(f"Failed to get permissions: {result.output.decode()}")
-    return result.output.decode().strip()
+    # exec_run returns (exit_code, output_bytes) tuple
+    exit_code, output_bytes = container.exec_run(f"stat -c '%a' {path}")
+    if exit_code != 0:
+        raise RuntimeError(f"Failed to get permissions: {output_bytes.decode()}")
+    return output_bytes.decode().strip()
 
 
 def get_file_owner(container, path: str) -> tuple[str, str]:
@@ -175,9 +179,10 @@ def get_file_owner(container, path: str) -> tuple[str, str]:
     Returns:
         Tuple of (owner, group)
     """
-    result = container.exec_run(f"stat -c '%U:%G' {path}")
-    if result.exit_code != 0:
-        raise RuntimeError(f"Failed to get owner: {result.output.decode()}")
-    owner_group = result.output.decode().strip()
+    # exec_run returns (exit_code, output_bytes) tuple
+    exit_code, output_bytes = container.exec_run(f"stat -c '%U:%G' {path}")
+    if exit_code != 0:
+        raise RuntimeError(f"Failed to get owner: {output_bytes.decode()}")
+    owner_group = output_bytes.decode().strip()
     owner, group = owner_group.split(":")
     return owner, group
