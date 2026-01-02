@@ -25,6 +25,8 @@ from refactoring_benchmark.utils.container_utils import (
     extract_folder_from_container,
     register_container,
     cleanup_all_containers,
+    get_local_client,
+    safe_container_run,
 )
 
 # --- CONFIGURATION ---
@@ -41,25 +43,6 @@ BASE_IMAGE = "benchmark/benchmark-base-all"
 setup_logging(LOG_DIR)
 bootstrap_logger = get_logger("bootstrap")
 
-def get_local_client():
-    """Each process needs its own Podman client connection."""
-    try:
-        c = podman.from_env(timeout=4000)
-        c.ping()
-        return c
-    except Exception as e:
-        bootstrap_logger.error(f"Podman Connection Failed in worker: {e}")
-        return None
-
-def safe_container_run(client: podman.PodmanClient, image, **kwargs) -> PodmanContainer:
-    """Retries container creation to handle 'POST operation failed' socket errors."""
-    for i in range(3):
-        try:
-            return client.containers.run(image, **kwargs)
-        except Exception as e:
-            if i == 2: raise
-            bootstrap_logger.warning(f"Podman create failed ({e}), retrying in {2**i}s...")
-            time.sleep(2**i)
 
 def run_test_metrics(container: PodmanContainer, logger: logging.Logger) -> Metrics:
     """Capture test metrics from the container."""

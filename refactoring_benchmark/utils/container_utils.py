@@ -8,6 +8,7 @@ from io import BytesIO
 import time
 from typing import Any, List, Optional, cast
 from refactoring_benchmark.utils.logger import get_logger, setup_logging
+import podman
 from podman.domain.containers import Container as PodmanContainer
 from podman.errors import APIError
 
@@ -15,6 +16,29 @@ utils_logger = get_logger("container_utils")
 
 _active_containers: set[PodmanContainer] = set()
 _containers_lock = threading.Lock()
+
+
+def get_local_client():
+    """Each process needs its own Podman client connection."""
+    try:
+        c = podman.from_env(timeout=4000)
+        c.ping()
+        return c
+    except Exception as e:
+        utils_logger.error(f"Podman Connection Failed in worker: {e}")
+        return None
+
+
+def safe_container_run(client: podman.PodmanClient, image, **kwargs) -> PodmanContainer:
+    """Retries container creation to handle 'POST operation failed' socket errors."""
+    for i in range(3):
+        try:
+            return client.containers.run(image, **kwargs)
+        except Exception as e:
+            if i == 2:
+                raise
+            utils_logger.warning(f"Podman create failed ({e}), retrying in {2**i}s...")
+            time.sleep(2**i)
 
 
 def register_container(container: PodmanContainer) -> None:
