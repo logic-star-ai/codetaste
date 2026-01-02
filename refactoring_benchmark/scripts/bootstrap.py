@@ -16,6 +16,7 @@ import podman
 from podman.domain.containers import Container as PodmanContainer
 
 from refactoring_benchmark.utils.common import clean_dir
+from refactoring_benchmark.utils.podman_shell import podman_commit_container, podman_container_storage
 from refactoring_benchmark.utils.prompts import BOOTSTRAP_PROMPT
 from refactoring_benchmark.utils.models import InstanceRow, Metrics, InstanceMetadata
 from refactoring_benchmark.utils.logger import setup_logging, get_logger
@@ -30,6 +31,10 @@ from refactoring_benchmark.utils.container_utils import (
     get_local_client,
     safe_container_run,
 )
+
+class BootstrapError(Exception):
+    """Custom exception for bootstrap errors."""
+    pass
 
 # --- CONFIGURATION ---
 CSV_FILE = "instances.csv"
@@ -114,7 +119,10 @@ def bootstrap_setup_phase(
     try:
         if use_base_image:
             instance_logger.info("Using base image fallback for setup phase.")
-            container.commit(repository=setup_image, tag=None)
+            container_size = podman_container_storage(container.id)["writable_bytes"]
+            if container_size > 4 * 1024**9:
+                raise BootstrapError("Container additional size exceeded 4GB limit. This is too large.")
+            podman_commit_container(container.id, setup_image, squash=True)
             return setup_image
 
         instance_logger.info("Claude Agent is taking control...")
@@ -132,6 +140,10 @@ def bootstrap_setup_phase(
             stream_logger=instance_logger,
             is_json_output=True,
         )
+
+        container_size = podman_container_storage(container.id)["writable_bytes"]
+        if container_size > 4 * 1024**9:
+            raise BootstrapError("Container additional size exceeded 4GB limit. This is too large.")
 
         if time.time() - ts_start >= 4200:
             raise TimeoutError(f"Agent exceeded 70m time limit for {instance_row.id}")
@@ -202,7 +214,10 @@ def bootstrap_setup_phase(
             )
 
         if meta.is_success_base or meta.is_success_golden:
-            container.commit(repository=setup_image, tag=None)
+            container_size = podman_container_storage(container.id)["writable_bytes"]
+            if container_size > 4 * 1024**9:
+                raise BootstrapError("Container additional size exceeded 4GB limit. This is too large.")
+            podman_commit_container(container.id, setup_image, squash=True)
             bootstrap_logger.info(
                 f"[{instance_row.id}]: ✅ Saved setup image: {setup_image}"
             )
@@ -317,11 +332,14 @@ def bootstrap_runtime_phase(
         )
 
         # Commit
-        container.commit(
-            repository=runtime_image,
-            tag=None,
+        container_size = podman_container_storage(container.id)["writable_bytes"]
+        if container_size > 4 * 1024**9:
+            raise BootstrapError("Container additional size exceeded 4GB limit. This is too large.")
+        podman_commit_container(
+            container.id, 
+            runtime_image,
             changes=['ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]'],
-        )
+            squash=True)
         bootstrap_logger.info(f"[{row.id}]: ✅ Saved runtime image: {runtime_image}")
         return runtime_image
 
@@ -344,7 +362,7 @@ def bootstrap_instance_retry(instance: InstanceRow):
             )
             client = get_local_client(20 * 60)
             bootstrap_runtime_phase(client, instance, setup_img)
-        except (RuntimeError, TimeoutError) as e:
+        except (RuntimeError, TimeoutError, BootstrapError) as e:
             # Attempt 2
             bootstrap_logger.error(
                 f"[{instance.id}]: Attempt 1 failed ({e}). Retrying with base image..."
