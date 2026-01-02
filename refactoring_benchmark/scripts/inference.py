@@ -95,8 +95,7 @@ def execute_instance(instance_row: InstanceRow, force: bool = False) -> bool:
             instance_logger.warning(f"Error streaming logs: {log_error}")
 
         # Wait for container to finish and get exit code
-        result = container.wait()
-        exit_code = result.get('StatusCode', -1)
+        exit_code = container.wait()
 
         # Remove container
         try:
@@ -184,7 +183,7 @@ def main():
 
     inference_logger.info(f"Loaded {len(instances)} instances")
 
-    instances_to_run = instances
+    instances_to_run = instances[:5]
     inference_logger.info(f"Running inference on {len(instances_to_run)} instances (max {MAX_CONCURRENT_INSTANCES} concurrent)")
 
     # Run instances in parallel

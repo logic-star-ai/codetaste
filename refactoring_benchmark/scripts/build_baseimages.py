@@ -115,7 +115,7 @@ def run_test(container: PodmanContainer, test_name: str, command: str) -> bool:
     logger.info(f"  Testing {test_name}...")
     # exec_run returns (exit_code, output_bytes) tuple
     exit_code, (stdout_bytes, stderr_bytes) = container.exec_run(["bash", "-c", command], demux=True)
-
+    stdout_bytes, stderr_bytes = stdout_bytes or b"", stderr_bytes or b""
     if exit_code != 0:
         logger.error(f"  {test_name} FAILED (exit code {exit_code})")
         logger.error(f"  Output: {stdout_bytes.decode('utf-8', errors='replace')}\nErrors: {stderr_bytes.decode('utf-8', errors='replace')}")
@@ -184,6 +184,9 @@ def verify_image(image_tag: str) -> Tuple[bool, List[str]]:
                 "uv-python-3.9": "uv python list | grep '3.9'",
                 "uv-python-3.10": "uv python list | grep '3.10'",
                 "uv-python-3.11": "uv python list | grep '3.11'",
+                # Go toolchain
+                "go": "go version",
+                "go-path": "go env GOPATH | grep '/home/benchmarker/go'",
                 # Node toolchain
                 "node": "node --version",
                 "npm": "npm --version",

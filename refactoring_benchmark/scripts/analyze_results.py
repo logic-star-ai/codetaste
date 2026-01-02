@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 import pandas as pd
+from scipy.stats import pearsonr
 
 from refactoring_benchmark.evaluation.metrics import (
     InstanceEvaluation,
@@ -115,7 +116,7 @@ def load_instance_evaluation(row: InstanceRow) -> InstanceEvaluation:
     with open(metadata_path) as f:
         metadata = json.load(f)
 
-    base_tests = TestMetrics(**metadata["start_metrics"])
+    base_tests = TestMetrics(**metadata["base_metrics"])
     golden_tests = TestMetrics(**metadata["golden_metrics"])
 
     # Load agent outputs
@@ -400,7 +401,6 @@ def print_summary(df: pd.DataFrame):
             # Correlation
             if len(df_with_ifr) > 5:
                 try:
-                    from scipy.stats import pearsonr
                     ifr_values = df_with_ifr['ifr'].values
                     success_values = df_with_ifr['overall_success'].astype(float).values
                     corr, p_val = pearsonr(ifr_values, success_values)

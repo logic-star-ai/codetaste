@@ -44,8 +44,8 @@ class InstanceRow(BaseModel):
         return f"{self.owner}/{self.repo}/{self.short_hash}"
 
     def instance_dir(self, base_path: str = "instance_images") -> str:
-        """Instance directory: {base_path}/{repo}/{owner}/{short_hash}"""
-        return os.path.join(base_path, self.repo, self.owner, self.short_hash)
+        """Instance directory: {base_path}/{owner}/{repo}/{short_hash}"""
+        return os.path.join(base_path, self.owner, self.repo, self.short_hash)
 
     def asset_dir(self, asset_type: str, base_path: str = "assets") -> str:
         """Asset directory: {base_path}/{asset_type}/{owner}/{repo}/{short_hash}"""
@@ -60,15 +60,41 @@ class Metrics(BaseModel):
     total: int = 0
     error: Optional[str] = None
 
+    @property
+    def is_valid(self) -> bool:
+        """At least 10 tests, at least 30% passed."""
+        return self.error is None and self.total >= 10 and (self.passed / self.total) >= 0.3
+
 
 class InstanceMetadata(BaseModel):
     """Complete metadata for a benchmark instance."""
     owner: str
     repo: str
     golden_metrics: Metrics
-    start_metrics: Metrics
+    base_metrics: Metrics
     base_hash: str
     golden_commit_hash: str
-    is_success_base: bool # Indicating if tests appear to be running correctly on base
-    is_success_golden: bool
-    setup_quality: str = "both_valid"  # "both_valid", "only_base_valid", "only_golden_valid", "neither_valid"
+
+    @property
+    def is_success_base(self) -> bool:
+        """Indicating if tests appear to be running correctly on base."""
+        return self.base_metrics.is_valid
+    
+    @property
+    def is_success_golden(self) -> bool:
+        """Indicating if tests appear to be running correctly on golden."""
+        return self.golden_metrics.is_valid
+    
+    @property
+    def setup_quality(self) -> Literal["both_valid", "only_base_valid", "only_golden_valid", "neither_valid"]:
+        """Classify setup quality based on test metrics validity."""
+        base_valid = self.is_success_base
+        golden_valid = self.is_success_golden
+        if base_valid and golden_valid:
+            return "both_valid"
+        elif base_valid and not golden_valid:
+            return "only_base_valid"
+        elif not base_valid and golden_valid:
+            return "only_golden_valid"
+        else:
+            return "neither_valid"

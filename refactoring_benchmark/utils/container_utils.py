@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import tarfile
+import threading
 from io import BytesIO
 import time
 from typing import Any, List, Optional, cast
@@ -11,6 +12,41 @@ from podman.domain.containers import Container as PodmanContainer
 from podman.errors import APIError
 
 utils_logger = get_logger("container_utils")
+
+_active_containers: set[PodmanContainer] = set()
+_containers_lock = threading.Lock()
+
+
+def register_container(container: PodmanContainer) -> None:
+    """Register a container for tracking and automatic cleanup."""
+    with _containers_lock:
+        _active_containers.add(container)
+        utils_logger.debug(f"Registered container {container.id[:12]} (total active: {len(_active_containers)}). A process only sees his containers, not parents or siblings.")
+
+
+def unregister_container(container: PodmanContainer) -> None:
+    """Remove a container from tracking after cleanup."""
+    with _containers_lock:
+        _active_containers.discard(container)
+        utils_logger.debug(f"Unregistered container {container.id[:12]} (total active: {len(_active_containers)}). A process only sees his containers, not parents or siblings.")
+
+
+def cleanup_all_containers() -> None:
+    """Clean up all tracked containers. Called on exit or interrupt."""
+    with _containers_lock:
+        if not _active_containers:
+            return
+
+        utils_logger.info(f"Cleaning up {len(_active_containers)} active container(s)...")
+        containers_to_cleanup = list(_active_containers)
+        _active_containers.clear()
+
+    for container in containers_to_cleanup:
+        try:
+            stop_and_remove_container(container)
+            utils_logger.info(f"✅ Cleaned up container {container.id[:12]}")
+        except Exception as e:
+            utils_logger.warning(f"⚠️ Failed to cleanup container {container.id[:12]}: {e}")
 
 def stream_exec(
     container: PodmanContainer,
@@ -101,12 +137,14 @@ def extract_folder_from_container(
         tar.extractall(path=local_dest)
 
 
-def stop_and_remove_container(container: PodmanContainer, force: bool = True) -> None:
+def stop_and_remove_container(container: PodmanContainer, force: bool = True, auto_unregister: bool = True) -> None:
     """
     Stop and remove a Docker container.
 
     Args:
         container: Docker container instance
+        force: Force removal of the container
+        auto_unregister: Automatically unregister from tracking set (default: True)
     """
     try:
         container.stop(timeout=2)
@@ -116,6 +154,9 @@ def stop_and_remove_container(container: PodmanContainer, force: bool = True) ->
         if container.status != "exited":
             utils_logger.warning(f"[{container.id}]: Failed to stop container, trying to remove ...: {e}")
     container.remove(force=force)
+
+    if auto_unregister:
+        unregister_container(container)
 
 import logging
 

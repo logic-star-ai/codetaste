@@ -123,7 +123,7 @@ class TestInstanceMetadata:
             owner="testowner",
             repo="testrepo",
             golden_metrics=golden_metrics,
-            start_metrics=base_metrics,
+            base_metrics=base_metrics,
             base_hash="abc123",
             golden_commit_hash="def456",
             is_success_base=True,
@@ -143,7 +143,7 @@ class TestInstanceMetadata:
             owner="test",
             repo="test",
             golden_metrics=Metrics(passed=25, failed=5, skipped=0, total=30),
-            start_metrics=Metrics(passed=20, failed=10, skipped=0, total=30),
+            base_metrics=Metrics(passed=20, failed=10, skipped=0, total=30),
             base_hash="abc",
             golden_commit_hash="def",
             is_success_base=False,
@@ -152,9 +152,9 @@ class TestInstanceMetadata:
 
         # Access nested metrics
         assert metadata.golden_metrics.passed == 25
-        assert metadata.start_metrics.passed == 20
+        assert metadata.base_metrics.passed == 20
         assert isinstance(metadata.golden_metrics, Metrics)
-        assert isinstance(metadata.start_metrics, Metrics)
+        assert isinstance(metadata.base_metrics, Metrics)
 
     def test_instance_metadata_serialization(self):
         """Test InstanceMetadata can be serialized to dict."""
@@ -162,7 +162,7 @@ class TestInstanceMetadata:
             owner="testowner",
             repo="testrepo",
             golden_metrics=Metrics(passed=30, failed=0, skipped=0, total=30),
-            start_metrics=Metrics(passed=28, failed=2, skipped=0, total=30),
+            base_metrics=Metrics(passed=28, failed=2, skipped=0, total=30),
             base_hash="abc123",
             golden_commit_hash="def456",
             is_success_base=True,
@@ -175,7 +175,7 @@ class TestInstanceMetadata:
         assert data["owner"] == "testowner"
         assert data["repo"] == "testrepo"
         assert data["golden_metrics"]["passed"] == 30
-        assert data["start_metrics"]["passed"] == 28
+        assert data["base_metrics"]["passed"] == 28
         assert data["is_success_base"] is True
 
     def test_instance_metadata_deserialization(self):
@@ -184,7 +184,7 @@ class TestInstanceMetadata:
             "owner": "testowner",
             "repo": "testrepo",
             "golden_metrics": {"passed": 30, "failed": 0, "skipped": 0, "total": 30},
-            "start_metrics": {"passed": 28, "failed": 2, "skipped": 0, "total": 30},
+            "base_metrics": {"passed": 28, "failed": 2, "skipped": 0, "total": 30},
             "base_hash": "abc123",
             "golden_commit_hash": "def456",
             "is_success_base": True,
@@ -195,7 +195,7 @@ class TestInstanceMetadata:
 
         assert metadata.owner == "testowner"
         assert metadata.golden_metrics.passed == 30
-        assert metadata.start_metrics.passed == 28
+        assert metadata.base_metrics.passed == 28
 
     def test_instance_metadata_all_scenarios(self):
         """Test all four possible success scenarios."""
@@ -203,7 +203,7 @@ class TestInstanceMetadata:
         both_success = InstanceMetadata(
             owner="test", repo="test",
             golden_metrics=Metrics(passed=30, failed=0, skipped=0, total=30),
-            start_metrics=Metrics(passed=30, failed=0, skipped=0, total=30),
+            base_metrics=Metrics(passed=30, failed=0, skipped=0, total=30),
             base_hash="a", golden_commit_hash="b",
             is_success_base=True, is_success_golden=True
         )
@@ -213,7 +213,7 @@ class TestInstanceMetadata:
         base_only = InstanceMetadata(
             owner="test", repo="test",
             golden_metrics=Metrics(passed=2, failed=28, skipped=0, total=30),
-            start_metrics=Metrics(passed=30, failed=0, skipped=0, total=30),
+            base_metrics=Metrics(passed=30, failed=0, skipped=0, total=30),
             base_hash="a", golden_commit_hash="b",
             is_success_base=True, is_success_golden=False
         )
@@ -223,7 +223,7 @@ class TestInstanceMetadata:
         golden_only = InstanceMetadata(
             owner="test", repo="test",
             golden_metrics=Metrics(passed=30, failed=0, skipped=0, total=30),
-            start_metrics=Metrics(passed=2, failed=28, skipped=0, total=30),
+            base_metrics=Metrics(passed=2, failed=28, skipped=0, total=30),
             base_hash="a", golden_commit_hash="b",
             is_success_base=False, is_success_golden=True
         )
@@ -233,7 +233,7 @@ class TestInstanceMetadata:
         both_failed = InstanceMetadata(
             owner="test", repo="test",
             golden_metrics=Metrics(passed=0, failed=-1, skipped=0, total=0, error="Crashed"),
-            start_metrics=Metrics(passed=0, failed=-1, skipped=0, total=0, error="Crashed"),
+            base_metrics=Metrics(passed=0, failed=-1, skipped=0, total=0, error="Crashed"),
             base_hash="a", golden_commit_hash="b",
             is_success_base=False, is_success_golden=False
         )
