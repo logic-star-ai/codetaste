@@ -18,15 +18,11 @@ _active_containers: set[PodmanContainer] = set()
 _containers_lock = threading.Lock()
 
 
-def get_local_client():
+def get_local_client(timeout: int = 4000) -> Optional[podman.PodmanClient]:
     """Each process needs its own Podman client connection."""
-    try:
-        c = podman.from_env(timeout=4000)
-        c.ping()
-        return c
-    except Exception as e:
-        utils_logger.error(f"Podman Connection Failed in worker: {e}")
-        return None
+    c = podman.from_env(timeout=timeout)
+    c.ping()
+    return c
 
 
 def safe_container_run(client: podman.PodmanClient, image, **kwargs) -> PodmanContainer:
@@ -151,12 +147,13 @@ def extract_folder_from_container(
     Raises:
         Exception: If extraction fails
     """
+    os.makedirs(local_dest, exist_ok=True)
+    
     bits, stat = container.get_archive(container_path)
     stream = BytesIO()
     for chunk in bits:
         stream.write(chunk)
     stream.seek(0)
-    os.makedirs(local_dest, exist_ok=True)
     with tarfile.open(fileobj=stream, mode="r") as tar:
         tar.extractall(path=local_dest)
 

@@ -14,6 +14,7 @@ from typing import Optional
 import podman
 from podman.domain.containers import Container as PodmanContainer
 
+from refactoring_benchmark.utils.common import clean_dir
 from refactoring_benchmark.utils.prompts import BOOTSTRAP_PROMPT
 from refactoring_benchmark.utils.models import InstanceRow, Metrics, InstanceMetadata
 from refactoring_benchmark.utils.logger import setup_logging, get_logger
@@ -135,7 +136,8 @@ def bootstrap_setup_phase(client: podman.PodmanClient, instance_row: InstanceRow
 
         # Save scripts
         try:
-            save_directory = instance_dir + ("/failed_scripts" if not (meta.is_success_base or meta.is_success_golden) else "")
+            save_directory = instance_dir + ("/failed" if not (meta.is_success_base or meta.is_success_golden) else "")
+            clean_dir(instance_dir)
             extract_folder_from_container(container, "/scripts", save_directory)
             bootstrap_logger.info(f"[{instance_row.id}]: ✅ Saved scripts to {save_directory}/scripts")
         except Exception as e:
@@ -222,19 +224,21 @@ def bootstrap_runtime_phase(client: podman.PodmanClient, row: InstanceRow, setup
             stop_and_remove_container(container)
 
 def bootstrap_instance_retry(instance: InstanceRow):
-    client = get_local_client()
-    if not client: return f"[{instance.id}]: ❌ Connection failed"
-    
+
     try:
         is_supported = any(lang in instance.language.lower() for lang in SUPPORTED_LANGUAGES)
         try:
             # Attempt 1
+            client = get_local_client(80 * 60)
             setup_img = bootstrap_setup_phase(client, instance, use_base_image=not is_supported)
+            client = get_local_client(20 * 60)
             bootstrap_runtime_phase(client, instance, setup_img)
         except (RuntimeError, TimeoutError) as e:
             # Attempt 2
             bootstrap_logger.error(f"[{instance.id}]: Attempt 1 failed ({e}). Retrying with base image...")
+            client = get_local_client(80 * 60)
             setup_img = bootstrap_setup_phase(client, instance, use_base_image=True)
+            client = get_local_client(20 * 60)
             bootstrap_runtime_phase(client, instance, setup_img)
     except Exception as e:
         bootstrap_logger.error(f"[{instance.id}]: ❌ FAILED to bootstrap after retry: {e}")
