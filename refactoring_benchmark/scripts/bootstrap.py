@@ -36,6 +36,25 @@ class BootstrapError(Exception):
     """Custom exception for bootstrap errors."""
     pass
 
+
+def validate_container_size(container_id: str, max_size_bytes: int = 4 * (1024**3)) -> None:
+    """Validate container storage size does not exceed limit."""
+    container_size = podman_container_storage(container_id)["writable_bytes"]
+    if container_size > max_size_bytes:
+        raise BootstrapError(
+            f"Container additional size exceeded {max_size_bytes / (1024**3):.2f}GB limit. "
+            f"writable_bytes = {container_size / (1024**3):.2f}GB. This is too large."
+        )
+
+
+def validate_and_commit_container(
+    container_id: str, image_name: str, max_size_bytes: int = 4 * (1024**3), **commit_kwargs
+) -> None:
+    """Validate container size then commit if within limits."""
+    validate_container_size(container_id, max_size_bytes)
+    podman_commit_container(container_id, image_name, **commit_kwargs)
+
+
 # --- CONFIGURATION ---
 CSV_FILE = "instances.csv"
 API_KEY = os.environ.get("ANTHROPIC_API_KEY")
@@ -119,17 +138,14 @@ def bootstrap_setup_phase(
     try:
         if use_base_image:
             instance_logger.info("Using base image fallback for setup phase.")
-            container_size = podman_container_storage(container.id)["writable_bytes"]
-            if container_size > 4 * 1024**9:
-                raise BootstrapError("Container additional size exceeded 4GB limit. This is too large.")
-            podman_commit_container(container.id, setup_image, squash=True)
+            validate_and_commit_container(container.id, setup_image, squash=True)
             return setup_image
 
         instance_logger.info("Claude Agent is taking control...")
         agent_cmd = [
             "bash",
             "-c",
-            f"timeout 70m claude -p {shlex.quote(BOOTSTRAP_PROMPT)} --dangerously-skip-permissions --verbose --output-format stream-json",
+            f"timeout 70m claude -p {shlex.quote(BOOTSTRAP_PROMPT)} --dangerously-skip-permissions --verbose --output-format stream-json --max-budget-usd 5",
         ]
 
         ts_start = time.time()
@@ -140,10 +156,10 @@ def bootstrap_setup_phase(
             stream_logger=instance_logger,
             is_json_output=True,
         )
-
-        container_size = podman_container_storage(container.id)["writable_bytes"]
-        if container_size > 4 * 1024**9:
-            raise BootstrapError("Container additional size exceeded 4GB limit. This is too large.")
+        if "error_max_budget_usd" in output.splitlines()[-1]:
+            raise BootstrapError("Bootstrap exceeded budget limit.")
+        
+        validate_container_size(container.id)
 
         if time.time() - ts_start >= 4200:
             raise TimeoutError(f"Agent exceeded 70m time limit for {instance_row.id}")
@@ -214,10 +230,7 @@ def bootstrap_setup_phase(
             )
 
         if meta.is_success_base or meta.is_success_golden:
-            container_size = podman_container_storage(container.id)["writable_bytes"]
-            if container_size > 4 * 1024**9:
-                raise BootstrapError("Container additional size exceeded 4GB limit. This is too large.")
-            podman_commit_container(container.id, setup_image, squash=True)
+            validate_and_commit_container(container.id, setup_image, squash=True)
             bootstrap_logger.info(
                 f"[{instance_row.id}]: ✅ Saved setup image: {setup_image}"
             )
@@ -332,14 +345,12 @@ def bootstrap_runtime_phase(
         )
 
         # Commit
-        container_size = podman_container_storage(container.id)["writable_bytes"]
-        if container_size > 4 * 1024**9:
-            raise BootstrapError("Container additional size exceeded 4GB limit. This is too large.")
-        podman_commit_container(
-            container.id, 
+        validate_and_commit_container(
+            container.id,
             runtime_image,
             changes=['ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]'],
-            squash=True)
+            squash=True,
+        )
         bootstrap_logger.info(f"[{row.id}]: ✅ Saved runtime image: {runtime_image}")
         return runtime_image
 
