@@ -1,4 +1,5 @@
 """Docker container utility functions for executing commands and copying files."""
+
 import json
 import logging
 import os
@@ -41,14 +42,18 @@ def register_container(container: PodmanContainer) -> None:
     """Register a container for tracking and automatic cleanup."""
     with _containers_lock:
         _active_containers.add(container)
-        utils_logger.debug(f"Registered container {container.id[:12]} (total active: {len(_active_containers)}). A process only sees his containers, not parents or siblings.")
+        utils_logger.debug(
+            f"Registered container {container.id[:12]} (total active: {len(_active_containers)}). A process only sees his containers, not parents or siblings."
+        )
 
 
 def unregister_container(container: PodmanContainer) -> None:
     """Remove a container from tracking after cleanup."""
     with _containers_lock:
         _active_containers.discard(container)
-        utils_logger.debug(f"Unregistered container {container.id[:12]} (total active: {len(_active_containers)}). A process only sees his containers, not parents or siblings.")
+        utils_logger.debug(
+            f"Unregistered container {container.id[:12]} (total active: {len(_active_containers)}). A process only sees his containers, not parents or siblings."
+        )
 
 
 def cleanup_all_containers() -> None:
@@ -57,7 +62,9 @@ def cleanup_all_containers() -> None:
         if not _active_containers:
             return
 
-        utils_logger.info(f"Cleaning up {len(_active_containers)} active container(s)...")
+        utils_logger.info(
+            f"Cleaning up {len(_active_containers)} active container(s)..."
+        )
         containers_to_cleanup = list(_active_containers)
         _active_containers.clear()
 
@@ -66,14 +73,17 @@ def cleanup_all_containers() -> None:
             stop_and_remove_container(container)
             utils_logger.info(f"✅ Cleaned up container {container.id[:12]}")
         except Exception as e:
-            utils_logger.warning(f"⚠️ Failed to cleanup container {container.id[:12]}: {e}")
+            utils_logger.warning(
+                f"⚠️ Failed to cleanup container {container.id[:12]}: {e}"
+            )
+
 
 def stream_exec(
     container: PodmanContainer,
     cmd: List[str],
     env: Optional[dict] = None,
     stream_logger: Optional[logging.Logger] = None,
-    is_json_output: bool = False
+    is_json_output: bool = False,
 ) -> str:
     """
     Execute a command in the container and stream its output.
@@ -92,7 +102,9 @@ def stream_exec(
 
     full_output = []
     # exec_run with stream=True returns (None, iterator) where iterator yields bytes chunks
-    exit_code, output_stream = container.exec_run(cmd=cmd, environment=env or {}, stream=True, tty=False)
+    exit_code, output_stream = container.exec_run(
+        cmd=cmd, environment=env or {}, stream=True, tty=False
+    )
 
     acc = ""
     for chunk in cast(Any, output_stream):
@@ -148,7 +160,7 @@ def extract_folder_from_container(
         Exception: If extraction fails
     """
     os.makedirs(local_dest, exist_ok=True)
-    
+
     bits, stat = container.get_archive(container_path)
     stream = BytesIO()
     for chunk in bits:
@@ -158,7 +170,9 @@ def extract_folder_from_container(
         tar.extractall(path=local_dest)
 
 
-def stop_and_remove_container(container: PodmanContainer, force: bool = True, auto_unregister: bool = True) -> None:
+def stop_and_remove_container(
+    container: PodmanContainer, force: bool = True, auto_unregister: bool = True
+) -> None:
     """
     Stop and remove a Docker container.
 
@@ -173,18 +187,24 @@ def stop_and_remove_container(container: PodmanContainer, force: bool = True, au
         time.sleep(2)
         container.reload()
         if container.status != "exited":
-            utils_logger.warning(f"[{container.id}]: Failed to stop container, trying to remove ...: {e}")
+            utils_logger.warning(
+                f"[{container.id}]: Failed to stop container, trying to remove ...: {e}"
+            )
     container.remove(force=force)
 
     if auto_unregister:
         unregister_container(container)
 
+
 import logging
 
-def podman_exec_logged(container: PodmanContainer, cmd: list[str] | str, logger: logging.Logger, **kwargs):
+
+def podman_exec_logged(
+    container: PodmanContainer, cmd: list[str] | str, logger: logging.Logger, **kwargs
+):
     """
     Structured wrapper for podman-py container.exec_run.
-    
+
     Args:
         container: podman.domain.containers.Container object
         cmd: Command string or list
@@ -192,7 +212,7 @@ def podman_exec_logged(container: PodmanContainer, cmd: list[str] | str, logger:
         **kwargs: Passed to exec_run (e.g. user, workdir, env)
     """
     # Force demux for separate stdout/stderr handling
-    kwargs['demux'] = True
+    kwargs["demux"] = True
     image_name = container.image.tags[0] if container.image.tags else container.image.id
     # Format command for logging
     readable_cmd = " ".join(cmd) if isinstance(cmd, list) else cmd
@@ -205,7 +225,7 @@ def podman_exec_logged(container: PodmanContainer, cmd: list[str] | str, logger:
     logger.info(f"\nContainer '{image_name}' command completed in {elapsed:.2f}s.")
 
     def clean_decode(b: Optional[bytes]) -> str:
-        return b.decode('utf-8', errors='replace').strip() if b else ""
+        return b.decode("utf-8", errors="replace").strip() if b else ""
 
     stdout_text = clean_decode(stdout_bytes)
     stderr_text = clean_decode(stderr_bytes)
@@ -213,12 +233,24 @@ def podman_exec_logged(container: PodmanContainer, cmd: list[str] | str, logger:
     # Extract and Log Maybe Truncated Output and Metadata
     stdout_lines = stdout_text.splitlines()
     stderr_lines = stderr_text.splitlines()
-    stdout_text_trunc = "\n".join((stdout_lines[:25] + ["... (truncated) ..."] + stdout_lines[-25:]) if len(stdout_lines) > 50 else stdout_lines)
-    stderr_text_trunc = "\n".join((stderr_lines[:25] + ["... (truncated) ..."] + stderr_lines[-25:]) if len(stderr_lines) > 50 else stderr_lines)
+    stdout_text_trunc = "\n".join(
+        (stdout_lines[:25] + ["... (truncated) ..."] + stdout_lines[-25:])
+        if len(stdout_lines) > 50
+        else stdout_lines
+    )
+    stderr_text_trunc = "\n".join(
+        (stderr_lines[:25] + ["... (truncated) ..."] + stderr_lines[-25:])
+        if len(stderr_lines) > 50
+        else stderr_lines
+    )
     if exit_code == 0:
-        logger.info(f"\n[Exit {exit_code:3}] Container '{image_name}' command succeeded (in {elapsed:.2f}s).")
+        logger.info(
+            f"\n[Exit {exit_code:3}] Container '{image_name}' command succeeded (in {elapsed:.2f}s)."
+        )
     else:
-        logger.error(f"\n[Exit {exit_code:3}] Container '{image_name}' command failed (in {elapsed:.2f}s)")
+        logger.error(
+            f"\n[Exit {exit_code:3}] Container '{image_name}' command failed (in {elapsed:.2f}s)"
+        )
     if stdout_text:
         logger.debug(f"[{image_name} STDOUT]:\n{stdout_text_trunc}")
     if stderr_text:

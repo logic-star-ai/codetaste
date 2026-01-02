@@ -1,4 +1,5 @@
 """Build and test base images for all supported languages."""
+
 import argparse
 import json
 import sys
@@ -42,11 +43,15 @@ def discover_dockerfiles() -> Dict[str, Path]:
         language = dockerfile_path.name.split(".", 1)[1]
         dockerfiles[language] = dockerfile_path
 
-    logger.info(f"Discovered {len(dockerfiles)} Dockerfile(s): {', '.join(dockerfiles.keys())}")
+    logger.info(
+        f"Discovered {len(dockerfiles)} Dockerfile(s): {', '.join(dockerfiles.keys())}"
+    )
     return dockerfiles
 
 
-def build_image(language: str, dockerfile_path: Path, force_rebuild: bool = False) -> Tuple[bool, str]:
+def build_image(
+    language: str, dockerfile_path: Path, force_rebuild: bool = False
+) -> Tuple[bool, str]:
     """
     Build a base image from a Dockerfile.
 
@@ -65,10 +70,14 @@ def build_image(language: str, dockerfile_path: Path, force_rebuild: bool = Fals
     try:
         existing_image = client.images.get(image_tag)
         if not force_rebuild:
-            logger.info(f"Image {image_tag} already exists (ID: {existing_image.short_id}), skipping build")
+            logger.info(
+                f"Image {image_tag} already exists (ID: {existing_image.short_id}), skipping build"
+            )
             return True, image_tag
 
-        logger.info(f"Removing existing image {image_tag} (ID: {existing_image.short_id})")
+        logger.info(
+            f"Removing existing image {image_tag} (ID: {existing_image.short_id})"
+        )
         client.images.remove(image_tag, force=True)
     except podman.errors.ImageNotFound:
         pass
@@ -88,13 +97,13 @@ def build_image(language: str, dockerfile_path: Path, force_rebuild: bool = Fals
     for log_line in build_logs:
         try:
             log_entry = json.loads(log_line)
-            if 'stream' in log_entry:
-                logger.debug(log_entry['stream'].strip())
-            elif 'error' in log_entry:
+            if "stream" in log_entry:
+                logger.debug(log_entry["stream"].strip())
+            elif "error" in log_entry:
                 logger.error(f"Build error: {log_entry['error']}")
         except json.JSONDecodeError:
             # Some lines might not be JSON, just log them as-is
-            logger.debug(log_line.decode('utf-8', errors='replace').strip())
+            logger.debug(log_line.decode("utf-8", errors="replace").strip())
 
     logger.info(f"Successfully built {image_tag} (ID: {image.short_id})")
     return True, image_tag
@@ -114,17 +123,23 @@ def run_test(container: PodmanContainer, test_name: str, command: str) -> bool:
     """
     logger.info(f"  Testing {test_name}...")
     # exec_run returns (exit_code, output_bytes) tuple
-    exit_code, (stdout_bytes, stderr_bytes) = container.exec_run(["bash", "-c", command], demux=True)
+    exit_code, (stdout_bytes, stderr_bytes) = container.exec_run(
+        ["bash", "-c", command], demux=True
+    )
     stdout_bytes, stderr_bytes = stdout_bytes or b"", stderr_bytes or b""
     if exit_code != 0:
         logger.error(f"  {test_name} FAILED (exit code {exit_code})")
-        logger.error(f"  Output: {stdout_bytes.decode('utf-8', errors='replace')}\nErrors: {stderr_bytes.decode('utf-8', errors='replace')}")
+        logger.error(
+            f"  Output: {stdout_bytes.decode('utf-8', errors='replace')}\nErrors: {stderr_bytes.decode('utf-8', errors='replace')}"
+        )
         return False
     else:
-        output = stdout_bytes.decode('utf-8', errors='replace').strip()
+        output = stdout_bytes.decode("utf-8", errors="replace").strip()
         # Only show first line of version output
-        first_line = output.split('\n')[0] if output else "OK"
-        logger.info(f"  {test_name} OK: {first_line}\nErrors: {stderr_bytes.decode('utf-8', errors='replace')}")
+        first_line = output.split("\n")[0] if output else "OK"
+        logger.info(
+            f"  {test_name} OK: {first_line}\nErrors: {stderr_bytes.decode('utf-8', errors='replace')}"
+        )
         return True
 
 
@@ -144,7 +159,7 @@ def verify_image(image_tag: str) -> Tuple[bool, List[str]]:
     failed_tests = []
 
     # Determine which language this image is for
-    language = image_tag.split('-')[-1]  # Extract from 'benchmark-base-{language}'
+    language = image_tag.split("-")[-1]  # Extract from 'benchmark-base-{language}'
     is_all = language == "all"
 
     try:
@@ -207,7 +222,7 @@ def verify_image(image_tag: str) -> Tuple[bool, List[str]]:
                 "clang": "clang --version | head -1",
                 "cmake": "cmake --version | head -1",
                 "make": "make --version | head -1",
-            }
+            },
         }
 
         # Run common tests
@@ -251,21 +266,23 @@ def verify_image(image_tag: str) -> Tuple[bool, List[str]]:
 def main():
     """Main entry point for building and testing base images."""
     # Parse command-line arguments
-    parser = argparse.ArgumentParser(description="Build and test base images for refactoring benchmark")
+    parser = argparse.ArgumentParser(
+        description="Build and test base images for refactoring benchmark"
+    )
     parser.add_argument(
         "--rebuild",
         action="store_true",
-        help="Force rebuild even if image already exists"
+        help="Force rebuild even if image already exists",
     )
     parser.add_argument(
         "--language",
         type=str,
-        help="Build only specific language (e.g., 'all', 'python', 'javascript')"
+        help="Build only specific language (e.g., 'all', 'python', 'javascript')",
     )
     parser.add_argument(
         "--skip-verify",
         action="store_true",
-        help="Skip verification tests after building"
+        help="Skip verification tests after building",
     )
     args = parser.parse_args()
 
@@ -283,7 +300,9 @@ def main():
     # Filter to specific language if requested
     if args.language:
         if args.language not in all_dockerfiles:
-            logger.error(f"Language '{args.language}' not found. Available: {', '.join(all_dockerfiles.keys())}")
+            logger.error(
+                f"Language '{args.language}' not found. Available: {', '.join(all_dockerfiles.keys())}"
+            )
             sys.exit(1)
         dockerfiles = {args.language: all_dockerfiles[args.language]}
     else:
@@ -297,7 +316,9 @@ def main():
         logger.info("-" * 80)
 
         # Build image
-        build_success, image_tag = build_image(language, dockerfile_path, force_rebuild=args.rebuild)
+        build_success, image_tag = build_image(
+            language, dockerfile_path, force_rebuild=args.rebuild
+        )
         if not build_success:
             results[language] = {"build": False, "verify": False, "failed_tests": []}
             continue

@@ -1,4 +1,5 @@
 """Logger configuration for the benchmark infrastructure."""
+
 import logging
 import os
 import sys
@@ -25,14 +26,16 @@ def setup_logging(log_dir: str = "logs") -> None:
     if not os.path.exists(log_dir):
         os.makedirs(log_dir)
 
+
 if _LOG_DIR is None:
     setup_logging()
+
 
 def get_logger(
     name: str,
     use_file: bool = True,
     use_stdout: bool = True,
-    level: int = logging.DEBUG
+    level: int = logging.DEBUG,
 ) -> logging.Logger:
     """
     Get or create a logger with the specified configuration.
@@ -66,7 +69,9 @@ def get_logger(
             for handler in logger.handlers[:]:
                 logger.removeHandler(handler)
 
-        file_fmt = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+        file_fmt = logging.Formatter(
+            "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+        )
         console_fmt = logging.Formatter("%(levelname)s: %(message)s")
 
         # Console Handler (always added)

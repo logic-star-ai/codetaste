@@ -1,4 +1,5 @@
 """Pydantic models for data validation and type safety."""
+
 import os
 from pydantic import BaseModel
 from typing import Literal, Optional, Dict
@@ -6,6 +7,7 @@ from typing import Literal, Optional, Dict
 
 class InstanceRow(BaseModel):
     """Represents a single row from the instances CSV file."""
+
     owner: str
     repo: str
     golden_commit_hash: str
@@ -49,11 +51,14 @@ class InstanceRow(BaseModel):
 
     def asset_dir(self, asset_type: str, base_path: str = "assets") -> str:
         """Asset directory: {base_path}/{asset_type}/{owner}/{repo}/{short_hash}"""
-        return os.path.join(base_path, asset_type, self.owner, self.repo, self.short_hash)
+        return os.path.join(
+            base_path, asset_type, self.owner, self.repo, self.short_hash
+        )
 
 
 class Metrics(BaseModel):
     """Test execution metrics."""
+
     passed: int = 0
     failed: int = 0
     skipped: int = 0
@@ -63,11 +68,16 @@ class Metrics(BaseModel):
     @property
     def is_valid(self) -> bool:
         """At least 10 tests, at least 30% passed."""
-        return self.error is None and self.total >= 10 and (self.passed / self.total) >= 0.3
+        return (
+            self.error is None
+            and self.total >= 10
+            and (self.passed / self.total) >= 0.3
+        )
 
 
 class InstanceMetadata(BaseModel):
     """Complete metadata for a benchmark instance."""
+
     owner: str
     repo: str
     golden_metrics: Metrics
@@ -79,14 +89,16 @@ class InstanceMetadata(BaseModel):
     def is_success_base(self) -> bool:
         """Indicating if tests appear to be running correctly on base."""
         return self.base_metrics.is_valid
-    
+
     @property
     def is_success_golden(self) -> bool:
         """Indicating if tests appear to be running correctly on golden."""
         return self.golden_metrics.is_valid
-    
+
     @property
-    def setup_quality(self) -> Literal["both_valid", "only_base_valid", "only_golden_valid", "neither_valid"]:
+    def setup_quality(
+        self,
+    ) -> Literal["both_valid", "only_base_valid", "only_golden_valid", "neither_valid"]:
         """Classify setup quality based on test metrics validity."""
         base_valid = self.is_success_base
         golden_valid = self.is_success_golden

@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field, computed_field
 
 class SetupQuality(str, Enum):
     """Quality of the test suite setup."""
+
     BOTH_VALID = "both_valid"
     ONLY_BASE_VALID = "only_base_valid"
     ONLY_GOLDEN_VALID = "only_golden_valid"
@@ -22,17 +23,18 @@ class SetupQuality(str, Enum):
         return self in {
             SetupQuality.BOTH_VALID,
             SetupQuality.ONLY_BASE_VALID,
-            SetupQuality.ONLY_GOLDEN_VALID
+            SetupQuality.ONLY_GOLDEN_VALID,
         }
 
 
 class TestOutcome(str, Enum):
     """Outcome of test evaluation."""
-    TEST_SUCCESS = "test_success"       # Both commits valid, agent tests in bounds
-    TEST_FAIL = "test_fail"            # Both commits valid, agent tests out of bounds
-    TEST_TRIVIAL = "test_trivial"      # Only one commit valid, can't properly evaluate
+
+    TEST_SUCCESS = "test_success"  # Both commits valid, agent tests in bounds
+    TEST_FAIL = "test_fail"  # Both commits valid, agent tests out of bounds
+    TEST_TRIVIAL = "test_trivial"  # Only one commit valid, can't properly evaluate
     TEST_NOT_SETUP = "test_not_setup"  # Neither commit valid, no test baseline
-    TEST_ERROR = "test_error"          # Agent tests crashed/didn't run
+    TEST_ERROR = "test_error"  # Agent tests crashed/didn't run
 
     def is_meaningful(self) -> bool:
         """Whether this is a meaningful test result."""
@@ -45,6 +47,7 @@ class TestOutcome(str, Enum):
 
 class TestMetrics(BaseModel):
     """Test execution metrics."""
+
     passed: int
     failed: int
     skipped: int = 0
@@ -62,9 +65,9 @@ class TestMetrics(BaseModel):
     def is_valid(self) -> bool:
         """Tests ran without crashing and have reasonable coverage."""
         return (
-            self.failed != -1 and  # Didn't crash
-            self.total >= 10 and   # Minimum test suite size
-            self.total < 10000     # Sanity check
+            self.failed != -1  # Didn't crash
+            and self.total >= 10  # Minimum test suite size
+            and self.total < 10000  # Sanity check
         )
 
     @computed_field
@@ -76,6 +79,7 @@ class TestMetrics(BaseModel):
 
 class RuleMetrics(BaseModel):
     """Rule evaluation metrics from SARIF output."""
+
     positive_rules_matched: int  # Good patterns found
     negative_rules_matched: int  # Bad patterns found (violations)
     total_positive_rules: int
@@ -121,12 +125,12 @@ class AgentMetadata(BaseModel):
 
     This should be written by the agent to /output/agent_metadata.json
     """
+
     # Required fields
     agent_name: str = Field(..., description="Name/identifier of the agent")
     agent_version: str = Field(..., description="Version of the agent")
     timestamp: datetime = Field(
-        default_factory=datetime.utcnow,
-        description="When the agent ran"
+        default_factory=datetime.utcnow, description="When the agent ran"
     )
 
     # Model information (if applicable)
@@ -134,30 +138,44 @@ class AgentMetadata(BaseModel):
     model_provider: Optional[str] = Field(None, description="Model provider")
 
     # Configuration
-    temperature: Optional[float] = Field(None, ge=0.0, le=2.0, description="Sampling temperature")
-    max_tokens: Optional[int] = Field(None, gt=0, description="Maximum tokens for generation")
-    prompt_template: Optional[str] = Field(None, description="Prompt template identifier")
+    temperature: Optional[float] = Field(
+        None, ge=0.0, le=2.0, description="Sampling temperature"
+    )
+    max_tokens: Optional[int] = Field(
+        None, gt=0, description="Maximum tokens for generation"
+    )
+    prompt_template: Optional[str] = Field(
+        None, description="Prompt template identifier"
+    )
 
     # Execution details
-    execution_time_seconds: Optional[float] = Field(None, ge=0, description="Total execution time")
-    total_input_tokens: Optional[int] = Field(None, ge=0, description="Total input tokens")
-    total_output_tokens: Optional[int] = Field(None, ge=0, description="Total output tokens")
+    execution_time_seconds: Optional[float] = Field(
+        None, ge=0, description="Total execution time"
+    )
+    total_input_tokens: Optional[int] = Field(
+        None, ge=0, description="Total input tokens"
+    )
+    total_output_tokens: Optional[int] = Field(
+        None, ge=0, description="Total output tokens"
+    )
     total_cost_usd: Optional[float] = Field(None, ge=0, description="Total cost in USD")
 
     # Agent-specific metadata
     custom_config: Dict[str, Any] = Field(
-        default_factory=dict,
-        description="Agent-specific configuration"
+        default_factory=dict, description="Agent-specific configuration"
     )
 
     # Developer/research info
-    developer: Optional[str] = Field(None, description="Agent developer or research team")
+    developer: Optional[str] = Field(
+        None, description="Agent developer or research team"
+    )
     experiment_id: Optional[str] = Field(None, description="Experiment identifier")
     notes: Optional[str] = Field(None, description="Additional notes")
 
 
 class InstanceEvaluation(BaseModel):
     """Complete evaluation for one instance."""
+
     instance_id: str
 
     # Test metrics
@@ -209,7 +227,7 @@ class InstanceEvaluation(BaseModel):
 
         if self.setup_quality in {
             SetupQuality.ONLY_BASE_VALID,
-            SetupQuality.ONLY_GOLDEN_VALID
+            SetupQuality.ONLY_GOLDEN_VALID,
         }:
             return TestOutcome.TEST_TRIVIAL
 

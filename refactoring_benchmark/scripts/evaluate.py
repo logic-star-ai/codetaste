@@ -74,11 +74,15 @@ def run_test_evaluation(instance_row: InstanceRow) -> Optional[Metrics]:
     Returns:
         Test metrics if successful, None otherwise
     """
-    instance_output_dir = os.path.join(PROJECT_ROOT, instance_row.instance_dir("output"))
+    instance_output_dir = os.path.join(
+        PROJECT_ROOT, instance_row.instance_dir("output")
+    )
     prediction_diff = os.path.join(instance_output_dir, "prediction.diff")
 
     if not os.path.exists(prediction_diff):
-        eval_logger.warning(f"[{instance_row.id}]: No prediction.diff found at {prediction_diff}")
+        eval_logger.warning(
+            f"[{instance_row.id}]: No prediction.diff found at {prediction_diff}"
+        )
         return None
 
     eval_logger.info(f"[{instance_row.id}]: Running test evaluation...")
@@ -88,21 +92,21 @@ def run_test_evaluation(instance_row: InstanceRow) -> Optional[Metrics]:
 
     try:
         run_cmds = [
-            "podman", "run", "--rm",
-            "-v", f"{prediction_diff}:/input/patch.diff",
-            "-v", f"{test_output_dir}:/output",
+            "podman",
+            "run",
+            "--rm",
+            "-v",
+            f"{prediction_diff}:/input/patch.diff",
+            "-v",
+            f"{test_output_dir}:/output",
             f"{instance_row.runtime_image}",
-            "eval_test"
+            "eval_test",
         ]
 
         eval_logger.info(f"[{instance_row.id}]: Running: {' '.join(run_cmds)}")
 
         result = subprocess.run(
-            run_cmds,
-            cwd=PROJECT_ROOT,
-            capture_output=True,
-            text=True,
-            timeout=600
+            run_cmds, cwd=PROJECT_ROOT, capture_output=True, text=True, timeout=600
         )
 
         output_lines = result.stdout.strip().split("\n")
@@ -110,12 +114,16 @@ def run_test_evaluation(instance_row: InstanceRow) -> Optional[Metrics]:
             try:
                 data = json.loads(line)
                 metrics = Metrics(**data)
-                eval_logger.info(f"[{instance_row.id}]: Test metrics: {metrics.model_dump()}")
+                eval_logger.info(
+                    f"[{instance_row.id}]: Test metrics: {metrics.model_dump()}"
+                )
                 return metrics
             except (json.JSONDecodeError, ValueError):
                 continue
 
-        eval_logger.warning(f"[{instance_row.id}]: Could not parse test metrics from output")
+        eval_logger.warning(
+            f"[{instance_row.id}]: Could not parse test metrics from output"
+        )
         return None
 
     except subprocess.TimeoutExpired:
@@ -126,7 +134,9 @@ def run_test_evaluation(instance_row: InstanceRow) -> Optional[Metrics]:
         return None
 
 
-def parse_sarif_results(sarif_path: str, rules_path: str) -> Dict[str, Tuple[int, int, int]]:
+def parse_sarif_results(
+    sarif_path: str, rules_path: str
+) -> Dict[str, Tuple[int, int, int]]:
     """
     Parse results into a dictionary: RULE_ID -> (base_count, agent_count, golden_count).
     """
@@ -137,17 +147,17 @@ def parse_sarif_results(sarif_path: str, rules_path: str) -> Dict[str, Tuple[int
         return results
 
     try:
-        with open(rules_path, 'r') as f:
+        with open(rules_path, "r") as f:
             rules_data = yaml.safe_load(f)
 
         rules_metadata = {}
-        if 'rules' in rules_data:
-            for rule in rules_data['rules']:
-                rule_id = rule.get('id')
-                if rule_id and 'metadata' in rule:
-                    metadata = rule['metadata']
-                    base_count = metadata.get('nr_legacy_patterns', 0)
-                    golden_count = metadata.get('nr_refactored_patterns', 0)
+        if "rules" in rules_data:
+            for rule in rules_data["rules"]:
+                rule_id = rule.get("id")
+                if rule_id and "metadata" in rule:
+                    metadata = rule["metadata"]
+                    base_count = metadata.get("nr_legacy_patterns", 0)
+                    golden_count = metadata.get("nr_refactored_patterns", 0)
                     rules_metadata[rule_id] = (base_count, golden_count)
     except Exception as e:
         eval_logger.error(f"Failed to parse rules file {rules_path}: {e}")
@@ -156,17 +166,19 @@ def parse_sarif_results(sarif_path: str, rules_path: str) -> Dict[str, Tuple[int
     agent_counts = {}
     if os.path.exists(sarif_path):
         try:
-            with open(sarif_path, 'r') as f:
+            with open(sarif_path, "r") as f:
                 sarif_data = json.load(f)
 
-            if 'runs' in sarif_data:
-                for run in sarif_data['runs']:
-                    if 'results' in run:
-                        for result in run['results']:
-                            rule_id = result.get('ruleId')
+            if "runs" in sarif_data:
+                for run in sarif_data["runs"]:
+                    if "results" in run:
+                        for result in run["results"]:
+                            rule_id = result.get("ruleId")
                             if rule_id:
                                 clean_id = rule_id.split(".")[-1]
-                                agent_counts[clean_id] = agent_counts.get(clean_id, 0) + 1
+                                agent_counts[clean_id] = (
+                                    agent_counts.get(clean_id, 0) + 1
+                                )
         except Exception as e:
             eval_logger.error(f"Failed to parse SARIF file {sarif_path}: {e}")
     else:
@@ -179,29 +191,41 @@ def parse_sarif_results(sarif_path: str, rules_path: str) -> Dict[str, Tuple[int
     return results
 
 
-def run_rule_evaluation(instance_row: InstanceRow) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+def run_rule_evaluation(
+    instance_row: InstanceRow,
+) -> Tuple[Optional[float], Optional[float], Optional[float]]:
     """
     Run rule-based evaluation. Returns (positive_rate, negative_rate, total_rate).
     """
-    instance_output_dir = os.path.join(PROJECT_ROOT, instance_row.instance_dir("output"))
+    instance_output_dir = os.path.join(
+        PROJECT_ROOT, instance_row.instance_dir("output")
+    )
     prediction_diff = os.path.join(instance_output_dir, "prediction.diff")
 
     if not os.path.exists(prediction_diff):
-        eval_logger.warning(f"[{instance_row.id}]: No prediction.diff found at {prediction_diff}")
+        eval_logger.warning(
+            f"[{instance_row.id}]: No prediction.diff found at {prediction_diff}"
+        )
         return None, None, None
 
     eval_logger.info(f"[{instance_row.id}]: Running rule evaluation...")
 
     try:
         run_cmds = [
-            "podman", "run", "--rm",
-            "-v", f"{prediction_diff}:/input/patch.diff",
-            "-v", f"{instance_output_dir}:/output",
+            "podman",
+            "run",
+            "--rm",
+            "-v",
+            f"{prediction_diff}:/input/patch.diff",
+            "-v",
+            f"{instance_output_dir}:/output",
             f"{instance_row.runtime_image}",
-            "eval_rule"
+            "eval_rule",
         ]
 
-        subprocess.run(run_cmds, cwd=PROJECT_ROOT, capture_output=True, text=True, timeout=1200)
+        subprocess.run(
+            run_cmds, cwd=PROJECT_ROOT, capture_output=True, text=True, timeout=1200
+        )
 
         sarif_pos = os.path.join(instance_output_dir, "rules_positive.sarif")
         sarif_neg = os.path.join(instance_output_dir, "rules_negative.sarif")
@@ -218,7 +242,7 @@ def run_rule_evaluation(instance_row: InstanceRow) -> Tuple[Optional[float], Opt
 
         share_pos = pos_satisfied / pos_total if pos_total > 0 else None
         share_neg = neg_satisfied / neg_total if neg_total > 0 else None
-        
+
         total_satisfied = pos_satisfied + neg_satisfied
         total_rules = pos_total + neg_total
         share_total = total_satisfied / total_rules if total_rules > 0 else None
@@ -238,7 +262,9 @@ def evaluate_instance(instance_row: InstanceRow) -> EvaluationResult:
     result = EvaluationResult(instance_row.id)
     eval_logger.info(f"\n{'='*60}\nEvaluating: {instance_row.display_path}\n{'='*60}")
 
-    instance_output_dir = os.path.join(PROJECT_ROOT, instance_row.instance_dir("output"))
+    instance_output_dir = os.path.join(
+        PROJECT_ROOT, instance_row.instance_dir("output")
+    )
     prediction_diff = os.path.join(instance_output_dir, "prediction.diff")
 
     if not os.path.exists(prediction_diff):
@@ -294,15 +320,20 @@ def main():
                 "total_instances": len(instances),
                 "results": [r.to_dict() for r in results],
             },
-            f, indent=2
+            f,
+            indent=2,
         )
 
     eval_logger.info(f"\n{'='*60}\nEvaluation complete!\nResults: {results_file}")
 
-    rule_successes = sum(r.rule_results_total for r in results if r.rule_results_total is not None)
+    rule_successes = sum(
+        r.rule_results_total for r in results if r.rule_results_total is not None
+    )
     errors = sum(1 for r in results if r.error)
 
-    eval_logger.info(f"Summary:\n Total: {len(instances)}\n Rule Fraction: {rule_successes:.2f}/{len(instances)}\n Errors: {errors}\n{'='*60}")
+    eval_logger.info(
+        f"Summary:\n Total: {len(instances)}\n Rule Fraction: {rule_successes:.2f}/{len(instances)}\n Errors: {errors}\n{'='*60}"
+    )
 
 
 if __name__ == "__main__":

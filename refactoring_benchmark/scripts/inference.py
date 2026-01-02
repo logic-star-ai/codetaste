@@ -1,4 +1,5 @@
 """Run inference on benchmark instances using agent scripts."""
+
 import atexit
 import csv
 import os
@@ -53,9 +54,7 @@ def execute_instance(instance_row: InstanceRow, force: bool = False) -> bool:
 
     # Create instance-specific logger
     instance_logger = get_logger(
-        f"inference-{instance_row.id}",
-        use_file=True,
-        use_stdout=False
+        f"inference-{instance_row.id}", use_file=True, use_stdout=False
     )
 
     instance_output_dir = os.path.abspath(
@@ -64,7 +63,9 @@ def execute_instance(instance_row: InstanceRow, force: bool = False) -> bool:
     prediction_diff = os.path.join(instance_output_dir, "prediction.diff")
 
     if os.path.exists(prediction_diff) and not force:
-        inference_logger.info(f"[{instance_row.id}]: Skipping inference, prediction.diff already exists")
+        inference_logger.info(
+            f"[{instance_row.id}]: Skipping inference, prediction.diff already exists"
+        )
         instance_logger.info("Skipping inference, prediction.diff already exists")
         client.close()
         return True
@@ -79,7 +80,9 @@ def execute_instance(instance_row: InstanceRow, force: bool = False) -> bool:
 
     # Validate paths
     if not os.path.exists(agent_dir):
-        inference_logger.error(f"[{instance_row.id}]: Agent directory not found: {agent_dir}")
+        inference_logger.error(
+            f"[{instance_row.id}]: Agent directory not found: {agent_dir}"
+        )
         instance_logger.error(f"Agent directory not found: {agent_dir}")
         client.close()
         return False
@@ -91,8 +94,12 @@ def execute_instance(instance_row: InstanceRow, force: bool = False) -> bool:
         try:
             client.images.get(instance_row.runtime_image)
         except podman.errors.ImageNotFound:
-            inference_logger.error(f"[{instance_row.id}]: ❌ Runtime image not found: {instance_row.runtime_image}")
-            instance_logger.error(f"❌ Runtime image not found: {instance_row.runtime_image}")
+            inference_logger.error(
+                f"[{instance_row.id}]: ❌ Runtime image not found: {instance_row.runtime_image}"
+            )
+            instance_logger.error(
+                f"❌ Runtime image not found: {instance_row.runtime_image}"
+            )
             instance_logger.error("Run bootstrap first to create the image")
             return False
 
@@ -115,20 +122,25 @@ def execute_instance(instance_row: InstanceRow, force: bool = False) -> bool:
         # Stream container output to log
         try:
             for log_line in container.logs(stream=True, follow=True):
-                instance_logger.info(log_line.decode('utf-8', errors='replace').rstrip())
+                instance_logger.info(
+                    log_line.decode("utf-8", errors="replace").rstrip()
+                )
         except Exception as log_error:
             instance_logger.warning(f"Error streaming logs: {log_error}")
 
         # Wait for container to finish and get exit code
         exit_code = container.wait()
 
-
         if exit_code == 0:
-            inference_logger.info(f"[{instance_row.id}]: ✅ Inference completed successfully")
+            inference_logger.info(
+                f"[{instance_row.id}]: ✅ Inference completed successfully"
+            )
             instance_logger.info("✅ Inference completed successfully")
             return True
         else:
-            inference_logger.error(f"[{instance_row.id}]: ❌ Container exited with code {exit_code}")
+            inference_logger.error(
+                f"[{instance_row.id}]: ❌ Container exited with code {exit_code}"
+            )
             instance_logger.error(f"❌ Container exited with code {exit_code}")
             return False
 
@@ -155,11 +167,17 @@ def inference_parallel(instances: list[InstanceRow]):
         instances: List of instances to run inference on
     """
     with ProcessPoolExecutor(NR_PARALLEL_PROCESSES) as executor:
-        future_to_instance = {executor.submit(execute_instance_wrapper, inst): inst for inst in instances}
+        future_to_instance = {
+            executor.submit(execute_instance_wrapper, inst): inst for inst in instances
+        }
         all_futures_remaining = set(future_to_instance.keys())
 
-        inference_logger.info(f"🚀 Running inference on {len(instances)} instances with up to {NR_PARALLEL_PROCESSES} parallel processes...")
-        inference_logger.info(f"Remaining instances {len(all_futures_remaining)}: {[future_to_instance[future].id for future in list(all_futures_remaining)[:3]]} ...")
+        inference_logger.info(
+            f"🚀 Running inference on {len(instances)} instances with up to {NR_PARALLEL_PROCESSES} parallel processes..."
+        )
+        inference_logger.info(
+            f"Remaining instances {len(all_futures_remaining)}: {[future_to_instance[future].id for future in list(all_futures_remaining)[:3]]} ..."
+        )
 
         for future in as_completed(future_to_instance):
             instance = future_to_instance[future]
@@ -168,9 +186,13 @@ def inference_parallel(instances: list[InstanceRow]):
                 all_futures_remaining.remove(future)
                 status = "✅" if success else "❌"
                 inference_logger.info(f"{status} [{instance.id}] completed")
-                inference_logger.info(f"Remaining instances {len(all_futures_remaining)}: {[future_to_instance[f].id for f in list(all_futures_remaining)[:3]]} ...")
+                inference_logger.info(
+                    f"Remaining instances {len(all_futures_remaining)}: {[future_to_instance[f].id for f in list(all_futures_remaining)[:3]]} ..."
+                )
             except Exception as e:
-                inference_logger.error(f"[{instance.id}]: Unexpected orchestration error: {e}")
+                inference_logger.error(
+                    f"[{instance.id}]: Unexpected orchestration error: {e}"
+                )
                 all_futures_remaining.discard(future)
 
 
@@ -207,8 +229,11 @@ def main():
 
 
 if __name__ == "__main__":
+
     def signal_handler(signum, _frame):
-        inference_logger.warning(f"\n⚠️ Received {signal.Signals(signum).name}. Terminating and cleaning...")
+        inference_logger.warning(
+            f"\n⚠️ Received {signal.Signals(signum).name}. Terminating and cleaning..."
+        )
         cleanup_all_containers()
         time.sleep(30)
         os._exit(1)
