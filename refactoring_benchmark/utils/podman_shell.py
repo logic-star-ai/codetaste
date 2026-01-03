@@ -1,8 +1,7 @@
-from ast import List
 import subprocess
 
 import subprocess
-from typing import Tuple
+from typing import Tuple, List, Optional
 
 class PodmanCommandError(Exception):
     """Custom exception for Podman command errors."""
