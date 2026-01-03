@@ -97,9 +97,7 @@ class RuleMetrics(BaseModel):
             return 1.0
 
         # Count successes: positive rules matched + negative rules avoided
-        followed = self.positive_rules_matched + (
-            self.total_negative_rules - self.negative_rules_matched
-        )
+        followed = self.positive_rules_matched + (self.total_negative_rules - self.negative_rules_matched)
         return followed / total
 
     @computed_field
@@ -129,46 +127,28 @@ class AgentMetadata(BaseModel):
     # Required fields
     agent_name: str = Field(..., description="Name/identifier of the agent")
     agent_version: str = Field(..., description="Version of the agent")
-    timestamp: datetime = Field(
-        default_factory=datetime.utcnow, description="When the agent ran"
-    )
+    timestamp: datetime = Field(default_factory=datetime.utcnow, description="When the agent ran")
 
     # Model information (if applicable)
     model_name: Optional[str] = Field(None, description="Underlying model name")
     model_provider: Optional[str] = Field(None, description="Model provider")
 
     # Configuration
-    temperature: Optional[float] = Field(
-        None, ge=0.0, le=2.0, description="Sampling temperature"
-    )
-    max_tokens: Optional[int] = Field(
-        None, gt=0, description="Maximum tokens for generation"
-    )
-    prompt_template: Optional[str] = Field(
-        None, description="Prompt template identifier"
-    )
+    temperature: Optional[float] = Field(None, ge=0.0, le=2.0, description="Sampling temperature")
+    max_tokens: Optional[int] = Field(None, gt=0, description="Maximum tokens for generation")
+    prompt_template: Optional[str] = Field(None, description="Prompt template identifier")
 
     # Execution details
-    execution_time_seconds: Optional[float] = Field(
-        None, ge=0, description="Total execution time"
-    )
-    total_input_tokens: Optional[int] = Field(
-        None, ge=0, description="Total input tokens"
-    )
-    total_output_tokens: Optional[int] = Field(
-        None, ge=0, description="Total output tokens"
-    )
+    execution_time_seconds: Optional[float] = Field(None, ge=0, description="Total execution time")
+    total_input_tokens: Optional[int] = Field(None, ge=0, description="Total input tokens")
+    total_output_tokens: Optional[int] = Field(None, ge=0, description="Total output tokens")
     total_cost_usd: Optional[float] = Field(None, ge=0, description="Total cost in USD")
 
     # Agent-specific metadata
-    custom_config: Dict[str, Any] = Field(
-        default_factory=dict, description="Agent-specific configuration"
-    )
+    custom_config: Dict[str, Any] = Field(default_factory=dict, description="Agent-specific configuration")
 
     # Developer/research info
-    developer: Optional[str] = Field(
-        None, description="Agent developer or research team"
-    )
+    developer: Optional[str] = Field(None, description="Agent developer or research team")
     experiment_id: Optional[str] = Field(None, description="Experiment identifier")
     notes: Optional[str] = Field(None, description="Additional notes")
 

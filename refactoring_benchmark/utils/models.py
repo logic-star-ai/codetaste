@@ -51,9 +51,7 @@ class InstanceRow(BaseModel):
 
     def asset_dir(self, asset_type: str, base_path: str = "assets") -> str:
         """Asset directory: {base_path}/{asset_type}/{owner}/{repo}/{short_hash}"""
-        return os.path.join(
-            base_path, asset_type, self.owner, self.repo, self.short_hash
-        )
+        return os.path.join(base_path, asset_type, self.owner, self.repo, self.short_hash)
 
 
 class Metrics(BaseModel):
@@ -68,11 +66,7 @@ class Metrics(BaseModel):
     @property
     def is_valid(self) -> bool:
         """At least 10 tests, at least 30% passed."""
-        return (
-            self.error is None
-            and self.total >= 10
-            and (self.passed / self.total) >= 0.3
-        )
+        return self.error is None and self.total >= 10 and (self.passed / self.total) >= 0.3
 
 
 class InstanceMetadata(BaseModel):

@@ -27,9 +27,7 @@ setup_logging(str(LOG_DIR))
 logger = get_logger("analyze")
 
 
-def parse_sarif_to_metrics(
-    sarif_pos_path: Path, sarif_neg_path: Path
-) -> Optional[RuleMetrics]:
+def parse_sarif_to_metrics(sarif_pos_path: Path, sarif_neg_path: Path) -> Optional[RuleMetrics]:
     """Parse SARIF files to extract rule metrics.
 
     Args:
@@ -215,30 +213,19 @@ def analyze_all() -> pd.DataFrame:
             "test_outcome": ev.test_outcome.value,
             # Agent metadata
             "agent_name": ev.agent_metadata.agent_name if ev.agent_metadata else None,
-            "agent_version": (
-                ev.agent_metadata.agent_version if ev.agent_metadata else None
-            ),
+            "agent_version": (ev.agent_metadata.agent_version if ev.agent_metadata else None),
             "model_name": ev.agent_metadata.model_name if ev.agent_metadata else None,
-            "model_provider": (
-                ev.agent_metadata.model_provider if ev.agent_metadata else None
-            ),
+            "model_provider": (ev.agent_metadata.model_provider if ev.agent_metadata else None),
             "temperature": ev.agent_metadata.temperature if ev.agent_metadata else None,
-            "execution_time": (
-                ev.agent_metadata.execution_time_seconds if ev.agent_metadata else None
-            ),
+            "execution_time": (ev.agent_metadata.execution_time_seconds if ev.agent_metadata else None),
             "total_tokens": (
-                (
-                    (ev.agent_metadata.total_input_tokens or 0)
-                    + (ev.agent_metadata.total_output_tokens or 0)
-                )
+                ((ev.agent_metadata.total_input_tokens or 0) + (ev.agent_metadata.total_output_tokens or 0))
                 if ev.agent_metadata and ev.agent_metadata.total_input_tokens
                 else None
             ),
             "cost_usd": ev.agent_metadata.total_cost_usd if ev.agent_metadata else None,
             "developer": ev.agent_metadata.developer if ev.agent_metadata else None,
-            "experiment_id": (
-                ev.agent_metadata.experiment_id if ev.agent_metadata else None
-            ),
+            "experiment_id": (ev.agent_metadata.experiment_id if ev.agent_metadata else None),
             # Test metrics
             "base_passed": ev.base_tests.passed,
             "base_total": ev.base_tests.total,
@@ -310,12 +297,8 @@ def print_summary(df: pd.DataFrame):
         print(f"{label:50s}: {count:4d} ({pct:5.1f}%)")
 
     # Key statistics
-    meaningful = outcome_counts.get("test_success", 0) + outcome_counts.get(
-        "test_fail", 0
-    )
-    problematic = outcome_counts.get("test_trivial", 0) + outcome_counts.get(
-        "test_not_setup", 0
-    )
+    meaningful = outcome_counts.get("test_success", 0) + outcome_counts.get("test_fail", 0)
+    problematic = outcome_counts.get("test_trivial", 0) + outcome_counts.get("test_not_setup", 0)
 
     print(f"\nMeaningful test results: {meaningful} ({meaningful/completed:.1%})")
     print(f"Problematic setups:      {problematic} ({problematic/completed:.1%})")
@@ -347,17 +330,11 @@ def print_summary(df: pd.DataFrame):
         questionable = (df_success["success_quality"] == "questionable").sum()
 
         print(f"\nSuccess quality:")
-        print(
-            f"  Clean (fully validated):        {clean:4d} ({clean/total_success:.1%})"
-        )
-        print(
-            f"  Questionable (weak validation): {questionable:4d} ({questionable/total_success:.1%})"
-        )
+        print(f"  Clean (fully validated):        {clean:4d} ({clean/total_success:.1%})")
+        print(f"  Questionable (weak validation): {questionable:4d} ({questionable/total_success:.1%})")
 
         if questionable > 0:
-            print(
-                f"\n  ⚠ WARNING: {questionable} successes have questionable validation"
-            )
+            print(f"\n  ⚠ WARNING: {questionable} successes have questionable validation")
             print(f"    due to incomplete test setup. Review carefully.")
 
     # Analysis by test outcome
@@ -372,9 +349,7 @@ def print_summary(df: pd.DataFrame):
             continue
 
         n = len(df_outcome)
-        success_rate_outcome = (
-            df_outcome["overall_success"].mean() if len(df_outcome) > 0 else 0
-        )
+        success_rate_outcome = df_outcome["overall_success"].mean() if len(df_outcome) > 0 else 0
         avg_ifr = df_outcome["ifr"].mean()
 
         print(f"\n{outcome.replace('_', ' ').title()}:")
@@ -412,18 +387,12 @@ def print_summary(df: pd.DataFrame):
         if len(df_with_ifr) > 5:
             success = df_with_ifr["overall_success"]
 
-            print(
-                f"\nE[IFR | overall_success]: {df_with_ifr[success]['ifr'].mean():.1%}"
-            )
-            print(
-                f"E[IFR | overall_failure]: {df_with_ifr[~success]['ifr'].mean():.1%}"
-            )
+            print(f"\nE[IFR | overall_success]: {df_with_ifr[success]['ifr'].mean():.1%}")
+            print(f"E[IFR | overall_failure]: {df_with_ifr[~success]['ifr'].mean():.1%}")
             print(f"Pr[overall_success]: {success.mean():.1%}")
 
             high_ifr = df_with_ifr["ifr"] >= 0.8
-            print(
-                f"Pr[overall_success | IFR >= 0.8]: {df_with_ifr[high_ifr]['overall_success'].mean():.1%}"
-            )
+            print(f"Pr[overall_success | IFR >= 0.8]: {df_with_ifr[high_ifr]['overall_success'].mean():.1%}")
 
             # Correlation
             if len(df_with_ifr) > 5:
@@ -431,9 +400,7 @@ def print_summary(df: pd.DataFrame):
                     ifr_values = df_with_ifr["ifr"].values
                     success_values = df_with_ifr["overall_success"].astype(float).values
                     corr, p_val = pearsonr(ifr_values, success_values)
-                    print(
-                        f"\nCorrelation(IFR, overall_success): r={corr:.3f}, p={p_val:.4f}"
-                    )
+                    print(f"\nCorrelation(IFR, overall_success): r={corr:.3f}, p={p_val:.4f}")
                 except ImportError:
                     logger.warning("scipy not available for correlation analysis")
 

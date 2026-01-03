@@ -3,9 +3,12 @@ import subprocess
 import subprocess
 from typing import Tuple, List, Optional
 
+
 class PodmanCommandError(Exception):
     """Custom exception for Podman command errors."""
+
     pass
+
 
 def run_podman_command(args: list[str], timeout: int = 120) -> Tuple[int, Tuple[str, str]]:
     """
@@ -19,23 +22,19 @@ def run_podman_command(args: list[str], timeout: int = 120) -> Tuple[int, Tuple[
     """
     # Prepend 'podman' to the argument list
     full_command = ["podman"] + args
-    
+
     try:
-        result = subprocess.run(
-            full_command,
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=timeout
-        )
+        result = subprocess.run(full_command, check=False, capture_output=True, text=True, timeout=timeout)
         return result.returncode, (result.stdout, result.stderr)
 
     except subprocess.TimeoutExpired as e:
         return -1, "", f"Command timed out after {timeout} seconds."
-    
+
+
 import subprocess
 import re
 from typing import Tuple, Optional
+
 
 def run_podman_command(args: list[str], timeout: int = 120) -> Tuple[int, Tuple[str, str]]:
     """
@@ -43,16 +42,11 @@ def run_podman_command(args: list[str], timeout: int = 120) -> Tuple[int, Tuple[
     """
     full_command = ["podman"] + args
     try:
-        result = subprocess.run(
-            full_command,
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=timeout
-        )
+        result = subprocess.run(full_command, check=False, capture_output=True, text=True, timeout=timeout)
         return result.returncode, (result.stdout, result.stderr)
     except subprocess.TimeoutExpired:
         raise TimeoutError(f"Podman command timed out after {timeout} seconds. Command: '{' '.join(full_command)}'")
+
 
 def podman_container_storage(container_id: str) -> Optional[dict]:
     """
@@ -60,8 +54,10 @@ def podman_container_storage(container_id: str) -> Optional[dict]:
     Returns a dictionary with 'writable' and 'virtual' sizes in bytes.
     """
     # Use --format to get specific columns and avoid header parsing issues
-    rc, (stdout, stderr) = run_podman_command(["ps", "-a", "-s", "--filter", f"id={container_id}", "--format", "{{.ID}}\t{{.Size}}"])
-    
+    rc, (stdout, stderr) = run_podman_command(
+        ["ps", "-a", "-s", "--filter", f"id={container_id}", "--format", "{{.ID}}\t{{.Size}}"]
+    )
+
     if rc != 0 or not stdout.strip():
         return None
 
@@ -74,14 +70,14 @@ def podman_container_storage(container_id: str) -> Optional[dict]:
         number, unit = match.groups()
         return float(number) * units.get(unit, 1)
 
-    parts = stdout.strip().split('\t')
+    parts = stdout.strip().split("\t")
     if len(parts) < 2:
         return None
 
     size_info = parts[1]
     # Extract writable and virtual sizes using regex
     size_match = re.search(r"([\d\.]+[a-zA-Z]+)\s*\(virtual\s*([\d\.]+[a-zA-Z]+)\)", size_info)
-    
+
     if size_match:
         writable_raw, virtual_raw = size_match.groups()
         return {
@@ -91,13 +87,14 @@ def podman_container_storage(container_id: str) -> Optional[dict]:
         }
     raise PodmanCommandError(f"Failed to parse size info for container {container_id}.")
 
+
 def podman_commit_container(
-    container_id: str, 
-    new_image_name: str, 
-    tag: Optional[str] = None, 
+    container_id: str,
+    new_image_name: str,
+    tag: Optional[str] = None,
     changes: Optional[List[str]] = None,
-    squash: bool = True, 
-    timeout: int = 8 * 60
+    squash: bool = True,
+    timeout: int = 8 * 60,
 ) -> Tuple[int, Tuple[str, str]]:
     """
     Commits a container to a new image with custom metadata changes.
@@ -106,26 +103,26 @@ def podman_commit_container(
         container_id: ID or Name of the source container.
         new_image_name: The name for the resulting image.
         tag: Optional tag (defaults to :latest if None).
-        changes: A list of Podman instructions, e.g., 
+        changes: A list of Podman instructions, e.g.,
                  ["ENTRYPOINT [\"python3\", \"main.py\"]", "ENV PORT=8080"]
         squash: Whether to collapse the new layers into one.
     """
     full_image_name = f"{new_image_name}:{tag}" if tag else new_image_name
-    
+
     args = ["commit"]
-    
+
     # Apply each change as a separate --change flag
     if changes:
         for change in changes:
             args.extend(["--change", change])
-    
+
     if squash:
         args.append("--squash")
-    
+
     args.extend([container_id, full_image_name])
-    
+
     return run_podman_command(args, timeout=timeout)
-    
+
 
 if __name__ == "__main__":
     container_id = "put_container_id_here"

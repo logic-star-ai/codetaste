@@ -69,9 +69,7 @@ def get_logger(
             for handler in logger.handlers[:]:
                 logger.removeHandler(handler)
 
-        file_fmt = logging.Formatter(
-            "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-        )
+        file_fmt = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
         console_fmt = logging.Formatter("%(levelname)s: %(message)s")
 
         # Console Handler (always added)

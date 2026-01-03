@@ -74,15 +74,11 @@ def run_test_evaluation(instance_row: InstanceRow) -> Optional[Metrics]:
     Returns:
         Test metrics if successful, None otherwise
     """
-    instance_output_dir = os.path.join(
-        PROJECT_ROOT, instance_row.instance_dir("output")
-    )
+    instance_output_dir = os.path.join(PROJECT_ROOT, instance_row.instance_dir("output"))
     prediction_diff = os.path.join(instance_output_dir, "prediction.diff")
 
     if not os.path.exists(prediction_diff):
-        eval_logger.warning(
-            f"[{instance_row.id}]: No prediction.diff found at {prediction_diff}"
-        )
+        eval_logger.warning(f"[{instance_row.id}]: No prediction.diff found at {prediction_diff}")
         return None
 
     eval_logger.info(f"[{instance_row.id}]: Running test evaluation...")
@@ -105,25 +101,19 @@ def run_test_evaluation(instance_row: InstanceRow) -> Optional[Metrics]:
 
         eval_logger.info(f"[{instance_row.id}]: Running: {' '.join(run_cmds)}")
 
-        result = subprocess.run(
-            run_cmds, cwd=PROJECT_ROOT, capture_output=True, text=True, timeout=600
-        )
+        result = subprocess.run(run_cmds, cwd=PROJECT_ROOT, capture_output=True, text=True, timeout=600)
 
         output_lines = result.stdout.strip().split("\n")
         for line in reversed(output_lines):
             try:
                 data = json.loads(line)
                 metrics = Metrics(**data)
-                eval_logger.info(
-                    f"[{instance_row.id}]: Test metrics: {metrics.model_dump()}"
-                )
+                eval_logger.info(f"[{instance_row.id}]: Test metrics: {metrics.model_dump()}")
                 return metrics
             except (json.JSONDecodeError, ValueError):
                 continue
 
-        eval_logger.warning(
-            f"[{instance_row.id}]: Could not parse test metrics from output"
-        )
+        eval_logger.warning(f"[{instance_row.id}]: Could not parse test metrics from output")
         return None
 
     except subprocess.TimeoutExpired:
@@ -134,9 +124,7 @@ def run_test_evaluation(instance_row: InstanceRow) -> Optional[Metrics]:
         return None
 
 
-def parse_sarif_results(
-    sarif_path: str, rules_path: str
-) -> Dict[str, Tuple[int, int, int]]:
+def parse_sarif_results(sarif_path: str, rules_path: str) -> Dict[str, Tuple[int, int, int]]:
     """
     Parse results into a dictionary: RULE_ID -> (base_count, agent_count, golden_count).
     """
@@ -176,9 +164,7 @@ def parse_sarif_results(
                             rule_id = result.get("ruleId")
                             if rule_id:
                                 clean_id = rule_id.split(".")[-1]
-                                agent_counts[clean_id] = (
-                                    agent_counts.get(clean_id, 0) + 1
-                                )
+                                agent_counts[clean_id] = agent_counts.get(clean_id, 0) + 1
         except Exception as e:
             eval_logger.error(f"Failed to parse SARIF file {sarif_path}: {e}")
     else:
@@ -197,15 +183,11 @@ def run_rule_evaluation(
     """
     Run rule-based evaluation. Returns (positive_rate, negative_rate, total_rate).
     """
-    instance_output_dir = os.path.join(
-        PROJECT_ROOT, instance_row.instance_dir("output")
-    )
+    instance_output_dir = os.path.join(PROJECT_ROOT, instance_row.instance_dir("output"))
     prediction_diff = os.path.join(instance_output_dir, "prediction.diff")
 
     if not os.path.exists(prediction_diff):
-        eval_logger.warning(
-            f"[{instance_row.id}]: No prediction.diff found at {prediction_diff}"
-        )
+        eval_logger.warning(f"[{instance_row.id}]: No prediction.diff found at {prediction_diff}")
         return None, None, None
 
     eval_logger.info(f"[{instance_row.id}]: Running rule evaluation...")
@@ -223,9 +205,7 @@ def run_rule_evaluation(
             "eval_rule",
         ]
 
-        subprocess.run(
-            run_cmds, cwd=PROJECT_ROOT, capture_output=True, text=True, timeout=1200
-        )
+        subprocess.run(run_cmds, cwd=PROJECT_ROOT, capture_output=True, text=True, timeout=1200)
 
         sarif_pos = os.path.join(instance_output_dir, "rules_positive.sarif")
         sarif_neg = os.path.join(instance_output_dir, "rules_negative.sarif")
@@ -262,9 +242,7 @@ def evaluate_instance(instance_row: InstanceRow) -> EvaluationResult:
     result = EvaluationResult(instance_row.id)
     eval_logger.info(f"\n{'='*60}\nEvaluating: {instance_row.display_path}\n{'='*60}")
 
-    instance_output_dir = os.path.join(
-        PROJECT_ROOT, instance_row.instance_dir("output")
-    )
+    instance_output_dir = os.path.join(PROJECT_ROOT, instance_row.instance_dir("output"))
     prediction_diff = os.path.join(instance_output_dir, "prediction.diff")
 
     if not os.path.exists(prediction_diff):
@@ -316,7 +294,6 @@ def main():
     for instance in instances:
         results.append(evaluate_instance(instance))
 
-
     output_dir = os.path.join(PROJECT_ROOT, "output")
     os.makedirs(output_dir, exist_ok=True)
 
@@ -333,9 +310,7 @@ def main():
 
     eval_logger.info(f"\n{'='*60}\nEvaluation complete!\nResults: {results_file}")
 
-    rule_successes = sum(
-        r.rule_results_total for r in results if r.rule_results_total is not None
-    )
+    rule_successes = sum(r.rule_results_total for r in results if r.rule_results_total is not None)
     errors = sum(1 for r in results if r.error)
 
     eval_logger.info(

@@ -62,9 +62,7 @@ def cleanup_all_containers() -> None:
         if not _active_containers:
             return
 
-        utils_logger.info(
-            f"Cleaning up {len(_active_containers)} active container(s)..."
-        )
+        utils_logger.info(f"Cleaning up {len(_active_containers)} active container(s)...")
         containers_to_cleanup = list(_active_containers)
         _active_containers.clear()
 
@@ -73,9 +71,7 @@ def cleanup_all_containers() -> None:
             stop_and_remove_container(container)
             utils_logger.info(f"✅ Cleaned up container {container.id[:12]}")
         except Exception as e:
-            utils_logger.warning(
-                f"⚠️ Failed to cleanup container {container.id[:12]}: {e}"
-            )
+            utils_logger.warning(f"⚠️ Failed to cleanup container {container.id[:12]}: {e}")
 
 
 def stream_exec(
@@ -102,9 +98,7 @@ def stream_exec(
 
     full_output = []
     # exec_run with stream=True returns (None, iterator) where iterator yields bytes chunks
-    exit_code, output_stream = container.exec_run(
-        cmd=cmd, environment=env or {}, stream=True, tty=False
-    )
+    exit_code, output_stream = container.exec_run(cmd=cmd, environment=env or {}, stream=True, tty=False)
 
     acc = ""
     for chunk in cast(Any, output_stream):
@@ -145,9 +139,7 @@ def copy_to_container(container: PodmanContainer, src_content: bytes, dst_path: 
     container.put_archive(os.path.dirname(dst_path), stream.read())
 
 
-def extract_folder_from_container(
-    container: PodmanContainer, container_path: str, local_dest: str
-) -> None:
+def extract_folder_from_container(container: PodmanContainer, container_path: str, local_dest: str) -> None:
     """
     Extract a folder from a container to the local filesystem.
 
@@ -170,9 +162,7 @@ def extract_folder_from_container(
         tar.extractall(path=local_dest)
 
 
-def stop_and_remove_container(
-    container: PodmanContainer, force: bool = True, auto_unregister: bool = True
-) -> None:
+def stop_and_remove_container(container: PodmanContainer, force: bool = True, auto_unregister: bool = True) -> None:
     """
     Stop and remove a Docker container.
 
@@ -188,9 +178,7 @@ def stop_and_remove_container(
         time.sleep(2)
         container.reload()
         if container.status != "exited":
-            utils_logger.warning(
-                f"[{container.id}]: Failed to stop container, trying to remove ...: {e}"
-            )
+            utils_logger.warning(f"[{container.id}]: Failed to stop container, trying to remove ...: {e}")
     container.remove(force=force)
 
     if auto_unregister:
@@ -200,9 +188,7 @@ def stop_and_remove_container(
 import logging
 
 
-def podman_exec_logged(
-    container: PodmanContainer, cmd: list[str] | str, logger: logging.Logger, **kwargs
-):
+def podman_exec_logged(container: PodmanContainer, cmd: list[str] | str, logger: logging.Logger, **kwargs):
     """
     Structured wrapper for podman-py container.exec_run.
 
@@ -235,23 +221,15 @@ def podman_exec_logged(
     stdout_lines = stdout_text.splitlines()
     stderr_lines = stderr_text.splitlines()
     stdout_text_trunc = "\n".join(
-        (stdout_lines[:25] + ["... (truncated) ..."] + stdout_lines[-25:])
-        if len(stdout_lines) > 50
-        else stdout_lines
+        (stdout_lines[:25] + ["... (truncated) ..."] + stdout_lines[-25:]) if len(stdout_lines) > 50 else stdout_lines
     )
     stderr_text_trunc = "\n".join(
-        (stderr_lines[:25] + ["... (truncated) ..."] + stderr_lines[-25:])
-        if len(stderr_lines) > 50
-        else stderr_lines
+        (stderr_lines[:25] + ["... (truncated) ..."] + stderr_lines[-25:]) if len(stderr_lines) > 50 else stderr_lines
     )
     if exit_code == 0:
-        logger.info(
-            f"\n[Exit {exit_code:3}] Container '{image_name}' command succeeded (in {elapsed:.2f}s)."
-        )
+        logger.info(f"\n[Exit {exit_code:3}] Container '{image_name}' command succeeded (in {elapsed:.2f}s).")
     else:
-        logger.error(
-            f"\n[Exit {exit_code:3}] Container '{image_name}' command failed (in {elapsed:.2f}s)"
-        )
+        logger.error(f"\n[Exit {exit_code:3}] Container '{image_name}' command failed (in {elapsed:.2f}s)")
     if stdout_text:
         logger.debug(f"[{image_name} STDOUT]:\n{stdout_text_trunc}")
     if stderr_text:
