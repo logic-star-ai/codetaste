@@ -16,7 +16,6 @@ from typing import Optional
 import podman
 from podman.domain.containers import Container as PodmanContainer
 
-from refactoring_benchmark.utils.podman_shell import podman_commit_container, podman_container_storage
 from refactoring_benchmark.utils.prompts import BOOTSTRAP_PROMPT
 from refactoring_benchmark.utils.models import InstanceRow, Metrics, InstanceMetadata
 from refactoring_benchmark.utils.logger import setup_logging, get_logger
@@ -31,84 +30,13 @@ from refactoring_benchmark.utils.container_utils import (
     get_local_client,
     safe_container_run,
 )
-
-
-class BootstrapError(Exception):
-    """Custom exception for bootstrap errors."""
-
-    pass
-
-
-def validate_container_size(container_id: str, max_size_bytes: int = 5 * (1024**3)) -> None:
-    """Validate container storage size does not exceed limit."""
-    container_size = podman_container_storage(container_id)["writable_bytes"]
-    if container_size > max_size_bytes:
-        raise BootstrapError(
-            f"Container additional size exceeded {max_size_bytes / (1024**3):.2f}GB limit. "
-            f"writable_bytes = {container_size / (1024**3):.2f}GB. This is too large."
-        )
-
-
-def validate_and_commit_container(
-    container_id: str, image_name: str, max_size_bytes: int = 5 * (1024**3), **commit_kwargs
-) -> None:
-    """Validate container size then commit if within limits."""
-    validate_container_size(container_id, max_size_bytes)
-    podman_commit_container(container_id, image_name, **commit_kwargs)
-
-
-# --- CONFIGURATION ---
-CSV_FILE = "instances.csv"
-API_KEY = os.environ.get("ANTHROPIC_API_KEY")
-LOG_DIR = "logs"
-PROJECT_ROOT = os.path.join(os.path.dirname(__file__), "..", "..")
-NR_PARALLEL_PROCESSES = 10
-TIMEOUT_BOOTSTRAP = 3600 * 2
-SUPPORTED_LANGUAGES = ["python", "javascript", "java", "c", "go", "rust"]
-BASE_IMAGE = "benchmark/benchmark-base-all"
+import refactoring_benchmark.bootstrap.utils as bootstrap_utils
+import refactoring_benchmark.bootstrap.config as config
+from refactoring_benchmark.bootstrap.utils import BootstrapError
 
 # Initialize logging infrastructure
-setup_logging(LOG_DIR)
+setup_logging(config.LOG_DIR)
 bootstrap_logger = get_logger("bootstrap")
-
-
-def run_test_metrics(container: PodmanContainer, logger: logging.Logger) -> Metrics:
-    """Capture test metrics from the container."""
-    command = (
-        "timeout 15m bash -c '"
-        "sudo /scripts/setup_system.sh || true; "
-        "source /scripts/setup_shell.sh || true; "
-        "/scripts/run_tests'"
-    )
-    try:
-        exit_code, (stdout_bytes, stderr_bytes) = podman_exec_logged(container, ["bash", "-c", command], logger)
-        output = stdout_bytes.decode().strip().split("\n")
-        data = json.loads(output[-1])
-        return Metrics(**data)
-    except Exception:
-        return Metrics(passed=0, failed=-1, total=0, error="Crashed")
-
-
-def setup_base_image_with_cloned_repo(
-    client, repo_url: str, golden_commit_hash: str, logger: logging.Logger
-) -> PodmanContainer:
-    """Helper to clone repo into base image container."""
-    container: PodmanContainer = safe_container_run(
-        client,
-        BASE_IMAGE,
-        detach=True,
-        environment={"ANTHROPIC_API_KEY": API_KEY},
-        working_dir="/testbed",
-    )
-    register_container(container)
-    for cmd in [
-        "git init .",
-        f"git remote add origin {repo_url}",
-        f"git fetch --depth 2 origin {golden_commit_hash}",
-        f"git checkout {golden_commit_hash}",
-    ]:
-        podman_exec_logged(container, ["bash", "-c", f"timeout 5m {cmd}"], logger)
-    return container
 
 
 def bootstrap_setup_phase(client: podman.PodmanClient, instance_row: InstanceRow, use_base_image: bool = False) -> str:
@@ -127,12 +55,14 @@ def bootstrap_setup_phase(client: podman.PodmanClient, instance_row: InstanceRow
         pass
 
     repo_url = f"https://github.com/{instance_row.owner}/{instance_row.repo}.git"
-    container = setup_base_image_with_cloned_repo(client, repo_url, instance_row.golden_commit_hash, instance_logger)
+    container = bootstrap_utils.setup_base_image_with_cloned_repo(
+        client, config.BASE_IMAGE, config.API_KEY, repo_url, instance_row.golden_commit_hash, instance_logger
+    )
 
     try:
         if use_base_image:
             instance_logger.info("Using base image fallback for setup phase.")
-            validate_and_commit_container(container.id, setup_image, squash=True)
+            bootstrap_utils.validate_and_commit_container(container.id, setup_image, squash=True)
             return setup_image
 
         instance_logger.info("Claude Agent is taking control...")
@@ -146,50 +76,24 @@ def bootstrap_setup_phase(client: podman.PodmanClient, instance_row: InstanceRow
         _, output = stream_exec(
             container,
             agent_cmd,
-            env={"ANTHROPIC_API_KEY": API_KEY or ""},
+            env={"ANTHROPIC_API_KEY": config.API_KEY or ""},
             stream_logger=instance_logger,
             is_json_output=True,
         )
         if "error_max_budget_usd" in output.splitlines()[-1]:
             raise BootstrapError("Bootstrap exceeded budget limit.")
 
-        validate_container_size(container.id)
+        bootstrap_utils.validate_container_size(container.id)
 
         if time.time() - ts_start >= 4200:
             raise TimeoutError(f"Agent exceeded 70m time limit for {instance_row.id}")
 
-        # Capture Golden Commit Metrics
-        podman_exec_logged(
-            container,
-            ["bash", "-c", "timeout 5m git reset --hard HEAD && git clean -xdff"],
-            instance_logger,
-        )
-        podman_exec_logged(
-            container,
-            [
-                "bash",
-                "-c",
-                f"timeout 5m git checkout {instance_row.golden_commit_hash}",
-            ],
-            instance_logger,
-        )
-        bootstrap_logger.info(f"[{instance_row.id}]: Capturing Golden Test Metrics...")
-        golden_metrics = run_test_metrics(container, instance_logger)
+        golden_metrics = bootstrap_utils.run_metrics(container, instance_row.golden_commit_hash, instance_logger)
         bootstrap_logger.info(
             f"[{instance_row.id}]: Golden Metrics: Passed={golden_metrics.passed}, Failed={golden_metrics.failed}, Total={golden_metrics.total}"
         )
-        # Capture Base Commit Metrics
-        podman_exec_logged(
-            container,
-            ["bash", "-c", "timeout 5m git reset --hard HEAD && git clean -xdff"],
-            instance_logger,
-        )
-        podman_exec_logged(
-            container,
-            ["bash", "-c", f"timeout 5m git checkout {instance_row.commit_hash}"],
-            instance_logger,
-        )
-        base_metrics = run_test_metrics(container, instance_logger)
+
+        base_metrics = bootstrap_utils.run_metrics(container, instance_row.commit_hash, instance_logger)
         bootstrap_logger.info(
             f"[{instance_row.id}]: Base Metrics: Passed={base_metrics.passed}, Failed={base_metrics.failed}, Total={base_metrics.total}"
         )
@@ -215,7 +119,7 @@ def bootstrap_setup_phase(client: podman.PodmanClient, instance_row: InstanceRow
             bootstrap_logger.warning(f"[{instance_row.id}]: Failed to save scripts: {e}")
 
         if meta.is_success_base or meta.is_success_golden:
-            validate_and_commit_container(container.id, setup_image, squash=True)
+            bootstrap_utils.validate_and_commit_container(container.id, setup_image, squash=True)
             bootstrap_logger.info(f"[{instance_row.id}]: ✅ Saved setup image: {setup_image}")
             return setup_image
 
@@ -244,7 +148,7 @@ def bootstrap_runtime_phase(client: podman.PodmanClient, row: InstanceRow, setup
         register_container(container)
 
         # 1. Inject Entrypoint
-        entrypoint_path = os.path.join(PROJECT_ROOT, "entrypoint.sh")
+        entrypoint_path = os.path.join(config.PROJECT_ROOT, "entrypoint.sh")
         with open(entrypoint_path, "rb") as f:
             copy_to_container(container, f.read(), "/usr/local/bin/entrypoint.sh")
         container.exec_run(["bash", "-c", "timeout 5m sudo chmod +x /usr/local/bin/entrypoint.sh"])
@@ -254,7 +158,7 @@ def bootstrap_runtime_phase(client: podman.PodmanClient, row: InstanceRow, setup
             ("rules", "/rules"),
             ("descriptions", "/task_description"),
         ]:
-            src = os.path.join(PROJECT_ROOT, row.asset_dir(folder))
+            src = os.path.join(config.PROJECT_ROOT, row.asset_dir(folder))
             if os.path.exists(src):
                 podman_exec_logged(
                     container,
@@ -323,7 +227,7 @@ def bootstrap_runtime_phase(client: podman.PodmanClient, row: InstanceRow, setup
         )
 
         # Commit
-        validate_and_commit_container(
+        bootstrap_utils.validate_and_commit_container(
             container.id,
             runtime_image,
             changes=['ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]'],
@@ -340,7 +244,7 @@ def bootstrap_runtime_phase(client: podman.PodmanClient, row: InstanceRow, setup
 def bootstrap_instance_retry(instance: InstanceRow):
 
     try:
-        is_supported = any(lang in instance.language.lower() for lang in SUPPORTED_LANGUAGES)
+        is_supported = any(lang in instance.language.lower() for lang in config.SUPPORTED_LANGUAGES)
         try:
             # Attempt 1
             client = get_local_client(80 * 60)
@@ -362,11 +266,11 @@ def bootstrap_instance_retry(instance: InstanceRow):
 
 def bootstrap_parallel(instances: list[InstanceRow]):
     """Orchestrates parallel execution with process local clients."""
-    with ProcessPoolExecutor(NR_PARALLEL_PROCESSES) as executor:
+    with ProcessPoolExecutor(config.NR_PARALLEL_PROCESSES) as executor:
         future_to_instance = {executor.submit(bootstrap_instance_retry, inst): inst for inst in instances}
         all_futures_remaining = set(future_to_instance.keys())
         bootstrap_logger.info(
-            f"🚀 Bootstrapping {len(instances)} instances with up to {NR_PARALLEL_PROCESSES} parallel processes..."
+            f"🚀 Bootstrapping {len(instances)} instances with up to {config.NR_PARALLEL_PROCESSES} parallel processes..."
         )
         bootstrap_logger.info(
             f"Remaining instances {len(all_futures_remaining)}: {[future_to_instance[future].id for future in list(all_futures_remaining)[:3]]} ..."
@@ -383,12 +287,12 @@ def bootstrap_parallel(instances: list[InstanceRow]):
 
 
 def main():
-    if not API_KEY:
+    if not config.API_KEY:
         bootstrap_logger.error("Missing ANTHROPIC_API_KEY")
         sys.exit(1)
 
     instances = []
-    with open(CSV_FILE, "r") as f:
+    with open(config.CSV_FILE, "r") as f:
         for row in csv.DictReader(f):
             instances.append(InstanceRow(**row))
 
