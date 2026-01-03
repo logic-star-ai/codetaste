@@ -26,6 +26,13 @@ def get_local_client(timeout: int = 4000) -> Optional[podman.PodmanClient]:
     c.ping()
     return c
 
+def is_image_existing(client: podman.PodmanClient, setup_image: str) -> bool:
+    """Check if a Podman image exists locally."""
+    try:
+        client.images.get(setup_image)
+        return True
+    except:
+        return False
 
 def safe_container_run(client: podman.PodmanClient, image, **kwargs) -> PodmanContainer:
     """Retries container creation to handle 'POST operation failed' socket errors."""
@@ -186,7 +193,48 @@ def stop_and_remove_container(container: PodmanContainer, force: bool = True, au
         unregister_container(container)
 
 
+def podman_exec_bash_logged(
+    container: PodmanContainer,
+    bash_cmd: str,
+    logger: logging.Logger,
+    timeout: Optional[int] = None,
+    **kwargs,
+):
+    """
+    Structured wrapper for podman-py container.exec_run with bash command.
 
+    Args:
+        container: podman.domain.containers.Container object
+        bash_cmd: Command string to run in bash
+        logger: logging.Logger instance
+        timeout: Optional timeout in seconds
+        **kwargs: Passed to exec_run (e.g. user, workdir, env)
+    """
+    cmd = ["bash", "-c", bash_cmd]
+    if timeout is not None:
+        cmd = ["timeout", str(timeout)] + cmd
+    return podman_exec_logged(container, cmd, logger, **kwargs)
+
+def podman_exec_bash_logged(
+    container: PodmanContainer,
+    bash_cmd: str,
+    logger: logging.Logger,
+    timeout: Optional[int] = None,
+    **kwargs,
+):
+    """
+    Structured wrapper for podman-py container.exec_run with bash command.
+
+    Args:
+        container: podman.domain.containers.Container object
+        bash_cmd: Command string to run in bash
+        logger: logging.Logger instance
+        timeout: Optional timeout in seconds
+        **kwargs: Passed to exec_run (e.g. user, workdir, env)
+    """
+    if timeout is not None:
+        bash_cmd = f"timeout {str(timeout).strip()}m {bash_cmd}"
+    return podman_exec_logged(container, ["bash", "-c", bash_cmd], logger, **kwargs)
 
 def podman_exec_logged(container: PodmanContainer, cmd: list[str] | str, logger: logging.Logger, **kwargs):
     """

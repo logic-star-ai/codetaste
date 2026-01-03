@@ -37,12 +37,9 @@ def bootstrap_setup_phase(client: podman.PodmanClient, row: InstanceRow, use_bas
     setup_image = row.setup_image
     container: Optional[PodmanContainer] = None
 
-    try:
-        client.images.get(setup_image)
+    if podman_utils.is_image_existing(client, setup_image):
         bootstrap_logger.info(f"⏭️  SKIPPING: Setup image already exists: {setup_image}")
         return setup_image
-    except:
-        pass
 
     repo_url = f"https://github.com/{row.owner}/{row.repo}.git"
 
@@ -126,12 +123,9 @@ def bootstrap_runtime_phase(client: podman.PodmanClient, row: InstanceRow, setup
     instance_logger = get_logger(f"bootstrap-{row.id}", use_file=True, use_stdout=False)
     container: Optional[PodmanContainer] = None
 
-    try:
-        client.images.get(runtime_image)
+    if podman_utils.is_image_existing(client, runtime_image):
         bootstrap_logger.info(f"⏭️  SKIPPING: Runtime image already exists: {runtime_image}")
         return runtime_image
-    except:
-        pass
 
     try:
         container = podman_utils.safe_container_run(client, setup_image, detach=True, working_dir="/testbed")
@@ -144,36 +138,14 @@ def bootstrap_runtime_phase(client: podman.PodmanClient, row: InstanceRow, setup
         container.exec_run(["bash", "-c", "timeout 5m sudo chmod +x /usr/local/bin/entrypoint.sh"])
 
         # 2. Inject Rules & Descriptions (Omitted detail for brevity, logic remains same)
-        for folder, target in [
-            ("rules", "/rules"),
-            ("descriptions", "/task_description"),
-        ]:
+        for folder, target in [("rules", "/rules"), ("descriptions", "/task_description")]:
             src = os.path.join(config.PROJECT_ROOT, row.asset_dir(folder))
             if os.path.exists(src):
-                podman_utils.podman_exec_logged(
-                    container,
-                    ["bash", "-c", f"sudo mkdir -p {target}"],
-                    instance_logger,
-                )
                 for filename in os.listdir(src):
                     with open(os.path.join(src, filename), "rb") as f:
                         podman_utils.copy_to_container(container, f.read(), f"{target}/{filename}")
-                podman_utils.podman_exec_logged(
-                    container,
-                    [
-                        "bash",
-                        "-c",
-                        "timeout 5m sudo chown -R benchmarker:benchmarker /task_description",
-                    ],
-                    instance_logger,
-                )
-                podman_utils.podman_exec_logged(
-                    container,
-                    ["bash", "-c", "timeout 5m sudo chmod -R 755 /task_description"],
-                    instance_logger,
-                )
 
-        # 4. Lobotomize git
+        # 3. Lobotomize git
         git_cmds = [
             "git reset --hard HEAD && git clean -xdff",
             f"git checkout {row.commit_hash}",
