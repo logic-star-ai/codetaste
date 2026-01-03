@@ -13,6 +13,7 @@ import podman
 from podman.domain.containers import Container as PodmanContainer
 from podman.errors import APIError
 
+
 utils_logger = get_logger("container_utils")
 
 _active_containers: set[PodmanContainer] = set()
@@ -62,14 +63,14 @@ def cleanup_all_containers() -> None:
         if not _active_containers:
             return
 
-        utils_logger.info(f"Cleaning up {len(_active_containers)} active container(s)...")
+        utils_logger.debug(f"Cleaning up {len(_active_containers)} active container(s)...")
         containers_to_cleanup = list(_active_containers)
         _active_containers.clear()
 
     for container in containers_to_cleanup:
         try:
             stop_and_remove_container(container)
-            utils_logger.info(f"✅ Cleaned up container {container.id[:12]}")
+            utils_logger.debug(f"✅ Cleaned up container {container.id[:12]}. {len(_active_containers)} remaining.")
         except Exception as e:
             utils_logger.warning(f"⚠️ Failed to cleanup container {container.id[:12]}: {e}")
 
@@ -185,7 +186,6 @@ def stop_and_remove_container(container: PodmanContainer, force: bool = True, au
         unregister_container(container)
 
 
-import logging
 
 
 def podman_exec_logged(container: PodmanContainer, cmd: list[str] | str, logger: logging.Logger, **kwargs):

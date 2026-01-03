@@ -19,17 +19,7 @@ from podman.domain.containers import Container as PodmanContainer
 from refactoring_benchmark.utils.prompts import BOOTSTRAP_PROMPT
 from refactoring_benchmark.utils.models import InstanceRow, Metrics, InstanceMetadata
 from refactoring_benchmark.utils.logger import setup_logging, get_logger
-from refactoring_benchmark.utils.container_utils import (
-    podman_exec_logged,
-    stop_and_remove_container,
-    stream_exec,
-    copy_to_container,
-    extract_folder_from_container,
-    register_container,
-    cleanup_all_containers,
-    get_local_client,
-    safe_container_run,
-)
+import refactoring_benchmark.podman.utils as podman_utils
 import refactoring_benchmark.bootstrap.utils as bootstrap_utils
 import refactoring_benchmark.bootstrap.config as config
 from refactoring_benchmark.bootstrap.utils import BootstrapError
@@ -37,14 +27,14 @@ from refactoring_benchmark.bootstrap.utils import BootstrapError
 # Initialize logging infrastructure
 setup_logging(config.LOG_DIR)
 bootstrap_logger = get_logger("bootstrap")
+executor_ref: Optional[ProcessPoolExecutor] = None
 
-
-def bootstrap_setup_phase(client: podman.PodmanClient, instance_row: InstanceRow, use_base_image: bool = False) -> str:
+def bootstrap_setup_phase(client: podman.PodmanClient, row: InstanceRow, use_base_image: bool = False) -> str:
     """Phase 1: Setup environment and verify tests."""
-    instance_logger = get_logger(f"bootstrap-{instance_row.id}", use_file=True, use_stdout=False)
-    instance_dir = instance_row.instance_dir()
+    instance_logger = get_logger(f"bootstrap-{row.id}", use_file=True, use_stdout=False)
+    instance_dir = row.instance_dir()
     os.makedirs(instance_dir, exist_ok=True)
-    setup_image = instance_row.setup_image
+    setup_image = row.setup_image
     container: Optional[PodmanContainer] = None
 
     try:
@@ -54,12 +44,12 @@ def bootstrap_setup_phase(client: podman.PodmanClient, instance_row: InstanceRow
     except:
         pass
 
-    repo_url = f"https://github.com/{instance_row.owner}/{instance_row.repo}.git"
-    container = bootstrap_utils.setup_base_image_with_cloned_repo(
-        client, config.BASE_IMAGE, config.API_KEY, repo_url, instance_row.golden_commit_hash, instance_logger
-    )
+    repo_url = f"https://github.com/{row.owner}/{row.repo}.git"
 
     try:
+        container = bootstrap_utils.setup_testbed_container(
+            client, config.BASE_IMAGE, config.API_KEY, repo_url, row.golden_commit_hash, instance_logger
+        )
         if use_base_image:
             instance_logger.info("Using base image fallback for setup phase.")
             bootstrap_utils.validate_and_commit_container(container.id, setup_image, squash=True)
@@ -73,7 +63,7 @@ def bootstrap_setup_phase(client: podman.PodmanClient, instance_row: InstanceRow
         ]
 
         ts_start = time.time()
-        _, output = stream_exec(
+        _, output = podman_utils.stream_exec(
             container,
             agent_cmd,
             env={"ANTHROPIC_API_KEY": config.API_KEY or ""},
@@ -86,26 +76,26 @@ def bootstrap_setup_phase(client: podman.PodmanClient, instance_row: InstanceRow
         bootstrap_utils.validate_container_size(container.id)
 
         if time.time() - ts_start >= 4200:
-            raise TimeoutError(f"Agent exceeded 70m time limit for {instance_row.id}")
+            raise TimeoutError(f"Agent exceeded 70m time limit for {row.id}")
 
-        golden_metrics = bootstrap_utils.run_metrics(container, instance_row.golden_commit_hash, instance_logger)
+        golden_metrics = bootstrap_utils.run_metrics(container, row.golden_commit_hash, instance_logger)
         bootstrap_logger.info(
-            f"[{instance_row.id}]: Golden Metrics: Passed={golden_metrics.passed}, Failed={golden_metrics.failed}, Total={golden_metrics.total}"
+            f"[{row.id}]: Golden Metrics: Passed={golden_metrics.passed}, Failed={golden_metrics.failed}, Total={golden_metrics.total}"
         )
 
-        base_metrics = bootstrap_utils.run_metrics(container, instance_row.commit_hash, instance_logger)
+        base_metrics = bootstrap_utils.run_metrics(container, row.commit_hash, instance_logger)
         bootstrap_logger.info(
-            f"[{instance_row.id}]: Base Metrics: Passed={base_metrics.passed}, Failed={base_metrics.failed}, Total={base_metrics.total}"
+            f"[{row.id}]: Base Metrics: Passed={base_metrics.passed}, Failed={base_metrics.failed}, Total={base_metrics.total}"
         )
 
         shutil.rmtree(instance_dir, ignore_errors=True)
         meta = InstanceMetadata(
-            owner=instance_row.owner,
-            repo=instance_row.repo,
+            owner=row.owner,
+            repo=row.repo,
             golden_metrics=golden_metrics,
             base_metrics=base_metrics,
-            base_hash=instance_row.commit_hash,
-            golden_commit_hash=instance_row.golden_commit_hash,
+            base_hash=row.commit_hash,
+            golden_commit_hash=row.golden_commit_hash,
         )
         with open(os.path.join(instance_dir, "metadata.json"), "w") as f:
             json.dump(meta.model_dump(), f, indent=2)
@@ -113,21 +103,21 @@ def bootstrap_setup_phase(client: podman.PodmanClient, instance_row: InstanceRow
         # Save scripts
         try:
             save_directory = instance_dir + ("/failed" if not (meta.is_success_base or meta.is_success_golden) else "")
-            extract_folder_from_container(container, "/scripts", save_directory)
-            bootstrap_logger.info(f"[{instance_row.id}]: ✅ Saved scripts to {save_directory}/scripts")
+            podman_utils.extract_folder_from_container(container, "/scripts", save_directory)
+            bootstrap_logger.info(f"[{row.id}]: ✅ Saved scripts to {save_directory}/scripts")
         except Exception as e:
-            bootstrap_logger.warning(f"[{instance_row.id}]: Failed to save scripts: {e}")
+            bootstrap_logger.warning(f"[{row.id}]: Failed to save scripts: {e}")
 
         if meta.is_success_base or meta.is_success_golden:
             bootstrap_utils.validate_and_commit_container(container.id, setup_image, squash=True)
-            bootstrap_logger.info(f"[{instance_row.id}]: ✅ Saved setup image: {setup_image}")
+            bootstrap_logger.info(f"[{row.id}]: ✅ Saved setup image: {setup_image}")
             return setup_image
 
         raise RuntimeError("Agent setup failed for both commits.")
 
     finally:
         if container is not None:
-            stop_and_remove_container(container)
+            podman_utils.stop_and_remove_container(container)
 
 
 def bootstrap_runtime_phase(client: podman.PodmanClient, row: InstanceRow, setup_image: str) -> Optional[str]:
@@ -144,13 +134,13 @@ def bootstrap_runtime_phase(client: podman.PodmanClient, row: InstanceRow, setup
         pass
 
     try:
-        container = safe_container_run(client, setup_image, detach=True, working_dir="/testbed")
-        register_container(container)
+        container = podman_utils.safe_container_run(client, setup_image, detach=True, working_dir="/testbed")
+        podman_utils.register_container(container)
 
         # 1. Inject Entrypoint
         entrypoint_path = os.path.join(config.PROJECT_ROOT, "entrypoint.sh")
         with open(entrypoint_path, "rb") as f:
-            copy_to_container(container, f.read(), "/usr/local/bin/entrypoint.sh")
+            podman_utils.copy_to_container(container, f.read(), "/usr/local/bin/entrypoint.sh")
         container.exec_run(["bash", "-c", "timeout 5m sudo chmod +x /usr/local/bin/entrypoint.sh"])
 
         # 2. Inject Rules & Descriptions (Omitted detail for brevity, logic remains same)
@@ -160,15 +150,15 @@ def bootstrap_runtime_phase(client: podman.PodmanClient, row: InstanceRow, setup
         ]:
             src = os.path.join(config.PROJECT_ROOT, row.asset_dir(folder))
             if os.path.exists(src):
-                podman_exec_logged(
+                podman_utils.podman_exec_logged(
                     container,
                     ["bash", "-c", f"sudo mkdir -p {target}"],
                     instance_logger,
                 )
                 for filename in os.listdir(src):
                     with open(os.path.join(src, filename), "rb") as f:
-                        copy_to_container(container, f.read(), f"{target}/{filename}")
-                podman_exec_logged(
+                        podman_utils.copy_to_container(container, f.read(), f"{target}/{filename}")
+                podman_utils.podman_exec_logged(
                     container,
                     [
                         "bash",
@@ -177,7 +167,7 @@ def bootstrap_runtime_phase(client: podman.PodmanClient, row: InstanceRow, setup
                     ],
                     instance_logger,
                 )
-                podman_exec_logged(
+                podman_utils.podman_exec_logged(
                     container,
                     ["bash", "-c", "timeout 5m sudo chmod -R 755 /task_description"],
                     instance_logger,
@@ -193,7 +183,7 @@ def bootstrap_runtime_phase(client: podman.PodmanClient, row: InstanceRow, setup
             "git gc --prune=now --aggressive > /dev/null 2>&1 || true",
         ]
         for cmd in git_cmds:
-            exit_code, (stdout_bytes, stderr_bytes) = podman_exec_logged(
+            exit_code, (stdout_bytes, stderr_bytes) = podman_utils.podman_exec_logged(
                 container, ["bash", "-c", f"timeout 5m {cmd}"], instance_logger
             )
             if exit_code == 124:
@@ -211,12 +201,12 @@ def bootstrap_runtime_phase(client: podman.PodmanClient, row: InstanceRow, setup
             ],
             demux=True,
         )
-        podman_exec_logged(
+        podman_utils.podman_exec_logged(
             container,
             ["bash", "-c", "timeout 5m sudo /scripts/setup_system.sh || true"],
             instance_logger,
         )
-        podman_exec_logged(
+        podman_utils.podman_exec_logged(
             container,
             [
                 "bash",
@@ -238,35 +228,34 @@ def bootstrap_runtime_phase(client: podman.PodmanClient, row: InstanceRow, setup
 
     finally:
         if container is not None:
-            stop_and_remove_container(container)
+            podman_utils.stop_and_remove_container(container)
 
 
 def bootstrap_instance_retry(instance: InstanceRow):
-
+    client = None
     try:
         is_supported = any(lang in instance.language.lower() for lang in config.SUPPORTED_LANGUAGES)
-        try:
-            # Attempt 1
-            client = get_local_client(80 * 60)
+        client = podman_utils.get_local_client(10 * 60)
+        try: # Attempt 1
             setup_img = bootstrap_setup_phase(client, instance, use_base_image=not is_supported)
-            client = get_local_client(20 * 60)
             bootstrap_runtime_phase(client, instance, setup_img)
-        except (RuntimeError, TimeoutError, BootstrapError) as e:
-            # Attempt 2
-            bootstrap_logger.error(f"[{instance.id}]: Attempt 1 failed ({e}). Retrying with base image...")
-            client = get_local_client(80 * 60)
+        except (RuntimeError, TimeoutError, BootstrapError) as e: # Attempt 2
+            bootstrap_logger.error(f"[{instance.id}]: Attempt 1 failed ({e}). Retrying base image without execution environment...")
             setup_img = bootstrap_setup_phase(client, instance, use_base_image=True)
-            client = get_local_client(20 * 60)
             bootstrap_runtime_phase(client, instance, setup_img)
     except Exception as e:
         bootstrap_logger.error(f"[{instance.id}]: ❌ FAILED to bootstrap after retry: {e}")
     finally:
-        client.close()
+        if client is not None:
+            client.close()
+        podman_utils.cleanup_all_containers()
 
 
 def bootstrap_parallel(instances: list[InstanceRow]):
     """Orchestrates parallel execution with process local clients."""
+    global executor_ref
     with ProcessPoolExecutor(config.NR_PARALLEL_PROCESSES) as executor:
+        executor_ref = executor
         future_to_instance = {executor.submit(bootstrap_instance_retry, inst): inst for inst in instances}
         all_futures_remaining = set(future_to_instance.keys())
         bootstrap_logger.info(
@@ -303,12 +292,11 @@ def main():
 if __name__ == "__main__":
 
     def signal_handler(signum, _frame):
-        bootstrap_logger.warning(f"\n⚠️ Received {signal.Signals(signum).name}. Terminating and cleaning...")
-        cleanup_all_containers()
-        time.sleep(30)
-        os._exit(1)
+        bootstrap_logger.warning(f"Received signal {signum}, waiting for executor to shutdown...")
+        if executor_ref is not None:
+            executor_ref.shutdown(wait=True, cancel_futures=True)
+        sys.exit(1)
 
-    atexit.register(cleanup_all_containers)
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     main()

@@ -5,15 +5,8 @@ import logging
 from podman.domain.containers import Container as PodmanContainer
 
 from refactoring_benchmark.utils.models import Metrics
-from refactoring_benchmark.utils.container_utils import (
-    podman_exec_logged,
-    safe_container_run,
-    register_container,
-)
-from refactoring_benchmark.utils.podman_shell import (
-    podman_container_storage,
-    podman_commit_container,
-)
+import refactoring_benchmark.podman.utils as podman_utils
+import refactoring_benchmark.podman.shell as podman_shell
 
 
 class BootstrapError(Exception):
@@ -24,7 +17,7 @@ class BootstrapError(Exception):
 
 def validate_container_size(container_id: str, max_size_bytes: int = 5 * (1024**3)) -> None:
     """Validate container storage size does not exceed limit."""
-    container_size = podman_container_storage(container_id)["writable_bytes"]
+    container_size = podman_shell.podman_container_storage(container_id)["writable_bytes"]
     if container_size > max_size_bytes:
         raise BootstrapError(
             f"Container additional size exceeded {max_size_bytes / (1024**3):.2f}GB limit. "
@@ -37,10 +30,10 @@ def validate_and_commit_container(
 ) -> None:
     """Validate container size then commit if within limits."""
     validate_container_size(container_id, max_size_bytes)
-    podman_commit_container(container_id, image_name, **commit_kwargs)
+    podman_shell.podman_commit_container(container_id, image_name, **commit_kwargs)
 
 
-def setup_base_image_with_cloned_repo(
+def setup_testbed_container(
     client,
     base_image: str,
     api_key: str,
@@ -49,32 +42,32 @@ def setup_base_image_with_cloned_repo(
     logger: logging.Logger,
 ) -> PodmanContainer:
     """Helper to clone repo into base image container."""
-    container: PodmanContainer = safe_container_run(
+    container: PodmanContainer = podman_utils.safe_container_run(
         client,
         base_image,
         detach=True,
         environment={"ANTHROPIC_API_KEY": api_key},
         working_dir="/testbed",
     )
-    register_container(container)
+    podman_utils.register_container(container)
     for cmd in [
         "git init .",
         f"git remote add origin {repo_url}",
         f"git fetch --depth 2 origin {golden_commit_hash}",
         f"git checkout {golden_commit_hash}",
     ]:
-        podman_exec_logged(container, ["bash", "-c", f"timeout 5m {cmd}"], logger)
+        podman_utils.podman_exec_logged(container, ["bash", "-c", f"timeout 5m {cmd}"], logger)
     return container
 
 
 def run_metrics(container: PodmanContainer, commit_hash: str, logger: logging.Logger) -> Metrics:
     """Run test metrics at a specific commit hash."""
-    podman_exec_logged(
+    podman_utils.podman_exec_logged(
         container,
         ["bash", "-c", "timeout 5m git reset --hard HEAD && git clean -xdff"],
         logger,
     )
-    podman_exec_logged(
+    podman_utils.podman_exec_logged(
         container,
         ["bash", "-c", f"timeout 5m git checkout {commit_hash}"],
         logger,
@@ -87,7 +80,7 @@ def run_metrics(container: PodmanContainer, commit_hash: str, logger: logging.Lo
         "/scripts/run_tests'"
     )
     try:
-        exit_code, (stdout_bytes, stderr_bytes) = podman_exec_logged(container, ["bash", "-c", command], logger)
+        exit_code, (stdout_bytes, stderr_bytes) = podman_utils.podman_exec_logged(container, ["bash", "-c", command], logger)
         output = stdout_bytes.decode().strip().split("\n")
         data = json.loads(output[-1])
         return Metrics(**data)

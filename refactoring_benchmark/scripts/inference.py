@@ -15,13 +15,7 @@ from podman.domain.containers import Container as PodmanContainer
 
 from refactoring_benchmark.utils.logger import get_logger, setup_logging
 from refactoring_benchmark.utils.models import InstanceRow
-from refactoring_benchmark.utils.container_utils import (
-    stop_and_remove_container,
-    register_container,
-    cleanup_all_containers,
-    get_local_client,
-    safe_container_run,
-)
+import refactoring_benchmark.podman.utils as podman_utils
 
 
 # --- Configuration ---
@@ -76,7 +70,7 @@ def execute_instance(instance_row: InstanceRow, force: bool = False) -> bool:
     )
 
     container: Optional[PodmanContainer] = None
-    client = get_local_client()
+    client = podman_utils.get_local_client()
     if not client:
         inference_logger.error(f"[{instance_row.id}]: ❌ Failed to connect to Podman daemon")
         return False
@@ -98,7 +92,7 @@ def execute_instance(instance_row: InstanceRow, force: bool = False) -> bool:
 
         # Run container in inference mode
         instance_logger.info("Running container in inference mode...")
-        container = safe_container_run(
+        container = podman_utils.safe_container_run(
             client,
             instance_row.runtime_image,
             command=["inference"],
@@ -110,7 +104,7 @@ def execute_instance(instance_row: InstanceRow, force: bool = False) -> bool:
             },
             working_dir="/testbed",
         )
-        register_container(container)
+        podman_utils.register_container(container)
 
         # Stream container output to log
         try:
@@ -132,7 +126,7 @@ def execute_instance(instance_row: InstanceRow, force: bool = False) -> bool:
 
     finally:
         if container is not None:
-            stop_and_remove_container(container)
+            podman_utils.stop_and_remove_container(container)
         client.close()
 
 
@@ -214,7 +208,7 @@ if __name__ == "__main__":
 
     def signal_handler(signum, _frame):
         inference_logger.warning(f"\n⚠️ Received {signal.Signals(signum).name}. Terminating and cleaning...")
-        cleanup_all_containers()
+        podman_utils.cleanup_all_containers()
         time.sleep(10 * NR_PARALLEL_PROCESSES)
         os._exit(1)
 

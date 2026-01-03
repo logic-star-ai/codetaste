@@ -3,11 +3,7 @@ import pytest
 import podman
 from pathlib import Path
 
-from refactoring_benchmark.utils.container_utils import (
-    copy_to_container,
-    extract_folder_from_container,
-    stream_exec,
-)
+import refactoring_benchmark.podman.utils as podman_utils
 from refactoring_benchmark.utils.logger import setup_logging
 
 
@@ -26,7 +22,7 @@ class TestCopyToContainer:
         try:
             # Copy a test file
             test_content = b"Hello from test!\n"
-            copy_to_container(container, test_content, "/tmp/test_file.txt")
+            podman_utils.copy_to_container(container, test_content, "/tmp/test_file.txt")
 
             # Verify file exists and has correct content
             # exec_run returns (exit_code, output_bytes) tuple
@@ -58,7 +54,7 @@ class TestCopyToContainer:
         try:
             # Copy a script
             script_content = b"#!/bin/bash\necho 'Hello'\n"
-            copy_to_container(container, script_content, "/tmp/test_script.sh")
+            podman_utils.copy_to_container(container, script_content, "/tmp/test_script.sh")
 
             # Verify it's executable
             # exec_run returns (exit_code, output_bytes) tuple
@@ -96,7 +92,7 @@ class TestCopyToContainer:
 
             # Copy file to nested location
             test_content = b"Nested content\n"
-            copy_to_container(container, test_content, "/tmp/nested/deep/path/file.txt")
+            podman_utils.copy_to_container(container, test_content, "/tmp/nested/deep/path/file.txt")
 
             # Verify
             # exec_run returns (exit_code, output_bytes) tuple
@@ -139,7 +135,7 @@ class TestExtractFolderFromContainer:
             local_dest = temp_dir / "extracted"
             local_dest.mkdir()
 
-            extract_folder_from_container(container, "/tmp/test_extract", str(local_dest))
+            podman_utils.extract_folder_from_container(container, "/tmp/test_extract", str(local_dest))
 
             # Verify extracted files
             assert (local_dest / "test_extract" / "file1.txt").exists()
@@ -180,7 +176,7 @@ class TestExtractFolderFromContainer:
             local_dest = temp_dir / "complex_extract"
             local_dest.mkdir()
 
-            extract_folder_from_container(container, "/tmp/complex", str(local_dest))
+            podman_utils.extract_folder_from_container(container, "/tmp/complex", str(local_dest))
 
             # Verify structure
             assert (local_dest / "complex" / "a" / "b" / "c").is_dir()
@@ -212,7 +208,7 @@ class TestStreamExec:
 
         try:
             # Execute simple command
-            _, output = stream_exec(container, ["echo", "Hello World"], env={})
+            _, output = podman_utils.stream_exec(container, ["echo", "Hello World"], env={})
 
             assert "Hello World" in output
 
@@ -238,7 +234,7 @@ class TestStreamExec:
 
         try:
             # Execute command that uses environment variable
-            _, output = stream_exec(
+            _, output = podman_utils.stream_exec(
                 container,
                 ["bash", "-c", "echo $TEST_VAR"],
                 env={"TEST_VAR": "test_value"}
@@ -268,7 +264,7 @@ class TestStreamExec:
 
         try:
             # Execute command with multiple lines of output
-            _, output = stream_exec(
+            _, output = podman_utils.stream_exec(
                 container,
                 ["bash", "-c", "echo 'line1'; echo 'line2'; echo 'line3'"],
                 env={}

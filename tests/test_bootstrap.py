@@ -1,15 +1,19 @@
 """Tests for bootstrap functionality."""
 import json
 import time
+import logging
 from pathlib import Path
 
 import pytest
 import podman
 
-from refactoring_benchmark.scripts.bootstrap import run_test_metrics
+from refactoring_benchmark.bootstrap.utils import run_metrics
 from refactoring_benchmark.utils.models import InstanceRow, Metrics
-from refactoring_benchmark.utils.container_utils import copy_to_container
+import refactoring_benchmark.podman.utils as podman_utils
 from tests.conftest import verify_git_state, get_git_commit_hash
+
+# Create a test logger
+test_logger = logging.getLogger("test_bootstrap")
 
 
 class TestGitCommitVerification:
@@ -129,7 +133,7 @@ echo '{test_output}'
 '''.encode()
 
             # Use copy_to_container utility
-            copy_to_container(container, script_content, "/scripts/run_tests")
+            podman_utils.copy_to_container(container, script_content, "/scripts/run_tests")
 
             # Capture metrics
             metrics = run_test_metrics(container)
@@ -163,7 +167,7 @@ echo '{test_output}'
             script_content = b'''#!/bin/bash
 echo "invalid json"
 '''
-            copy_to_container(container, script_content, "/scripts/run_tests")
+            podman_utils.copy_to_container(container, script_content, "/scripts/run_tests")
 
             # Capture metrics (should return error metrics)
             metrics = run_test_metrics(container)
