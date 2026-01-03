@@ -272,6 +272,10 @@ def evaluate_instance(instance_row: InstanceRow) -> EvaluationResult:
         eval_logger.error(f"[{instance_row.id}]: {result.error}")
         return result
 
+    test_metrics = run_test_evaluation(instance_row)
+    result.test_metrics = test_metrics
+    result.test_success = test_metrics is not None and test_metrics.failed == 0
+
     pos, neg, total = run_rule_evaluation(instance_row)
     result.rule_results_positive = pos
     result.rule_results_negative = neg
@@ -304,11 +308,14 @@ def main():
         eval_logger.error("No instances found in instances.csv")
         sys.exit(1)
 
+    instances = instances[:15]
+
     eval_logger.info(f"Found {len(instances)} instances to evaluate")
 
     results: list[EvaluationResult] = []
     for instance in instances:
         results.append(evaluate_instance(instance))
+
 
     output_dir = os.path.join(PROJECT_ROOT, "output")
     os.makedirs(output_dir, exist_ok=True)

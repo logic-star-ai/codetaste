@@ -28,11 +28,11 @@ def get_local_client(timeout: int = 4000) -> Optional[podman.PodmanClient]:
 
 def safe_container_run(client: podman.PodmanClient, image, **kwargs) -> PodmanContainer:
     """Retries container creation to handle 'POST operation failed' socket errors."""
-    for i in range(3):
+    for i in range(1, 5):
         try:
             return client.containers.run(image, **kwargs)
         except Exception as e:
-            if i == 2:
+            if i == 4:
                 raise
             utils_logger.warning(f"Podman create failed ({e}), retrying in {2**i}s...")
             time.sleep(2**i)
@@ -182,8 +182,9 @@ def stop_and_remove_container(
         auto_unregister: Automatically unregister from tracking set (default: True)
     """
     try:
+        container.reload()
         container.stop(timeout=2)
-    except APIError as e:
+    except (APIError, json.JSONDecodeError) as e:
         time.sleep(2)
         container.reload()
         if container.status != "exited":

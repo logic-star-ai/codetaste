@@ -3,6 +3,7 @@
 import atexit
 import csv
 import os
+import shutil
 import signal
 import sys
 import time
@@ -47,48 +48,41 @@ def execute_instance(instance_row: InstanceRow, force: bool = False) -> bool:
     Returns:
         True if successful, False otherwise
     """
-    # Get process-local Podman client
-    client = get_local_client()
-    if not client:
-        return False
-
-    # Create instance-specific logger
     instance_logger = get_logger(
         f"inference-{instance_row.id}", use_file=True, use_stdout=False
     )
+    instance_output_dir = os.path.abspath(os.path.join(PROJECT_ROOT, instance_row.instance_dir("output")))
 
-    instance_output_dir = os.path.abspath(
-        os.path.join(PROJECT_ROOT, instance_row.instance_dir("output"))
-    )
-    prediction_diff = os.path.join(instance_output_dir, "prediction.diff")
 
-    if os.path.exists(prediction_diff) and not force:
-        inference_logger.info(
-            f"[{instance_row.id}]: Skipping inference, prediction.diff already exists"
-        )
-        instance_logger.info("Skipping inference, prediction.diff already exists")
-        client.close()
+    prediction_diff_path = os.path.join(instance_output_dir, "prediction.diff")
+    if os.path.exists(prediction_diff_path) and not force:
+        inference_logger.info(f"[{instance_row.id}]: Skipping inference, prediction.diff already exists")
         return True
 
     agent_dir = os.path.abspath(os.path.join(PROJECT_ROOT, "agent"))
-    os.makedirs(instance_output_dir, exist_ok=True)
-
-    inference_logger.info(f"[{instance_row.id}]: Starting inference")
-    instance_logger.info(f"Starting inference for {instance_row.display_path}")
-    instance_logger.info(f"  Image: {instance_row.runtime_image}")
-    instance_logger.info(f"  Output: {instance_output_dir}")
-
-    # Validate paths
     if not os.path.exists(agent_dir):
-        inference_logger.error(
-            f"[{instance_row.id}]: Agent directory not found: {agent_dir}"
-        )
-        instance_logger.error(f"Agent directory not found: {agent_dir}")
-        client.close()
+        inference_logger.error(f"[{instance_row.id}]: Agent directory not found: {agent_dir}")
         return False
+    if not os.path.exists(os.path.join(agent_dir, "agent_config.json")):
+        inference_logger.error(f"[{instance_row.id}]: agent_config.json not found in agent directory")
+        return False
+    
+    if os.path.exists(instance_output_dir):
+        if os.path.isfile(instance_output_dir):
+            os.remove(instance_output_dir)
+        else:
+            shutil.rmtree(instance_output_dir)
+    os.makedirs(instance_output_dir, exist_ok=True)
+    shutil.copy2(
+        os.path.join(PROJECT_ROOT, "agent", "agent_config.json"),
+        os.path.join(instance_output_dir, "agent_config.json"),
+    )
 
     container: Optional[PodmanContainer] = None
-
+    client = get_local_client()
+    if not client:
+        inference_logger.error(f"[{instance_row.id}]: ❌ Failed to connect to Podman daemon")
+        return False
     try:
         # Verify image exists
         try:
@@ -102,6 +96,12 @@ def execute_instance(instance_row: InstanceRow, force: bool = False) -> bool:
             )
             instance_logger.error("Run bootstrap first to create the image")
             return False
+
+        # Inference
+        inference_logger.info(f"[{instance_row.id}]: Starting inference")
+        instance_logger.info(f"Starting inference for {instance_row.display_path}")
+        instance_logger.info(f"  Image: {instance_row.runtime_image}")
+        instance_logger.info(f"  Output: {instance_output_dir}")
 
         # Run container in inference mode
         instance_logger.info("Running container in inference mode...")
@@ -130,11 +130,8 @@ def execute_instance(instance_row: InstanceRow, force: bool = False) -> bool:
 
         # Wait for container to finish and get exit code
         exit_code = container.wait()
-
         if exit_code == 0:
-            inference_logger.info(
-                f"[{instance_row.id}]: ✅ Inference completed successfully"
-            )
+            inference_logger.info(f"[{instance_row.id}]: ✅ Inference completed successfully")
             instance_logger.info("✅ Inference completed successfully")
             return True
         else:
@@ -222,7 +219,7 @@ def main():
     inference_logger.info(f"Loaded {len(instances)} instances")
 
     # Run subset of instances (adjust as needed)
-    instances_to_run = instances[:5]
+    instances_to_run = instances[:15]
 
     if instances_to_run:
         inference_parallel(instances_to_run)
@@ -235,7 +232,7 @@ if __name__ == "__main__":
             f"\n⚠️ Received {signal.Signals(signum).name}. Terminating and cleaning..."
         )
         cleanup_all_containers()
-        time.sleep(30)
+        time.sleep(10 * NR_PARALLEL_PROCESSES)
         os._exit(1)
 
     atexit.register(cleanup_all_containers)
