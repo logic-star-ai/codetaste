@@ -94,12 +94,11 @@ case "$1" in
         
         # Restricted Execution
         echo "=== Dropping Privileges: Switching to 'agent_user' ==="
-        if sudo -E -u agent_user bash -c '
+        if sudo -E -u agent_user bash -c "
             [ -f /scripts/setup_shell.sh ] && source /scripts/setup_shell.sh
-            [ -f "$1" ] && source "$1"
-            shift 1
-            bash "$@"
-        ' -- "$AGENT_SETUP_SCRIPT" "$AGENT_SCRIPT" "$(cat "$TASK_DESC_DIR/description.md")"; then
+            [ -f \"$AGENT_SETUP_SCRIPT\" ] && source \"$AGENT_SETUP_SCRIPT\"
+            bash \"$AGENT_SCRIPT\"
+        "; then
             echo "=== Agent finished successfully ==="
         else
             echo "=== Agent failed with exit code $? ==="
@@ -130,6 +129,8 @@ case "$1" in
         fi
 
         # Run verification using the scripts created during bootstrap
+        setup_env
+        source /scripts/setup_shell.sh
         /scripts/run_tests
         ;;
 
