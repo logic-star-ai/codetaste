@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import shlex
+import shutil
 import signal
 import sys
 from concurrent.futures import ProcessPoolExecutor, TimeoutError, as_completed
@@ -15,7 +16,6 @@ from typing import Optional
 import podman
 from podman.domain.containers import Container as PodmanContainer
 
-from refactoring_benchmark.utils.common import clean_dir
 from refactoring_benchmark.utils.podman_shell import podman_commit_container, podman_container_storage
 from refactoring_benchmark.utils.prompts import BOOTSTRAP_PROMPT
 from refactoring_benchmark.utils.models import InstanceRow, Metrics, InstanceMetadata
@@ -37,7 +37,7 @@ class BootstrapError(Exception):
     pass
 
 
-def validate_container_size(container_id: str, max_size_bytes: int = 4 * (1024**3)) -> None:
+def validate_container_size(container_id: str, max_size_bytes: int = 5 * (1024**3)) -> None:
     """Validate container storage size does not exceed limit."""
     container_size = podman_container_storage(container_id)["writable_bytes"]
     if container_size > max_size_bytes:
@@ -48,7 +48,7 @@ def validate_container_size(container_id: str, max_size_bytes: int = 4 * (1024**
 
 
 def validate_and_commit_container(
-    container_id: str, image_name: str, max_size_bytes: int = 4 * (1024**3), **commit_kwargs
+    container_id: str, image_name: str, max_size_bytes: int = 5 * (1024**3), **commit_kwargs
 ) -> None:
     """Validate container size then commit if within limits."""
     validate_container_size(container_id, max_size_bytes)
@@ -200,6 +200,7 @@ def bootstrap_setup_phase(
             f"[{instance_row.id}]: Base Metrics: Passed={base_metrics.passed}, Failed={base_metrics.failed}, Total={base_metrics.total}"
         )
 
+        shutil.rmtree(instance_dir, ignore_errors=True)
         meta = InstanceMetadata(
             owner=instance_row.owner,
             repo=instance_row.repo,
@@ -208,7 +209,6 @@ def bootstrap_setup_phase(
             base_hash=instance_row.commit_hash,
             golden_commit_hash=instance_row.golden_commit_hash,
         )
-
         with open(os.path.join(instance_dir, "metadata.json"), "w") as f:
             json.dump(meta.model_dump(), f, indent=2)
 
@@ -219,7 +219,6 @@ def bootstrap_setup_phase(
                 if not (meta.is_success_base or meta.is_success_golden)
                 else ""
             )
-            clean_dir(instance_dir)
             extract_folder_from_container(container, "/scripts", save_directory)
             bootstrap_logger.info(
                 f"[{instance_row.id}]: ✅ Saved scripts to {save_directory}/scripts"
@@ -253,6 +252,7 @@ def bootstrap_runtime_phase(
 
     try:
         client.images.get(runtime_image)
+        bootstrap_logger.info(f"⏭️  SKIPPING: Runtime image already exists: {runtime_image}")
         return runtime_image
     except:
         pass
@@ -425,7 +425,7 @@ def main():
             instances.append(InstanceRow(**row))
 
     if instances:
-        bootstrap_parallel(instances[:20])
+        bootstrap_parallel(instances[:15])
 
 
 if __name__ == "__main__":
