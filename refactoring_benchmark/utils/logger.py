@@ -86,5 +86,7 @@ def get_logger(
             fh.setFormatter(file_fmt)
             fh.setLevel(level)
             logger.addHandler(fh)
+            if level == logging.DEBUG:
+                logger.debug(f"File logging enabled. Log file: {log_file}")
 
     return logger

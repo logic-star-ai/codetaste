@@ -16,6 +16,7 @@ from typing import Optional
 import podman
 from podman.domain.containers import Container as PodmanContainer
 
+from refactoring_benchmark.bootstrap.models import ExecutionInstanceMetadata
 from refactoring_benchmark.utils.prompts import BOOTSTRAP_PROMPT
 from refactoring_benchmark.utils.models import InstanceRow, Metrics, InstanceMetadata
 from refactoring_benchmark.utils.logger import setup_logging, get_logger
@@ -29,88 +30,76 @@ setup_logging(config.LOG_DIR)
 bootstrap_logger = get_logger("bootstrap")
 executor_ref: Optional[ProcessPoolExecutor] = None
 
-
-def bootstrap_setup_phase(client: podman.PodmanClient, row: InstanceRow, use_base_image: bool = False) -> str:
-    """Phase 1: Setup environment and verify tests."""
-    instance_logger = get_logger(f"bootstrap-{row.id}", use_file=True, use_stdout=False)
-    instance_dir = row.instance_dir()
-    os.makedirs(instance_dir, exist_ok=True)
-    setup_image = row.setup_image
-    container: Optional[PodmanContainer] = None
-
-    if podman_utils.is_image_existing(client, setup_image):
-        bootstrap_logger.info(f"⏭️  SKIPPING: Setup image already exists: {setup_image}")
-        return setup_image
-
-    repo_url = f"https://github.com/{row.owner}/{row.repo}.git"
-
-    try:
-        container = bootstrap_utils.setup_testbed_container(
-            client, config.BASE_IMAGE, config.API_KEY, repo_url, row.golden_commit_hash, instance_logger
-        )
-        if use_base_image:
-            instance_logger.info("Using base image fallback for setup phase.")
-            bootstrap_utils.validate_and_commit_container(container.id, setup_image, squash=True)
-            return setup_image
-
-        instance_logger.info("Claude Agent is taking control...")
-        agent_cmd = [
+def bootstrap_run_setup_agent(container: PodmanContainer, logger: logging.Logger) -> PodmanContainer:
+    logger.info("Claude Agent is taking control...")
+    agent_cmd = [
             "bash",
             "-c",
             f"timeout 70m claude -p --dangerously-skip-permissions --verbose --output-format stream-json --max-budget-usd 5 {shlex.quote(BOOTSTRAP_PROMPT)}",
         ]
+    ts_start = time.time()
+    _, output = podman_utils.stream_exec(
+        container,
+        agent_cmd,
+        env={"ANTHROPIC_API_KEY": config.API_KEY or ""},
+        stream_logger=logger,
+        is_json_output=True,
+    )
+    if "error_max_budget_usd" in output.splitlines()[-1]:
+        raise BootstrapError("Bootstrap exceeded budget limit.")
+    bootstrap_utils.validate_container_size(container.id)
+    if time.time() - ts_start >= 4200:
+        raise TimeoutError(f"Agent exceeded 70m time limit.")
+    return container
 
-        ts_start = time.time()
-        _, output = podman_utils.stream_exec(
-            container,
-            agent_cmd,
-            env={"ANTHROPIC_API_KEY": config.API_KEY or ""},
-            stream_logger=instance_logger,
-            is_json_output=True,
-        )
-        if "error_max_budget_usd" in output.splitlines()[-1]:
-            raise BootstrapError("Bootstrap exceeded budget limit.")
+def bootstrap_setup_phase(client: podman.PodmanClient, row: InstanceRow, metadata: ExecutionInstanceMetadata, use_base_image: bool = False) -> str:
+    """Phase 1: If there is an existing setup image, reuse it. Otherwise, bootstrap a new one. If use_base_image is True, skip agent setup and use base image directly."""
+    instance_logger = get_logger(f"bootstrap-{row.id}", use_file=True, use_stdout=False)
+    instance_dir = row.instance_dir()
+    repo_url = f"https://github.com/{row.owner}/{row.repo}.git"
+    os.makedirs(instance_dir, exist_ok=True)
+    setup_image = row.setup_image
 
-        bootstrap_utils.validate_container_size(container.id)
-
-        if time.time() - ts_start >= 4200:
-            raise TimeoutError(f"Agent exceeded 70m time limit for {row.id}")
-
-        golden_metrics = bootstrap_utils.run_metrics(container, row.golden_commit_hash, instance_logger)
-        bootstrap_logger.info(
-            f"[{row.id}]: Golden Metrics: Passed={golden_metrics.passed}, Failed={golden_metrics.failed}, Total={golden_metrics.total}"
-        )
-
-        base_metrics = bootstrap_utils.run_metrics(container, row.commit_hash, instance_logger)
-        bootstrap_logger.info(
-            f"[{row.id}]: Base Metrics: Passed={base_metrics.passed}, Failed={base_metrics.failed}, Total={base_metrics.total}"
-        )
-
-        shutil.rmtree(instance_dir, ignore_errors=True)
-        meta = InstanceMetadata(
-            owner=row.owner,
-            repo=row.repo,
-            golden_metrics=golden_metrics,
-            base_metrics=base_metrics,
-            base_hash=row.commit_hash,
-            golden_commit_hash=row.golden_commit_hash,
-        )
-        with open(os.path.join(instance_dir, "metadata.json"), "w") as f:
-            json.dump(meta.model_dump(), f, indent=2)
+    container: Optional[PodmanContainer] = None
+    try:
+        if podman_utils.is_image_existing(client, setup_image):
+            container = podman_utils.safe_container_run(client, setup_image, detach=True, working_dir="/testbed")
+        else:
+            container = bootstrap_utils.setup_testbed_container(
+                client, config.BASE_IMAGE, config.API_KEY, repo_url, row.golden_commit_hash, instance_logger
+            )
+            if use_base_image:
+                bootstrap_utils.validate_and_commit_container(container.id, setup_image, squash=True)
+                metadata.has_execution_environment = False
+                metadata.reason_no_execution_environment = (metadata.reason_no_execution_environment or "") + " Used base image fallback."
+                return setup_image
+            try:
+                # Run Agent to setup environment. Raise TimeoutError on 70m limit. Raise BootstrapError on budget exceeded.
+                container = bootstrap_run_setup_agent(container, instance_logger)
+            except (TimeoutError, BootstrapError) as e:
+                metadata.has_execution_environment = False
+                metadata.reason_no_execution_environment = (metadata.reason_no_execution_environment or "") + f" Agent error: {e}"
+                raise
+        
+        metadata.golden_metrics = bootstrap_utils.run_metrics(container, row.golden_commit_hash, instance_logger)
+        bootstrap_logger.info(f"[{row.id}]: Golden Metrics: {metadata.golden_metrics.model_dump()}")
+        metadata.base_metrics = bootstrap_utils.run_metrics(container, row.commit_hash, instance_logger)
+        bootstrap_logger.info(f"[{row.id}]: Base Metrics: {metadata.base_metrics.model_dump()}")
 
         # Save scripts
         try:
-            save_directory = instance_dir + ("/failed" if not (meta.is_success_base or meta.is_success_golden) else "")
-            podman_utils.extract_folder_from_container(container, "/scripts", save_directory)
-            bootstrap_logger.info(f"[{row.id}]: ✅ Saved scripts to {save_directory}/scripts")
+            podman_utils.extract_folder_from_container(container, "/scripts", instance_dir)
+            bootstrap_logger.info(f"[{row.id}]: ✅ Saved scripts to {instance_dir}/scripts")
         except Exception as e:
             bootstrap_logger.warning(f"[{row.id}]: Failed to save scripts: {e}")
 
-        if meta.is_success_base or meta.is_success_golden:
+        # Save container if necessary.
+        if metadata.golden_metrics.is_valid or metadata.base_metrics.is_valid:
             bootstrap_utils.validate_and_commit_container(container.id, setup_image, squash=True)
             bootstrap_logger.info(f"[{row.id}]: ✅ Saved setup image: {setup_image}")
             return setup_image
-
+        metadata.has_execution_environment = False
+        metadata.reason_no_execution_environment = (metadata.reason_no_execution_environment or "") + " Insufficient test coverage."
         raise RuntimeError("Agent setup failed for both commits.")
 
     finally:
@@ -159,10 +148,7 @@ def bootstrap_runtime_phase(client: podman.PodmanClient, row: InstanceRow, setup
             exit_code, (stdout_bytes, stderr_bytes) = podman_utils.podman_timed_exec_bash_logged(
                 container, cmd, instance_logger, timeout=300
             )
-            instance_logger.info(
-                f"[{row.id}]: Git Command: {cmd}\nOutput: {stdout_bytes.decode() if stdout_bytes else 'No Output'}\nErrors: {stderr_bytes.decode() if stderr_bytes else 'No Errors'}"
-            )
-        instance_logger.info(f"[{row.id}]: 🧠 Lobotomized git repository.")
+        bootstrap_logger.info(f"[{row.id}]: 🧠 Lobotomized git repository.")
         # exec_run returns (exit_code, output_bytes) tuple
         exit_code, (stdout_bytes, stderr_bytes) = container.exec_run(
             [
@@ -202,18 +188,26 @@ def bootstrap_runtime_phase(client: podman.PodmanClient, row: InstanceRow, setup
 
 def bootstrap_instance_retry(instance: InstanceRow):
     client = None
+    if os.path.exists(os.path.join(instance.instance_dir(), "instance_metadata.json")):
+        bootstrap_logger.info(f"⏭️  SKIPPING: Instance already bootstrapped: {instance.id}")
+        return
+    
+    metadata_instance_image = ExecutionInstanceMetadata(owner=instance.owner, repo=instance.repo, base_hash=instance.commit_hash, golden_hash=instance.golden_commit_hash)
+    metadata_instance_image.setup_image = instance.setup_image
+    metadata_instance_image.runtime_image = instance.runtime_image
     try:
         is_supported = any(lang in instance.language.lower() for lang in config.SUPPORTED_LANGUAGES)
         client = podman_utils.get_local_client(10 * 60)
         try:  # Attempt 1
-            setup_img = bootstrap_setup_phase(client, instance, use_base_image=not is_supported)
+            setup_img = bootstrap_setup_phase(client, instance, metadata_instance_image, use_base_image=not is_supported)
             bootstrap_runtime_phase(client, instance, setup_img)
         except (RuntimeError, TimeoutError, BootstrapError) as e:  # Attempt 2
             bootstrap_logger.error(
                 f"[{instance.id}]: Attempt 1 failed ({e}). Retrying base image without execution environment..."
             )
-            setup_img = bootstrap_setup_phase(client, instance, use_base_image=True)
+            setup_img = bootstrap_setup_phase(client, instance, metadata_instance_image, use_base_image=True)
             bootstrap_runtime_phase(client, instance, setup_img)
+        metadata_instance_image.save_to_json(os.path.join(instance.instance_dir(), "instance_metadata.json"))
     except Exception as e:
         bootstrap_logger.error(f"[{instance.id}]: ❌ FAILED to bootstrap after retry: {e}")
     finally:

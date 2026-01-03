@@ -27,6 +27,9 @@ def base_container(podman_client):
     yield container
     try:
         container.stop(timeout=1)
+    except Exception:
+        pass
+    try:
         container.remove(force=True)
     except Exception:
         pass

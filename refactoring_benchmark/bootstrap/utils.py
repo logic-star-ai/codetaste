@@ -20,8 +20,7 @@ def validate_container_size(container_id: str, max_size_bytes: int = 5 * (1024**
     container_size = podman_shell.podman_container_storage(container_id)["writable_bytes"]
     if container_size > max_size_bytes:
         raise BootstrapError(
-            f"Container additional size exceeded {max_size_bytes / (1024**3):.2f}GB limit. "
-            f"writable_bytes = {container_size / (1024**3):.2f}GB. This is too large."
+            f"Container additional size exceeded {max_size_bytes / (1024**3):.2f}GB limit."
         )
 
 
