@@ -29,6 +29,7 @@ setup_logging(config.LOG_DIR)
 bootstrap_logger = get_logger("bootstrap")
 executor_ref: Optional[ProcessPoolExecutor] = None
 
+
 def bootstrap_setup_phase(client: podman.PodmanClient, row: InstanceRow, use_base_image: bool = False) -> str:
     """Phase 1: Setup environment and verify tests."""
     instance_logger = get_logger(f"bootstrap-{row.id}", use_file=True, use_stdout=False)
@@ -155,11 +156,9 @@ def bootstrap_runtime_phase(client: podman.PodmanClient, row: InstanceRow, setup
             "git gc --prune=now --aggressive > /dev/null 2>&1 || true",
         ]
         for cmd in git_cmds:
-            exit_code, (stdout_bytes, stderr_bytes) = podman_utils.podman_exec_logged(
-                container, ["bash", "-c", f"timeout 5m {cmd}"], instance_logger
+            exit_code, (stdout_bytes, stderr_bytes) = podman_utils.podman_timed_exec_bash_logged(
+                container, cmd, instance_logger, timeout=300
             )
-            if exit_code == 124:
-                raise TimeoutError(f"Git command timed out: {cmd}")
             instance_logger.info(
                 f"[{row.id}]: Git Command: {cmd}\nOutput: {stdout_bytes.decode() if stdout_bytes else 'No Output'}\nErrors: {stderr_bytes.decode() if stderr_bytes else 'No Errors'}"
             )
@@ -173,19 +172,17 @@ def bootstrap_runtime_phase(client: podman.PodmanClient, row: InstanceRow, setup
             ],
             demux=True,
         )
-        podman_utils.podman_exec_logged(
+        podman_utils.podman_timed_exec_bash_logged(
             container,
-            ["bash", "-c", "timeout 5m sudo /scripts/setup_system.sh || true"],
+            "sudo /scripts/setup_system.sh || true",
             instance_logger,
+            timeout=300,
         )
-        podman_utils.podman_exec_logged(
+        podman_utils.podman_timed_exec_bash_logged(
             container,
-            [
-                "bash",
-                "-c",
-                "timeout 5m bash -c 'source /scripts/setup_shell.sh || true'",
-            ],
+            "source /scripts/setup_shell.sh || true",
             instance_logger,
+            timeout=300,
         )
 
         # Commit
@@ -208,11 +205,13 @@ def bootstrap_instance_retry(instance: InstanceRow):
     try:
         is_supported = any(lang in instance.language.lower() for lang in config.SUPPORTED_LANGUAGES)
         client = podman_utils.get_local_client(10 * 60)
-        try: # Attempt 1
+        try:  # Attempt 1
             setup_img = bootstrap_setup_phase(client, instance, use_base_image=not is_supported)
             bootstrap_runtime_phase(client, instance, setup_img)
-        except (RuntimeError, TimeoutError, BootstrapError) as e: # Attempt 2
-            bootstrap_logger.error(f"[{instance.id}]: Attempt 1 failed ({e}). Retrying base image without execution environment...")
+        except (RuntimeError, TimeoutError, BootstrapError) as e:  # Attempt 2
+            bootstrap_logger.error(
+                f"[{instance.id}]: Attempt 1 failed ({e}). Retrying base image without execution environment..."
+            )
             setup_img = bootstrap_setup_phase(client, instance, use_base_image=True)
             bootstrap_runtime_phase(client, instance, setup_img)
     except Exception as e:

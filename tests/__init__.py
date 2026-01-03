@@ -1,1 +1,1 @@
-"""Test suite for refactoring-benchmark."""
+"""Test suite for refactoring benchmark."""

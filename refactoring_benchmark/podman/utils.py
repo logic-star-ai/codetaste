@@ -26,6 +26,7 @@ def get_local_client(timeout: int = 4000) -> Optional[podman.PodmanClient]:
     c.ping()
     return c
 
+
 def is_image_existing(client: podman.PodmanClient, setup_image: str) -> bool:
     """Check if a Podman image exists locally."""
     try:
@@ -33,6 +34,7 @@ def is_image_existing(client: podman.PodmanClient, setup_image: str) -> bool:
         return True
     except:
         return False
+
 
 def safe_container_run(client: podman.PodmanClient, image, **kwargs) -> PodmanContainer:
     """Retries container creation to handle 'POST operation failed' socket errors."""
@@ -193,50 +195,41 @@ def stop_and_remove_container(container: PodmanContainer, force: bool = True, au
         unregister_container(container)
 
 
-def podman_exec_bash_logged(
+def podman_timed_exec_bash_logged(
     container: PodmanContainer,
     bash_cmd: str,
-    logger: logging.Logger,
-    timeout: Optional[int] = None,
+    logger: Optional[logging.Logger],
+    timeout: Optional[int | str] = None,
     **kwargs,
-):
+) -> tuple[int, tuple[bytes | None, bytes | None]]:
     """
-    Structured wrapper for podman-py container.exec_run with bash command.
+    Structured wrapper for executing bash commands with optional timeout.
 
     Args:
         container: podman.domain.containers.Container object
-        bash_cmd: Command string to run in bash
+        bash_cmd: Bash command string to execute
         logger: logging.Logger instance
-        timeout: Optional timeout in seconds
-        **kwargs: Passed to exec_run (e.g. user, workdir, env)
+        timeout: Optional timeout in seconds (uses GNU timeout command)
+        **kwargs: Passed to podman_exec_logged (e.g. user, workdir, env)
+
+    Returns:
+        tuple: (exit_code, (stdout_bytes, stderr_bytes))
     """
     cmd = ["bash", "-c", bash_cmd]
     if timeout is not None:
-        cmd = ["timeout", str(timeout)] + cmd
-    return podman_exec_logged(container, cmd, logger, **kwargs)
+        cmd = ["timeout", "--signal=KILL", str(timeout)] + cmd
 
-def podman_exec_bash_logged(
-    container: PodmanContainer,
-    bash_cmd: str,
-    logger: logging.Logger,
-    timeout: Optional[int] = None,
-    **kwargs,
-):
-    """
-    Structured wrapper for podman-py container.exec_run with bash command.
+    exit_code, output = podman_exec_logged(container, cmd, logger, **kwargs)
 
-    Args:
-        container: podman.domain.containers.Container object
-        bash_cmd: Command string to run in bash
-        logger: logging.Logger instance
-        timeout: Optional timeout in seconds
-        **kwargs: Passed to exec_run (e.g. user, workdir, env)
-    """
-    if timeout is not None:
-        bash_cmd = f"timeout {str(timeout).strip()}m {bash_cmd}"
-    return podman_exec_logged(container, ["bash", "-c", bash_cmd], logger, **kwargs)
+    if exit_code == 137:
+        raise TimeoutError(f"Command timed out after {timeout} seconds: {bash_cmd}")
 
-def podman_exec_logged(container: PodmanContainer, cmd: list[str] | str, logger: logging.Logger, **kwargs):
+    return exit_code, output
+
+
+def podman_exec_logged(
+    container: PodmanContainer, cmd: list[str] | str, logger: Optional[logging.Logger], **kwargs
+) -> tuple[int, tuple[bytes | None, bytes | None]]:
     """
     Structured wrapper for podman-py container.exec_run.
 
@@ -251,13 +244,15 @@ def podman_exec_logged(container: PodmanContainer, cmd: list[str] | str, logger:
     image_name = container.image.tags[0] if container.image.tags else container.image.id
     # Format command for logging
     readable_cmd = " ".join(cmd) if isinstance(cmd, list) else cmd
-    logger.info(f"\nContainer '{image_name}' executing: {readable_cmd}")
+    if logger is not None:
+        logger.info(f"\nContainer '{image_name}' executing: {readable_cmd}")
 
     ts_start = time.time()
     exit_code, (stdout_bytes, stderr_bytes) = container.exec_run(cmd, **kwargs)
     ts_end = time.time()
     elapsed = ts_end - ts_start
-    logger.info(f"\nContainer '{image_name}' command completed in {elapsed:.2f}s.")
+    if logger is not None:
+        logger.info(f"\nContainer '{image_name}' command completed in {elapsed:.2f}s.")
 
     def clean_decode(b: Optional[bytes]) -> str:
         return b.decode("utf-8", errors="replace").strip() if b else ""
@@ -274,16 +269,17 @@ def podman_exec_logged(container: PodmanContainer, cmd: list[str] | str, logger:
     stderr_text_trunc = "\n".join(
         (stderr_lines[:25] + ["... (truncated) ..."] + stderr_lines[-25:]) if len(stderr_lines) > 50 else stderr_lines
     )
-    if exit_code == 0:
-        logger.info(f"\n[Exit {exit_code:3}] Container '{image_name}' command succeeded (in {elapsed:.2f}s).")
-    else:
-        logger.error(f"\n[Exit {exit_code:3}] Container '{image_name}' command failed (in {elapsed:.2f}s)")
-    if stdout_text:
-        logger.debug(f"[{image_name} STDOUT]:\n{stdout_text_trunc}")
-    if stderr_text:
-        if exit_code != 0:
-            logger.error(f"[{image_name} STDERR]:\n{stderr_text_trunc}")
+    if logger is not None:
+        if exit_code == 0:
+            logger.info(f"\n[Exit {exit_code:3}] Container '{image_name}' command succeeded (in {elapsed:.2f}s).")
         else:
-            logger.warning(f"[{image_name} STDERR (non-fatal)]:\n{stderr_text_trunc}")
+            logger.error(f"\n[Exit {exit_code:3}] Container '{image_name}' command failed (in {elapsed:.2f}s)")
+        if stdout_text:
+            logger.debug(f"[{image_name} STDOUT]:\n{stdout_text_trunc}")
+        if stderr_text:
+            if exit_code != 0:
+                logger.error(f"[{image_name} STDERR]:\n{stderr_text_trunc}")
+            else:
+                logger.warning(f"[{image_name} STDERR (non-fatal)]:\n{stderr_text_trunc}")
 
     return exit_code, (stdout_bytes, stderr_bytes)

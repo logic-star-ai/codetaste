@@ -56,31 +56,30 @@ def setup_testbed_container(
         f"git fetch --depth 2 origin {golden_commit_hash}",
         f"git checkout {golden_commit_hash}",
     ]:
-        podman_utils.podman_exec_logged(container, ["bash", "-c", f"timeout 5m {cmd}"], logger)
+        podman_utils.podman_timed_exec_bash_logged(container, cmd, logger, timeout=300)
     return container
 
 
 def run_metrics(container: PodmanContainer, commit_hash: str, logger: logging.Logger) -> Metrics:
     """Run test metrics at a specific commit hash."""
-    podman_utils.podman_exec_logged(
+    podman_utils.podman_timed_exec_bash_logged(
         container,
-        ["bash", "-c", "timeout 5m git reset --hard HEAD && git clean -xdff"],
+        "git reset --hard HEAD && git clean -xdff",
         logger,
+        timeout=300,
     )
-    podman_utils.podman_exec_logged(
+    podman_utils.podman_timed_exec_bash_logged(
         container,
-        ["bash", "-c", f"timeout 5m git checkout {commit_hash}"],
+        f"git checkout {commit_hash}",
         logger,
+        timeout=300,
     )
 
-    command = (
-        "timeout 15m bash -c '"
-        "sudo /scripts/setup_system.sh || true; "
-        "source /scripts/setup_shell.sh || true; "
-        "/scripts/run_tests'"
-    )
+    command = "sudo /scripts/setup_system.sh || true; " "source /scripts/setup_shell.sh || true; " "/scripts/run_tests"
     try:
-        exit_code, (stdout_bytes, stderr_bytes) = podman_utils.podman_exec_logged(container, ["bash", "-c", command], logger)
+        exit_code, (stdout_bytes, stderr_bytes) = podman_utils.podman_timed_exec_bash_logged(
+            container, command, logger, timeout=900
+        )
         output = stdout_bytes.decode().strip().split("\n")
         data = json.loads(output[-1])
         return Metrics(**data)
