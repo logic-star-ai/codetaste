@@ -48,7 +48,6 @@ def setup_testbed_container(
         environment={"ANTHROPIC_API_KEY": api_key},
         working_dir="/testbed",
     )
-    podman_utils.register_container(container)
     for cmd in [
         "git init .",
         f"git remote add origin {repo_url}",
@@ -74,7 +73,7 @@ def run_metrics(container: PodmanContainer, commit_hash: str, logger: logging.Lo
         timeout=300,
     )
 
-    command = "sudo /scripts/setup_system.sh || true; " "source /scripts/setup_shell.sh || true; " "/scripts/run_tests"
+    command = "sudo /scripts/setup_system.sh || true; source /scripts/setup_shell.sh || true; /scripts/run_tests"
     try:
         exit_code, (stdout_bytes, stderr_bytes) = podman_utils.podman_timed_exec_bash_logged(
             container, command, logger, timeout=900

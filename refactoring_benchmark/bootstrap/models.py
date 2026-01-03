@@ -31,7 +31,7 @@ class ExecutionInstanceMetadata(BaseModel):
     setup_image: Optional[str] = None
     runtime_image: Optional[str] = None
     has_execution_environment: Optional[bool] = None
-    reason_no_execution_environment: Optional[str] = None
+    reason_no_execution_environment: str = ""
 
     def save_to_json(self, file_path: str | Path):
         path = Path(file_path)

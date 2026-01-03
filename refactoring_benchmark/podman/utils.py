@@ -40,7 +40,9 @@ def safe_container_run(client: podman.PodmanClient, image, **kwargs) -> PodmanCo
     """Retries container creation to handle 'POST operation failed' socket errors."""
     for i in range(1, 5):
         try:
-            return client.containers.run(image, **kwargs)
+            container: PodmanContainer = client.containers.run(image, **kwargs)
+            register_container(container)
+            return container
         except Exception as e:
             if i == 4:
                 raise

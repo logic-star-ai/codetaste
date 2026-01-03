@@ -94,9 +94,9 @@ case "$1" in
         
         # Restricted Execution
         echo "=== Dropping Privileges: Switching to 'agent_user' ==="
+        [ -f \"$AGENT_SETUP_SCRIPT\" ] && sudo \"$AGENT_SETUP_SCRIPT\"
         if sudo -E -u agent_user bash -c "
             [ -f /scripts/setup_shell.sh ] && source /scripts/setup_shell.sh
-            [ -f \"$AGENT_SETUP_SCRIPT\" ] && source \"$AGENT_SETUP_SCRIPT\"
             bash \"$AGENT_SCRIPT\"
         "; then
             echo "=== Agent finished successfully ==="

@@ -114,6 +114,8 @@ def run_test_evaluation(instance_row: InstanceRow) -> Optional[Metrics]:
                 continue
 
         eval_logger.warning(f"[{instance_row.id}]: Could not parse test metrics from output")
+        eval_logger.debug(f"[{instance_row.id}]: Full output:\n{result.stdout}")
+        eval_logger.debug(f"[{instance_row.id}]: Error output:\n{result.stderr}")
         return None
 
     except subprocess.TimeoutExpired:

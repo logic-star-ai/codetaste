@@ -132,6 +132,13 @@ def execute_instance(instance_row: InstanceRow, force: bool = False) -> bool:
 
 def execute_instance_wrapper(instance: InstanceRow):
     """Wrapper for execute_instance for use with ProcessPoolExecutor."""
+    def cleanup():
+        podman_utils.cleanup_all_containers()
+        sys.exit(1)
+    atexit.register(cleanup)
+    signal.signal(signal.SIGTERM, lambda signum, frame: cleanup())
+    signal.signal(signal.SIGINT, lambda signum, frame: cleanup())
+    #
     try:
         return execute_instance(instance)
     except Exception as e:
@@ -150,9 +157,7 @@ def inference_parallel(instances: list[InstanceRow]):
         future_to_instance = {executor.submit(execute_instance_wrapper, inst): inst for inst in instances}
         all_futures_remaining = set(future_to_instance.keys())
 
-        inference_logger.info(
-            f"🚀 Running inference on {len(instances)} instances with up to {NR_PARALLEL_PROCESSES} parallel processes..."
-        )
+        inference_logger.info(f"🚀 Running inference on {len(instances)} instances with up to {NR_PARALLEL_PROCESSES} parallel processes...")
         inference_logger.info(
             f"Remaining instances {len(all_futures_remaining)}: {[future_to_instance[future].id for future in list(all_futures_remaining)[:3]]} ..."
         )
@@ -205,14 +210,9 @@ def main():
 
 
 if __name__ == "__main__":
+    try:
+        main()
+    finally:
+        print("Cleaning up Podman containers...")
+        time.sleep(60)
 
-    def signal_handler(signum, _frame):
-        inference_logger.warning(f"\n⚠️ Received {signal.Signals(signum).name}. Terminating and cleaning...")
-        podman_utils.cleanup_all_containers()
-        time.sleep(10 * NR_PARALLEL_PROCESSES)
-        os._exit(1)
-
-    atexit.register(cleanup_all_containers)
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
-    main()
