@@ -14,14 +14,14 @@ from typing import Optional
 import podman
 from podman.domain.containers import Container as PodmanContainer
 
-from refactoring_benchmark.bootstrap.models import ExecutionInstanceMetadata
+from refactoring_benchmark.legacy_bootstrap.models import ExecutionInstanceMetadata
 from refactoring_benchmark.utils.prompts import BOOTSTRAP_PROMPT
 from refactoring_benchmark.utils.models import InstanceRow
 from refactoring_benchmark.utils.logger import setup_logging, get_logger
 import refactoring_benchmark.podman.utils as podman_utils
-import refactoring_benchmark.bootstrap.utils as bootstrap_utils
-import refactoring_benchmark.bootstrap.config as config
-from refactoring_benchmark.bootstrap.utils import BootstrapError
+import refactoring_benchmark.legacy_bootstrap.utils as bootstrap_utils
+import refactoring_benchmark.legacy_bootstrap.config as config
+from refactoring_benchmark.legacy_bootstrap.utils import BootstrapError
 
 # Initialize logging infrastructure
 setup_logging(config.LOG_DIR)
