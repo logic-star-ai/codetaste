@@ -8,7 +8,7 @@ from typing import List, Optional
 import pandas as pd
 from scipy.stats import pearsonr
 
-from refactoring_benchmark.evaluation.metrics import (
+from refactoring_benchmark.evaluation_legacy.metrics import (
     InstanceEvaluation,
     TestMetrics,
     RuleMetrics,

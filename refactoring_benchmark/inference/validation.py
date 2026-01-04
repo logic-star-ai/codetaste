@@ -110,7 +110,6 @@ def validate_agent_dir(agent_dir: Path) -> None:
     if missing:
         raise FileNotFoundError(f"Missing required files in agent directory: {', '.join(missing)}")
 
-    # Check that run_agent is executable (if on Unix)
     run_agent = required_files["run_agent"]
     if not run_agent.is_file():
         raise ValueError(f"run_agent is not a file: {run_agent}")

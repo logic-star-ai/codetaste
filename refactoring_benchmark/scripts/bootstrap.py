@@ -16,7 +16,7 @@ from podman.domain.containers import Container as PodmanContainer
 
 from refactoring_benchmark.bootstrap.models import ExecutionInstanceMetadata
 from refactoring_benchmark.utils.prompts import BOOTSTRAP_PROMPT
-from refactoring_benchmark.utils.models import InstanceRow, Metrics, InstanceMetadata
+from refactoring_benchmark.utils.models import InstanceRow
 from refactoring_benchmark.utils.logger import setup_logging, get_logger
 import refactoring_benchmark.podman.utils as podman_utils
 import refactoring_benchmark.bootstrap.utils as bootstrap_utils
