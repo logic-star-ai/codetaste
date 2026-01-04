@@ -17,7 +17,7 @@ from podman.errors import APIError
 utils_logger = get_logger("container_utils")
 
 _active_containers: set[PodmanContainer] = set()
-_containers_lock = threading.Lock()
+_containers_lock = threading.RLock()
 
 
 def get_local_client(timeout: int = 4000) -> Optional[podman.PodmanClient]:
@@ -77,12 +77,12 @@ def cleanup_all_containers() -> None:
         utils_logger.debug(f"Cleaning up {len(_active_containers)} active container(s)...")
         containers_to_cleanup = list(_active_containers)
 
-    for container in containers_to_cleanup:
-        try:
-            stop_and_remove_container(container)
-            utils_logger.debug(f"✅ Cleaned up container {container.id[:12]}. {len(_active_containers)} remaining.")
-        except Exception as e:
-            utils_logger.warning(f"⚠️ Failed to cleanup container {container.id[:12]}: {e}")
+        for container in containers_to_cleanup:
+            try:
+                stop_and_remove_container(container)
+                utils_logger.debug(f"✅ Cleaned up container {container.id[:12]}. {len(_active_containers)} remaining.")
+            except Exception as e:
+                utils_logger.warning(f"⚠️ Failed to cleanup container {container.id[:12]}: {e}")
 
 
 def stream_exec(
@@ -182,21 +182,22 @@ def stop_and_remove_container(container: PodmanContainer, force: bool = True, au
         force: Force removal of the container
         auto_unregister: Automatically unregister from tracking set (default: True)
     """
-    try:
-        container.reload()
-    except (APIError, json.JSONDecodeError) as e:
-        pass
-    try:
-        container.remove(force=force)
-    except (APIError, json.JSONDecodeError) as e:
-        # Handle the case where the container was already deleted by another process
-        if e.response.status_code == 404:
-            return
-        utils_logger.error(f"Failed to remove container {container.id}: {e}")
-        raise
+    with _containers_lock:
+        try:
+            container.stop(timeout=2)
+        except (APIError, json.JSONDecodeError) as e:
+            pass
+        try:
+            container.remove(force=force)
+        except (APIError, json.JSONDecodeError) as e:
+            # Handle the case where the container was already deleted by another process
+            if e.response.status_code == 404:
+                return
+            utils_logger.error(f"Failed to remove container {container.id}: {e}")
+            raise
 
-    if auto_unregister:
-        unregister_container(container)
+        if auto_unregister:
+            unregister_container(container)
 
 
 def podman_timed_exec_bash_logged(

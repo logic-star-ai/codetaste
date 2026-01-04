@@ -44,27 +44,6 @@ def copy_agent_config(agent_dir: Path, output_dir: Path) -> None:
     shutil.copy2(src, dst)
 
 
-def copy_instance_metadata(instance: InstanceRow, output_dir: Path, base_path: Path = Path(".")) -> None:
-    """
-    Copy instance_metadata.json from instance_images to output directory.
-
-    Args:
-        instance: Benchmark instance
-        output_dir: Destination output directory
-        base_path: Base path for instance_images directory (default: current directory)
-
-    Raises:
-        FileNotFoundError: If instance metadata file doesn't exist
-    """
-    src = base_path / "instance_images" / instance.owner / instance.repo / instance.short_hash / "instance_metadata.json"
-    dst = output_dir / "instance_metadata.json"
-
-    if not src.exists():
-        raise FileNotFoundError(f"Instance metadata not found: {src}")
-
-    shutil.copy2(src, dst)
-
-
 def create_fallback_inference_metadata(
     output_dir: Path,
     finish_reason: str,

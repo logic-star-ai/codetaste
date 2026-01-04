@@ -1,4 +1,4 @@
-"""Bootstrap utility functions for benchmark instance creation."""
+"""Bootstrap utility functions."""
 
 import json
 import logging
@@ -16,7 +16,16 @@ class BootstrapError(Exception):
 
 
 def validate_container_size(container_id: str, max_size_bytes: int = 5 * (1024**3)) -> None:
-    """Validate container storage size does not exceed limit."""
+    """
+    Validate container storage size does not exceed limit.
+
+    Args:
+        container_id: Container ID to check
+        max_size_bytes: Maximum allowed size in bytes (default: 5GB)
+
+    Raises:
+        BootstrapError: If container exceeds size limit
+    """
     container_size = podman_shell.podman_container_storage(container_id)["writable_bytes"]
     if container_size > max_size_bytes:
         raise BootstrapError(
@@ -27,7 +36,18 @@ def validate_container_size(container_id: str, max_size_bytes: int = 5 * (1024**
 def validate_and_commit_container(
     container_id: str, image_name: str, max_size_bytes: int = 5 * (1024**3), **commit_kwargs
 ) -> None:
-    """Validate container size then commit if within limits."""
+    """
+    Validate container size then commit if within limits.
+
+    Args:
+        container_id: Container ID to commit
+        image_name: Name for the committed image
+        max_size_bytes: Maximum allowed size in bytes
+        **commit_kwargs: Additional arguments for podman commit
+
+    Raises:
+        BootstrapError: If container exceeds size limit
+    """
     validate_container_size(container_id, max_size_bytes)
     podman_shell.podman_commit_container(container_id, image_name, **commit_kwargs)
 
@@ -40,7 +60,20 @@ def setup_testbed_container(
     golden_commit_hash: str,
     logger: logging.Logger,
 ) -> PodmanContainer:
-    """Helper to clone repo into base image container."""
+    """
+    Clone repository into base image container.
+
+    Args:
+        client: Podman client
+        base_image: Base image name
+        api_key: Anthropic API key
+        repo_url: GitHub repository URL
+        golden_commit_hash: Commit hash to checkout
+        logger: Logger instance
+
+    Returns:
+        Container with repository cloned
+    """
     container: PodmanContainer = podman_utils.safe_container_run(
         client,
         base_image,
@@ -49,6 +82,8 @@ def setup_testbed_container(
         working_dir="/testbed",
         remove=True,
     )
+    podman_utils.register_container(container)
+
     for cmd in [
         "git init .",
         f"git remote add origin {repo_url}",
@@ -56,11 +91,22 @@ def setup_testbed_container(
         f"git checkout {golden_commit_hash}",
     ]:
         podman_utils.podman_timed_exec_bash_logged(container, cmd, logger, timeout=300)
+
     return container
 
 
 def run_metrics(container: PodmanContainer, commit_hash: str, logger: logging.Logger) -> Metrics:
-    """Run test metrics at a specific commit hash."""
+    """
+    Run test metrics at a specific commit hash.
+
+    Args:
+        container: Container to run tests in
+        commit_hash: Commit hash to checkout and test
+        logger: Logger instance
+
+    Returns:
+        Metrics with test results
+    """
     podman_utils.podman_timed_exec_bash_logged(
         container,
         "git reset --hard HEAD && git clean -xdff",

@@ -50,7 +50,6 @@ def run_single_instance(instance: InstanceRow, config: InferenceConfig) -> bool:
     # Copy metadata files
     try:
         copy_agent_config(config.agent_dir, output_dir)
-        copy_instance_metadata(instance, output_dir)
     except FileNotFoundError as e:
         instance_logger.error(f"Failed to copy metadata: {e}")
         return False
@@ -92,6 +91,7 @@ def run_single_instance(instance: InstanceRow, config: InferenceConfig) -> bool:
                 str(output_dir): {"bind": "/output", "mode": "rw"},
             },
             working_dir="/testbed",
+            remove=True
         )
 
         # Stream container output to log

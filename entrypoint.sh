@@ -128,6 +128,12 @@ case "$1" in
             echo "No diff file found at $DIFF_INPUT"
         fi
 
+        # Copy instance metadata to output
+        if [ -f "/rules/instance_metadata.json" ]; then
+            cp /rules/instance_metadata.json /output/instance_metadata.json
+            echo "-> Copied instance_metadata.json to output"
+        fi
+
         # Run verification using the scripts created during bootstrap
         setup_env
         source /scripts/setup_shell.sh
@@ -144,6 +150,12 @@ case "$1" in
             git apply --allow-binary-replacement --3way "$DIFF_INPUT"
         else
             echo "No diff file found at $DIFF_INPUT"
+        fi
+
+        # Copy instance metadata to output
+        if [ -f "/rules/instance_metadata.json" ]; then
+            cp /rules/instance_metadata.json /output/instance_metadata.json
+            echo "-> Copied instance_metadata.json to output"
         fi
 
         echo "Running Opengrep with positive rules..."

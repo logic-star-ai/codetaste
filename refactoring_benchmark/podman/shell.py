@@ -1,12 +1,13 @@
 import subprocess
 
 import subprocess
+import threading
 from typing import Tuple, List, Optional
 
+_shell_lock = threading.RLock()
 
 class PodmanCommandError(Exception):
     """Custom exception for Podman command errors."""
-
     pass
 
 
@@ -20,15 +21,16 @@ def run_podman_command(args: list[str], timeout: int = 120) -> Tuple[int, Tuple[
     Returns:
         A tuple of (returncode, stdout, stderr)
     """
-    # Prepend 'podman' to the argument list
-    full_command = ["podman"] + args
+    with _shell_lock:
+        # Prepend 'podman' to the argument list
+        full_command = ["podman"] + args
 
-    try:
-        result = subprocess.run(full_command, check=False, capture_output=True, text=True, timeout=timeout)
-        return result.returncode, (result.stdout, result.stderr)
+        try:
+            result = subprocess.run(full_command, check=False, capture_output=True, text=True, timeout=timeout)
+            return result.returncode, (result.stdout, result.stderr)
 
-    except subprocess.TimeoutExpired as e:
-        return -1, "", f"Command timed out after {timeout} seconds."
+        except subprocess.TimeoutExpired as e:
+            return -1, "", f"Command timed out after {timeout} seconds."
 
 
 import subprocess

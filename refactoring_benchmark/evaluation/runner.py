@@ -52,6 +52,7 @@ def run_test_evaluation(
                 str(prediction_diff): {"bind": "/input/patch.diff", "mode": "ro"},
                 str(eval_dir): {"bind": "/output", "mode": "rw"},
             },
+            remove=True
         )
 
         # Stream and collect output
@@ -122,6 +123,7 @@ def run_rule_evaluation(
                 str(prediction_diff): {"bind": "/input/patch.diff", "mode": "ro"},
                 str(eval_dir): {"bind": "/output", "mode": "rw"},
             },
+            remove=True
         )
 
         # Stream and collect output
