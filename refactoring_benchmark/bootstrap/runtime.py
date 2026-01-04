@@ -98,14 +98,13 @@ def bootstrap_runtime_phase(
 
         # Commit
         validate_and_commit_container(
-            container.id,
+            container,
             runtime_image,
             changes=['ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]'],
-            squash=True,
         )
         logger.info(f"✅ Saved runtime image: {runtime_image}")
         return runtime_image
 
     finally:
         if container is not None:
-            podman_utils.stop_and_remove_container(container)
+            podman_utils.stop_container(container)

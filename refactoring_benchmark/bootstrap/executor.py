@@ -38,16 +38,19 @@ def bootstrap_single_instance(instance: InstanceRow, config: BootstrapConfig) ->
     # Check if already bootstrapped
     if metadata_path.exists():
         metadata = ExecutionInstanceMetadata.load_from_json(metadata_path)
+        client = podman_utils.get_local_client(80 * 60)
+        if not podman_utils.is_image_existing(client, metadata.setup_image):
+            instance_logger.error(f"Inconsistent state: Setup image missing for instance {instance.id} but metadata exists. Remove metadata to bootstrap setup again.")
+            return False
         if config.force_runtime_build:
             instance_logger.info(
                 f"⚠️  FORCING runtime phase for instance: {instance.id} with existing metadata."
             )
-            client = None
             try:
-                client = podman_utils.get_local_client(80 * 60)
                 bootstrap_runtime_phase(
                     client, instance, instance.setup_image, config, instance_logger, metadata=metadata, force=True
                 )
+                instance_logger.info(f"✅ Successfully rebuilt runtime for instance: {instance.id}")
                 return True
             except Exception as e:
                 instance_logger.error(f"Failed to rebuild runtime: {e}")
@@ -75,7 +78,7 @@ def bootstrap_single_instance(instance: InstanceRow, config: BootstrapConfig) ->
         is_supported = any(
             lang in instance.language.lower() for lang in config.supported_languages
         )
-        client = podman_utils.get_local_client(80 * 60)
+        client = podman_utils.get_local_client(120 * 60)
 
         # Attempt 1: Bootstrap with agent
         try:
@@ -83,7 +86,7 @@ def bootstrap_single_instance(instance: InstanceRow, config: BootstrapConfig) ->
                 client, instance, metadata, config, instance_logger, use_base_image=not is_supported
             )
             bootstrap_runtime_phase(client, instance, setup_img, config, instance_logger, metadata=metadata)
-
+            instance_logger.info(f"✅ Successfully bootstrapped {instance.id}.")
         # Attempt 2: Fallback to base image
         except (RuntimeError, TimeoutError, BootstrapError) as e:
             instance_logger.error(
@@ -93,10 +96,9 @@ def bootstrap_single_instance(instance: InstanceRow, config: BootstrapConfig) ->
                 client, instance, metadata, config, instance_logger, use_base_image=True
             )
             bootstrap_runtime_phase(client, instance, setup_img, config, instance_logger, metadata=metadata)
-
+            instance_logger.info(f"✅ Successfully bootstrapped {instance.id} on retry with base image.")
         # Save metadata
         metadata.save_to_json(metadata_path)
-        instance_logger.info(f"✅ Successfully bootstrapped {instance.id}")
         return True
 
     except Exception as e:

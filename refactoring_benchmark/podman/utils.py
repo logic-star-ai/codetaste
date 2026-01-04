@@ -11,7 +11,7 @@ from typing import Any, List, Optional, cast
 from refactoring_benchmark.utils.logger import get_logger, setup_logging
 import podman
 from podman.domain.containers import Container as PodmanContainer
-from podman.errors import APIError
+from podman.errors import APIError, NotFound
 
 
 utils_logger = get_logger("container_utils")
@@ -46,7 +46,7 @@ def safe_container_run(client: podman.PodmanClient, image, **kwargs) -> PodmanCo
         except Exception as e:
             if i == 4:
                 raise
-            utils_logger.warning(f"Podman create failed ({e}), retrying in {2**i}s...")
+            utils_logger.warning(f"Podman containers.run on {image} failed ({e}), retrying in {2**i}s...")
             time.sleep(2**i)
 
 
@@ -79,7 +79,7 @@ def cleanup_all_containers() -> None:
 
         for container in containers_to_cleanup:
             try:
-                stop_and_remove_container(container)
+                stop_container(container)
                 utils_logger.debug(f"✅ Cleaned up container {container.id[:12]}. {len(_active_containers)} remaining.")
             except Exception as e:
                 utils_logger.warning(f"⚠️ Failed to cleanup container {container.id[:12]}: {e}")
@@ -173,7 +173,7 @@ def extract_folder_from_container(container: PodmanContainer, container_path: st
         tar.extractall(path=local_dest)
 
 
-def stop_and_remove_container(container: PodmanContainer, force: bool = True, auto_unregister: bool = True) -> None:
+def stop_container(container: PodmanContainer, force: bool = True, auto_unregister: bool = True) -> None:
     """
     Stop and remove a Docker container.
 
@@ -183,21 +183,17 @@ def stop_and_remove_container(container: PodmanContainer, force: bool = True, au
         auto_unregister: Automatically unregister from tracking set (default: True)
     """
     with _containers_lock:
+        if container not in _active_containers:
+            return
+        if auto_unregister:
+            unregister_container(container)
         try:
             container.stop(timeout=2)
         except (APIError, json.JSONDecodeError) as e:
             pass
-        try:
-            container.remove(force=force)
-        except (APIError, json.JSONDecodeError) as e:
-            # Handle the case where the container was already deleted by another process
-            if e.response.status_code == 404:
-                return
-            utils_logger.error(f"Failed to remove container {container.id}: {e}")
-            raise
+        except NotFound:
+            return
 
-        if auto_unregister:
-            unregister_container(container)
 
 
 def podman_timed_exec_bash_logged(
@@ -288,3 +284,65 @@ def podman_exec_logged(
                 logger.warning(f"[{image_name} STDERR (non-fatal)]:\n{stderr_text_trunc}")
 
     return exit_code, (stdout_bytes, stderr_bytes)
+
+
+def commit_container(
+    container: PodmanContainer,
+    image_name: str,
+    tag: Optional[str] = None,
+    changes: Optional[List[str]] = None,
+) -> None:
+    """
+    Commit a container to a new image using podman-py library.
+
+    Args:
+        container: Container to commit
+        image_name: Name for the resulting image
+        tag: Optional tag (defaults to :latest if None)
+        changes: List of Dockerfile instructions to apply (e.g., ["ENTRYPOINT [\"/bin/sh\"]"])
+
+    Raises:
+        APIError: If commit fails
+    """
+    # Build repository and tag
+    repository = image_name
+    if ":" in image_name and tag is None:
+        # Split image_name into repo and tag
+        repository, tag = image_name.rsplit(":", 1)
+    elif tag is None:
+        tag = "latest"
+
+    # Commit the container
+    container.commit(repository=repository, tag=tag, changes=changes)
+    utils_logger.info(f"Committed container {container.id[:12]} to {repository}:{tag}")
+
+
+def get_container_storage(container: PodmanContainer) -> dict:
+    """
+    Get container storage size information using podman-py.
+
+    Args:
+        container: Container to inspect
+
+    Returns:
+        Dictionary with 'container_id', 'writable_bytes', and 'virtual_bytes'
+
+    Raises:
+        APIError: If inspection fails
+    """
+    # Reload container to get fresh data with size info
+    container.reload()
+
+    # Get size info from container attributes
+    # The SizeRw field contains the writable layer size
+    # The SizeRootFs field contains the total size (virtual size)
+    attrs = container.attrs
+
+    size_rw = attrs.get("SizeRw", 0)  # Writable layer size in bytes
+    size_rootfs = attrs.get("SizeRootFs", 0)  # Total filesystem size in bytes
+
+    return {
+        "container_id": container.id,
+        "writable_bytes": size_rw,
+        "virtual_bytes": size_rootfs,
+    }

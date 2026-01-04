@@ -6,7 +6,6 @@ from podman.domain.containers import Container as PodmanContainer
 
 from refactoring_benchmark.utils.models import Metrics
 import refactoring_benchmark.podman.utils as podman_utils
-import refactoring_benchmark.podman.shell as podman_shell
 
 
 class BootstrapError(Exception):
@@ -15,18 +14,19 @@ class BootstrapError(Exception):
     pass
 
 
-def validate_container_size(container_id: str, max_size_bytes: int = 5 * (1024**3)) -> None:
+def validate_container_size(container: PodmanContainer, max_size_bytes: int = 5 * (1024**3)) -> None:
     """
     Validate container storage size does not exceed limit.
 
     Args:
-        container_id: Container ID to check
+        container: Container to check
         max_size_bytes: Maximum allowed size in bytes (default: 5GB)
 
     Raises:
         BootstrapError: If container exceeds size limit
     """
-    container_size = podman_shell.podman_container_storage(container_id)["writable_bytes"]
+    storage_info = podman_utils.get_container_storage(container)
+    container_size = storage_info["writable_bytes"]
     if container_size > max_size_bytes:
         raise BootstrapError(
             f"Container additional size exceeded {max_size_bytes / (1024**3):.2f}GB limit."
@@ -34,22 +34,22 @@ def validate_container_size(container_id: str, max_size_bytes: int = 5 * (1024**
 
 
 def validate_and_commit_container(
-    container_id: str, image_name: str, max_size_bytes: int = 5 * (1024**3), **commit_kwargs
+    container: PodmanContainer, image_name: str, max_size_bytes: int = 5 * (1024**3), **commit_kwargs
 ) -> None:
     """
     Validate container size then commit if within limits.
 
     Args:
-        container_id: Container ID to commit
+        container: Container to commit
         image_name: Name for the committed image
         max_size_bytes: Maximum allowed size in bytes
-        **commit_kwargs: Additional arguments for podman commit
+        **commit_kwargs: Additional arguments for commit (e.g., changes, tag)
 
     Raises:
         BootstrapError: If container exceeds size limit
     """
-    validate_container_size(container_id, max_size_bytes)
-    podman_shell.podman_commit_container(container_id, image_name, **commit_kwargs)
+    validate_container_size(container, max_size_bytes)
+    podman_utils.commit_container(container, image_name, **commit_kwargs)
 
 
 def setup_testbed_container(
@@ -82,7 +82,6 @@ def setup_testbed_container(
         working_dir="/testbed",
         remove=True,
     )
-    podman_utils.register_container(container)
 
     for cmd in [
         "git init .",
@@ -123,7 +122,7 @@ def run_metrics(container: PodmanContainer, commit_hash: str, logger: logging.Lo
     command = "sudo /scripts/setup_system.sh || true; source /scripts/setup_shell.sh || true; /scripts/run_tests"
     try:
         exit_code, (stdout_bytes, stderr_bytes) = podman_utils.podman_timed_exec_bash_logged(
-            container, command, logger, timeout=900
+            container, command, logger, timeout=(900 + 300) # Give it some extra buffer time
         )
         output = stdout_bytes.decode().strip().split("\n")
         data = json.loads(output[-1])

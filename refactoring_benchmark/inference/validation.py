@@ -3,7 +3,6 @@
 import json
 import re
 from pathlib import Path
-from typing import Union
 
 from refactoring_benchmark.inference.models import AgentConfig
 

@@ -14,7 +14,6 @@ from tqdm import tqdm
 from refactoring_benchmark.inference.models import InferenceConfig
 from refactoring_benchmark.inference.utils import (
     copy_agent_config,
-    copy_instance_metadata,
     create_fallback_inference_metadata,
     ensure_inference_metadata_exists,
     get_instance_output_dir,
@@ -135,7 +134,7 @@ def run_single_instance(instance: InstanceRow, config: InferenceConfig) -> bool:
 
     finally:
         if container is not None:
-            podman_utils.stop_and_remove_container(container)
+            podman_utils.stop_container(container)
         client.close()
 
 

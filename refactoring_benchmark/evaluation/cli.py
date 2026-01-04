@@ -54,8 +54,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--timeout-test",
         type=int,
-        default=600,
-        help="Timeout in seconds for test evaluation (default: 10 minutes)",
+        default=1200,
+        help="Timeout in seconds for test evaluation (default: 20 minutes)",
     )
 
     parser.add_argument(

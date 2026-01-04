@@ -18,7 +18,7 @@ def main():
     args = parse_args()
 
     # Setup logging
-    log_dir = Path("logs")
+    log_dir = Path("logs/bootstrap")
     setup_logging(log_dir)
     logger = get_logger("bootstrap")
 

@@ -78,7 +78,7 @@ def run_test_evaluation(
 
     finally:
         if container is not None:
-            podman_utils.stop_and_remove_container(container)
+            podman_utils.stop_container(container)
         client.close()
 
 
@@ -150,6 +150,6 @@ def run_rule_evaluation(
 
     finally:
         if container is not None:
-            podman_utils.stop_and_remove_container(container)
+            podman_utils.stop_container(container)
         client.close()
 

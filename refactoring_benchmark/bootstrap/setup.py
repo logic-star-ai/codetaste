@@ -43,10 +43,11 @@ def bootstrap_run_setup_agent(
         TimeoutError: If agent exceeds time limit
     """
     logger.info("Claude Agent is taking control...")
+    timeout = "90m"
     agent_cmd = [
         "bash",
         "-c",
-        f"timeout 70m claude -p --dangerously-skip-permissions --verbose --output-format stream-json --max-budget-usd 5 {shlex.quote(BOOTSTRAP_PROMPT)}",
+        f"timeout {timeout} claude -p --dangerously-skip-permissions --verbose --output-format stream-json --max-budget-usd 5 {shlex.quote(BOOTSTRAP_PROMPT)}",
     ]
     ts_start = time.time()
     _, output = podman_utils.stream_exec(
@@ -59,10 +60,10 @@ def bootstrap_run_setup_agent(
     if "error_max_budget_usd" in output.splitlines()[-1]:
         raise BootstrapError("Bootstrap exceeded budget limit.")
 
-    validate_container_size(container.id)
+    validate_container_size(container)
 
-    if time.time() - ts_start >= 4200:
-        raise TimeoutError(f"Agent exceeded 70m time limit.")
+    if time.time() - ts_start >= int(timeout[:-1]) * 60:
+        raise TimeoutError(f"Agent exceeded {timeout} time limit.")
 
     return container
 
@@ -118,7 +119,7 @@ def bootstrap_setup_phase(
 
             try:
                 container = bootstrap_run_setup_agent(container, config, logger)
-                validate_container_size(container.id)
+                validate_container_size(container)
             except (TimeoutError, BootstrapError) as e:
                 metadata.has_execution_environment = False
                 metadata.reason_no_execution_environment += f"Agent error: {e} "
@@ -134,7 +135,7 @@ def bootstrap_setup_phase(
 
         # 4. Final Validation
         if metadata.golden_metrics.is_valid or metadata.base_metrics.is_valid:
-            validate_and_commit_container(container.id, setup_image, squash=True)
+            validate_and_commit_container(container, setup_image)
             metadata.has_execution_environment = True
             return setup_image
 
@@ -144,7 +145,7 @@ def bootstrap_setup_phase(
 
     finally:
         if container:
-            podman_utils.stop_and_remove_container(container)
+            podman_utils.stop_container(container)
 
 
 def _finalize_fallback(
@@ -161,7 +162,7 @@ def _finalize_fallback(
     Returns:
         Setup image name
     """
-    validate_and_commit_container(container.id, setup_image, squash=True)
+    validate_and_commit_container(container, setup_image)
     metadata.has_execution_environment = False
     metadata.reason_no_execution_environment += "Used base image fallback."
     return setup_image

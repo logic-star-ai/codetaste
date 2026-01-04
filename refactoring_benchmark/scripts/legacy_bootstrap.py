@@ -111,7 +111,7 @@ def bootstrap_setup_phase(
 
     finally:
         if container:
-            podman_utils.stop_and_remove_container(container)
+            podman_utils.stop_container(container)
 
 def _finalize_fallback(
     container: PodmanContainer, 
@@ -192,7 +192,7 @@ def bootstrap_runtime_phase(client: podman.PodmanClient, row: InstanceRow, setup
 
     finally:
         if container is not None:
-            podman_utils.stop_and_remove_container(container)
+            podman_utils.stop_container(container)
 
 
 def bootstrap_instance_retry(instance: InstanceRow, force_runtime: bool = False):
