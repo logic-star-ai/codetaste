@@ -207,7 +207,7 @@ def run_rule_evaluation(
             "eval_rule",
         ]
 
-        subprocess.run(run_cmds, cwd=PROJECT_ROOT, capture_output=True, text=True, timeout=1200)
+        result = subprocess.run(run_cmds, cwd=PROJECT_ROOT, capture_output=True, text=True, timeout=1200)
 
         sarif_pos = os.path.join(instance_output_dir, "rules_positive.sarif")
         sarif_neg = os.path.join(instance_output_dir, "rules_negative.sarif")

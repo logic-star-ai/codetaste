@@ -175,7 +175,7 @@ def bootstrap_runtime_phase(client: podman.PodmanClient, row: InstanceRow, setup
         bootstrap_logger.info(f"[{row.id}]: 🧠 Lobotomized git repository.")
         podman_utils.podman_timed_exec_bash_logged(
             container,
-            "sudo /scripts/setup_system.sh || true; source /scripts/setup_shell.sh",
+            "[ -f /scripts/setup_system.sh ] && sudo /scripts/setup_system.sh || :; [ -f /scripts/setup_shell.sh ] && . /scripts/setup_shell.sh",
             instance_logger,
             timeout=600,
         )
