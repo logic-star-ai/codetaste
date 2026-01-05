@@ -16,9 +16,7 @@ class BootstrapConfig(BaseModel):
     api_key: str
     base_image: str = "benchmark/benchmark-base-all"
     timeout_bootstrap: int = Field(gt=0, default=7200)  # 2 hours
-    supported_languages: list[str] = Field(
-        default_factory=lambda: ["python", "javascript", "java", "c", "go", "rust"]
-    )
+    supported_languages: list[str] = Field(default_factory=lambda: ["python", "javascript", "java", "c", "go", "rust"])
 
     class Config:
         arbitrary_types_allowed = True
@@ -26,6 +24,7 @@ class BootstrapConfig(BaseModel):
 
 class Metrics(BaseModel):
     """Test execution metrics."""
+
     passed: int = 0
     failed: int = 0
     skipped: int = 0
@@ -42,6 +41,7 @@ class Metrics(BaseModel):
 
 class ExecutionInstanceMetadata(BaseModel):
     """Metadata for an execution instance."""
+
     owner: str
     repo: str
     base_hash: str

@@ -28,9 +28,7 @@ def validate_container_size(container: PodmanContainer, max_size_bytes: int = 5 
     storage_info = podman_utils.get_container_storage(container)
     container_size = storage_info["writable_bytes"]
     if container_size > max_size_bytes:
-        raise BootstrapError(
-            f"Container additional size exceeded {max_size_bytes / (1024**3):.2f}GB limit."
-        )
+        raise BootstrapError(f"Container additional size exceeded {max_size_bytes / (1024**3):.2f}GB limit.")
 
 
 def validate_and_commit_container(
@@ -122,7 +120,7 @@ def run_metrics(container: PodmanContainer, commit_hash: str, logger: logging.Lo
     command = "sudo /scripts/setup_system.sh || true; source /scripts/setup_shell.sh || true; /scripts/run_tests"
     try:
         exit_code, (stdout_bytes, stderr_bytes) = podman_utils.podman_timed_exec_bash_logged(
-            container, command, logger, timeout=(900 + 300) # Give it some extra buffer time
+            container, command, logger, timeout=(900 + 300)  # Give it some extra buffer time
         )
         output = stdout_bytes.decode().strip().split("\n")
         data = json.loads(output[-1])

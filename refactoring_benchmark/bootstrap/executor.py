@@ -40,12 +40,12 @@ def bootstrap_single_instance(instance: InstanceRow, config: BootstrapConfig) ->
         metadata = ExecutionInstanceMetadata.load_from_json(metadata_path)
         client = podman_utils.get_local_client(80 * 60)
         if not podman_utils.is_image_existing(client, metadata.setup_image):
-            instance_logger.error(f"Inconsistent state: Setup image missing for instance {instance.id} but metadata exists. Remove metadata to bootstrap setup again.")
+            instance_logger.error(
+                f"Inconsistent state: Setup image missing for instance {instance.id} but metadata exists. Remove metadata to bootstrap setup again."
+            )
             return False
         if config.force_runtime_build:
-            instance_logger.info(
-                f"⚠️  FORCING runtime phase for instance: {instance.id} with existing metadata."
-            )
+            instance_logger.info(f"⚠️  FORCING runtime phase for instance: {instance.id} with existing metadata.")
             try:
                 bootstrap_runtime_phase(
                     client, instance, instance.setup_image, config, instance_logger, metadata=metadata, force=True
@@ -75,9 +75,7 @@ def bootstrap_single_instance(instance: InstanceRow, config: BootstrapConfig) ->
     client = None
     try:
         # Check if language is supported
-        is_supported = any(
-            lang in instance.language.lower() for lang in config.supported_languages
-        )
+        is_supported = any(lang in instance.language.lower() for lang in config.supported_languages)
         client = podman_utils.get_local_client(120 * 60)
 
         # Attempt 1: Bootstrap with agent
@@ -89,12 +87,8 @@ def bootstrap_single_instance(instance: InstanceRow, config: BootstrapConfig) ->
             instance_logger.info(f"✅ Successfully bootstrapped {instance.id}.")
         # Attempt 2: Fallback to base image
         except (RuntimeError, TimeoutError, BootstrapError) as e:
-            instance_logger.error(
-                f"Attempt 1 failed ({e}). Retrying with base image without execution environment..."
-            )
-            setup_img = bootstrap_setup_phase(
-                client, instance, metadata, config, instance_logger, use_base_image=True
-            )
+            instance_logger.error(f"Attempt 1 failed ({e}). Retrying with base image without execution environment...")
+            setup_img = bootstrap_setup_phase(client, instance, metadata, config, instance_logger, use_base_image=True)
             bootstrap_runtime_phase(client, instance, setup_img, config, instance_logger, metadata=metadata)
             instance_logger.info(f"✅ Successfully bootstrapped {instance.id} on retry with base image.")
         # Save metadata
@@ -171,8 +165,7 @@ class BootstrapOrchestrator:
         try:
             # Submit all tasks
             future_to_instance = {
-                executor.submit(bootstrap_single_instance, inst, self.config): inst
-                for inst in self.instances
+                executor.submit(bootstrap_single_instance, inst, self.config): inst for inst in self.instances
             }
 
             # Process completed tasks with progress bar

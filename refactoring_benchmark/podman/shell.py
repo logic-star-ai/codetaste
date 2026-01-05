@@ -6,8 +6,10 @@ from typing import Tuple, List, Optional
 
 _shell_lock = threading.RLock()
 
+
 class PodmanCommandError(Exception):
     """Custom exception for Podman command errors."""
+
     pass
 
 

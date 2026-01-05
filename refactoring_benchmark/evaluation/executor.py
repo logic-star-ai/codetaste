@@ -151,7 +151,9 @@ def evaluate_single_instance(instance: InstanceRow, agent_id: str, config: Evalu
 
     instance_logger.info(f"Evaluation completed successfully")
     instance_logger.info(f"  Test metrics: {test_metrics.model_dump() if test_metrics else 'N/A'}")
-    instance_logger.info(f"  Rule IFR: {rule_metrics.ifr:.3f} (pos: {rule_metrics.positive_ifr:.3f}, neg: {rule_metrics.negative_ifr:.3f})")
+    instance_logger.info(
+        f"  Rule IFR: {rule_metrics.ifr:.3f} (pos: {rule_metrics.positive_ifr:.3f}, neg: {rule_metrics.negative_ifr:.3f})"
+    )
 
     return True
 

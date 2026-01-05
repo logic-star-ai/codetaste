@@ -196,7 +196,6 @@ def stop_container(container: PodmanContainer, force: bool = True, auto_unregist
             return
 
 
-
 def podman_timed_exec_bash_logged(
     container: PodmanContainer,
     bash_cmd: str,
@@ -335,11 +334,15 @@ def get_container_storage(container: PodmanContainer) -> dict:
     response = api_client.get(f"/containers/{container.id}/json", params={"size": True})
     try:
         response.raise_for_status()
-        data = response.json() 
+        data = response.json()
         if "SizeRw" not in data or "SizeRootFs" not in data:
-            utils_logger.warning(f"Size information missing in container inspect data. For container: {container.id[:12]}.")
+            utils_logger.warning(
+                f"Size information missing in container inspect data. For container: {container.id[:12]}."
+            )
         else:
-            utils_logger.debug(f"Retrieved storage info for container {container.id[:12]}: SizeRw={data['SizeRw']}, SizeRootFs={data['SizeRootFs']}")
+            utils_logger.debug(
+                f"Retrieved storage info for container {container.id[:12]}: SizeRw={data['SizeRw']}, SizeRootFs={data['SizeRootFs']}"
+            )
     except Exception as e:
         data = {}
 

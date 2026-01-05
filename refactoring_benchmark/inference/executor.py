@@ -90,7 +90,7 @@ def run_single_instance(instance: InstanceRow, config: InferenceConfig) -> bool:
                 str(output_dir): {"bind": "/output", "mode": "rw"},
             },
             working_dir="/testbed",
-            remove=True
+            remove=True,
         )
 
         # Stream container output to log
@@ -113,7 +113,7 @@ def run_single_instance(instance: InstanceRow, config: InferenceConfig) -> bool:
         prediction_path = output_dir / "prediction.diff"
         if exit_code == 0 and prediction_path.exists():
             instance_logger.info("Inference completed successfully")
-            ensure_inference_metadata_exists(output_dir) # TODO : Validate Format
+            ensure_inference_metadata_exists(output_dir)  # TODO : Validate Format
             return True
         else:
             instance_logger.error(f"Container exited with code {exit_code}")

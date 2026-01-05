@@ -150,9 +150,7 @@ def bootstrap_setup_phase(
             podman_utils.stop_container(container)
 
 
-def _finalize_fallback(
-    container: PodmanContainer, setup_image: str, metadata: ExecutionInstanceMetadata
-) -> str:
+def _finalize_fallback(container: PodmanContainer, setup_image: str, metadata: ExecutionInstanceMetadata) -> str:
     """
     Commits the current container state as the setup image and marks as fallback.
 
@@ -170,9 +168,7 @@ def _finalize_fallback(
     return setup_image
 
 
-def _save_scripts_safely(
-    container: PodmanContainer, instance_dir: str, row_id: str, logger: logging.Logger
-) -> None:
+def _save_scripts_safely(container: PodmanContainer, instance_dir: str, row_id: str, logger: logging.Logger) -> None:
     """
     Extract scripts from container to instance directory.
 
