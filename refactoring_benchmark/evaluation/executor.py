@@ -69,7 +69,7 @@ def evaluate_single_instance(instance: InstanceRow, agent_id: str, config: Evalu
     agent_output_dir = config.output_dir / instance.owner / instance.repo / instance.short_hash / agent_id
     eval_dir = agent_output_dir / "evaluation"
     prediction_diff = agent_output_dir / "prediction.diff"
-    instance_metadata_path = agent_output_dir / "instance_metadata.json"
+    instance_metadata_path = eval_dir / "instance_metadata.json"
 
     # Check if prediction.diff exists
     if not prediction_diff.exists():

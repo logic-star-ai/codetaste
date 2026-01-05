@@ -40,7 +40,8 @@ def safe_container_run(client: podman.PodmanClient, image, **kwargs) -> PodmanCo
     """Retries container creation to handle 'POST operation failed' socket errors."""
     for i in range(1, 5):
         try:
-            container: PodmanContainer = client.containers.run(image, **kwargs)
+            remove = kwargs.pop("remove", True)
+            container: PodmanContainer = client.containers.run(image, remove=remove, **kwargs)
             register_container(container)
             return container
         except Exception as e:
@@ -319,7 +320,7 @@ def commit_container(
 
 def get_container_storage(container: PodmanContainer) -> dict:
     """
-    Get container storage size information using podman-py.
+    Get container storage usage information calling the api
 
     Args:
         container: Container to inspect
@@ -330,16 +331,20 @@ def get_container_storage(container: PodmanContainer) -> dict:
     Raises:
         APIError: If inspection fails
     """
-    # Reload container to get fresh data with size info
-    container.reload()
+    api_client = container.client
+    response = api_client.get(f"/containers/{container.id}/json", params={"size": True})
+    try:
+        response.raise_for_status()
+        data = response.json() 
+        if "SizeRw" not in data or "SizeRootFs" not in data:
+            utils_logger.warning(f"Size information missing in container inspect data. For container: {container.id[:12]}.")
+        else:
+            utils_logger.debug(f"Retrieved storage info for container {container.id[:12]}: SizeRw={data['SizeRw']}, SizeRootFs={data['SizeRootFs']}")
+    except Exception as e:
+        data = {}
 
-    # Get size info from container attributes
-    # The SizeRw field contains the writable layer size
-    # The SizeRootFs field contains the total size (virtual size)
-    attrs = container.attrs
-
-    size_rw = attrs.get("SizeRw", 0)  # Writable layer size in bytes
-    size_rootfs = attrs.get("SizeRootFs", 0)  # Total filesystem size in bytes
+    size_rw = data.get("SizeRw", 0)
+    size_rootfs = data.get("SizeRootFs", 0)
 
     return {
         "container_id": container.id,

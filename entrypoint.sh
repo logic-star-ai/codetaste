@@ -130,7 +130,7 @@ case "$1" in
 
         # Copy instance metadata to output
         if [ -f "/rules/instance_metadata.json" ]; then
-            cp /rules/instance_metadata.json /output/instance_metadata.json
+            cat /rules/instance_metadata.json > /output/instance_metadata.json
             echo "-> Copied instance_metadata.json to output"
         fi
 
@@ -154,7 +154,7 @@ case "$1" in
 
         # Copy instance metadata to output
         if [ -f "/rules/instance_metadata.json" ]; then
-            cp /rules/instance_metadata.json /output/instance_metadata.json
+            cat /rules/instance_metadata.json > /output/instance_metadata.json
             echo "-> Copied instance_metadata.json to output"
         fi
 

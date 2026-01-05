@@ -139,6 +139,8 @@ def bootstrap_setup_phase(
             metadata.has_execution_environment = True
             return setup_image
 
+        metadata.golden_metrics = None
+        metadata.base_metrics = None
         metadata.has_execution_environment = False
         metadata.reason_no_execution_environment += f"Insufficient test coverage. "
         raise RuntimeError(f"Metrics validation failed for {row.id}")
