@@ -1,7 +1,7 @@
 """Data models for bootstrap configuration."""
 
 from pathlib import Path
-from typing import Optional, TypeVar
+from typing import Optional, Type, TypeVar
 from pydantic import BaseModel, Field
 
 T = TypeVar("T", bound="ExecutionInstanceMetadata")

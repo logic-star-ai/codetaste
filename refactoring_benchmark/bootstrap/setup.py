@@ -60,7 +60,9 @@ def bootstrap_run_setup_agent(
     if "error_max_budget_usd" in output.splitlines()[-1]:
         raise BootstrapError("Bootstrap exceeded budget limit.")
 
-    validate_container_size(container)
+    # Clean up /tmp folder
+    cleanup_tmp = ["bash", "-c", "sudo find /tmp -mindepth 1 -delete"]
+    podman_utils.podman_exec_logged(container, cleanup_tmp, logger)  
 
     if time.time() - ts_start >= int(timeout[:-1]) * 60:
         raise TimeoutError(f"Agent exceeded {timeout} time limit.")
@@ -119,11 +121,11 @@ def bootstrap_setup_phase(
 
             try:
                 container = bootstrap_run_setup_agent(container, config, logger)
-                validate_container_size(container)
             except (TimeoutError, BootstrapError) as e:
                 metadata.has_execution_environment = False
                 metadata.reason_no_execution_environment += f"Agent error: {e} "
                 raise
+            validate_container_size(container, metadata=metadata)
 
         # 3. Process Metrics & Scripts
         metadata.golden_metrics = run_metrics(container, row.golden_commit_hash, logger)
@@ -133,6 +135,7 @@ def bootstrap_setup_phase(
 
         _save_scripts_safely(container, instance_dir, row.id, logger)
 
+        validate_container_size(container, metadata=metadata)
         # 4. Final Validation
         if metadata.golden_metrics.is_valid or metadata.base_metrics.is_valid:
             validate_and_commit_container(container, setup_image)

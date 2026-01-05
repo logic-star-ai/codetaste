@@ -2,9 +2,11 @@
 
 import json
 import logging
+from typing import Optional
 from podman.domain.containers import Container as PodmanContainer
 
 from refactoring_benchmark.utils.models import Metrics
+from refactoring_benchmark.bootstrap.models import ExecutionInstanceMetadata
 import refactoring_benchmark.podman.utils as podman_utils
 
 
@@ -14,7 +16,7 @@ class BootstrapError(Exception):
     pass
 
 
-def validate_container_size(container: PodmanContainer, max_size_bytes: int = 5 * (1024**3)) -> None:
+def validate_container_size(container: PodmanContainer, metadata: Optional[ExecutionInstanceMetadata] = None, max_size_bytes: int = 5 * (1024**3)) -> None:
     """
     Validate container storage size does not exceed limit.
 
@@ -28,6 +30,9 @@ def validate_container_size(container: PodmanContainer, max_size_bytes: int = 5 
     storage_info = podman_utils.get_container_storage(container)
     container_size = storage_info["writable_bytes"]
     if container_size > max_size_bytes:
+        if metadata:
+            metadata.has_execution_environment = False
+            metadata.reason_no_execution_environment += f"Container size {container_size / (1024**3):.2f}GB exceeds limit. "
         raise BootstrapError(f"Container additional size exceeded {max_size_bytes / (1024**3):.2f}GB limit.")
 
 
@@ -46,7 +51,7 @@ def validate_and_commit_container(
     Raises:
         BootstrapError: If container exceeds size limit
     """
-    validate_container_size(container, max_size_bytes)
+    validate_container_size(container, max_size_bytes=max_size_bytes)
     podman_utils.commit_container(container, image_name, **commit_kwargs)
 
 
