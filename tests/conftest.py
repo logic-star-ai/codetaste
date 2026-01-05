@@ -4,8 +4,7 @@ import pytest
 import podman
 from podman.domain.containers import Container as PodmanContainer
 
-from refactoring_benchmark.legacy_bootstrap.config import BASE_IMAGE
-
+BASE_IMAGE = "benchmark/benchmark-base-all"
 
 @pytest.fixture(scope="session")
 def podman_client():

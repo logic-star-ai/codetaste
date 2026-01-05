@@ -6,7 +6,7 @@ from typing import Optional
 
 from pydantic import BaseModel, Field, computed_field
 
-from refactoring_benchmark.legacy_bootstrap.models import ExecutionInstanceMetadata
+from refactoring_benchmark.bootstrap.models import ExecutionInstanceMetadata
 
 
 class TestMetrics(BaseModel):

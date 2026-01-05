@@ -14,7 +14,7 @@ from refactoring_benchmark.bootstrap.models import BootstrapConfig
 from refactoring_benchmark.bootstrap.setup import bootstrap_setup_phase
 from refactoring_benchmark.bootstrap.runtime import bootstrap_runtime_phase
 from refactoring_benchmark.bootstrap.utils import BootstrapError
-from refactoring_benchmark.legacy_bootstrap.models import ExecutionInstanceMetadata
+from refactoring_benchmark.bootstrap.models import ExecutionInstanceMetadata
 from refactoring_benchmark.podman import utils as podman_utils
 from refactoring_benchmark.utils.logger import get_logger
 from refactoring_benchmark.utils.models import InstanceRow

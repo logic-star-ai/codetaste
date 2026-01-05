@@ -18,7 +18,7 @@ from refactoring_benchmark.bootstrap.utils import (
     validate_container_size,
     validate_and_commit_container,
 )
-from refactoring_benchmark.legacy_bootstrap.models import ExecutionInstanceMetadata
+from refactoring_benchmark.bootstrap.models import ExecutionInstanceMetadata
 from refactoring_benchmark.utils.models import InstanceRow
 from refactoring_benchmark.utils.prompts import BOOTSTRAP_PROMPT
 import refactoring_benchmark.podman.utils as podman_utils

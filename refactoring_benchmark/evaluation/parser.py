@@ -6,7 +6,7 @@ from typing import Dict, Optional, Tuple
 
 import yaml
 
-from refactoring_benchmark.legacy_bootstrap.models import ExecutionInstanceMetadata
+from refactoring_benchmark.bootstrap.models import ExecutionInstanceMetadata
 from refactoring_benchmark.evaluation.models import RuleMetrics, TestMetrics
 
 
