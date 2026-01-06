@@ -97,6 +97,7 @@ def main():
         force=args.force,
         agent_config=agent_config,
         sanitized_agent_id=sanitized_agent_id,
+        env_vars=args.env_vars,
     )
 
     # Create and run orchestrator

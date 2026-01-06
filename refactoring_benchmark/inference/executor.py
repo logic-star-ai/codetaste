@@ -74,17 +74,20 @@ def run_single_instance(instance: InstanceRow, config: InferenceConfig) -> bool:
         instance_logger.info(f"  Image: {instance.runtime_image}")
         instance_logger.info(f"  Output: {output_dir}")
 
-        # Get API key from environment (may be None)
-        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        # Build environment variables for container
+        container_env = {}
+        container_env.update(config.env_vars)
 
         # Run container in inference mode
         instance_logger.info("Running container in inference mode...")
+        if container_env:
+            instance_logger.info(f"  Environment variables: {', '.join(container_env.keys())}")
         container = podman_utils.safe_container_run(
             client,
             instance.runtime_image,
             command=["inference"],
             detach=True,
-            environment={"ANTHROPIC_API_KEY": api_key} if api_key else {},
+            environment=container_env,
             volumes={
                 str(config.agent_dir): {"bind": "/agent", "mode": "rw"},
                 str(output_dir): {"bind": "/output", "mode": "rw"},

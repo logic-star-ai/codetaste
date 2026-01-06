@@ -64,11 +64,30 @@ def parse_args() -> argparse.Namespace:
         help="Force re-run inference even if outputs already exist",
     )
 
+    parser.add_argument(
+        "--env",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="Environment variable to pass to containers (can be specified multiple times)",
+    )
+
     args = parser.parse_args()
 
     # Convert paths to absolute
     args.agent_dir = args.agent_dir.resolve()
     args.output_dir = args.output_dir.resolve()
     args.instances_csv = args.instances_csv.resolve()
+
+    # Parse environment variables from KEY=VALUE format
+    env_vars = {}
+    for env_str in args.env:
+        if "=" not in env_str:
+            parser.error(f"Invalid --env format: '{env_str}'. Expected KEY=VALUE")
+        key, value = env_str.split("=", 1)
+        if not key:
+            parser.error(f"Invalid --env format: '{env_str}'. Key cannot be empty")
+        env_vars[key] = value
+    args.env_vars = env_vars
 
     return args
