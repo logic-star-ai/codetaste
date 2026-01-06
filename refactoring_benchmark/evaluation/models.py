@@ -7,6 +7,7 @@ from typing import Optional
 from pydantic import BaseModel, Field, computed_field
 
 from refactoring_benchmark.bootstrap.models import ExecutionInstanceMetadata
+from refactoring_benchmark.inference.models import AgentConfig
 
 
 class TestMetrics(BaseModel):
@@ -95,6 +96,7 @@ class EvaluationResult(BaseModel):
     """Complete evaluation result for a single instance and agent."""
 
     instance_metadata: ExecutionInstanceMetadata
+    agent_config: AgentConfig
     agent_test_metrics: Optional[TestMetrics] = None
     agent_rule_metrics: RuleMetrics  # Required, not optional
     evaluation_timestamp: str = Field(default_factory=lambda: datetime.utcnow().isoformat() + "Z")

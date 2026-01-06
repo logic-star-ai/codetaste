@@ -16,6 +16,7 @@ from refactoring_benchmark.evaluation.parser import (
     parse_test_output,
 )
 from refactoring_benchmark.evaluation.runner import run_rule_evaluation, run_test_evaluation
+from refactoring_benchmark.inference.validation import validate_agent_config
 from refactoring_benchmark.podman import utils as podman_utils
 from refactoring_benchmark.utils.logger import get_logger
 from refactoring_benchmark.utils.models import InstanceRow
@@ -70,10 +71,18 @@ def evaluate_single_instance(instance: InstanceRow, agent_id: str, config: Evalu
     eval_dir = agent_output_dir / "evaluation"
     prediction_diff = agent_output_dir / "prediction.diff"
     instance_metadata_path = eval_dir / "instance_metadata.json"
+    agent_config_path = agent_output_dir / "agent_config.json"
 
     # Check if prediction.diff exists
     if not prediction_diff.exists():
         instance_logger.warning(f"Skipping {instance.id}, no prediction.diff found at {prediction_diff}")
+        return False
+
+    # Load agent config
+    try:
+        agent_config = validate_agent_config(agent_config_path)
+    except Exception as e:
+        instance_logger.error(f"Failed to load agent config: {e}")
         return False
 
     # Check if evaluation already exists
@@ -140,6 +149,7 @@ def evaluate_single_instance(instance: InstanceRow, agent_id: str, config: Evalu
     # Create evaluation result
     evaluation_result = EvaluationResult(
         instance_metadata=instance_metadata,
+        agent_config=agent_config,
         agent_test_metrics=test_metrics,
         agent_rule_metrics=rule_metrics,
     )
