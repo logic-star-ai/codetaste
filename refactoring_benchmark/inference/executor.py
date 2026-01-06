@@ -13,6 +13,7 @@ from tqdm import tqdm
 
 from refactoring_benchmark.inference.models import InferenceConfig
 from refactoring_benchmark.inference.utils import (
+    augment_inference_metadata_with_description_type,
     copy_agent_config,
     create_fallback_inference_metadata,
     ensure_inference_metadata_exists,
@@ -77,6 +78,7 @@ def run_single_instance(instance: InstanceRow, config: InferenceConfig) -> bool:
         # Build environment variables for container
         container_env = {}
         container_env.update(config.env_vars)
+        container_env["DESCRIPTION_TYPE"] = config.description_type
 
         # Run container in inference mode
         instance_logger.info("Running container in inference mode...")
@@ -117,6 +119,7 @@ def run_single_instance(instance: InstanceRow, config: InferenceConfig) -> bool:
         if exit_code == 0 and prediction_path.exists():
             instance_logger.info("Inference completed successfully")
             ensure_inference_metadata_exists(output_dir)  # TODO : Validate Format
+            augment_inference_metadata_with_description_type(output_dir, config.description_type)
             return True
         else:
             instance_logger.error(f"Container exited with code {exit_code}")
@@ -124,6 +127,7 @@ def run_single_instance(instance: InstanceRow, config: InferenceConfig) -> bool:
             if prediction_path.exists():
                 # Agent produced output but failed
                 ensure_inference_metadata_exists(output_dir)
+                augment_inference_metadata_with_description_type(output_dir, config.description_type)
             else:
                 # Agent crashed without producing output
                 create_fallback_inference_metadata(output_dir, finish_reason="crashed")

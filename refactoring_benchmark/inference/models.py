@@ -44,6 +44,7 @@ class InferenceConfig(BaseModel):
     agent_config: AgentConfig
     sanitized_agent_id: str
     env_vars: Dict[str, str] = Field(default_factory=dict)
+    description_type: str = "standard"
 
     class Config:
         arbitrary_types_allowed = True

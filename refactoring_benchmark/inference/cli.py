@@ -72,6 +72,14 @@ def parse_args() -> argparse.Namespace:
         help="Environment variable to pass to containers (can be specified multiple times)",
     )
 
+    parser.add_argument(
+        "--description-type",
+        type=str,
+        choices=["standard", "minimal"],
+        default="standard",
+        help="Type of task description to use (standard: full description, minimal: title and summary only)",
+    )
+
     args = parser.parse_args()
 
     # Convert paths to absolute

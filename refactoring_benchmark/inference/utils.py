@@ -110,3 +110,27 @@ def output_exists(output_dir: Path) -> bool:
     """
     prediction_path = output_dir / "prediction.diff"
     return prediction_path.exists()
+
+
+def augment_inference_metadata_with_description_type(
+    output_dir: Path, description_type: str
+) -> None:
+    """
+    Augment inference_metadata.json with description_type field if it exists and is valid JSON.
+
+    Args:
+        output_dir: Output directory containing inference_metadata.json
+        description_type: Type of description used ("standard" or "minimal")
+    """
+    metadata_path = output_dir / "inference_metadata.json"
+    if not metadata_path.exists():
+        return
+
+    try:
+        with open(metadata_path, "r") as f:
+            metadata = json.load(f)
+        metadata["description_type"] = description_type
+        with open(metadata_path, "w") as f:
+            json.dump(metadata, f, indent=2)
+    except (json.JSONDecodeError, Exception):
+        pass

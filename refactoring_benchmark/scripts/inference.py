@@ -98,6 +98,7 @@ def main():
         agent_config=agent_config,
         sanitized_agent_id=sanitized_agent_id,
         env_vars=args.env_vars,
+        description_type=args.description_type,
     )
 
     # Create and run orchestrator
