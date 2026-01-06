@@ -79,6 +79,16 @@ case "$1" in
             echo "Error: Agent script not found at $AGENT_SCRIPT"
             exit 1
         fi
+        # Select description type (default: standard)
+        DESCRIPTION_TYPE="${DESCRIPTION_TYPE:-standard}"
+        if [ "$DESCRIPTION_TYPE" = "minimal" ]; then
+            echo "Using minimal description"
+            mv "$TASK_DESC_DIR/minimal_description.md" "$TASK_DESC_DIR/description.md"
+        else
+            echo "Using standard description"
+            rm -f "$TASK_DESC_DIR/minimal_description.md"
+        fi
+
         create_restricted_user
         
         # Agent System Setup Script Can Still Use Github
