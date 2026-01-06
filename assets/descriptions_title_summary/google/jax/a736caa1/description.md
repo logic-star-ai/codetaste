@@ -1,0 +1,3 @@
+# Migrate internal/test modules to use typed config state objects
+
+Refactor config access patterns throughout internal and test modules to use statically-typed state objects instead of dynamic lookups. Replace `config.config._read(...)` with `config._read(...)`, `config.config.flag_name` with `config.flag_name.value`, and `FLAGS.flag_name` with direct config access. Add module-level convenience functions in `config.py` (`_read`, `update`, `define_bool_state`, etc.) that delegate to the global `config` instance.
