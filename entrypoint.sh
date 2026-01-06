@@ -121,7 +121,7 @@ case "$1" in
         git checkout "$PRE_AGENT_HASH"
         if [ -f "$DIFF_INPUT" ]; then
             echo "Applying patch from $DIFF_INPUT..."
-            git apply --allow-binary-replacement --3way "$DIFF_INPUT"
+            git apply --allow-empty --allow-binary-replacement --3way "$DIFF_INPUT"
         else
             echo "No diff file found at $DIFF_INPUT"
         fi
@@ -145,7 +145,7 @@ case "$1" in
         git checkout "$PRE_AGENT_HASH"
         if [ -f "$DIFF_INPUT" ]; then
             echo "Applying patch from $DIFF_INPUT..."
-            git apply --allow-binary-replacement --3way "$DIFF_INPUT"
+            git apply --allow-empty --allow-binary-replacement --3way "$DIFF_INPUT"
         else
             echo "No diff file found at $DIFF_INPUT"
         fi

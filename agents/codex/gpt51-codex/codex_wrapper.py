@@ -43,8 +43,8 @@ def get_timestamp() -> str:
 def run_limited_task(prompt: str, unknown_args: list) -> bool:
     line_count = 0
     token_metadata = {}
+    start_time = get_timestamp()
     cmd = ["codex", "exec"] + unknown_args + ["--", prompt]
-
     try:
         with subprocess.Popen(
             cmd, 
@@ -69,26 +69,27 @@ def run_limited_task(prompt: str, unknown_args: list) -> bool:
                 if line_count > MAX_LINES:
                     print(f"\n[!] KILL: Line limit ({MAX_LINES}) exceeded.", file=sys.stderr)
                     proc.terminate()
-                    _finalize_output("max_lines_exceeded", line_count, token_metadata)
-                    return True # Want to keep prediction.diff
+                    _finalize_output("max_lines_exceeded", line_count, token_metadata, start_time)
+                    return True # keep prediction.diff even if we hit line limit
 
                 print(line, end="", flush=True)
 
             status = proc.wait()
             reason = "success" if status == 0 else "error"
-            _finalize_output(reason, line_count, token_metadata, status)
+            _finalize_output(reason, line_count, token_metadata, start_time, status)
             return status == 0
 
     except Exception as e:
         print(f"Execution Error: {e}", file=sys.stderr)
         return False
 
-def _finalize_output(reason: str, lines: int, tokens: dict, exit_code: int = 0):
+def _finalize_output(reason: str, lines: int, tokens: dict, start_time: str, exit_code: int = 0):
     """Helper to print the final execution summary as JSON."""
     result = {
         "finish_reason": reason,
         "finish_time": get_timestamp(),
-        "cost": compute_cost(tokens),
+        "start_time": start_time,
+        "cost_usd": compute_cost(tokens),
         "additional": {
             "lines": lines,
             "exit_code": exit_code,
