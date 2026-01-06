@@ -4,7 +4,6 @@ set -e
 # --- Configuration ---
 REPO_ROOT="/testbed"
 AGENT_SCRIPT="/agent/run_agent"
-AGENT_SETUP_SCRIPT="/agent/setup_agent.sh"
 AGENT_SYSTEM_SETUP_SCRIPT="/agent/setup_system.sh"
 DIFF_INPUT="/input/patch.diff"
 DIFF_OUTPUT="/output/prediction.diff"
@@ -76,25 +75,24 @@ setup_env
 case "$1" in
     "inference")
         echo "=== Mode: Inference ==="
-        block_network
-        create_restricted_user
-        
         if [ ! -f "$AGENT_SCRIPT" ]; then
             echo "Error: Agent script not found at $AGENT_SCRIPT"
             exit 1
         fi
+        create_restricted_user
         
+        # Agent System Setup Script Can Still Use Github
         if [ -f "$AGENT_SYSTEM_SETUP_SCRIPT" ]; then
             echo "=== Running Agent System Setup Script ==="
             sudo bash "$AGENT_SYSTEM_SETUP_SCRIPT"
         fi
+        block_network
+        
 
         echo "[Security] Transferring repo ownership to agent_user..."
         sudo chown -R agent_user:agent_user "$REPO_ROOT"
         
         # Restricted Execution
-        echo "=== Dropping Privileges: Switching to 'agent_user' ==="
-        [ -f \"$AGENT_SETUP_SCRIPT\" ] && sudo \"$AGENT_SETUP_SCRIPT\"
         if sudo -E -u agent_user bash -c "
             [ -f /scripts/setup_shell.sh ] && source /scripts/setup_shell.sh
             bash \"$AGENT_SCRIPT\"
