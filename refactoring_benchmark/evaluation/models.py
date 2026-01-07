@@ -2,12 +2,14 @@
 
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Type, TypeVar
 
 from pydantic import BaseModel, Field, computed_field
 
 from refactoring_benchmark.bootstrap.models import ExecutionInstanceMetadata
 from refactoring_benchmark.inference.models import AgentConfig
+
+T = TypeVar("T", bound="EvaluationResult")
 
 
 class TestMetrics(BaseModel):
@@ -103,3 +105,17 @@ class EvaluationResult(BaseModel):
 
     class Config:
         arbitrary_types_allowed = True
+
+    def save_to_json(self, file_path: str | Path):
+        """Save evaluation result to a JSON file."""
+        path = Path(file_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8") as f:
+            f.write(self.model_dump_json(indent=4))
+
+    @classmethod
+    def load_from_json(cls: Type[T], file_path: str | Path) -> T:
+        """Load evaluation result from a JSON file."""
+        path = Path(file_path)
+        with path.open("r", encoding="utf-8") as f:
+            return cls.model_validate_json(f.read())
