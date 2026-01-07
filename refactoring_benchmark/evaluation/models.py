@@ -7,7 +7,7 @@ from typing import Optional, Type, TypeVar
 from pydantic import BaseModel, Field, computed_field
 
 from refactoring_benchmark.bootstrap.models import ExecutionInstanceMetadata
-from refactoring_benchmark.inference.models import AgentConfig
+from refactoring_benchmark.inference.models import AgentConfig, InferenceMetadata
 
 T = TypeVar("T", bound="EvaluationResult")
 
@@ -100,7 +100,8 @@ class EvaluationResult(BaseModel):
     instance_metadata: ExecutionInstanceMetadata
     agent_config: AgentConfig
     agent_test_metrics: Optional[TestMetrics] = None
-    agent_rule_metrics: RuleMetrics  # Required, not optional
+    agent_rule_metrics: RuleMetrics
+    inference_metadata: Optional[InferenceMetadata] = None
     evaluation_timestamp: str = Field(default_factory=lambda: datetime.utcnow().isoformat() + "Z")
 
     class Config:
@@ -115,7 +116,25 @@ class EvaluationResult(BaseModel):
 
     @classmethod
     def load_from_json(cls: Type[T], file_path: str | Path) -> T:
-        """Load evaluation result from a JSON file."""
+        """Load evaluation result from a JSON file.
+
+        Also attempts to load inference_metadata.json from the parent directory if it exists.
+        The expected structure is:
+            {output_dir}/{owner}/{repo}/{hash}/{agent_id}/inference_metadata.json
+            {output_dir}/{owner}/{repo}/{hash}/{agent_id}/evaluation/evaluation_result.json
+        """
         path = Path(file_path)
         with path.open("r", encoding="utf-8") as f:
-            return cls.model_validate_json(f.read())
+            result = cls.model_validate_json(f.read())
+
+        # Try to load inference metadata from parent directory
+        inference_metadata_path = path.parent.parent / "inference_metadata.json"
+        if inference_metadata_path.exists():
+            try:
+                with inference_metadata_path.open("r", encoding="utf-8") as f:
+                    result.inference_metadata = InferenceMetadata.model_validate_json(f.read())
+            except Exception:
+                # If loading fails, leave it as None
+                pass
+
+        return result

@@ -56,6 +56,7 @@ class InferenceMetadata(BaseModel):
     cost_usd: float = Field(alias="cost_usd", default=-1.0)
     finish_reason: str
     finish_time: Optional[str] = None
+    start_time: Optional[str] = None
     additional: Optional[Dict[str, Any]] = None
 
     class Config:

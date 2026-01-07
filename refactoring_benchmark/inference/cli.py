@@ -47,7 +47,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("./output"),
+        default=None,
         help="Base directory for inference outputs",
     )
 
@@ -83,6 +83,8 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
 
     # Convert paths to absolute
+    if args.output_dir is None:
+        args.output_dir = Path("./output" if args.description_type == "standard" else "./output_minimal")
     args.agent_dir = args.agent_dir.resolve()
     args.output_dir = args.output_dir.resolve()
     args.instances_csv = args.instances_csv.resolve()
