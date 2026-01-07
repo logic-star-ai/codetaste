@@ -1,0 +1,3249 @@
+diff --git a/compiler/rustc_borrowck/src/lib.rs b/compiler/rustc_borrowck/src/lib.rs
+index 698fdafc93616..742d68ad076e4 100644
+--- a/compiler/rustc_borrowck/src/lib.rs
++++ b/compiler/rustc_borrowck/src/lib.rs
+@@ -34,7 +34,7 @@ use rustc_infer::infer::{
+ use rustc_middle::mir::tcx::PlaceTy;
+ use rustc_middle::mir::*;
+ use rustc_middle::query::Providers;
+-use rustc_middle::ty::{self, ParamEnv, RegionVid, TyCtxt};
++use rustc_middle::ty::{self, ParamEnv, RegionVid, TyCtxt, TypingMode};
+ use rustc_middle::{bug, span_bug};
+ use rustc_mir_dataflow::Analysis;
+ use rustc_mir_dataflow::impls::{
+@@ -440,7 +440,7 @@ pub struct BorrowckInferCtxt<'tcx> {
+ 
+ impl<'tcx> BorrowckInferCtxt<'tcx> {
+     pub(crate) fn new(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> Self {
+-        let infcx = tcx.infer_ctxt().with_opaque_type_inference(def_id).build();
++        let infcx = tcx.infer_ctxt().build(TypingMode::analysis_in_body(tcx, def_id));
+         BorrowckInferCtxt { infcx, reg_var_to_origin: RefCell::new(Default::default()) }
+     }
+ 
+diff --git a/compiler/rustc_borrowck/src/region_infer/opaque_types.rs b/compiler/rustc_borrowck/src/region_infer/opaque_types.rs
+index abce98265b3cb..741dac9e7639d 100644
+--- a/compiler/rustc_borrowck/src/region_infer/opaque_types.rs
++++ b/compiler/rustc_borrowck/src/region_infer/opaque_types.rs
+@@ -9,6 +9,7 @@ use rustc_macros::extension;
+ use rustc_middle::ty::visit::TypeVisitableExt;
+ use rustc_middle::ty::{
+     self, GenericArgKind, GenericArgs, OpaqueHiddenType, OpaqueTypeKey, Ty, TyCtxt, TypeFoldable,
++    TypingMode,
+ };
+ use rustc_span::Span;
+ use rustc_trait_selection::error_reporting::InferCtxtErrorExt;
+@@ -340,14 +341,13 @@ fn check_opaque_type_well_formed<'tcx>(
+         parent_def_id = tcx.local_parent(parent_def_id);
+     }
+ 
+-    // FIXME(-Znext-solver): We probably should use `&[]` instead of
+-    // and prepopulate this `InferCtxt` with known opaque values, rather than
+-    // allowing opaque types to be defined and checking them after the fact.
++    // FIXME(#132279): This should eventually use the already defined hidden types
++    // instead. Alternatively we'll entirely remove this function given we also check
++    // the opaque in `check_opaque_meets_bounds` later.
+     let infcx = tcx
+         .infer_ctxt()
+         .with_next_trait_solver(next_trait_solver)
+-        .with_opaque_type_inference(parent_def_id)
+-        .build();
++        .build(TypingMode::analysis_in_body(tcx, parent_def_id));
+     let ocx = ObligationCtxt::new_with_diagnostics(&infcx);
+     let identity_args = GenericArgs::identity_for_item(tcx, def_id);
+ 
+@@ -517,7 +517,9 @@ impl<'tcx> LazyOpaqueTyEnv<'tcx> {
+             },
+         );
+ 
+-        let infcx = tcx.infer_ctxt().build();
++        // FIXME(#132279): It feels wrong to use `non_body_analysis` here given that we're
++        // in a body here.
++        let infcx = tcx.infer_ctxt().build(TypingMode::non_body_analysis());
+         let ocx = ObligationCtxt::new(&infcx);
+ 
+         let wf_tys = ocx.assumed_wf_types(param_env, parent).unwrap_or_else(|_| {
+diff --git a/compiler/rustc_codegen_ssa/src/base.rs b/compiler/rustc_codegen_ssa/src/base.rs
+index b954633f4532d..cb4c9c078b197 100644
+--- a/compiler/rustc_codegen_ssa/src/base.rs
++++ b/compiler/rustc_codegen_ssa/src/base.rs
+@@ -21,7 +21,7 @@ use rustc_middle::mir::BinOp;
+ use rustc_middle::mir::mono::{CodegenUnit, CodegenUnitNameBuilder, MonoItem};
+ use rustc_middle::query::Providers;
+ use rustc_middle::ty::layout::{HasTyCtxt, LayoutOf, TyAndLayout};
+-use rustc_middle::ty::{self, Instance, Ty, TyCtxt};
++use rustc_middle::ty::{self, Instance, Ty, TyCtxt, TypingMode};
+ use rustc_session::Session;
+ use rustc_session::config::{self, CrateType, EntryFnType, OptLevel, OutputType};
+ use rustc_span::symbol::sym;
+@@ -119,7 +119,7 @@ pub fn validate_trivial_unsize<'tcx>(
+ ) -> bool {
+     match (source_data.principal(), target_data.principal()) {
+         (Some(hr_source_principal), Some(hr_target_principal)) => {
+-            let infcx = tcx.infer_ctxt().build();
++            let infcx = tcx.infer_ctxt().build(TypingMode::PostAnalysis);
+             let universe = infcx.universe();
+             let ocx = ObligationCtxt::new(&infcx);
+             infcx.enter_forall(hr_target_principal, |target_principal| {
+diff --git a/compiler/rustc_const_eval/src/check_consts/check.rs b/compiler/rustc_const_eval/src/check_consts/check.rs
+index 004fb12419f11..0880b924d3802 100644
+--- a/compiler/rustc_const_eval/src/check_consts/check.rs
++++ b/compiler/rustc_const_eval/src/check_consts/check.rs
+@@ -16,7 +16,7 @@ use rustc_middle::mir::visit::Visitor;
+ use rustc_middle::mir::*;
+ use rustc_middle::span_bug;
+ use rustc_middle::ty::adjustment::PointerCoercion;
+-use rustc_middle::ty::{self, Instance, InstanceKind, Ty, TypeVisitableExt};
++use rustc_middle::ty::{self, Instance, InstanceKind, Ty, TypeVisitableExt, TypingMode};
+ use rustc_mir_dataflow::Analysis;
+ use rustc_mir_dataflow::impls::MaybeStorageLive;
+ use rustc_mir_dataflow::storage::always_storage_live_locals;
+@@ -593,7 +593,7 @@ impl<'tcx> Visitor<'tcx> for Checker<'_, 'tcx> {
+                 // Typeck only does a "non-const" check since it operates on HIR and cannot distinguish
+                 // which path expressions are getting called on and which path expressions are only used
+                 // as function pointers. This is required for correctness.
+-                let infcx = tcx.infer_ctxt().build();
++                let infcx = tcx.infer_ctxt().build(TypingMode::from_param_env(param_env));
+                 let ocx = ObligationCtxt::new_with_diagnostics(&infcx);
+ 
+                 let predicates = tcx.predicates_of(callee).instantiate(tcx, fn_args);
+diff --git a/compiler/rustc_const_eval/src/check_consts/ops.rs b/compiler/rustc_const_eval/src/check_consts/ops.rs
+index 3ac06ae64910c..3f977dc4b05aa 100644
+--- a/compiler/rustc_const_eval/src/check_consts/ops.rs
++++ b/compiler/rustc_const_eval/src/check_consts/ops.rs
+@@ -12,7 +12,7 @@ use rustc_middle::mir::CallSource;
+ use rustc_middle::span_bug;
+ use rustc_middle::ty::print::{PrintTraitRefExt as _, with_no_trimmed_paths};
+ use rustc_middle::ty::{
+-    self, Closure, FnDef, FnPtr, GenericArgKind, GenericArgsRef, Param, TraitRef, Ty,
++    self, Closure, FnDef, FnPtr, GenericArgKind, GenericArgsRef, Param, TraitRef, Ty, TypingMode,
+     suggest_constraining_type_param,
+ };
+ use rustc_middle::util::{CallDesugaringKind, CallKind, call_kind};
+@@ -116,7 +116,7 @@ impl<'tcx> NonConstOp<'tcx> for FnCallNonConst<'tcx> {
+                     let obligation =
+                         Obligation::new(tcx, ObligationCause::dummy(), param_env, trait_ref);
+ 
+-                    let infcx = tcx.infer_ctxt().build();
++                    let infcx = tcx.infer_ctxt().build(TypingMode::from_param_env(param_env));
+                     let mut selcx = SelectionContext::new(&infcx);
+                     let implsrc = selcx.select(&obligation);
+ 
+diff --git a/compiler/rustc_const_eval/src/check_consts/qualifs.rs b/compiler/rustc_const_eval/src/check_consts/qualifs.rs
+index 547030a185435..e8637ba45cf1d 100644
+--- a/compiler/rustc_const_eval/src/check_consts/qualifs.rs
++++ b/compiler/rustc_const_eval/src/check_consts/qualifs.rs
+@@ -114,11 +114,11 @@ impl Qualif for HasMutInterior {
+             ty::TraitRef::new(cx.tcx, freeze_def_id, [ty::GenericArg::from(ty)]),
+         );
+ 
+-        let infcx = cx
+-            .tcx
+-            .infer_ctxt()
+-            .with_opaque_type_inference(cx.body.source.def_id().expect_local())
+-            .build();
++        // FIXME(#132279): This should eventually use the already defined hidden types.
++        let infcx = cx.tcx.infer_ctxt().build(ty::TypingMode::analysis_in_body(
++            cx.tcx,
++            cx.body.source.def_id().expect_local(),
++        ));
+         let ocx = ObligationCtxt::new(&infcx);
+         ocx.register_obligation(obligation);
+         let errors = ocx.select_all_or_error();
+diff --git a/compiler/rustc_const_eval/src/interpret/eval_context.rs b/compiler/rustc_const_eval/src/interpret/eval_context.rs
+index a1c773a4b8005..d81368e9fcc39 100644
+--- a/compiler/rustc_const_eval/src/interpret/eval_context.rs
++++ b/compiler/rustc_const_eval/src/interpret/eval_context.rs
+@@ -9,7 +9,9 @@ use rustc_middle::query::TyCtxtAt;
+ use rustc_middle::ty::layout::{
+     self, FnAbiError, FnAbiOfHelpers, FnAbiRequest, LayoutError, LayoutOfHelpers, TyAndLayout,
+ };
+-use rustc_middle::ty::{self, GenericArgsRef, ParamEnv, Ty, TyCtxt, TypeFoldable, Variance};
++use rustc_middle::ty::{
++    self, GenericArgsRef, ParamEnv, Ty, TyCtxt, TypeFoldable, TypingMode, Variance,
++};
+ use rustc_middle::{mir, span_bug};
+ use rustc_session::Limit;
+ use rustc_span::Span;
+@@ -325,7 +327,7 @@ impl<'tcx, M: Machine<'tcx>> InterpCx<'tcx, M> {
+             return true;
+         }
+         // Slow path: spin up an inference context to check if these traits are sufficiently equal.
+-        let infcx = self.tcx.infer_ctxt().build();
++        let infcx = self.tcx.infer_ctxt().build(TypingMode::from_param_env(self.param_env));
+         let ocx = ObligationCtxt::new(&infcx);
+         let cause = ObligationCause::dummy_with_span(self.cur_span());
+         // equate the two trait refs after normalization
+diff --git a/compiler/rustc_const_eval/src/util/compare_types.rs b/compiler/rustc_const_eval/src/util/compare_types.rs
+index 3ea54146fc787..7af977bab4d66 100644
+--- a/compiler/rustc_const_eval/src/util/compare_types.rs
++++ b/compiler/rustc_const_eval/src/util/compare_types.rs
+@@ -5,7 +5,7 @@
+ 
+ use rustc_infer::infer::TyCtxtInferExt;
+ use rustc_middle::traits::ObligationCause;
+-use rustc_middle::ty::{ParamEnv, Ty, TyCtxt, Variance};
++use rustc_middle::ty::{ParamEnv, Ty, TyCtxt, TypingMode, Variance};
+ use rustc_trait_selection::traits::ObligationCtxt;
+ 
+ /// Returns whether the two types are equal up to subtyping.
+@@ -45,7 +45,8 @@ pub fn relate_types<'tcx>(
+     }
+ 
+     let mut builder = tcx.infer_ctxt().ignoring_regions();
+-    let infcx = builder.build();
++    // FIXME(#132279): This should eventually use the already defined hidden types.
++    let infcx = builder.build(TypingMode::from_param_env(param_env));
+     let ocx = ObligationCtxt::new(&infcx);
+     let cause = ObligationCause::dummy();
+     let src = ocx.normalize(&cause, param_env, src);
+diff --git a/compiler/rustc_hir_analysis/src/check/check.rs b/compiler/rustc_hir_analysis/src/check/check.rs
+index 6d04bdf7e48ed..f830108a02f4f 100644
+--- a/compiler/rustc_hir_analysis/src/check/check.rs
++++ b/compiler/rustc_hir_analysis/src/check/check.rs
+@@ -30,6 +30,7 @@ use rustc_trait_selection::traits;
+ use rustc_trait_selection::traits::outlives_bounds::InferCtxtExt as _;
+ use rustc_type_ir::fold::TypeFoldable;
+ use tracing::{debug, instrument};
++use ty::TypingMode;
+ use {rustc_attr as attr, rustc_hir as hir};
+ 
+ use super::compare_impl_item::{check_type_bounds, compare_impl_method, compare_impl_ty};
+@@ -276,7 +277,8 @@ fn check_opaque_meets_bounds<'tcx>(
+     };
+     let param_env = tcx.param_env(defining_use_anchor);
+ 
+-    let infcx = tcx.infer_ctxt().with_opaque_type_inference(defining_use_anchor).build();
++    // FIXME(#132279): This should eventually use the already defined hidden types.
++    let infcx = tcx.infer_ctxt().build(TypingMode::analysis_in_body(tcx, defining_use_anchor));
+     let ocx = ObligationCtxt::new_with_diagnostics(&infcx);
+ 
+     let args = match *origin {
+@@ -1675,8 +1677,8 @@ pub(super) fn check_coroutine_obligations(
+         // typeck writeback gives us predicates with their regions erased.
+         // As borrowck already has checked lifetimes, we do not need to do it again.
+         .ignoring_regions()
+-        .with_opaque_type_inference(def_id)
+-        .build();
++        // FIXME(#132279): This should eventually use the already defined hidden types.
++        .build(TypingMode::analysis_in_body(tcx, def_id));
+ 
+     let ocx = ObligationCtxt::new_with_diagnostics(&infcx);
+     for (predicate, cause) in &typeck_results.coroutine_stalled_predicates {
+diff --git a/compiler/rustc_hir_analysis/src/check/compare_impl_item.rs b/compiler/rustc_hir_analysis/src/check/compare_impl_item.rs
+index 9de96b7ba7760..db2c44fd29df4 100644
+--- a/compiler/rustc_hir_analysis/src/check/compare_impl_item.rs
++++ b/compiler/rustc_hir_analysis/src/check/compare_impl_item.rs
+@@ -17,7 +17,7 @@ use rustc_middle::ty::fold::BottomUpFolder;
+ use rustc_middle::ty::util::ExplicitSelf;
+ use rustc_middle::ty::{
+     self, GenericArgs, GenericParamDefKind, Ty, TyCtxt, TypeFoldable, TypeFolder,
+-    TypeSuperFoldable, TypeVisitableExt, Upcast,
++    TypeSuperFoldable, TypeVisitableExt, TypingMode, Upcast,
+ };
+ use rustc_middle::{bug, span_bug};
+ use rustc_span::Span;
+@@ -228,7 +228,7 @@ fn compare_method_predicate_entailment<'tcx>(
+     let param_env = traits::normalize_param_env_or_error(tcx, param_env, normalize_cause);
+     debug!(caller_bounds=?param_env.caller_bounds());
+ 
+-    let infcx = &tcx.infer_ctxt().build();
++    let infcx = &tcx.infer_ctxt().build(TypingMode::non_body_analysis());
+     let ocx = ObligationCtxt::new_with_diagnostics(infcx);
+ 
+     // Create obligations for each predicate declared by the impl
+@@ -516,7 +516,7 @@ pub(super) fn collect_return_position_impl_trait_in_trait_tys<'tcx>(
+         ObligationCause::misc(tcx.def_span(impl_m_def_id), impl_m_def_id),
+     );
+ 
+-    let infcx = &tcx.infer_ctxt().build();
++    let infcx = &tcx.infer_ctxt().build(TypingMode::non_body_analysis());
+     let ocx = ObligationCtxt::new_with_diagnostics(infcx);
+ 
+     // Normalize the impl signature with fresh variables for lifetime inference.
+@@ -1196,7 +1196,7 @@ fn compare_self_type<'tcx>(
+         let self_arg_ty = tcx.fn_sig(method.def_id).instantiate_identity().input(0);
+         let param_env = ty::ParamEnv::reveal_all();
+ 
+-        let infcx = tcx.infer_ctxt().build();
++        let infcx = tcx.infer_ctxt().build(TypingMode::non_body_analysis());
+         let self_arg_ty = tcx.liberate_late_bound_regions(method.def_id, self_arg_ty);
+         let can_eq_self = |ty| infcx.can_eq(param_env, untransformed_self_ty, ty);
+         match ExplicitSelf::determine(self_arg_ty, can_eq_self) {
+@@ -1801,7 +1801,7 @@ fn compare_const_predicate_entailment<'tcx>(
+         ObligationCause::misc(impl_ct_span, impl_ct_def_id),
+     );
+ 
+-    let infcx = tcx.infer_ctxt().build();
++    let infcx = tcx.infer_ctxt().build(TypingMode::non_body_analysis());
+     let ocx = ObligationCtxt::new_with_diagnostics(&infcx);
+ 
+     let impl_ct_own_bounds = impl_ct_predicates.instantiate_own_identity();
+@@ -1951,7 +1951,7 @@ fn compare_type_predicate_entailment<'tcx>(
+     let param_env = traits::normalize_param_env_or_error(tcx, param_env, normalize_cause);
+     debug!(caller_bounds=?param_env.caller_bounds());
+ 
+-    let infcx = tcx.infer_ctxt().build();
++    let infcx = tcx.infer_ctxt().build(TypingMode::non_body_analysis());
+     let ocx = ObligationCtxt::new_with_diagnostics(&infcx);
+ 
+     for (predicate, span) in impl_ty_own_bounds {
+@@ -2036,7 +2036,7 @@ pub(super) fn check_type_bounds<'tcx>(
+     let impl_ty_args = GenericArgs::identity_for_item(tcx, impl_ty.def_id);
+     let rebased_args = impl_ty_args.rebase_onto(tcx, container_id, impl_trait_ref.args);
+ 
+-    let infcx = tcx.infer_ctxt().build();
++    let infcx = tcx.infer_ctxt().build(TypingMode::non_body_analysis());
+     let ocx = ObligationCtxt::new_with_diagnostics(&infcx);
+ 
+     // A synthetic impl Trait for RPITIT desugaring or assoc type for effects desugaring has no HIR,
+diff --git a/compiler/rustc_hir_analysis/src/check/compare_impl_item/refine.rs b/compiler/rustc_hir_analysis/src/check/compare_impl_item/refine.rs
+index 2d6b9813271e2..646c104f1f553 100644
+--- a/compiler/rustc_hir_analysis/src/check/compare_impl_item/refine.rs
++++ b/compiler/rustc_hir_analysis/src/check/compare_impl_item/refine.rs
+@@ -8,7 +8,7 @@ use rustc_middle::span_bug;
+ use rustc_middle::traits::{ObligationCause, Reveal};
+ use rustc_middle::ty::{
+     self, Ty, TyCtxt, TypeFoldable, TypeFolder, TypeSuperVisitable, TypeVisitable,
+-    TypeVisitableExt, TypeVisitor,
++    TypeVisitableExt, TypeVisitor, TypingMode,
+ };
+ use rustc_span::Span;
+ use rustc_trait_selection::regions::InferCtxtRegionExt;
+@@ -132,7 +132,7 @@ pub(super) fn check_refining_return_position_impl_trait_in_trait<'tcx>(
+     let param_env = ty::ParamEnv::new(tcx.mk_clauses_from_iter(hybrid_preds), Reveal::UserFacing);
+     let param_env = normalize_param_env_or_error(tcx, param_env, ObligationCause::dummy());
+ 
+-    let ref infcx = tcx.infer_ctxt().build();
++    let ref infcx = tcx.infer_ctxt().build(TypingMode::non_body_analysis());
+     let ocx = ObligationCtxt::new(infcx);
+ 
+     // Normalize the bounds. This has two purposes:
+diff --git a/compiler/rustc_hir_analysis/src/check/dropck.rs b/compiler/rustc_hir_analysis/src/check/dropck.rs
+index 97a29b32c0158..1c9bbe627fb07 100644
+--- a/compiler/rustc_hir_analysis/src/check/dropck.rs
++++ b/compiler/rustc_hir_analysis/src/check/dropck.rs
+@@ -9,7 +9,7 @@ use rustc_infer::infer::outlives::env::OutlivesEnvironment;
+ use rustc_infer::infer::{RegionResolutionError, TyCtxtInferExt};
+ use rustc_infer::traits::{ObligationCause, ObligationCauseCode};
+ use rustc_middle::ty::util::CheckRegions;
+-use rustc_middle::ty::{self, GenericArgsRef, Ty, TyCtxt};
++use rustc_middle::ty::{self, GenericArgsRef, Ty, TyCtxt, TypingMode};
+ use rustc_trait_selection::regions::InferCtxtRegionExt;
+ use rustc_trait_selection::traits::{self, ObligationCtxt};
+ 
+@@ -124,7 +124,7 @@ fn ensure_drop_predicates_are_implied_by_item_defn<'tcx>(
+     adt_def_id: LocalDefId,
+     adt_to_impl_args: GenericArgsRef<'tcx>,
+ ) -> Result<(), ErrorGuaranteed> {
+-    let infcx = tcx.infer_ctxt().build();
++    let infcx = tcx.infer_ctxt().build(TypingMode::non_body_analysis());
+     let ocx = ObligationCtxt::new_with_diagnostics(&infcx);
+ 
+     let impl_span = tcx.def_span(drop_impl_def_id.to_def_id());
+diff --git a/compiler/rustc_hir_analysis/src/check/entry.rs b/compiler/rustc_hir_analysis/src/check/entry.rs
+index 7da2cd93d4e01..0beb1f98d56de 100644
+--- a/compiler/rustc_hir_analysis/src/check/entry.rs
++++ b/compiler/rustc_hir_analysis/src/check/entry.rs
+@@ -4,7 +4,7 @@ use rustc_hir as hir;
+ use rustc_hir::Node;
+ use rustc_infer::infer::TyCtxtInferExt;
+ use rustc_middle::span_bug;
+-use rustc_middle::ty::{self, Ty, TyCtxt};
++use rustc_middle::ty::{self, Ty, TyCtxt, TypingMode};
+ use rustc_session::config::EntryFnType;
+ use rustc_span::Span;
+ use rustc_span::def_id::{CRATE_DEF_ID, DefId, LocalDefId};
+@@ -128,7 +128,7 @@ fn check_main_fn_ty(tcx: TyCtxt<'_>, main_def_id: DefId) {
+             tcx.dcx().emit_err(errors::MainFunctionReturnTypeGeneric { span: return_ty_span });
+             return;
+         };
+-        let infcx = tcx.infer_ctxt().build();
++        let infcx = tcx.infer_ctxt().build(TypingMode::non_body_analysis());
+         let cause = traits::ObligationCause::new(
+             return_ty_span,
+             main_diagnostics_def_id,
+diff --git a/compiler/rustc_hir_analysis/src/check/mod.rs b/compiler/rustc_hir_analysis/src/check/mod.rs
+index ec5a89ec9d914..e9eea36a0e66c 100644
+--- a/compiler/rustc_hir_analysis/src/check/mod.rs
++++ b/compiler/rustc_hir_analysis/src/check/mod.rs
+@@ -85,7 +85,7 @@ use rustc_infer::infer::{self, TyCtxtInferExt as _};
+ use rustc_infer::traits::ObligationCause;
+ use rustc_middle::query::Providers;
+ use rustc_middle::ty::error::{ExpectedFound, TypeError};
+-use rustc_middle::ty::{self, GenericArgs, GenericArgsRef, Ty, TyCtxt};
++use rustc_middle::ty::{self, GenericArgs, GenericArgsRef, Ty, TyCtxt, TypingMode};
+ use rustc_middle::{bug, span_bug};
+ use rustc_session::parse::feature_err;
+ use rustc_span::def_id::CRATE_DEF_ID;
+@@ -530,7 +530,7 @@ fn suggestion_signature<'tcx>(
+             let ty = tcx.type_of(assoc.def_id).instantiate_identity();
+             let val = tcx
+                 .infer_ctxt()
+-                .build()
++                .build(TypingMode::non_body_analysis())
+                 .err_ctxt()
+                 .ty_kind_suggestion(tcx.param_env(assoc.def_id), ty)
+                 .unwrap_or_else(|| "value".to_string());
+@@ -620,7 +620,7 @@ pub fn check_function_signature<'tcx>(
+ 
+     let param_env = ty::ParamEnv::empty();
+ 
+-    let infcx = &tcx.infer_ctxt().build();
++    let infcx = &tcx.infer_ctxt().build(TypingMode::non_body_analysis());
+     let ocx = ObligationCtxt::new_with_diagnostics(infcx);
+ 
+     let actual_sig = tcx.fn_sig(fn_id).instantiate_identity();
+diff --git a/compiler/rustc_hir_analysis/src/check/wfcheck.rs b/compiler/rustc_hir_analysis/src/check/wfcheck.rs
+index 499e42d31c97f..12ed7b89f68be 100644
+--- a/compiler/rustc_hir_analysis/src/check/wfcheck.rs
++++ b/compiler/rustc_hir_analysis/src/check/wfcheck.rs
+@@ -17,7 +17,7 @@ use rustc_middle::ty::print::with_no_trimmed_paths;
+ use rustc_middle::ty::trait_def::TraitSpecializationKind;
+ use rustc_middle::ty::{
+     self, AdtKind, GenericArgKind, GenericArgs, GenericParamDefKind, Ty, TyCtxt, TypeFoldable,
+-    TypeSuperVisitable, TypeVisitable, TypeVisitableExt, TypeVisitor, Upcast,
++    TypeSuperVisitable, TypeVisitable, TypeVisitableExt, TypeVisitor, TypingMode, Upcast,
+ };
+ use rustc_middle::{bug, span_bug};
+ use rustc_session::parse::feature_err;
+@@ -106,7 +106,7 @@ where
+     F: for<'a> FnOnce(&WfCheckingCtxt<'a, 'tcx>) -> Result<(), ErrorGuaranteed>,
+ {
+     let param_env = tcx.param_env(body_def_id);
+-    let infcx = &tcx.infer_ctxt().build();
++    let infcx = &tcx.infer_ctxt().build(TypingMode::non_body_analysis());
+     let ocx = ObligationCtxt::new_with_diagnostics(infcx);
+ 
+     let mut wfcx = WfCheckingCtxt { ocx, span, body_def_id, param_env };
+@@ -765,7 +765,7 @@ fn test_region_obligations<'tcx>(
+     // Unfortunately, we have to use a new `InferCtxt` each call, because
+     // region constraints get added and solved there and we need to test each
+     // call individually.
+-    let infcx = tcx.infer_ctxt().build();
++    let infcx = tcx.infer_ctxt().build(TypingMode::non_body_analysis());
+ 
+     add_constraints(&infcx);
+ 
+diff --git a/compiler/rustc_hir_analysis/src/coherence/builtin.rs b/compiler/rustc_hir_analysis/src/coherence/builtin.rs
+index b4f6b5a9dd24f..5ff52376837eb 100644
+--- a/compiler/rustc_hir_analysis/src/coherence/builtin.rs
++++ b/compiler/rustc_hir_analysis/src/coherence/builtin.rs
+@@ -15,7 +15,9 @@ use rustc_infer::infer::{self, RegionResolutionError, TyCtxtInferExt};
+ use rustc_infer::traits::Obligation;
+ use rustc_middle::ty::adjustment::CoerceUnsizedInfo;
+ use rustc_middle::ty::print::PrintTraitRefExt as _;
+-use rustc_middle::ty::{self, Ty, TyCtxt, TypeVisitableExt, suggest_constraining_type_params};
++use rustc_middle::ty::{
++    self, Ty, TyCtxt, TypeVisitableExt, TypingMode, suggest_constraining_type_params,
++};
+ use rustc_span::{DUMMY_SP, Span};
+ use rustc_trait_selection::error_reporting::InferCtxtErrorExt;
+ use rustc_trait_selection::traits::misc::{
+@@ -213,7 +215,7 @@ fn visit_implementation_of_dispatch_from_dyn(checker: &Checker<'_>) -> Result<()
+ 
+     let param_env = tcx.param_env(impl_did);
+ 
+-    let infcx = tcx.infer_ctxt().build();
++    let infcx = tcx.infer_ctxt().build(TypingMode::non_body_analysis());
+     let cause = ObligationCause::misc(span, impl_did);
+ 
+     // Later parts of the compiler rely on all DispatchFromDyn types to be ABI-compatible with raw
+@@ -354,7 +356,7 @@ pub(crate) fn coerce_unsized_info<'tcx>(
+ 
+     debug!("visit_implementation_of_coerce_unsized: {:?} -> {:?} (free)", source, target);
+ 
+-    let infcx = tcx.infer_ctxt().build();
++    let infcx = tcx.infer_ctxt().build(TypingMode::non_body_analysis());
+     let cause = ObligationCause::misc(span, impl_did);
+     let check_mutbl = |mt_a: ty::TypeAndMut<'tcx>,
+                        mt_b: ty::TypeAndMut<'tcx>,
+diff --git a/compiler/rustc_hir_analysis/src/coherence/orphan.rs b/compiler/rustc_hir_analysis/src/coherence/orphan.rs
+index 04770469132bb..8a1a887766c75 100644
+--- a/compiler/rustc_hir_analysis/src/coherence/orphan.rs
++++ b/compiler/rustc_hir_analysis/src/coherence/orphan.rs
+@@ -7,7 +7,7 @@ use rustc_infer::infer::{InferCtxt, TyCtxtInferExt};
+ use rustc_lint_defs::builtin::UNCOVERED_PARAM_IN_PROJECTION;
+ use rustc_middle::ty::{
+     self, Ty, TyCtxt, TypeFoldable, TypeFolder, TypeSuperFoldable, TypeSuperVisitable,
+-    TypeVisitable, TypeVisitableExt, TypeVisitor,
++    TypeVisitable, TypeVisitableExt, TypeVisitor, TypingMode,
+ };
+ use rustc_middle::{bug, span_bug};
+ use rustc_span::def_id::{DefId, LocalDefId};
+@@ -302,7 +302,7 @@ fn orphan_check<'tcx>(
+     }
+ 
+     // (1)  Instantiate all generic params with fresh inference vars.
+-    let infcx = tcx.infer_ctxt().intercrate(true).build();
++    let infcx = tcx.infer_ctxt().build(TypingMode::Coherence);
+     let cause = traits::ObligationCause::dummy();
+     let args = infcx.fresh_args_for_item(cause.span, impl_def_id.to_def_id());
+     let trait_ref = trait_ref.instantiate(tcx, args);
+diff --git a/compiler/rustc_hir_analysis/src/collect.rs b/compiler/rustc_hir_analysis/src/collect.rs
+index 3add801cf5649..cca52c5142c61 100644
+--- a/compiler/rustc_hir_analysis/src/collect.rs
++++ b/compiler/rustc_hir_analysis/src/collect.rs
+@@ -34,7 +34,7 @@ use rustc_infer::traits::ObligationCause;
+ use rustc_middle::hir::nested_filter;
+ use rustc_middle::query::Providers;
+ use rustc_middle::ty::util::{Discr, IntTypeExt};
+-use rustc_middle::ty::{self, AdtKind, Const, IsSuggestable, Ty, TyCtxt};
++use rustc_middle::ty::{self, AdtKind, Const, IsSuggestable, Ty, TyCtxt, TypingMode};
+ use rustc_middle::{bug, span_bug};
+ use rustc_span::symbol::{Ident, Symbol, kw, sym};
+ use rustc_span::{DUMMY_SP, Span};
+@@ -1438,9 +1438,11 @@ fn infer_return_ty_for_fn_sig<'tcx>(
+                     Applicability::MachineApplicable,
+                 );
+                 recovered_ret_ty = Some(suggestable_ret_ty);
+-            } else if let Some(sugg) =
+-                suggest_impl_trait(&tcx.infer_ctxt().build(), tcx.param_env(def_id), ret_ty)
+-            {
++            } else if let Some(sugg) = suggest_impl_trait(
++                &tcx.infer_ctxt().build(TypingMode::non_body_analysis()),
++                tcx.param_env(def_id),
++                ret_ty,
++            ) {
+                 diag.span_suggestion(
+                     ty.span,
+                     "replace with an appropriate return type",
+diff --git a/compiler/rustc_hir_analysis/src/hir_ty_lowering/mod.rs b/compiler/rustc_hir_analysis/src/hir_ty_lowering/mod.rs
+index 0891642f2c88c..2d0c3ec28c372 100644
+--- a/compiler/rustc_hir_analysis/src/hir_ty_lowering/mod.rs
++++ b/compiler/rustc_hir_analysis/src/hir_ty_lowering/mod.rs
+@@ -39,7 +39,7 @@ use rustc_middle::mir::interpret::{LitToConstError, LitToConstInput};
+ use rustc_middle::ty::print::PrintPolyTraitRefExt as _;
+ use rustc_middle::ty::{
+     self, Const, GenericArgKind, GenericArgsRef, GenericParamDefKind, ParamEnv, Ty, TyCtxt,
+-    TypeVisitableExt,
++    TypeVisitableExt, TypingMode,
+ };
+ use rustc_middle::{bug, span_bug};
+ use rustc_session::lint::builtin::AMBIGUOUS_ASSOCIATED_ITEMS;
+@@ -1300,7 +1300,7 @@ impl<'tcx> dyn HirTyLowerer<'tcx> + '_ {
+             Some(infcx) => infcx,
+             None => {
+                 assert!(!self_ty.has_infer());
+-                infcx_ = tcx.infer_ctxt().ignoring_regions().build();
++                infcx_ = tcx.infer_ctxt().ignoring_regions().build(TypingMode::non_body_analysis());
+                 &infcx_
+             }
+         };
+@@ -1492,7 +1492,7 @@ impl<'tcx> dyn HirTyLowerer<'tcx> + '_ {
+             infcx
+         } else {
+             assert!(!qself_ty.has_infer());
+-            infcx_ = tcx.infer_ctxt().build();
++            infcx_ = tcx.infer_ctxt().build(TypingMode::non_body_analysis());
+             &infcx_
+         };
+ 
+diff --git a/compiler/rustc_hir_analysis/src/hir_wf_check.rs b/compiler/rustc_hir_analysis/src/hir_wf_check.rs
+index 2fa4ca680737d..5b0165bf993da 100644
+--- a/compiler/rustc_hir_analysis/src/hir_wf_check.rs
++++ b/compiler/rustc_hir_analysis/src/hir_wf_check.rs
+@@ -5,7 +5,7 @@ use rustc_infer::infer::TyCtxtInferExt;
+ use rustc_infer::traits::{ObligationCause, WellFormedLoc};
+ use rustc_middle::bug;
+ use rustc_middle::query::Providers;
+-use rustc_middle::ty::{self, TyCtxt};
++use rustc_middle::ty::{self, TyCtxt, TypingMode};
+ use rustc_span::def_id::LocalDefId;
+ use rustc_trait_selection::traits::{self, ObligationCtxt};
+ use tracing::debug;
+@@ -68,7 +68,7 @@ fn diagnostic_hir_wf_check<'tcx>(
+ 
+     impl<'tcx> Visitor<'tcx> for HirWfCheck<'tcx> {
+         fn visit_ty(&mut self, ty: &'tcx hir::Ty<'tcx>) {
+-            let infcx = self.tcx.infer_ctxt().build();
++            let infcx = self.tcx.infer_ctxt().build(TypingMode::non_body_analysis());
+             let ocx = ObligationCtxt::new_with_diagnostics(&infcx);
+ 
+             let tcx_ty = self.icx.lower_ty(ty);
+diff --git a/compiler/rustc_hir_analysis/src/impl_wf_check/min_specialization.rs b/compiler/rustc_hir_analysis/src/impl_wf_check/min_specialization.rs
+index a394fc2fbb199..b0c9aed5d8557 100644
+--- a/compiler/rustc_hir_analysis/src/impl_wf_check/min_specialization.rs
++++ b/compiler/rustc_hir_analysis/src/impl_wf_check/min_specialization.rs
+@@ -72,7 +72,9 @@ use rustc_infer::infer::TyCtxtInferExt;
+ use rustc_infer::infer::outlives::env::OutlivesEnvironment;
+ use rustc_infer::traits::specialization_graph::Node;
+ use rustc_middle::ty::trait_def::TraitSpecializationKind;
+-use rustc_middle::ty::{self, GenericArg, GenericArgs, GenericArgsRef, TyCtxt, TypeVisitableExt};
++use rustc_middle::ty::{
++    self, GenericArg, GenericArgs, GenericArgsRef, TyCtxt, TypeVisitableExt, TypingMode,
++};
+ use rustc_span::{ErrorGuaranteed, Span};
+ use rustc_trait_selection::error_reporting::InferCtxtErrorExt;
+ use rustc_trait_selection::traits::outlives_bounds::InferCtxtExt as _;
+@@ -195,7 +197,7 @@ fn get_impl_args(
+     impl1_def_id: LocalDefId,
+     impl2_node: Node,
+ ) -> Result<(GenericArgsRef<'_>, GenericArgsRef<'_>), ErrorGuaranteed> {
+-    let infcx = &tcx.infer_ctxt().build();
++    let infcx = &tcx.infer_ctxt().build(TypingMode::non_body_analysis());
+     let ocx = ObligationCtxt::new_with_diagnostics(infcx);
+     let param_env = tcx.param_env(impl1_def_id);
+     let impl1_span = tcx.def_span(impl1_def_id);
+@@ -409,7 +411,7 @@ fn check_predicates<'tcx>(
+ 
+     // Include the well-formed predicates of the type parameters of the impl.
+     for arg in tcx.impl_trait_ref(impl1_def_id).unwrap().instantiate_identity().args {
+-        let infcx = &tcx.infer_ctxt().build();
++        let infcx = &tcx.infer_ctxt().build(TypingMode::non_body_analysis());
+         let obligations =
+             wf::obligations(infcx, tcx.param_env(impl1_def_id), impl1_def_id, 0, arg, span)
+                 .unwrap();
+diff --git a/compiler/rustc_hir_typeck/src/typeck_root_ctxt.rs b/compiler/rustc_hir_typeck/src/typeck_root_ctxt.rs
+index 18e40cfa42874..903be7e732afa 100644
+--- a/compiler/rustc_hir_typeck/src/typeck_root_ctxt.rs
++++ b/compiler/rustc_hir_typeck/src/typeck_root_ctxt.rs
+@@ -8,7 +8,7 @@ use rustc_hir::{HirId, HirIdMap};
+ use rustc_infer::infer::{InferCtxt, InferOk, TyCtxtInferExt};
+ use rustc_middle::span_bug;
+ use rustc_middle::ty::visit::TypeVisitableExt;
+-use rustc_middle::ty::{self, Ty, TyCtxt};
++use rustc_middle::ty::{self, Ty, TyCtxt, TypingMode};
+ use rustc_span::Span;
+ use rustc_span::def_id::LocalDefIdMap;
+ use rustc_trait_selection::traits::query::evaluate_obligation::InferCtxtExt;
+@@ -81,7 +81,8 @@ impl<'tcx> TypeckRootCtxt<'tcx> {
+     pub(crate) fn new(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> Self {
+         let hir_owner = tcx.local_def_id_to_hir_id(def_id).owner;
+ 
+-        let infcx = tcx.infer_ctxt().ignoring_regions().with_opaque_type_inference(def_id).build();
++        let infcx =
++            tcx.infer_ctxt().ignoring_regions().build(TypingMode::analysis_in_body(tcx, def_id));
+         let typeck_results = RefCell::new(ty::TypeckResults::new(hir_owner));
+ 
+         TypeckRootCtxt {
+diff --git a/compiler/rustc_infer/src/infer/at.rs b/compiler/rustc_infer/src/infer/at.rs
+index 8c943a961e76a..3eda3e9c67e85 100644
+--- a/compiler/rustc_infer/src/infer/at.rs
++++ b/compiler/rustc_infer/src/infer/at.rs
+@@ -28,7 +28,7 @@
+ use relate::lattice::{LatticeOp, LatticeOpKind};
+ use rustc_middle::bug;
+ use rustc_middle::ty::relate::solver_relating::RelateExt as NextSolverRelate;
+-use rustc_middle::ty::{Const, ImplSubject};
++use rustc_middle::ty::{Const, ImplSubject, TypingMode};
+ 
+ use super::*;
+ use crate::infer::relate::type_relating::TypeRelating;
+@@ -67,30 +67,48 @@ impl<'tcx> InferCtxt<'tcx> {
+     /// variables in the same state. This can be used to "branch off" many tests from the same
+     /// common state.
+     pub fn fork(&self) -> Self {
+-        self.fork_with_intercrate(self.intercrate)
++        Self {
++            tcx: self.tcx,
++            typing_mode: self.typing_mode,
++            considering_regions: self.considering_regions,
++            skip_leak_check: self.skip_leak_check,
++            inner: self.inner.clone(),
++            lexical_region_resolutions: self.lexical_region_resolutions.clone(),
++            selection_cache: self.selection_cache.clone(),
++            evaluation_cache: self.evaluation_cache.clone(),
++            reported_trait_errors: self.reported_trait_errors.clone(),
++            reported_signature_mismatch: self.reported_signature_mismatch.clone(),
++            tainted_by_errors: self.tainted_by_errors.clone(),
++            universe: self.universe.clone(),
++            next_trait_solver: self.next_trait_solver,
++            obligation_inspector: self.obligation_inspector.clone(),
++        }
+     }
+ 
+     /// Forks the inference context, creating a new inference context with the same inference
+     /// variables in the same state, except possibly changing the intercrate mode. This can be
+     /// used to "branch off" many tests from the same common state. Used in negative coherence.
+-    pub fn fork_with_intercrate(&self, intercrate: bool) -> Self {
+-        Self {
++    pub fn fork_with_typing_mode(&self, typing_mode: TypingMode<'tcx>) -> Self {
++        // Unlike `fork`, this invalidates all cache entries as they may depend on the
++        // typing mode.
++        let forked = Self {
+             tcx: self.tcx,
+-            defining_opaque_types: self.defining_opaque_types,
++            typing_mode,
+             considering_regions: self.considering_regions,
+             skip_leak_check: self.skip_leak_check,
+             inner: self.inner.clone(),
+             lexical_region_resolutions: self.lexical_region_resolutions.clone(),
+-            selection_cache: self.selection_cache.clone(),
+-            evaluation_cache: self.evaluation_cache.clone(),
++            selection_cache: Default::default(),
++            evaluation_cache: Default::default(),
+             reported_trait_errors: self.reported_trait_errors.clone(),
+             reported_signature_mismatch: self.reported_signature_mismatch.clone(),
+             tainted_by_errors: self.tainted_by_errors.clone(),
+             universe: self.universe.clone(),
+-            intercrate,
+             next_trait_solver: self.next_trait_solver,
+             obligation_inspector: self.obligation_inspector.clone(),
+-        }
++        };
++        forked.inner.borrow_mut().projection_cache().clear();
++        forked
+     }
+ }
+ 
+diff --git a/compiler/rustc_infer/src/infer/canonical/canonicalizer.rs b/compiler/rustc_infer/src/infer/canonical/canonicalizer.rs
+index 90d07964fdac0..c9d8ebecef050 100644
+--- a/compiler/rustc_infer/src/infer/canonical/canonicalizer.rs
++++ b/compiler/rustc_infer/src/infer/canonical/canonicalizer.rs
+@@ -46,7 +46,7 @@ impl<'tcx> InferCtxt<'tcx> {
+         V: TypeFoldable<TyCtxt<'tcx>>,
+     {
+         let (param_env, value) = value.into_parts();
+-        let param_env = self.tcx.canonical_param_env_cache.get_or_insert(
++        let canonical_param_env = self.tcx.canonical_param_env_cache.get_or_insert(
+             self.tcx,
+             param_env,
+             query_state,
+@@ -64,7 +64,7 @@ impl<'tcx> InferCtxt<'tcx> {
+         );
+ 
+         let canonical = Canonicalizer::canonicalize_with_base(
+-            param_env,
++            canonical_param_env,
+             value,
+             Some(self),
+             self.tcx,
+@@ -72,7 +72,7 @@ impl<'tcx> InferCtxt<'tcx> {
+             query_state,
+         )
+         .unchecked_map(|(param_env, value)| param_env.and(value));
+-        CanonicalQueryInput { canonical, defining_opaque_types: self.defining_opaque_types() }
++        CanonicalQueryInput { canonical, typing_mode: self.typing_mode(param_env) }
+     }
+ 
+     /// Canonicalizes a query *response* `V`. When we canonicalize a
+diff --git a/compiler/rustc_infer/src/infer/context.rs b/compiler/rustc_infer/src/infer/context.rs
+index 0c151a11ad4e3..ecda9c6eb000a 100644
+--- a/compiler/rustc_infer/src/infer/context.rs
++++ b/compiler/rustc_infer/src/infer/context.rs
+@@ -1,7 +1,6 @@
+ ///! Definition of `InferCtxtLike` from the librarified type layer.
+-use rustc_hir::def_id::{DefId, LocalDefId};
++use rustc_hir::def_id::DefId;
+ use rustc_middle::traits::ObligationCause;
+-use rustc_middle::traits::solve::SolverMode;
+ use rustc_middle::ty::fold::TypeFoldable;
+ use rustc_middle::ty::relate::RelateResult;
+ use rustc_middle::ty::relate::combine::PredicateEmittingRelation;
+@@ -21,11 +20,11 @@ impl<'tcx> rustc_type_ir::InferCtxtLike for InferCtxt<'tcx> {
+         self.next_trait_solver
+     }
+ 
+-    fn solver_mode(&self) -> ty::solve::SolverMode {
+-        match self.intercrate {
+-            true => SolverMode::Coherence,
+-            false => SolverMode::Normal,
+-        }
++    fn typing_mode(
++        &self,
++        param_env_for_debug_assertion: ty::ParamEnv<'tcx>,
++    ) -> ty::TypingMode<'tcx> {
++        self.typing_mode(param_env_for_debug_assertion)
+     }
+ 
+     fn universe(&self) -> ty::UniverseIndex {
+@@ -91,10 +90,6 @@ impl<'tcx> rustc_type_ir::InferCtxtLike for InferCtxt<'tcx> {
+         self.inner.borrow_mut().unwrap_region_constraints().opportunistic_resolve_var(self.tcx, vid)
+     }
+ 
+-    fn defining_opaque_types(&self) -> &'tcx ty::List<LocalDefId> {
+-        self.defining_opaque_types()
+-    }
+-
+     fn next_ty_infer(&self) -> Ty<'tcx> {
+         self.next_ty_var(DUMMY_SP)
+     }
+diff --git a/compiler/rustc_infer/src/infer/mod.rs b/compiler/rustc_infer/src/infer/mod.rs
+index be43cba97f08f..fc54d69449f04 100644
+--- a/compiler/rustc_infer/src/infer/mod.rs
++++ b/compiler/rustc_infer/src/infer/mod.rs
+@@ -38,11 +38,12 @@ use rustc_middle::ty::fold::{
+ use rustc_middle::ty::visit::TypeVisitableExt;
+ use rustc_middle::ty::{
+     self, ConstVid, FloatVid, GenericArg, GenericArgKind, GenericArgs, GenericArgsRef,
+-    GenericParamDefKind, InferConst, IntVid, Ty, TyCtxt, TyVid,
++    GenericParamDefKind, InferConst, IntVid, Ty, TyCtxt, TyVid, TypingMode,
+ };
+ use rustc_middle::{bug, span_bug};
+ use rustc_span::Span;
+ use rustc_span::symbol::Symbol;
++use rustc_type_ir::solve::Reveal;
+ use snapshot::undo_log::InferCtxtUndoLogs;
+ use tracing::{debug, instrument};
+ use type_variable::TypeVariableOrigin;
+@@ -243,8 +244,9 @@ impl<'tcx> InferCtxtInner<'tcx> {
+ pub struct InferCtxt<'tcx> {
+     pub tcx: TyCtxt<'tcx>,
+ 
+-    /// The `DefIds` of the opaque types that may have their hidden types constrained.
+-    defining_opaque_types: &'tcx ty::List<LocalDefId>,
++    /// The mode of this inference context, see the struct documentation
++    /// for more details.
++    typing_mode: TypingMode<'tcx>,
+ 
+     /// Whether this inference context should care about region obligations in
+     /// the root universe. Most notably, this is used during hir typeck as region
+@@ -296,26 +298,6 @@ pub struct InferCtxt<'tcx> {
+     /// bound.
+     universe: Cell<ty::UniverseIndex>,
+ 
+-    /// During coherence we have to assume that other crates may add
+-    /// additional impls which we currently don't know about.
+-    ///
+-    /// To deal with this evaluation, we should be conservative
+-    /// and consider the possibility of impls from outside this crate.
+-    /// This comes up primarily when resolving ambiguity. Imagine
+-    /// there is some trait reference `$0: Bar` where `$0` is an
+-    /// inference variable. If `intercrate` is true, then we can never
+-    /// say for sure that this reference is not implemented, even if
+-    /// there are *no impls at all for `Bar`*, because `$0` could be
+-    /// bound to some type that in a downstream crate that implements
+-    /// `Bar`.
+-    ///
+-    /// Outside of coherence, we set this to false because we are only
+-    /// interested in types that the user could actually have written.
+-    /// In other words, we consider `$0: Bar` to be unimplemented if
+-    /// there is no type that the user could *actually name* that
+-    /// would satisfy it. This avoids crippling inference, basically.
+-    pub intercrate: bool,
+-
+     next_trait_solver: bool,
+ 
+     pub obligation_inspector: Cell<Option<ObligationInspector<'tcx>>>,
+@@ -529,11 +511,8 @@ pub struct RegionObligation<'tcx> {
+ /// Used to configure inference contexts before their creation.
+ pub struct InferCtxtBuilder<'tcx> {
+     tcx: TyCtxt<'tcx>,
+-    defining_opaque_types: &'tcx ty::List<LocalDefId>,
+     considering_regions: bool,
+     skip_leak_check: bool,
+-    /// Whether we are in coherence mode.
+-    intercrate: bool,
+     /// Whether we should use the new trait solver in the local inference context,
+     /// which affects things like which solver is used in `predicate_may_hold`.
+     next_trait_solver: bool,
+@@ -544,37 +523,19 @@ impl<'tcx> TyCtxt<'tcx> {
+     fn infer_ctxt(self) -> InferCtxtBuilder<'tcx> {
+         InferCtxtBuilder {
+             tcx: self,
+-            defining_opaque_types: ty::List::empty(),
+             considering_regions: true,
+             skip_leak_check: false,
+-            intercrate: false,
+             next_trait_solver: self.next_trait_solver_globally(),
+         }
+     }
+ }
+ 
+ impl<'tcx> InferCtxtBuilder<'tcx> {
+-    /// Whenever the `InferCtxt` should be able to handle defining uses of opaque types,
+-    /// you need to call this function. Otherwise the opaque type will be treated opaquely.
+-    ///
+-    /// It is only meant to be called in two places, for typeck
+-    /// (via `Inherited::build`) and for the inference context used
+-    /// in mir borrowck.
+-    pub fn with_opaque_type_inference(mut self, defining_anchor: LocalDefId) -> Self {
+-        self.defining_opaque_types = self.tcx.opaque_types_defined_by(defining_anchor);
+-        self
+-    }
+-
+     pub fn with_next_trait_solver(mut self, next_trait_solver: bool) -> Self {
+         self.next_trait_solver = next_trait_solver;
+         self
+     }
+ 
+-    pub fn intercrate(mut self, intercrate: bool) -> Self {
+-        self.intercrate = intercrate;
+-        self
+-    }
+-
+     pub fn ignoring_regions(mut self) -> Self {
+         self.considering_regions = false;
+         self
+@@ -600,24 +561,17 @@ impl<'tcx> InferCtxtBuilder<'tcx> {
+     where
+         T: TypeFoldable<TyCtxt<'tcx>>,
+     {
+-        self.defining_opaque_types = input.defining_opaque_types;
+-        let infcx = self.build();
++        let infcx = self.build(input.typing_mode);
+         let (value, args) = infcx.instantiate_canonical(span, &input.canonical);
+         (infcx, value, args)
+     }
+ 
+-    pub fn build(&mut self) -> InferCtxt<'tcx> {
+-        let InferCtxtBuilder {
+-            tcx,
+-            defining_opaque_types,
+-            considering_regions,
+-            skip_leak_check,
+-            intercrate,
+-            next_trait_solver,
+-        } = *self;
++    pub fn build(&mut self, typing_mode: TypingMode<'tcx>) -> InferCtxt<'tcx> {
++        let InferCtxtBuilder { tcx, considering_regions, skip_leak_check, next_trait_solver } =
++            *self;
+         InferCtxt {
+             tcx,
+-            defining_opaque_types,
++            typing_mode,
+             considering_regions,
+             skip_leak_check,
+             inner: RefCell::new(InferCtxtInner::new()),
+@@ -628,7 +582,6 @@ impl<'tcx> InferCtxtBuilder<'tcx> {
+             reported_signature_mismatch: Default::default(),
+             tainted_by_errors: Cell::new(None),
+             universe: Cell::new(ty::UniverseIndex::ROOT),
+-            intercrate,
+             next_trait_solver,
+             obligation_inspector: Cell::new(None),
+         }
+@@ -659,14 +612,30 @@ impl<'tcx> InferCtxt<'tcx> {
+         self.tcx.dcx().taintable_handle(&self.tainted_by_errors)
+     }
+ 
+-    pub fn defining_opaque_types(&self) -> &'tcx ty::List<LocalDefId> {
+-        self.defining_opaque_types
+-    }
+-
+     pub fn next_trait_solver(&self) -> bool {
+         self.next_trait_solver
+     }
+ 
++    #[inline(always)]
++    pub fn typing_mode(
++        &self,
++        param_env_for_debug_assertion: ty::ParamEnv<'tcx>,
++    ) -> TypingMode<'tcx> {
++        if cfg!(debug_assertions) {
++            match (param_env_for_debug_assertion.reveal(), self.typing_mode) {
++                (Reveal::All, TypingMode::PostAnalysis)
++                | (Reveal::UserFacing, TypingMode::Coherence | TypingMode::Analysis { .. }) => {}
++                (r, t) => unreachable!("TypingMode x Reveal mismatch: {r:?} {t:?}"),
++            }
++        }
++        self.typing_mode
++    }
++
++    #[inline(always)]
++    pub fn typing_mode_unchecked(&self) -> TypingMode<'tcx> {
++        self.typing_mode
++    }
++
+     pub fn freshen<T: TypeFoldable<TyCtxt<'tcx>>>(&self, t: T) -> T {
+         t.fold_with(&mut self.freshener())
+     }
+@@ -1029,8 +998,12 @@ impl<'tcx> InferCtxt<'tcx> {
+ 
+     #[inline(always)]
+     pub fn can_define_opaque_ty(&self, id: impl Into<DefId>) -> bool {
+-        let Some(id) = id.into().as_local() else { return false };
+-        self.defining_opaque_types.contains(&id)
++        match self.typing_mode_unchecked() {
++            TypingMode::Analysis { defining_opaque_types } => {
++                id.into().as_local().is_some_and(|def_id| defining_opaque_types.contains(&def_id))
++            }
++            TypingMode::Coherence | TypingMode::PostAnalysis => false,
++        }
+     }
+ 
+     pub fn ty_to_string(&self, t: Ty<'tcx>) -> String {
+diff --git a/compiler/rustc_infer/src/infer/opaque_types/mod.rs b/compiler/rustc_infer/src/infer/opaque_types/mod.rs
+index c38b7114e43eb..498d25aea640b 100644
+--- a/compiler/rustc_infer/src/infer/opaque_types/mod.rs
++++ b/compiler/rustc_infer/src/infer/opaque_types/mod.rs
+@@ -2,6 +2,7 @@ use hir::def_id::{DefId, LocalDefId};
+ use rustc_data_structures::fx::FxIndexMap;
+ use rustc_data_structures::sync::Lrc;
+ use rustc_hir as hir;
++use rustc_middle::bug;
+ use rustc_middle::traits::ObligationCause;
+ use rustc_middle::traits::solve::Goal;
+ use rustc_middle::ty::error::{ExpectedFound, TypeError};
+@@ -100,7 +101,7 @@ impl<'tcx> InferCtxt<'tcx> {
+         let process = |a: Ty<'tcx>, b: Ty<'tcx>| match *a.kind() {
+             ty::Alias(ty::Opaque, ty::AliasTy { def_id, args, .. }) if def_id.is_local() => {
+                 let def_id = def_id.expect_local();
+-                if self.intercrate {
++                if let ty::TypingMode::Coherence = self.typing_mode(param_env) {
+                     // See comment on `insert_hidden_type` for why this is sufficient in coherence
+                     return Some(self.register_hidden_type(
+                         OpaqueTypeKey { def_id, args },
+@@ -519,28 +520,32 @@ impl<'tcx> InferCtxt<'tcx> {
+         // value being folded. In simple cases like `-> impl Foo`,
+         // these are the same span, but not in cases like `-> (impl
+         // Foo, impl Bar)`.
+-        if self.intercrate {
+-            // During intercrate we do not define opaque types but instead always
+-            // force ambiguity unless the hidden type is known to not implement
+-            // our trait.
+-            goals.push(Goal::new(self.tcx, param_env, ty::PredicateKind::Ambiguous))
+-        } else {
+-            let prev = self
+-                .inner
+-                .borrow_mut()
+-                .opaque_types()
+-                .register(opaque_type_key, OpaqueHiddenType { ty: hidden_ty, span });
+-            if let Some(prev) = prev {
+-                goals.extend(
+-                    self.at(&ObligationCause::dummy_with_span(span), param_env)
+-                        .eq(DefineOpaqueTypes::Yes, prev, hidden_ty)?
+-                        .obligations
+-                        .into_iter()
+-                        // FIXME: Shuttling between obligations and goals is awkward.
+-                        .map(Goal::from),
+-                );
++        match self.typing_mode(param_env) {
++            ty::TypingMode::Coherence => {
++                // During intercrate we do not define opaque types but instead always
++                // force ambiguity unless the hidden type is known to not implement
++                // our trait.
++                goals.push(Goal::new(self.tcx, param_env, ty::PredicateKind::Ambiguous));
+             }
+-        };
++            ty::TypingMode::Analysis { .. } => {
++                let prev = self
++                    .inner
++                    .borrow_mut()
++                    .opaque_types()
++                    .register(opaque_type_key, OpaqueHiddenType { ty: hidden_ty, span });
++                if let Some(prev) = prev {
++                    goals.extend(
++                        self.at(&ObligationCause::dummy_with_span(span), param_env)
++                            .eq(DefineOpaqueTypes::Yes, prev, hidden_ty)?
++                            .obligations
++                            .into_iter()
++                            // FIXME: Shuttling between obligations and goals is awkward.
++                            .map(Goal::from),
++                    );
++                }
++            }
++            ty::TypingMode::PostAnalysis => bug!("insert hidden type post-analysis"),
++        }
+ 
+         Ok(())
+     }
+diff --git a/compiler/rustc_infer/src/infer/relate/generalize.rs b/compiler/rustc_infer/src/infer/relate/generalize.rs
+index 32817dbcb2140..4c80bf4e07e8c 100644
+--- a/compiler/rustc_infer/src/infer/relate/generalize.rs
++++ b/compiler/rustc_infer/src/infer/relate/generalize.rs
+@@ -9,6 +9,7 @@ use rustc_middle::ty::error::TypeError;
+ use rustc_middle::ty::visit::MaxUniverse;
+ use rustc_middle::ty::{
+     self, AliasRelationDirection, InferConst, Term, Ty, TyCtxt, TypeVisitable, TypeVisitableExt,
++    TypingMode,
+ };
+ use rustc_span::Span;
+ use tracing::{debug, instrument, warn};
+@@ -519,7 +520,10 @@ impl<'tcx> TypeRelation<TyCtxt<'tcx>> for Generalizer<'_, 'tcx> {
+                             //
+                             // cc trait-system-refactor-initiative#108
+                             if self.infcx.next_trait_solver()
+-                                && !self.infcx.intercrate
++                                && !matches!(
++                                    self.infcx.typing_mode_unchecked(),
++                                    TypingMode::Coherence
++                                )
+                                 && self.in_alias
+                             {
+                                 inner.type_variables().equate(vid, new_var_id);
+@@ -650,7 +654,10 @@ impl<'tcx> TypeRelation<TyCtxt<'tcx>> for Generalizer<'_, 'tcx> {
+                             // See the comment for type inference variables
+                             // for more details.
+                             if self.infcx.next_trait_solver()
+-                                && !self.infcx.intercrate
++                                && !matches!(
++                                    self.infcx.typing_mode_unchecked(),
++                                    TypingMode::Coherence
++                                )
+                                 && self.in_alias
+                             {
+                                 variable_table.union(vid, new_var_id);
+diff --git a/compiler/rustc_lint/src/builtin.rs b/compiler/rustc_lint/src/builtin.rs
+index dbb8c66753236..77682ea9341b4 100644
+--- a/compiler/rustc_lint/src/builtin.rs
++++ b/compiler/rustc_lint/src/builtin.rs
+@@ -31,7 +31,7 @@ use rustc_middle::bug;
+ use rustc_middle::lint::in_external_macro;
+ use rustc_middle::ty::layout::LayoutOf;
+ use rustc_middle::ty::print::with_no_trimmed_paths;
+-use rustc_middle::ty::{self, Ty, TyCtxt, TypeVisitableExt, Upcast, VariantDef};
++use rustc_middle::ty::{self, Ty, TyCtxt, TypeVisitableExt, TypingMode, Upcast, VariantDef};
+ use rustc_session::lint::FutureIncompatibilityReason;
+ // hardwired lints from rustc_lint_defs
+ pub use rustc_session::lint::builtin::*;
+@@ -604,7 +604,7 @@ impl<'tcx> LateLintPass<'tcx> for MissingCopyImplementations {
+             && cx
+                 .tcx
+                 .infer_ctxt()
+-                .build()
++                .build(cx.typing_mode())
+                 .type_implements_trait(iter_trait, [ty], cx.param_env)
+                 .must_apply_modulo_regions()
+         {
+@@ -648,7 +648,9 @@ fn type_implements_negative_copy_modulo_regions<'tcx>(
+         predicate: pred.upcast(tcx),
+     };
+ 
+-    tcx.infer_ctxt().build().predicate_must_hold_modulo_regions(&obligation)
++    tcx.infer_ctxt()
++        .build(TypingMode::non_body_analysis())
++        .predicate_must_hold_modulo_regions(&obligation)
+ }
+ 
+ declare_lint! {
+diff --git a/compiler/rustc_lint/src/context.rs b/compiler/rustc_lint/src/context.rs
+index 699088914e87e..aa7ec2659d089 100644
+--- a/compiler/rustc_lint/src/context.rs
++++ b/compiler/rustc_lint/src/context.rs
+@@ -14,11 +14,12 @@ use rustc_feature::Features;
+ use rustc_hir::def::Res;
+ use rustc_hir::def_id::{CrateNum, DefId};
+ use rustc_hir::definitions::{DefPathData, DisambiguatedDefPathData};
++use rustc_infer::traits::Reveal;
+ use rustc_middle::bug;
+ use rustc_middle::middle::privacy::EffectiveVisibilities;
+ use rustc_middle::ty::layout::{LayoutError, LayoutOfHelpers, TyAndLayout};
+ use rustc_middle::ty::print::{PrintError, PrintTraitRefExt as _, Printer, with_no_trimmed_paths};
+-use rustc_middle::ty::{self, GenericArg, RegisteredTools, Ty, TyCtxt};
++use rustc_middle::ty::{self, GenericArg, RegisteredTools, Ty, TyCtxt, TypingMode};
+ use rustc_session::lint::{
+     BuiltinLintDiag, FutureIncompatibleInfo, Level, Lint, LintBuffer, LintExpectationId, LintId,
+ };
+@@ -698,6 +699,15 @@ impl LintContext for EarlyContext<'_> {
+ }
+ 
+ impl<'tcx> LateContext<'tcx> {
++    /// The typing mode of the currently visited node. Use this when
++    /// building a new `InferCtxt`.
++    pub fn typing_mode(&self) -> TypingMode<'tcx> {
++        debug_assert_eq!(self.param_env.reveal(), Reveal::UserFacing);
++        // FIXME(#132279): In case we're in a body, we should use a typing
++        // mode which reveals the opaque types defined by that body.
++        TypingMode::non_body_analysis()
++    }
++
+     /// Gets the type-checking results for the current body,
+     /// or `None` if outside a body.
+     pub fn maybe_typeck_results(&self) -> Option<&'tcx ty::TypeckResults<'tcx>> {
+diff --git a/compiler/rustc_lint/src/for_loops_over_fallibles.rs b/compiler/rustc_lint/src/for_loops_over_fallibles.rs
+index fcb7a6108c0e2..cf68e41243ff3 100644
+--- a/compiler/rustc_lint/src/for_loops_over_fallibles.rs
++++ b/compiler/rustc_lint/src/for_loops_over_fallibles.rs
+@@ -166,7 +166,7 @@ fn suggest_question_mark<'tcx>(
+     }
+ 
+     let ty = args.type_at(0);
+-    let infcx = cx.tcx.infer_ctxt().build();
++    let infcx = cx.tcx.infer_ctxt().build(cx.typing_mode());
+     let ocx = ObligationCtxt::new(&infcx);
+ 
+     let body_def_id = cx.tcx.hir().body_owner_def_id(body_id);
+diff --git a/compiler/rustc_lint/src/impl_trait_overcaptures.rs b/compiler/rustc_lint/src/impl_trait_overcaptures.rs
+index cc40b67ab271d..026826021c813 100644
+--- a/compiler/rustc_lint/src/impl_trait_overcaptures.rs
++++ b/compiler/rustc_lint/src/impl_trait_overcaptures.rs
+@@ -15,7 +15,7 @@ use rustc_middle::ty::relate::{
+     Relate, RelateResult, TypeRelation, structurally_relate_consts, structurally_relate_tys,
+ };
+ use rustc_middle::ty::{
+-    self, Ty, TyCtxt, TypeSuperVisitable, TypeVisitable, TypeVisitableExt, TypeVisitor,
++    self, Ty, TyCtxt, TypeSuperVisitable, TypeVisitable, TypeVisitableExt, TypeVisitor, TypingMode,
+ };
+ use rustc_middle::{bug, span_bug};
+ use rustc_session::lint::FutureIncompatibilityReason;
+@@ -184,7 +184,7 @@ fn check_fn(tcx: TyCtxt<'_>, parent_def_id: LocalDefId) {
+         }),
+         outlives_env: LazyCell::new(|| {
+             let param_env = tcx.param_env(parent_def_id);
+-            let infcx = tcx.infer_ctxt().build();
++            let infcx = tcx.infer_ctxt().build(TypingMode::from_param_env(param_env));
+             let ocx = ObligationCtxt::new(&infcx);
+             let assumed_wf_tys = ocx.assumed_wf_types(param_env, parent_def_id).unwrap_or_default();
+             let implied_bounds =
+diff --git a/compiler/rustc_lint/src/non_fmt_panic.rs b/compiler/rustc_lint/src/non_fmt_panic.rs
+index 51877e8a03495..cf25ec99e6713 100644
+--- a/compiler/rustc_lint/src/non_fmt_panic.rs
++++ b/compiler/rustc_lint/src/non_fmt_panic.rs
+@@ -157,7 +157,7 @@ fn check_panic<'tcx>(cx: &LateContext<'tcx>, f: &'tcx hir::Expr<'tcx>, arg: &'tc
+                 Some(ty_def) if cx.tcx.is_lang_item(ty_def.did(), LangItem::String),
+             );
+ 
+-            let infcx = cx.tcx.infer_ctxt().build();
++            let infcx = cx.tcx.infer_ctxt().build(cx.typing_mode());
+             let suggest_display = is_str
+                 || cx.tcx.get_diagnostic_item(sym::Display).is_some_and(|t| {
+                     infcx.type_implements_trait(t, [ty], cx.param_env).may_apply()
+diff --git a/compiler/rustc_lint/src/opaque_hidden_inferred_bound.rs b/compiler/rustc_lint/src/opaque_hidden_inferred_bound.rs
+index ffbcf7f808ebe..16a1a5a72bc49 100644
+--- a/compiler/rustc_lint/src/opaque_hidden_inferred_bound.rs
++++ b/compiler/rustc_lint/src/opaque_hidden_inferred_bound.rs
+@@ -85,7 +85,7 @@ impl<'tcx> LateLintPass<'tcx> for OpaqueHiddenInferredBound {
+         }
+ 
+         let def_id = opaque.def_id.to_def_id();
+-        let infcx = &cx.tcx.infer_ctxt().build();
++        let infcx = &cx.tcx.infer_ctxt().build(cx.typing_mode());
+         // For every projection predicate in the opaque type's explicit bounds,
+         // check that the type that we're assigning actually satisfies the bounds
+         // of the associated type.
+diff --git a/compiler/rustc_middle/src/query/plumbing.rs b/compiler/rustc_middle/src/query/plumbing.rs
+index 564d274bc8b1e..57da5b39ba781 100644
+--- a/compiler/rustc_middle/src/query/plumbing.rs
++++ b/compiler/rustc_middle/src/query/plumbing.rs
+@@ -323,7 +323,7 @@ macro_rules! define_callbacks {
+                 // Increase this limit if necessary, but do try to keep the size low if possible
+                 #[cfg(target_pointer_width = "64")]
+                 const _: () = {
+-                    if mem::size_of::<Key<'static>>() > 72 {
++                    if mem::size_of::<Key<'static>>() > 80 {
+                         panic!("{}", concat!(
+                             "the query `",
+                             stringify!($name),
+diff --git a/compiler/rustc_middle/src/ty/context.rs b/compiler/rustc_middle/src/ty/context.rs
+index 5ae9c589ec4a5..5cbbc80ebfbb6 100644
+--- a/compiler/rustc_middle/src/ty/context.rs
++++ b/compiler/rustc_middle/src/ty/context.rs
+@@ -54,7 +54,6 @@ use rustc_type_ir::TyKind::*;
+ use rustc_type_ir::fold::TypeFoldable;
+ use rustc_type_ir::lang_items::TraitSolverLangItem;
+ pub use rustc_type_ir::lift::Lift;
+-use rustc_type_ir::solve::SolverMode;
+ use rustc_type_ir::{CollectAndApply, Interner, TypeFlags, WithCachedTypeInfo, search_graph};
+ use tracing::{debug, trace};
+ 
+@@ -170,15 +169,8 @@ impl<'tcx> Interner for TyCtxt<'tcx> {
+         tracked.get(self)
+     }
+ 
+-    fn with_global_cache<R>(
+-        self,
+-        mode: SolverMode,
+-        f: impl FnOnce(&mut search_graph::GlobalCache<Self>) -> R,
+-    ) -> R {
+-        match mode {
+-            SolverMode::Normal => f(&mut *self.new_solver_evaluation_cache.lock()),
+-            SolverMode::Coherence => f(&mut *self.new_solver_coherence_evaluation_cache.lock()),
+-        }
++    fn with_global_cache<R>(self, f: impl FnOnce(&mut search_graph::GlobalCache<Self>) -> R) -> R {
++        f(&mut *self.new_solver_evaluation_cache.lock())
+     }
+ 
+     fn evaluation_is_concurrent(&self) -> bool {
+@@ -629,6 +621,10 @@ impl<'tcx> Interner for TyCtxt<'tcx> {
+     ) -> ty::Binder<'tcx, T> {
+         self.anonymize_bound_vars(binder)
+     }
++
++    fn opaque_types_defined_by(self, defining_anchor: LocalDefId) -> Self::DefiningOpaqueTypes {
++        self.opaque_types_defined_by(defining_anchor)
++    }
+ }
+ 
+ macro_rules! bidirectional_lang_item_map {
+@@ -1334,7 +1330,6 @@ pub struct GlobalCtxt<'tcx> {
+ 
+     /// Caches the results of goal evaluation in the new solver.
+     pub new_solver_evaluation_cache: Lock<search_graph::GlobalCache<TyCtxt<'tcx>>>,
+-    pub new_solver_coherence_evaluation_cache: Lock<search_graph::GlobalCache<TyCtxt<'tcx>>>,
+ 
+     pub canonical_param_env_cache: CanonicalParamEnvCache<'tcx>,
+ 
+@@ -1561,7 +1556,6 @@ impl<'tcx> TyCtxt<'tcx> {
+             selection_cache: Default::default(),
+             evaluation_cache: Default::default(),
+             new_solver_evaluation_cache: Default::default(),
+-            new_solver_coherence_evaluation_cache: Default::default(),
+             canonical_param_env_cache: Default::default(),
+             data_layout,
+             alloc_map: Lock::new(interpret::AllocMap::new()),
+diff --git a/compiler/rustc_middle/src/ty/mod.rs b/compiler/rustc_middle/src/ty/mod.rs
+index b92fc864b49a7..bd32e5837b38f 100644
+--- a/compiler/rustc_middle/src/ty/mod.rs
++++ b/compiler/rustc_middle/src/ty/mod.rs
+@@ -100,7 +100,7 @@ pub use self::rvalue_scopes::RvalueScopes;
+ pub use self::sty::{
+     AliasTy, Article, Binder, BoundTy, BoundTyKind, BoundVariableKind, CanonicalPolyFnSig,
+     CoroutineArgsExt, EarlyBinder, FnSig, InlineConstArgs, InlineConstArgsParts, ParamConst,
+-    ParamTy, PolyFnSig, TyKind, TypeAndMut, UpvarArgs,
++    ParamTy, PolyFnSig, TyKind, TypeAndMut, TypingMode, UpvarArgs,
+ };
+ pub use self::trait_def::TraitDef;
+ pub use self::typeck_results::{
+diff --git a/compiler/rustc_middle/src/ty/sty.rs b/compiler/rustc_middle/src/ty/sty.rs
+index d8362ccc0a97c..a8327ebc17fee 100644
+--- a/compiler/rustc_middle/src/ty/sty.rs
++++ b/compiler/rustc_middle/src/ty/sty.rs
+@@ -40,6 +40,7 @@ pub type AliasTy<'tcx> = ir::AliasTy<TyCtxt<'tcx>>;
+ pub type FnSig<'tcx> = ir::FnSig<TyCtxt<'tcx>>;
+ pub type Binder<'tcx, T> = ir::Binder<TyCtxt<'tcx>, T>;
+ pub type EarlyBinder<'tcx, T> = ir::EarlyBinder<TyCtxt<'tcx>, T>;
++pub type TypingMode<'tcx> = ir::TypingMode<TyCtxt<'tcx>>;
+ 
+ pub trait Article {
+     fn article(&self) -> &'static str;
+diff --git a/compiler/rustc_mir_build/src/build/mod.rs b/compiler/rustc_mir_build/src/build/mod.rs
+index 8c20d2e0d3a62..e15ea4d8d8be2 100644
+--- a/compiler/rustc_mir_build/src/build/mod.rs
++++ b/compiler/rustc_mir_build/src/build/mod.rs
+@@ -16,7 +16,7 @@ use rustc_middle::middle::region;
+ use rustc_middle::mir::*;
+ use rustc_middle::query::TyCtxtAt;
+ use rustc_middle::thir::{self, ExprId, LintLevel, LocalVarId, Param, ParamId, PatKind, Thir};
+-use rustc_middle::ty::{self, ScalarInt, Ty, TyCtxt, TypeVisitableExt};
++use rustc_middle::ty::{self, ScalarInt, Ty, TyCtxt, TypeVisitableExt, TypingMode};
+ use rustc_middle::{bug, span_bug};
+ use rustc_span::symbol::sym;
+ use rustc_span::{Span, Symbol};
+@@ -500,7 +500,9 @@ fn construct_fn<'tcx>(
+         );
+     }
+ 
+-    let infcx = tcx.infer_ctxt().build();
++    // FIXME(#132279): This should be able to reveal opaque
++    // types defined during HIR typeck.
++    let infcx = tcx.infer_ctxt().build(TypingMode::non_body_analysis());
+     let mut builder = Builder::new(
+         thir,
+         infcx,
+@@ -578,7 +580,9 @@ fn construct_const<'a, 'tcx>(
+         _ => span_bug!(tcx.def_span(def), "can't build MIR for {:?}", def),
+     };
+ 
+-    let infcx = tcx.infer_ctxt().build();
++    // FIXME(#132279): We likely want to be able to use the hidden types of
++    // opaques used by this function here.
++    let infcx = tcx.infer_ctxt().build(TypingMode::non_body_analysis());
+     let mut builder =
+         Builder::new(thir, infcx, def, hir_id, span, 0, const_ty, const_ty_span, None);
+ 
+diff --git a/compiler/rustc_mir_build/src/thir/pattern/const_to_pat.rs b/compiler/rustc_mir_build/src/thir/pattern/const_to_pat.rs
+index 0dfa9168f7c80..c89f526aa1758 100644
+--- a/compiler/rustc_mir_build/src/thir/pattern/const_to_pat.rs
++++ b/compiler/rustc_mir_build/src/thir/pattern/const_to_pat.rs
+@@ -7,7 +7,7 @@ use rustc_infer::traits::Obligation;
+ use rustc_middle::mir;
+ use rustc_middle::mir::interpret::ErrorHandled;
+ use rustc_middle::thir::{FieldPat, Pat, PatKind};
+-use rustc_middle::ty::{self, Ty, TyCtxt, TypeVisitableExt, ValTree};
++use rustc_middle::ty::{self, Ty, TyCtxt, TypeVisitableExt, TypingMode, ValTree};
+ use rustc_span::Span;
+ use rustc_target::abi::{FieldIdx, VariantIdx};
+ use rustc_trait_selection::traits::ObligationCause;
+@@ -36,7 +36,9 @@ impl<'a, 'tcx> PatCtxt<'a, 'tcx> {
+         id: hir::HirId,
+         span: Span,
+     ) -> Box<Pat<'tcx>> {
+-        let infcx = self.tcx.infer_ctxt().build();
++        // FIXME(#132279): We likely want to be able to reveal the hidden types
++        // of opaques defined in this function here.
++        let infcx = self.tcx.infer_ctxt().build(TypingMode::non_body_analysis());
+         let mut convert = ConstToPat::new(self, id, span, infcx);
+         convert.to_pat(c, ty)
+     }
+diff --git a/compiler/rustc_mir_transform/src/coroutine.rs b/compiler/rustc_mir_transform/src/coroutine.rs
+index cd29105897778..ab3abc901b407 100644
+--- a/compiler/rustc_mir_transform/src/coroutine.rs
++++ b/compiler/rustc_mir_transform/src/coroutine.rs
+@@ -64,7 +64,7 @@ use rustc_index::{Idx, IndexVec};
+ use rustc_middle::mir::visit::{MutVisitor, PlaceContext, Visitor};
+ use rustc_middle::mir::*;
+ use rustc_middle::ty::{
+-    self, CoroutineArgs, CoroutineArgsExt, GenericArgsRef, InstanceKind, Ty, TyCtxt,
++    self, CoroutineArgs, CoroutineArgsExt, GenericArgsRef, InstanceKind, Ty, TyCtxt, TypingMode,
+ };
+ use rustc_middle::{bug, span_bug};
+ use rustc_mir_dataflow::Analysis;
+@@ -1501,7 +1501,11 @@ fn check_field_tys_sized<'tcx>(
+         return;
+     }
+ 
+-    let infcx = tcx.infer_ctxt().ignoring_regions().build();
++    // FIXME(#132279): @lcnr believes that we may want to support coroutines
++    // whose `Sized`-ness relies on the hidden types of opaques defined by the
++    // parent function. In this case we'd have to be able to reveal only these
++    // opaques here.
++    let infcx = tcx.infer_ctxt().ignoring_regions().build(TypingMode::non_body_analysis());
+     let param_env = tcx.param_env(def_id);
+ 
+     let ocx = ObligationCtxt::new_with_diagnostics(&infcx);
+diff --git a/compiler/rustc_mir_transform/src/validate.rs b/compiler/rustc_mir_transform/src/validate.rs
+index 25e68f44456b8..77356723c466b 100644
+--- a/compiler/rustc_mir_transform/src/validate.rs
++++ b/compiler/rustc_mir_transform/src/validate.rs
+@@ -12,7 +12,7 @@ use rustc_middle::mir::*;
+ use rustc_middle::ty::adjustment::PointerCoercion;
+ use rustc_middle::ty::{
+     self, CoroutineArgsExt, InstanceKind, ParamEnv, ScalarInt, Ty, TyCtxt, TypeVisitableExt,
+-    Variance,
++    TypingMode, Variance,
+ };
+ use rustc_middle::{bug, span_bug};
+ use rustc_target::abi::{FIRST_VARIANT, Size};
+@@ -606,7 +606,7 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
+             return true;
+         }
+ 
+-        let infcx = self.tcx.infer_ctxt().build();
++        let infcx = self.tcx.infer_ctxt().build(TypingMode::from_param_env(self.param_env));
+         let ocx = ObligationCtxt::new(&infcx);
+         ocx.register_obligation(Obligation::new(
+             self.tcx,
+diff --git a/compiler/rustc_next_trait_solver/src/delegate.rs b/compiler/rustc_next_trait_solver/src/delegate.rs
+index 4da1e7fa711b5..f7fbfed5b8e38 100644
+--- a/compiler/rustc_next_trait_solver/src/delegate.rs
++++ b/compiler/rustc_next_trait_solver/src/delegate.rs
+@@ -1,7 +1,7 @@
+ use std::ops::Deref;
+ 
+ use rustc_type_ir::fold::TypeFoldable;
+-use rustc_type_ir::solve::{Certainty, Goal, NoSolution, SolverMode};
++use rustc_type_ir::solve::{Certainty, Goal, NoSolution};
+ use rustc_type_ir::{self as ty, InferCtxtLike, Interner};
+ 
+ pub trait SolverDelegate: Deref<Target = <Self as SolverDelegate>::Infcx> + Sized {
+@@ -15,7 +15,6 @@ pub trait SolverDelegate: Deref<Target = <Self as SolverDelegate>::Infcx> + Size
+ 
+     fn build_with_canonical<V>(
+         cx: Self::Interner,
+-        solver_mode: SolverMode,
+         canonical: &ty::CanonicalQueryInput<Self::Interner, V>,
+     ) -> (Self, V, ty::CanonicalVarValues<Self::Interner>)
+     where
+@@ -93,7 +92,6 @@ pub trait SolverDelegate: Deref<Target = <Self as SolverDelegate>::Infcx> + Size
+ 
+     fn fetch_eligible_assoc_item(
+         &self,
+-        param_env: <Self::Interner as Interner>::ParamEnv,
+         goal_trait_ref: ty::TraitRef<Self::Interner>,
+         trait_assoc_def_id: <Self::Interner as Interner>::DefId,
+         impl_def_id: <Self::Interner as Interner>::DefId,
+diff --git a/compiler/rustc_next_trait_solver/src/solve/assembly/mod.rs b/compiler/rustc_next_trait_solver/src/solve/assembly/mod.rs
+index f6a5f20a639ec..ebf7372926f8a 100644
+--- a/compiler/rustc_next_trait_solver/src/solve/assembly/mod.rs
++++ b/compiler/rustc_next_trait_solver/src/solve/assembly/mod.rs
+@@ -8,14 +8,14 @@ use rustc_type_ir::inherent::*;
+ use rustc_type_ir::lang_items::TraitSolverLangItem;
+ use rustc_type_ir::solve::inspect;
+ use rustc_type_ir::visit::TypeVisitableExt as _;
+-use rustc_type_ir::{self as ty, Interner, Upcast as _, elaborate};
++use rustc_type_ir::{self as ty, Interner, TypingMode, Upcast as _, elaborate};
+ use tracing::{debug, instrument};
+ 
+ use crate::delegate::SolverDelegate;
+ use crate::solve::inspect::ProbeKind;
+ use crate::solve::{
+     BuiltinImplSource, CandidateSource, CanonicalResponse, Certainty, EvalCtxt, Goal, GoalSource,
+-    MaybeCause, NoSolution, QueryResult, SolverMode,
++    MaybeCause, NoSolution, QueryResult,
+ };
+ 
+ /// A candidate is a possible way to prove a goal.
+@@ -328,11 +328,12 @@ where
+ 
+         let mut candidates = vec![];
+ 
+-        if self.solver_mode() == SolverMode::Coherence {
++        if let TypingMode::Coherence = self.typing_mode(goal.param_env) {
+             if let Ok(candidate) = self.consider_coherence_unknowable_candidate(goal) {
+                 return vec![candidate];
+             }
+         }
++
+         self.assemble_impl_candidates(goal, &mut candidates);
+ 
+         self.assemble_builtin_impl_candidates(goal, &mut candidates);
+@@ -343,8 +344,11 @@ where
+ 
+         self.assemble_param_env_candidates(goal, &mut candidates);
+ 
+-        if self.solver_mode() == SolverMode::Normal {
+-            self.discard_impls_shadowed_by_env(goal, &mut candidates);
++        match self.typing_mode(goal.param_env) {
++            TypingMode::Coherence => {}
++            TypingMode::Analysis { .. } | TypingMode::PostAnalysis => {
++                self.discard_impls_shadowed_by_env(goal, &mut candidates);
++            }
+         }
+ 
+         candidates
+diff --git a/compiler/rustc_next_trait_solver/src/solve/eval_ctxt/canonical.rs b/compiler/rustc_next_trait_solver/src/solve/eval_ctxt/canonical.rs
+index e2fd0dd2a25fa..2f50070d43883 100644
+--- a/compiler/rustc_next_trait_solver/src/solve/eval_ctxt/canonical.rs
++++ b/compiler/rustc_next_trait_solver/src/solve/eval_ctxt/canonical.rs
+@@ -55,6 +55,7 @@ where
+         &self,
+         goal: Goal<I, T>,
+     ) -> (Vec<I::GenericArg>, CanonicalInput<I, T>) {
++        let param_env_for_debug_assertion = goal.param_env;
+         let opaque_types = self.delegate.clone_opaque_types_for_query_response();
+         let (goal, opaque_types) =
+             (goal, opaque_types).fold_with(&mut EagerResolver::new(self.delegate));
+@@ -73,7 +74,7 @@ where
+         );
+         let query_input = ty::CanonicalQueryInput {
+             canonical,
+-            defining_opaque_types: self.delegate.defining_opaque_types(),
++            typing_mode: self.typing_mode(param_env_for_debug_assertion),
+         };
+         (orig_values, query_input)
+     }
+diff --git a/compiler/rustc_next_trait_solver/src/solve/eval_ctxt/mod.rs b/compiler/rustc_next_trait_solver/src/solve/eval_ctxt/mod.rs
+index 7608253882a27..8685896715e1e 100644
+--- a/compiler/rustc_next_trait_solver/src/solve/eval_ctxt/mod.rs
++++ b/compiler/rustc_next_trait_solver/src/solve/eval_ctxt/mod.rs
+@@ -10,7 +10,7 @@ use rustc_type_ir::inherent::*;
+ use rustc_type_ir::relate::Relate;
+ use rustc_type_ir::relate::solver_relating::RelateExt;
+ use rustc_type_ir::visit::{TypeSuperVisitable, TypeVisitable, TypeVisitableExt, TypeVisitor};
+-use rustc_type_ir::{self as ty, CanonicalVarValues, InferCtxtLike, Interner};
++use rustc_type_ir::{self as ty, CanonicalVarValues, InferCtxtLike, Interner, TypingMode};
+ use rustc_type_ir_macros::{Lift_Generic, TypeFoldable_Generic, TypeVisitable_Generic};
+ use tracing::{instrument, trace};
+ 
+@@ -21,7 +21,6 @@ use crate::solve::search_graph::SearchGraph;
+ use crate::solve::{
+     CanonicalInput, Certainty, FIXPOINT_STEP_LIMIT, Goal, GoalEvaluationKind, GoalSource,
+     HasChanged, NestedNormalizationGoals, NoSolution, PredefinedOpaquesData, QueryResult,
+-    SolverMode,
+ };
+ 
+ pub(super) mod canonical;
+@@ -215,8 +214,8 @@ where
+     D: SolverDelegate<Interner = I>,
+     I: Interner,
+ {
+-    pub(super) fn solver_mode(&self) -> SolverMode {
+-        self.search_graph.solver_mode()
++    pub(super) fn typing_mode(&self, param_env_for_debug_assertion: I::ParamEnv) -> TypingMode<I> {
++        self.delegate.typing_mode(param_env_for_debug_assertion)
+     }
+ 
+     pub(super) fn set_is_normalizes_to_goal(&mut self) {
+@@ -232,7 +231,7 @@ where
+         generate_proof_tree: GenerateProofTree,
+         f: impl FnOnce(&mut EvalCtxt<'_, D>) -> R,
+     ) -> (R, Option<inspect::GoalEvaluation<I>>) {
+-        let mut search_graph = SearchGraph::new(delegate.solver_mode(), root_depth);
++        let mut search_graph = SearchGraph::new(root_depth);
+ 
+         let mut ecx = EvalCtxt {
+             delegate,
+@@ -279,7 +278,7 @@ where
+         f: impl FnOnce(&mut EvalCtxt<'_, D>, Goal<I, I::Predicate>) -> R,
+     ) -> R {
+         let (ref delegate, input, var_values) =
+-            SolverDelegate::build_with_canonical(cx, search_graph.solver_mode(), &canonical_input);
++            SolverDelegate::build_with_canonical(cx, &canonical_input);
+ 
+         let mut ecx = EvalCtxt {
+             delegate,
+@@ -942,21 +941,11 @@ where
+ 
+     pub(super) fn fetch_eligible_assoc_item(
+         &self,
+-        param_env: I::ParamEnv,
+         goal_trait_ref: ty::TraitRef<I>,
+         trait_assoc_def_id: I::DefId,
+         impl_def_id: I::DefId,
+     ) -> Result<Option<I::DefId>, NoSolution> {
+-        self.delegate.fetch_eligible_assoc_item(
+-            param_env,
+-            goal_trait_ref,
+-            trait_assoc_def_id,
+-            impl_def_id,
+-        )
+-    }
+-
+-    pub(super) fn can_define_opaque_ty(&self, def_id: I::LocalDefId) -> bool {
+-        self.delegate.defining_opaque_types().contains(&def_id)
++        self.delegate.fetch_eligible_assoc_item(goal_trait_ref, trait_assoc_def_id, impl_def_id)
+     }
+ 
+     pub(super) fn insert_hidden_type(
+diff --git a/compiler/rustc_next_trait_solver/src/solve/normalizes_to/mod.rs b/compiler/rustc_next_trait_solver/src/solve/normalizes_to/mod.rs
+index 7287cdf74bf45..129744b4db7e5 100644
+--- a/compiler/rustc_next_trait_solver/src/solve/normalizes_to/mod.rs
++++ b/compiler/rustc_next_trait_solver/src/solve/normalizes_to/mod.rs
+@@ -6,7 +6,7 @@ mod weak_types;
+ use rustc_type_ir::fast_reject::DeepRejectCtxt;
+ use rustc_type_ir::inherent::*;
+ use rustc_type_ir::lang_items::TraitSolverLangItem;
+-use rustc_type_ir::{self as ty, Interner, NormalizesTo, Upcast as _};
++use rustc_type_ir::{self as ty, Interner, NormalizesTo, TypingMode, Upcast as _};
+ use tracing::instrument;
+ 
+ use crate::delegate::SolverDelegate;
+@@ -15,7 +15,7 @@ use crate::solve::assembly::{self, Candidate};
+ use crate::solve::inspect::ProbeKind;
+ use crate::solve::{
+     BuiltinImplSource, CandidateSource, Certainty, EvalCtxt, Goal, GoalSource, MaybeCause,
+-    NoSolution, QueryResult, Reveal,
++    NoSolution, QueryResult,
+ };
+ 
+ impl<D, I> EvalCtxt<'_, D>
+@@ -71,21 +71,21 @@ where
+                 Ok(())
+             }
+             ty::AliasTermKind::OpaqueTy => {
+-                match param_env.reveal() {
+-                    // In user-facing mode, paques are only rigid if we may not define it.
+-                    Reveal::UserFacing => {
++                match self.typing_mode(param_env) {
++                    // Opaques are never rigid outside of analysis mode.
++                    TypingMode::Coherence | TypingMode::PostAnalysis => Err(NoSolution),
++                    // During analysis, opaques are only rigid if we may not define it.
++                    TypingMode::Analysis { defining_opaque_types } => {
+                         if rigid_alias
+                             .def_id
+                             .as_local()
+-                            .is_some_and(|def_id| self.can_define_opaque_ty(def_id))
++                            .is_some_and(|def_id| defining_opaque_types.contains(&def_id))
+                         {
+                             Err(NoSolution)
+                         } else {
+                             Ok(())
+                         }
+                     }
+-                    // Opaques are never rigid in reveal-all mode.
+-                    Reveal::All => Err(NoSolution),
+                 }
+             }
+             // FIXME(generic_const_exprs): we would need to support generic consts here
+@@ -252,7 +252,6 @@ where
+             // return ambiguity this would otherwise be incomplete, resulting in
+             // unsoundness during coherence (#105782).
+             let Some(target_item_def_id) = ecx.fetch_eligible_assoc_item(
+-                goal.param_env,
+                 goal_trait_ref,
+                 goal.predicate.def_id(),
+                 impl_def_id,
+diff --git a/compiler/rustc_next_trait_solver/src/solve/normalizes_to/opaque_types.rs b/compiler/rustc_next_trait_solver/src/solve/normalizes_to/opaque_types.rs
+index f8d51f304f332..d1d701695ab83 100644
+--- a/compiler/rustc_next_trait_solver/src/solve/normalizes_to/opaque_types.rs
++++ b/compiler/rustc_next_trait_solver/src/solve/normalizes_to/opaque_types.rs
+@@ -4,12 +4,10 @@
+ 
+ use rustc_index::bit_set::GrowableBitSet;
+ use rustc_type_ir::inherent::*;
+-use rustc_type_ir::{self as ty, Interner};
++use rustc_type_ir::{self as ty, Interner, TypingMode};
+ 
+ use crate::delegate::SolverDelegate;
+-use crate::solve::{
+-    Certainty, EvalCtxt, Goal, NoSolution, QueryResult, Reveal, SolverMode, inspect,
+-};
++use crate::solve::{Certainty, EvalCtxt, Goal, NoSolution, QueryResult, inspect};
+ 
+ impl<D, I> EvalCtxt<'_, D>
+ where
+@@ -24,17 +22,27 @@ where
+         let opaque_ty = goal.predicate.alias;
+         let expected = goal.predicate.term.as_type().expect("no such thing as an opaque const");
+ 
+-        match (goal.param_env.reveal(), self.solver_mode()) {
+-            (Reveal::UserFacing, SolverMode::Normal) => {
+-                let Some(opaque_ty_def_id) = opaque_ty.def_id.as_local() else {
++        match self.typing_mode(goal.param_env) {
++            TypingMode::Coherence => {
++                // An impossible opaque type bound is the only way this goal will fail
++                // e.g. assigning `impl Copy := NotCopy`
++                self.add_item_bounds_for_hidden_type(
++                    opaque_ty.def_id,
++                    opaque_ty.args,
++                    goal.param_env,
++                    expected,
++                );
++                self.evaluate_added_goals_and_make_canonical_response(Certainty::AMBIGUOUS)
++            }
++            TypingMode::Analysis { defining_opaque_types } => {
++                let Some(def_id) = opaque_ty.def_id.as_local() else {
+                     return Err(NoSolution);
+                 };
+-                // FIXME: at some point we should call queries without defining
+-                // new opaque types but having the existing opaque type definitions.
+-                // This will require moving this below "Prefer opaques registered already".
+-                if !self.can_define_opaque_ty(opaque_ty_def_id) {
++
++                if !defining_opaque_types.contains(&def_id) {
+                     return Err(NoSolution);
+                 }
++
+                 // FIXME: This may have issues when the args contain aliases...
+                 match uses_unique_placeholders_ignoring_regions(self.cx(), opaque_ty.args) {
+                     Err(NotUniqueParam::NotParam(param)) if param.is_non_region_infer() => {
+@@ -48,8 +56,7 @@ where
+                     Ok(()) => {}
+                 }
+                 // Prefer opaques registered already.
+-                let opaque_type_key =
+-                    ty::OpaqueTypeKey { def_id: opaque_ty_def_id, args: opaque_ty.args };
++                let opaque_type_key = ty::OpaqueTypeKey { def_id, args: opaque_ty.args };
+                 // FIXME: This also unifies the previous hidden type with the expected.
+                 //
+                 // If that fails, we insert `expected` as a new hidden type instead of
+@@ -69,7 +76,7 @@ where
+                             }
+                             ecx.eq(goal.param_env, candidate_ty, expected)?;
+                             ecx.add_item_bounds_for_hidden_type(
+-                                candidate_key.def_id.into(),
++                                def_id.into(),
+                                 candidate_key.args,
+                                 goal.param_env,
+                                 candidate_ty,
+@@ -82,25 +89,14 @@ where
+                 // FIXME: should we use `inject_hidden_type_unchecked` here?
+                 self.insert_hidden_type(opaque_type_key, goal.param_env, expected)?;
+                 self.add_item_bounds_for_hidden_type(
+-                    opaque_ty.def_id,
++                    def_id.into(),
+                     opaque_ty.args,
+                     goal.param_env,
+                     expected,
+                 );
+                 self.evaluate_added_goals_and_make_canonical_response(Certainty::Yes)
+             }
+-            (Reveal::UserFacing, SolverMode::Coherence) => {
+-                // An impossible opaque type bound is the only way this goal will fail
+-                // e.g. assigning `impl Copy := NotCopy`
+-                self.add_item_bounds_for_hidden_type(
+-                    opaque_ty.def_id,
+-                    opaque_ty.args,
+-                    goal.param_env,
+-                    expected,
+-                );
+-                self.evaluate_added_goals_and_make_canonical_response(Certainty::AMBIGUOUS)
+-            }
+-            (Reveal::All, _) => {
++            TypingMode::PostAnalysis => {
+                 // FIXME: Add an assertion that opaque type storage is empty.
+                 let actual = cx.type_of(opaque_ty.def_id).instantiate(cx, opaque_ty.args);
+                 self.eq(goal.param_env, expected, actual)?;
+diff --git a/compiler/rustc_next_trait_solver/src/solve/trait_goals.rs b/compiler/rustc_next_trait_solver/src/solve/trait_goals.rs
+index 08cc89d950e22..e23e475a2a62a 100644
+--- a/compiler/rustc_next_trait_solver/src/solve/trait_goals.rs
++++ b/compiler/rustc_next_trait_solver/src/solve/trait_goals.rs
+@@ -6,7 +6,7 @@ use rustc_type_ir::fast_reject::DeepRejectCtxt;
+ use rustc_type_ir::inherent::*;
+ use rustc_type_ir::lang_items::TraitSolverLangItem;
+ use rustc_type_ir::visit::TypeVisitableExt as _;
+-use rustc_type_ir::{self as ty, Interner, TraitPredicate, Upcast as _, elaborate};
++use rustc_type_ir::{self as ty, Interner, TraitPredicate, TypingMode, Upcast as _, elaborate};
+ use tracing::{instrument, trace};
+ 
+ use crate::delegate::SolverDelegate;
+@@ -15,7 +15,7 @@ use crate::solve::assembly::{self, Candidate};
+ use crate::solve::inspect::ProbeKind;
+ use crate::solve::{
+     BuiltinImplSource, CandidateSource, Certainty, EvalCtxt, Goal, GoalSource, MaybeCause,
+-    NoSolution, QueryResult, Reveal, SolverMode,
++    NoSolution, QueryResult,
+ };
+ 
+ impl<D, I> assembly::GoalKind<D> for TraitPredicate<I>
+@@ -67,9 +67,9 @@ where
+         let maximal_certainty = match (impl_polarity, goal.predicate.polarity) {
+             // In intercrate mode, this is ambiguous. But outside of intercrate,
+             // it's not a real impl.
+-            (ty::ImplPolarity::Reservation, _) => match ecx.solver_mode() {
+-                SolverMode::Coherence => Certainty::AMBIGUOUS,
+-                SolverMode::Normal => return Err(NoSolution),
++            (ty::ImplPolarity::Reservation, _) => match ecx.typing_mode(goal.param_env) {
++                TypingMode::Coherence => Certainty::AMBIGUOUS,
++                TypingMode::Analysis { .. } | TypingMode::PostAnalysis => return Err(NoSolution),
+             },
+ 
+             // Impl matches polarity
+@@ -167,30 +167,26 @@ where
+             return result;
+         }
+ 
+-        // Don't call `type_of` on a local TAIT that's in the defining scope,
+-        // since that may require calling `typeck` on the same item we're
++        // We only look into opaque types during analysis for opaque types
++        // outside of their defining scope. Doing so for opaques in the
++        // defining scope may require calling `typeck` on the same item we're
+         // currently type checking, which will result in a fatal cycle that
+         // ideally we want to avoid, since we can make progress on this goal
+         // via an alias bound or a locally-inferred hidden type instead.
+-        //
+-        // Also, don't call `type_of` on a TAIT in `Reveal::All` mode, since
+-        // we already normalize the self type in
+-        // `assemble_candidates_after_normalizing_self_ty`, and we'd
+-        // just be registering an identical candidate here.
+-        //
+-        // We always return `Err(NoSolution)` here in `SolverMode::Coherence`
+-        // since we'll always register an ambiguous candidate in
+-        // `assemble_candidates_after_normalizing_self_ty` due to normalizing
+-        // the TAIT.
+         if let ty::Alias(ty::Opaque, opaque_ty) = goal.predicate.self_ty().kind() {
+-            if matches!(goal.param_env.reveal(), Reveal::All)
+-                || matches!(ecx.solver_mode(), SolverMode::Coherence)
+-                || opaque_ty
+-                    .def_id
+-                    .as_local()
+-                    .is_some_and(|def_id| ecx.can_define_opaque_ty(def_id))
+-            {
+-                return Err(NoSolution);
++            match ecx.typing_mode(goal.param_env) {
++                TypingMode::Coherence | TypingMode::PostAnalysis => {
++                    unreachable!("rigid opaque outside of analysis: {goal:?}");
++                }
++                TypingMode::Analysis { defining_opaque_types } => {
++                    if opaque_ty
++                        .def_id
++                        .as_local()
++                        .is_some_and(|def_id| defining_opaque_types.contains(&def_id))
++                    {
++                        return Err(NoSolution);
++                    }
++                }
+             }
+         }
+ 
+diff --git a/compiler/rustc_passes/src/check_attr.rs b/compiler/rustc_passes/src/check_attr.rs
+index 8c4592cbb369f..0a2926c040447 100644
+--- a/compiler/rustc_passes/src/check_attr.rs
++++ b/compiler/rustc_passes/src/check_attr.rs
+@@ -25,7 +25,7 @@ use rustc_middle::middle::resolve_bound_vars::ObjectLifetimeDefault;
+ use rustc_middle::query::Providers;
+ use rustc_middle::traits::ObligationCause;
+ use rustc_middle::ty::error::{ExpectedFound, TypeError};
+-use rustc_middle::ty::{self, TyCtxt};
++use rustc_middle::ty::{self, TyCtxt, TypingMode};
+ use rustc_middle::{bug, span_bug};
+ use rustc_session::lint::builtin::{
+     CONFLICTING_REPR_HINTS, INVALID_DOC_ATTRIBUTES, INVALID_MACRO_EXPORT_ARGUMENTS,
+@@ -2267,7 +2267,7 @@ impl<'tcx> CheckAttrVisitor<'tcx> {
+         let def_id = hir_id.expect_owner().def_id;
+         let param_env = ty::ParamEnv::empty();
+ 
+-        let infcx = tcx.infer_ctxt().build();
++        let infcx = tcx.infer_ctxt().build(TypingMode::non_body_analysis());
+         let ocx = ObligationCtxt::new_with_diagnostics(&infcx);
+ 
+         let span = tcx.def_span(def_id);
+diff --git a/compiler/rustc_passes/src/layout_test.rs b/compiler/rustc_passes/src/layout_test.rs
+index 0b6cf82ca8b46..921a915d05b14 100644
+--- a/compiler/rustc_passes/src/layout_test.rs
++++ b/compiler/rustc_passes/src/layout_test.rs
+@@ -2,6 +2,7 @@ use rustc_abi::{HasDataLayout, TargetDataLayout};
+ use rustc_ast::Attribute;
+ use rustc_hir::def::DefKind;
+ use rustc_hir::def_id::LocalDefId;
++use rustc_middle::infer::canonical::ir::TypingMode;
+ use rustc_middle::span_bug;
+ use rustc_middle::ty::layout::{HasParamEnv, HasTyCtxt, LayoutError, LayoutOfHelpers};
+ use rustc_middle::ty::{self, ParamEnv, Ty, TyCtxt};
+@@ -54,7 +55,7 @@ pub fn ensure_wf<'tcx>(
+         param_env,
+         pred,
+     );
+-    let infcx = tcx.infer_ctxt().build();
++    let infcx = tcx.infer_ctxt().build(TypingMode::from_param_env(param_env));
+     let ocx = traits::ObligationCtxt::new_with_diagnostics(&infcx);
+     ocx.register_obligation(obligation);
+     let errors = ocx.select_all_or_error();
+diff --git a/compiler/rustc_trait_selection/src/solve/delegate.rs b/compiler/rustc_trait_selection/src/solve/delegate.rs
+index 5793ac2fc313c..c53689b211d2a 100644
+--- a/compiler/rustc_trait_selection/src/solve/delegate.rs
++++ b/compiler/rustc_trait_selection/src/solve/delegate.rs
+@@ -7,13 +7,13 @@ use rustc_infer::infer::canonical::{
+     Canonical, CanonicalExt as _, CanonicalQueryInput, CanonicalVarInfo, CanonicalVarValues,
+ };
+ use rustc_infer::infer::{InferCtxt, RegionVariableOrigin, TyCtxtInferExt};
++use rustc_infer::traits::ObligationCause;
+ use rustc_infer::traits::solve::Goal;
+-use rustc_infer::traits::{ObligationCause, Reveal};
+ use rustc_middle::ty::fold::TypeFoldable;
+ use rustc_middle::ty::{self, Ty, TyCtxt, TypeVisitableExt as _};
+ use rustc_span::{DUMMY_SP, ErrorGuaranteed, Span};
+-use rustc_type_ir::solve::{Certainty, NoSolution, SolverMode};
+-use tracing::trace;
++use rustc_type_ir::TypingMode;
++use rustc_type_ir::solve::{Certainty, NoSolution};
+ 
+ use crate::traits::specialization_graph;
+ 
+@@ -47,7 +47,6 @@ impl<'tcx> rustc_next_trait_solver::delegate::SolverDelegate for SolverDelegate<
+ 
+     fn build_with_canonical<V>(
+         interner: TyCtxt<'tcx>,
+-        solver_mode: SolverMode,
+         canonical: &CanonicalQueryInput<'tcx, V>,
+     ) -> (Self, V, CanonicalVarValues<'tcx>)
+     where
+@@ -56,10 +55,6 @@ impl<'tcx> rustc_next_trait_solver::delegate::SolverDelegate for SolverDelegate<
+         let (infcx, value, vars) = interner
+             .infer_ctxt()
+             .with_next_trait_solver(true)
+-            .intercrate(match solver_mode {
+-                SolverMode::Normal => false,
+-                SolverMode::Coherence => true,
+-            })
+             .build_with_canonical(DUMMY_SP, canonical);
+         (SolverDelegate(infcx), value, vars)
+     }
+@@ -195,7 +190,6 @@ impl<'tcx> rustc_next_trait_solver::delegate::SolverDelegate for SolverDelegate<
+ 
+     fn fetch_eligible_assoc_item(
+         &self,
+-        param_env: ty::ParamEnv<'tcx>,
+         goal_trait_ref: ty::TraitRef<'tcx>,
+         trait_assoc_def_id: DefId,
+         impl_def_id: DefId,
+@@ -211,12 +205,12 @@ impl<'tcx> rustc_next_trait_solver::delegate::SolverDelegate for SolverDelegate<
+             // and the obligation is monomorphic, otherwise passes such as
+             // transmute checking and polymorphic MIR optimizations could
+             // get a result which isn't correct for all monomorphizations.
+-            if param_env.reveal() == Reveal::All {
+-                let poly_trait_ref = self.resolve_vars_if_possible(goal_trait_ref);
+-                !poly_trait_ref.still_further_specializable()
+-            } else {
+-                trace!(?node_item.item.def_id, "not eligible due to default");
+-                false
++            match self.typing_mode_unchecked() {
++                TypingMode::Coherence | TypingMode::Analysis { .. } => false,
++                TypingMode::PostAnalysis => {
++                    let poly_trait_ref = self.resolve_vars_if_possible(goal_trait_ref);
++                    !poly_trait_ref.still_further_specializable()
++                }
+             }
+         };
+ 
+diff --git a/compiler/rustc_trait_selection/src/traits/auto_trait.rs b/compiler/rustc_trait_selection/src/traits/auto_trait.rs
+index 934fe9ec47c0e..52ba5621d3191 100644
+--- a/compiler/rustc_trait_selection/src/traits/auto_trait.rs
++++ b/compiler/rustc_trait_selection/src/traits/auto_trait.rs
+@@ -10,6 +10,7 @@ use rustc_infer::infer::DefineOpaqueTypes;
+ use rustc_middle::mir::interpret::ErrorHandled;
+ use rustc_middle::ty::{Region, RegionVid};
+ use tracing::debug;
++use ty::TypingMode;
+ 
+ use super::*;
+ use crate::errors::UnableToConstructConstantValue;
+@@ -79,7 +80,7 @@ impl<'tcx> AutoTraitFinder<'tcx> {
+ 
+         let trait_ref = ty::TraitRef::new(tcx, trait_did, [ty]);
+ 
+-        let infcx = tcx.infer_ctxt().build();
++        let infcx = tcx.infer_ctxt().build(TypingMode::non_body_analysis());
+         let mut selcx = SelectionContext::new(&infcx);
+         for polarity in [ty::PredicatePolarity::Positive, ty::PredicatePolarity::Negative] {
+             let result = selcx.select(&Obligation::new(
+@@ -99,7 +100,7 @@ impl<'tcx> AutoTraitFinder<'tcx> {
+             }
+         }
+ 
+-        let infcx = tcx.infer_ctxt().build();
++        let infcx = tcx.infer_ctxt().build(TypingMode::non_body_analysis());
+         let mut fresh_preds = FxIndexSet::default();
+ 
+         // Due to the way projections are handled by SelectionContext, we need to run
+diff --git a/compiler/rustc_trait_selection/src/traits/coherence.rs b/compiler/rustc_trait_selection/src/traits/coherence.rs
+index f8fb297e36c4b..3cd11d7c8e8de 100644
+--- a/compiler/rustc_trait_selection/src/traits/coherence.rs
++++ b/compiler/rustc_trait_selection/src/traits/coherence.rs
+@@ -18,7 +18,7 @@ use rustc_middle::traits::solve::{CandidateSource, Certainty, Goal};
+ use rustc_middle::traits::specialization_graph::OverlapMode;
+ use rustc_middle::ty::fast_reject::DeepRejectCtxt;
+ use rustc_middle::ty::visit::{TypeSuperVisitable, TypeVisitable, TypeVisitableExt, TypeVisitor};
+-use rustc_middle::ty::{self, Ty, TyCtxt};
++use rustc_middle::ty::{self, Ty, TyCtxt, TypingMode};
+ pub use rustc_next_trait_solver::coherence::*;
+ use rustc_next_trait_solver::solve::SolverDelegateEvalExt;
+ use rustc_span::symbol::sym;
+@@ -195,9 +195,8 @@ fn overlap<'tcx>(
+     let infcx = tcx
+         .infer_ctxt()
+         .skip_leak_check(skip_leak_check.is_yes())
+-        .intercrate(true)
+         .with_next_trait_solver(tcx.next_trait_solver_in_coherence())
+-        .build();
++        .build(TypingMode::Coherence);
+     let selcx = &mut SelectionContext::new(&infcx);
+     if track_ambiguity_causes.is_yes() {
+         selcx.enable_tracking_intercrate_ambiguity_causes();
+@@ -419,7 +418,7 @@ fn impl_intersection_has_negative_obligation(
+ 
+     // N.B. We need to unify impl headers *with* intercrate mode, even if proving negative predicates
+     // do not need intercrate mode enabled.
+-    let ref infcx = tcx.infer_ctxt().intercrate(true).with_next_trait_solver(true).build();
++    let ref infcx = tcx.infer_ctxt().with_next_trait_solver(true).build(TypingMode::Coherence);
+     let root_universe = infcx.universe();
+     assert_eq!(root_universe, ty::UniverseIndex::ROOT);
+ 
+@@ -570,7 +569,9 @@ fn try_prove_negated_where_clause<'tcx>(
+     // the *existence* of a negative goal, not the non-existence of a positive goal.
+     // Without this, we over-eagerly register coherence ambiguity candidates when
+     // impl candidates do exist.
+-    let ref infcx = root_infcx.fork_with_intercrate(false);
++    // FIXME(#132279): `TypingMode::non_body_analysis` is a bit questionable here as it
++    // would cause us to reveal opaque types to leak their auto traits.
++    let ref infcx = root_infcx.fork_with_typing_mode(TypingMode::non_body_analysis());
+     let ocx = ObligationCtxt::new(infcx);
+     ocx.register_obligation(Obligation::new(
+         infcx.tcx,
+@@ -714,7 +715,10 @@ impl<'a, 'tcx> ProofTreeVisitor<'tcx> for AmbiguityCausesVisitor<'a, 'tcx> {
+ 
+             // It is only relevant that a goal is unknowable if it would have otherwise
+             // failed.
+-            let non_intercrate_infcx = infcx.fork_with_intercrate(false);
++            // FIXME(#132279): Forking with `TypingMode::non_body_analysis` is a bit questionable
++            // as it would allow us to reveal opaque types, potentially causing unexpected
++            // cycles.
++            let non_intercrate_infcx = infcx.fork_with_typing_mode(TypingMode::non_body_analysis());
+             if non_intercrate_infcx.predicate_may_hold(&Obligation::new(
+                 infcx.tcx,
+                 ObligationCause::dummy(),
+diff --git a/compiler/rustc_trait_selection/src/traits/dyn_compatibility.rs b/compiler/rustc_trait_selection/src/traits/dyn_compatibility.rs
+index a068f25fe35ec..bd4e3dd7d8ddc 100644
+--- a/compiler/rustc_trait_selection/src/traits/dyn_compatibility.rs
++++ b/compiler/rustc_trait_selection/src/traits/dyn_compatibility.rs
+@@ -14,7 +14,7 @@ use rustc_middle::query::Providers;
+ use rustc_middle::ty::{
+     self, EarlyBinder, ExistentialPredicateStableCmpExt as _, GenericArgs, Ty, TyCtxt,
+     TypeFoldable, TypeFolder, TypeSuperFoldable, TypeSuperVisitable, TypeVisitable,
+-    TypeVisitableExt, TypeVisitor, Upcast,
++    TypeVisitableExt, TypeVisitor, TypingMode, Upcast,
+ };
+ use rustc_span::Span;
+ use rustc_span::symbol::Symbol;
+@@ -718,7 +718,7 @@ fn receiver_is_dispatchable<'tcx>(
+         Obligation::new(tcx, ObligationCause::dummy(), param_env, predicate)
+     };
+ 
+-    let infcx = tcx.infer_ctxt().build();
++    let infcx = tcx.infer_ctxt().build(TypingMode::non_body_analysis());
+     // the receiver is dispatchable iff the obligation holds
+     infcx.predicate_must_hold_modulo_regions(&obligation)
+ }
+diff --git a/compiler/rustc_trait_selection/src/traits/effects.rs b/compiler/rustc_trait_selection/src/traits/effects.rs
+index bd8c04b765570..60b3357810a65 100644
+--- a/compiler/rustc_trait_selection/src/traits/effects.rs
++++ b/compiler/rustc_trait_selection/src/traits/effects.rs
+@@ -1,8 +1,9 @@
+ use rustc_hir as hir;
+ use rustc_infer::infer::{BoundRegionConversionTime, DefineOpaqueTypes, InferCtxt};
+ use rustc_infer::traits::{ImplSource, Obligation, PredicateObligation};
++use rustc_middle::span_bug;
+ use rustc_middle::ty::fast_reject::DeepRejectCtxt;
+-use rustc_middle::{span_bug, ty};
++use rustc_middle::ty::{self, TypingMode};
+ use rustc_type_ir::solve::NoSolution;
+ use thin_vec::ThinVec;
+ 
+@@ -19,7 +20,7 @@ pub fn evaluate_host_effect_obligation<'tcx>(
+     selcx: &mut SelectionContext<'_, 'tcx>,
+     obligation: &HostEffectObligation<'tcx>,
+ ) -> Result<ThinVec<PredicateObligation<'tcx>>, EvaluationFailure> {
+-    if selcx.infcx.intercrate {
++    if matches!(selcx.infcx.typing_mode(obligation.param_env), TypingMode::Coherence) {
+         span_bug!(
+             obligation.cause.span,
+             "should not select host obligation in old solver in intercrate mode"
+diff --git a/compiler/rustc_trait_selection/src/traits/fulfill.rs b/compiler/rustc_trait_selection/src/traits/fulfill.rs
+index e3ad21e352a06..29e60e3c428bc 100644
+--- a/compiler/rustc_trait_selection/src/traits/fulfill.rs
++++ b/compiler/rustc_trait_selection/src/traits/fulfill.rs
+@@ -13,7 +13,7 @@ use rustc_middle::bug;
+ use rustc_middle::mir::interpret::ErrorHandled;
+ use rustc_middle::ty::abstract_const::NotConstEvaluatable;
+ use rustc_middle::ty::error::{ExpectedFound, TypeError};
+-use rustc_middle::ty::{self, Binder, Const, GenericArgsRef, TypeVisitableExt};
++use rustc_middle::ty::{self, Binder, Const, GenericArgsRef, TypeVisitableExt, TypingMode};
+ use thin_vec::ThinVec;
+ use tracing::{debug, debug_span, instrument};
+ 
+@@ -760,7 +760,9 @@ impl<'a, 'tcx> FulfillProcessor<'a, 'tcx> {
+         stalled_on: &mut Vec<TyOrConstInferVar>,
+     ) -> ProcessResult<PendingPredicateObligation<'tcx>, FulfillmentErrorCode<'tcx>> {
+         let infcx = self.selcx.infcx;
+-        if obligation.predicate.is_global() && !self.selcx.is_intercrate() {
++        if obligation.predicate.is_global()
++            && !matches!(infcx.typing_mode(obligation.param_env), TypingMode::Coherence)
++        {
+             // no type variables present, can use evaluation for better caching.
+             // FIXME: consider caching errors too.
+             if infcx.predicate_must_hold_considering_regions(obligation) {
+@@ -813,11 +815,13 @@ impl<'a, 'tcx> FulfillProcessor<'a, 'tcx> {
+         stalled_on: &mut Vec<TyOrConstInferVar>,
+     ) -> ProcessResult<PendingPredicateObligation<'tcx>, FulfillmentErrorCode<'tcx>> {
+         let tcx = self.selcx.tcx();
+-
+-        if obligation.predicate.is_global() && !self.selcx.is_intercrate() {
++        let infcx = self.selcx.infcx;
++        if obligation.predicate.is_global()
++            && !matches!(infcx.typing_mode(obligation.param_env), TypingMode::Coherence)
++        {
+             // no type variables present, can use evaluation for better caching.
+             // FIXME: consider caching errors too.
+-            if self.selcx.infcx.predicate_must_hold_considering_regions(obligation) {
++            if infcx.predicate_must_hold_considering_regions(obligation) {
+                 if let Some(key) = ProjectionCacheKey::from_poly_projection_obligation(
+                     &mut self.selcx,
+                     &project_obligation,
+@@ -825,8 +829,7 @@ impl<'a, 'tcx> FulfillProcessor<'a, 'tcx> {
+                     // If `predicate_must_hold_considering_regions` succeeds, then we've
+                     // evaluated all sub-obligations. We can therefore mark the 'root'
+                     // obligation as complete, and skip evaluating sub-obligations.
+-                    self.selcx
+-                        .infcx
++                    infcx
+                         .inner
+                         .borrow_mut()
+                         .projection_cache()
+diff --git a/compiler/rustc_trait_selection/src/traits/misc.rs b/compiler/rustc_trait_selection/src/traits/misc.rs
+index 3e65194577e0d..3b17fa6b03285 100644
+--- a/compiler/rustc_trait_selection/src/traits/misc.rs
++++ b/compiler/rustc_trait_selection/src/traits/misc.rs
+@@ -8,7 +8,7 @@ use rustc_data_structures::fx::FxIndexSet;
+ use rustc_hir as hir;
+ use rustc_infer::infer::outlives::env::OutlivesEnvironment;
+ use rustc_infer::infer::{RegionResolutionError, TyCtxtInferExt};
+-use rustc_middle::ty::{self, AdtDef, Ty, TyCtxt, TypeVisitableExt};
++use rustc_middle::ty::{self, AdtDef, Ty, TyCtxt, TypeVisitableExt, TypingMode};
+ 
+ use super::outlives_bounds::InferCtxtExt;
+ use crate::regions::InferCtxtRegionExt;
+@@ -143,7 +143,7 @@ pub fn type_allowed_to_implement_const_param_ty<'tcx>(
+     let mut infringing_inner_tys = vec![];
+     for inner_ty in inner_tys {
+         // We use an ocx per inner ty for better diagnostics
+-        let infcx = tcx.infer_ctxt().build();
++        let infcx = tcx.infer_ctxt().build(TypingMode::non_body_analysis());
+         let ocx = traits::ObligationCtxt::new_with_diagnostics(&infcx);
+ 
+         ocx.register_bound(
+@@ -200,7 +200,7 @@ pub fn all_fields_implement_trait<'tcx>(
+     for variant in adt.variants() {
+         for field in &variant.fields {
+             // Do this per-field to get better error messages.
+-            let infcx = tcx.infer_ctxt().build();
++            let infcx = tcx.infer_ctxt().build(TypingMode::non_body_analysis());
+             let ocx = traits::ObligationCtxt::new_with_diagnostics(&infcx);
+ 
+             let unnormalized_ty = field.ty(tcx, args);
+diff --git a/compiler/rustc_trait_selection/src/traits/mod.rs b/compiler/rustc_trait_selection/src/traits/mod.rs
+index f5d9b50359c13..1c84f2171bcac 100644
+--- a/compiler/rustc_trait_selection/src/traits/mod.rs
++++ b/compiler/rustc_trait_selection/src/traits/mod.rs
+@@ -34,7 +34,8 @@ use rustc_middle::ty::error::{ExpectedFound, TypeError};
+ use rustc_middle::ty::fold::TypeFoldable;
+ use rustc_middle::ty::visit::{TypeVisitable, TypeVisitableExt};
+ use rustc_middle::ty::{
+-    self, GenericArgs, GenericArgsRef, Ty, TyCtxt, TypeFolder, TypeSuperVisitable, Upcast,
++    self, GenericArgs, GenericArgsRef, Ty, TyCtxt, TypeFolder, TypeSuperVisitable, TypingMode,
++    Upcast,
+ };
+ use rustc_span::Span;
+ use rustc_span::def_id::DefId;
+@@ -274,7 +275,7 @@ fn do_normalize_predicates<'tcx>(
+     // by wfcheck anyway, so I'm not sure we have to check
+     // them here too, and we will remove this function when
+     // we move over to lazy normalization *anyway*.
+-    let infcx = tcx.infer_ctxt().ignoring_regions().build();
++    let infcx = tcx.infer_ctxt().ignoring_regions().build(TypingMode::non_body_analysis());
+     let ocx = ObligationCtxt::new_with_diagnostics(&infcx);
+     let predicates = ocx.normalize(&cause, elaborated_env, predicates);
+ 
+@@ -475,11 +476,11 @@ pub fn normalize_param_env_or_error<'tcx>(
+ 
+ /// Normalizes the predicates and checks whether they hold in an empty environment. If this
+ /// returns true, then either normalize encountered an error or one of the predicates did not
+-/// hold. Used when creating vtables to check for unsatisfiable methods.
++/// hold. Used when creating vtables to check for unsatisfiable methods. This should not be
++/// used during analysis.
+ pub fn impossible_predicates<'tcx>(tcx: TyCtxt<'tcx>, predicates: Vec<ty::Clause<'tcx>>) -> bool {
+     debug!("impossible_predicates(predicates={:?})", predicates);
+-
+-    let infcx = tcx.infer_ctxt().build();
++    let infcx = tcx.infer_ctxt().build(TypingMode::PostAnalysis);
+     let param_env = ty::ParamEnv::reveal_all();
+     let ocx = ObligationCtxt::new(&infcx);
+     let predicates = ocx.normalize(&ObligationCause::dummy(), param_env, predicates);
+@@ -568,8 +569,11 @@ fn is_impossible_associated_item(
+     // since that method *may* have some substitutions where the predicates hold.
+     //
+     // This replicates the logic we use in coherence.
+-    let infcx =
+-        tcx.infer_ctxt().ignoring_regions().with_next_trait_solver(true).intercrate(true).build();
++    let infcx = tcx
++        .infer_ctxt()
++        .ignoring_regions()
++        .with_next_trait_solver(true)
++        .build(TypingMode::Coherence);
+     let param_env = ty::ParamEnv::empty();
+     let fresh_args = infcx.fresh_args_for_item(tcx.def_span(impl_def_id), impl_def_id);
+ 
+diff --git a/compiler/rustc_trait_selection/src/traits/project.rs b/compiler/rustc_trait_selection/src/traits/project.rs
+index 0803dd74b89bb..a75c07c2e8c6e 100644
+--- a/compiler/rustc_trait_selection/src/traits/project.rs
++++ b/compiler/rustc_trait_selection/src/traits/project.rs
+@@ -334,11 +334,6 @@ pub(super) fn opt_normalize_projection_term<'a, 'b, 'tcx>(
+ ) -> Result<Option<Term<'tcx>>, InProgress> {
+     let infcx = selcx.infcx;
+     debug_assert!(!selcx.infcx.next_trait_solver());
+-    // Don't use the projection cache in intercrate mode -
+-    // the `infcx` may be re-used between intercrate in non-intercrate
+-    // mode, which could lead to using incorrect cache results.
+-    let use_cache = !selcx.is_intercrate();
+-
+     let projection_term = infcx.resolve_vars_if_possible(projection_term);
+     let cache_key = ProjectionCacheKey::new(projection_term, param_env);
+ 
+@@ -349,13 +344,8 @@ pub(super) fn opt_normalize_projection_term<'a, 'b, 'tcx>(
+     // would not benefit from caching when proving `T: Trait<U=Foo>`
+     // bounds. It might be the case that we want two distinct caches,
+     // or else another kind of cache entry.
+-
+-    let cache_result = if use_cache {
+-        infcx.inner.borrow_mut().projection_cache().try_start(cache_key)
+-    } else {
+-        Ok(())
+-    };
+-    match cache_result {
++    let cache_entry = infcx.inner.borrow_mut().projection_cache().try_start(cache_key);
++    match cache_entry {
+         Ok(()) => debug!("no cache"),
+         Err(ProjectionCacheEntry::Ambiguous) => {
+             // If we found ambiguity the last time, that means we will continue
+@@ -378,10 +368,7 @@ pub(super) fn opt_normalize_projection_term<'a, 'b, 'tcx>(
+             // Cache that normalizing this projection resulted in a cycle. This
+             // should ensure that, unless this happens within a snapshot that's
+             // rolled back, fulfillment or evaluation will notice the cycle.
+-
+-            if use_cache {
+-                infcx.inner.borrow_mut().projection_cache().recur(cache_key);
+-            }
++            infcx.inner.borrow_mut().projection_cache().recur(cache_key);
+             return Err(InProgress);
+         }
+         Err(ProjectionCacheEntry::Recur) => {
+@@ -445,26 +432,20 @@ pub(super) fn opt_normalize_projection_term<'a, 'b, 'tcx>(
+             let mut deduped = SsoHashSet::with_capacity(result.obligations.len());
+             result.obligations.retain(|obligation| deduped.insert(obligation.clone()));
+ 
+-            if use_cache {
+-                infcx.inner.borrow_mut().projection_cache().insert_term(cache_key, result.clone());
+-            }
++            infcx.inner.borrow_mut().projection_cache().insert_term(cache_key, result.clone());
+             obligations.extend(result.obligations);
+             Ok(Some(result.value))
+         }
+         Ok(Projected::NoProgress(projected_ty)) => {
+             let result =
+                 Normalized { value: projected_ty, obligations: PredicateObligations::new() };
+-            if use_cache {
+-                infcx.inner.borrow_mut().projection_cache().insert_term(cache_key, result.clone());
+-            }
++            infcx.inner.borrow_mut().projection_cache().insert_term(cache_key, result.clone());
+             // No need to extend `obligations`.
+             Ok(Some(result.value))
+         }
+         Err(ProjectionError::TooManyCandidates) => {
+             debug!("opt_normalize_projection_type: too many candidates");
+-            if use_cache {
+-                infcx.inner.borrow_mut().projection_cache().ambiguous(cache_key);
+-            }
++            infcx.inner.borrow_mut().projection_cache().ambiguous(cache_key);
+             Ok(None)
+         }
+         Err(ProjectionError::TraitSelectionError(_)) => {
+@@ -473,10 +454,7 @@ pub(super) fn opt_normalize_projection_term<'a, 'b, 'tcx>(
+             // just return `ty::err` but add the obligation `T :
+             // Trait`, which when processed will cause the error to be
+             // reported later
+-
+-            if use_cache {
+-                infcx.inner.borrow_mut().projection_cache().error(cache_key);
+-            }
++            infcx.inner.borrow_mut().projection_cache().error(cache_key);
+             let result = normalize_to_error(selcx, param_env, projection_term, cause, depth);
+             obligations.extend(result.obligations);
+             Ok(Some(result.value))
+diff --git a/compiler/rustc_trait_selection/src/traits/query/evaluate_obligation.rs b/compiler/rustc_trait_selection/src/traits/query/evaluate_obligation.rs
+index bb44645a4ce1c..9e1a2a3e7d286 100644
+--- a/compiler/rustc_trait_selection/src/traits/query/evaluate_obligation.rs
++++ b/compiler/rustc_trait_selection/src/traits/query/evaluate_obligation.rs
+@@ -87,7 +87,6 @@ impl<'tcx> InferCtxt<'tcx> {
+                 Ok(result)
+             })
+         } else {
+-            assert!(!self.intercrate);
+             let c_pred =
+                 self.canonicalize_query(param_env.and(obligation.predicate), &mut _orig_values);
+             self.tcx.at(obligation.cause.span).evaluate_obligation(c_pred)
+diff --git a/compiler/rustc_trait_selection/src/traits/select/candidate_assembly.rs b/compiler/rustc_trait_selection/src/traits/select/candidate_assembly.rs
+index e027586563ecc..03fde1d159890 100644
+--- a/compiler/rustc_trait_selection/src/traits/select/candidate_assembly.rs
++++ b/compiler/rustc_trait_selection/src/traits/select/candidate_assembly.rs
+@@ -16,7 +16,7 @@ use rustc_infer::traits::{
+     Obligation, ObligationCause, PolyTraitObligation, PredicateObligations, SelectionError,
+ };
+ use rustc_middle::ty::fast_reject::DeepRejectCtxt;
+-use rustc_middle::ty::{self, ToPolyTraitRef, Ty, TypeVisitableExt};
++use rustc_middle::ty::{self, ToPolyTraitRef, Ty, TypeVisitableExt, TypingMode};
+ use rustc_middle::{bug, span_bug};
+ use tracing::{debug, instrument, trace};
+ 
+@@ -790,7 +790,9 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
+                         //
+                         // Note that this is only sound as projection candidates of opaque types
+                         // are always applicable for auto traits.
+-                    } else if self.infcx.intercrate {
++                    } else if let TypingMode::Coherence =
++                        self.infcx.typing_mode(obligation.param_env)
++                    {
+                         // We do not emit auto trait candidates for opaque types in coherence.
+                         // Doing so can result in weird dependency cycles.
+                         candidates.ambiguous = true;
+@@ -930,7 +932,10 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
+     ) -> Option<ty::PolyExistentialTraitRef<'tcx>> {
+         // Don't drop any candidates in intercrate mode, as it's incomplete.
+         // (Not that it matters, since `Unsize` is not a stable trait.)
+-        if self.infcx.intercrate {
++        //
++        // FIXME(@lcnr): This should probably only trigger during analysis,
++        // disabling candidates during codegen is also questionable.
++        if let TypingMode::Coherence = self.infcx.typing_mode(param_env) {
+             return None;
+         }
+ 
+diff --git a/compiler/rustc_trait_selection/src/traits/select/mod.rs b/compiler/rustc_trait_selection/src/traits/select/mod.rs
+index 635d3bc99b1ad..b1e5e5263151e 100644
+--- a/compiler/rustc_trait_selection/src/traits/select/mod.rs
++++ b/compiler/rustc_trait_selection/src/traits/select/mod.rs
+@@ -2,6 +2,7 @@
+ //!
+ //! [rustc dev guide]: https://rustc-dev-guide.rust-lang.org/traits/resolution.html#selection
+ 
++use std::assert_matches::assert_matches;
+ use std::cell::{Cell, RefCell};
+ use std::fmt::{self, Display};
+ use std::ops::ControlFlow;
+@@ -28,7 +29,7 @@ use rustc_middle::ty::error::TypeErrorToStringExt;
+ use rustc_middle::ty::print::{PrintTraitRefExt as _, with_no_trimmed_paths};
+ use rustc_middle::ty::{
+     self, GenericArgsRef, PolyProjectionPredicate, Ty, TyCtxt, TypeFoldable, TypeVisitableExt,
+-    Upcast,
++    TypingMode, Upcast,
+ };
+ use rustc_span::Symbol;
+ use rustc_span::symbol::sym;
+@@ -222,7 +223,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
+     /// Enables tracking of intercrate ambiguity causes. See
+     /// the documentation of [`Self::intercrate_ambiguity_causes`] for more.
+     pub fn enable_tracking_intercrate_ambiguity_causes(&mut self) {
+-        assert!(self.is_intercrate());
++        assert_matches!(self.infcx.typing_mode_unchecked(), TypingMode::Coherence);
+         assert!(self.intercrate_ambiguity_causes.is_none());
+         self.intercrate_ambiguity_causes = Some(FxIndexSet::default());
+         debug!("selcx: enable_tracking_intercrate_ambiguity_causes");
+@@ -234,7 +235,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
+     pub fn take_intercrate_ambiguity_causes(
+         &mut self,
+     ) -> FxIndexSet<IntercrateAmbiguityCause<'tcx>> {
+-        assert!(self.is_intercrate());
++        assert_matches!(self.infcx.typing_mode_unchecked(), TypingMode::Coherence);
+         self.intercrate_ambiguity_causes.take().unwrap_or_default()
+     }
+ 
+@@ -242,10 +243,6 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
+         self.infcx.tcx
+     }
+ 
+-    pub fn is_intercrate(&self) -> bool {
+-        self.infcx.intercrate
+-    }
+-
+     ///////////////////////////////////////////////////////////////////////////
+     // Selection
+     //
+@@ -1029,7 +1026,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
+         previous_stack: TraitObligationStackList<'o, 'tcx>,
+         mut obligation: PolyTraitObligation<'tcx>,
+     ) -> Result<EvaluationResult, OverflowError> {
+-        if !self.is_intercrate()
++        if !matches!(self.infcx.typing_mode(obligation.param_env), TypingMode::Coherence)
+             && obligation.is_global()
+             && obligation.param_env.caller_bounds().iter().all(|bound| bound.has_param())
+         {
+@@ -1312,14 +1309,6 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
+         param_env: ty::ParamEnv<'tcx>,
+         trait_pred: ty::PolyTraitPredicate<'tcx>,
+     ) -> Option<EvaluationResult> {
+-        // Neither the global nor local cache is aware of intercrate
+-        // mode, so don't do any caching. In particular, we might
+-        // re-use the same `InferCtxt` with both an intercrate
+-        // and non-intercrate `SelectionContext`
+-        if self.is_intercrate() {
+-            return None;
+-        }
+-
+         let tcx = self.tcx();
+         if self.can_use_global_caches(param_env) {
+             if let Some(res) = tcx.evaluation_cache.get(&(param_env, trait_pred), tcx) {
+@@ -1342,14 +1331,6 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
+             return;
+         }
+ 
+-        // Neither the global nor local cache is aware of intercrate
+-        // mode, so don't do any caching. In particular, we might
+-        // re-use the same `InferCtxt` with both an intercrate
+-        // and non-intercrate `SelectionContext`
+-        if self.is_intercrate() {
+-            return;
+-        }
+-
+         if self.can_use_global_caches(param_env) && !trait_pred.has_infer() {
+             debug!(?trait_pred, ?result, "insert_evaluation_cache global");
+             // This may overwrite the cache with the same value
+@@ -1476,13 +1457,14 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
+     }
+ 
+     fn is_knowable<'o>(&mut self, stack: &TraitObligationStack<'o, 'tcx>) -> Result<(), Conflict> {
+-        debug!("is_knowable(intercrate={:?})", self.is_intercrate());
+-
+-        if !self.is_intercrate() {
+-            return Ok(());
++        let obligation = &stack.obligation;
++        match self.infcx.typing_mode(obligation.param_env) {
++            TypingMode::Coherence => {}
++            TypingMode::Analysis { .. } | TypingMode::PostAnalysis => return Ok(()),
+         }
+ 
+-        let obligation = &stack.obligation;
++        debug!("is_knowable()");
++
+         let predicate = self.infcx.resolve_vars_if_possible(obligation.predicate);
+ 
+         // Okay to skip binder because of the nature of the
+@@ -1502,25 +1484,24 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
+             return false;
+         }
+ 
+-        // Avoid using the global cache during coherence and just rely
+-        // on the local cache. This effectively disables caching
+-        // during coherence. It is really just a simplification to
+-        // avoid us having to fear that coherence results "pollute"
+-        // the master cache. Since coherence executes pretty quickly,
+-        // it's not worth going to more trouble to increase the
+-        // hit-rate, I don't think.
+-        if self.is_intercrate() {
+-            return false;
+-        }
+-
+-        // Avoid using the global cache when we're defining opaque types
+-        // as their hidden type may impact the result of candidate selection.
+-        if !self.infcx.defining_opaque_types().is_empty() {
+-            return false;
++        match self.infcx.typing_mode(param_env) {
++            // Avoid using the global cache during coherence and just rely
++            // on the local cache. It is really just a simplification to
++            // avoid us having to fear that coherence results "pollute"
++            // the master cache. Since coherence executes pretty quickly,
++            // it's not worth going to more trouble to increase the
++            // hit-rate, I don't think.
++            TypingMode::Coherence => false,
++            // Avoid using the global cache when we're defining opaque types
++            // as their hidden type may impact the result of candidate selection.
++            TypingMode::Analysis { defining_opaque_types } => defining_opaque_types.is_empty(),
++            // The global cache is only used if there are no opaque types in
++            // the defining scope or we're outside of analysis.
++            //
++            // FIXME(#132279): This is still incorrect as we treat opaque types
++            // and default associated items differently between these two modes.
++            TypingMode::PostAnalysis => true,
+         }
+-
+-        // Otherwise, we can use the global cache.
+-        true
+     }
+ 
+     fn check_candidate_cache(
+@@ -1528,13 +1509,6 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
+         param_env: ty::ParamEnv<'tcx>,
+         cache_fresh_trait_pred: ty::PolyTraitPredicate<'tcx>,
+     ) -> Option<SelectionResult<'tcx, SelectionCandidate<'tcx>>> {
+-        // Neither the global nor local cache is aware of intercrate
+-        // mode, so don't do any caching. In particular, we might
+-        // re-use the same `InferCtxt` with both an intercrate
+-        // and non-intercrate `SelectionContext`
+-        if self.is_intercrate() {
+-            return None;
+-        }
+         let tcx = self.tcx();
+         let pred = cache_fresh_trait_pred.skip_binder();
+ 
+@@ -1566,13 +1540,6 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
+         &self,
+         result: &SelectionResult<'tcx, SelectionCandidate<'tcx>>,
+     ) -> bool {
+-        // Neither the global nor local cache is aware of intercrate
+-        // mode, so don't do any caching. In particular, we might
+-        // re-use the same `InferCtxt` with both an intercrate
+-        // and non-intercrate `SelectionContext`
+-        if self.is_intercrate() {
+-            return false;
+-        }
+         match result {
+             Ok(Some(SelectionCandidate::ParamCandidate(trait_ref))) => !trait_ref.has_infer(),
+             _ => true,
+@@ -2541,7 +2508,9 @@ impl<'tcx> SelectionContext<'_, 'tcx> {
+             })?;
+         nested_obligations.extend(obligations);
+ 
+-        if !self.is_intercrate() && impl_trait_header.polarity == ty::ImplPolarity::Reservation {
++        if impl_trait_header.polarity == ty::ImplPolarity::Reservation
++            && !matches!(self.infcx.typing_mode(obligation.param_env), TypingMode::Coherence)
++        {
+             debug!("reservation impls only apply in intercrate mode");
+             return Err(());
+         }
+diff --git a/compiler/rustc_trait_selection/src/traits/specialize/mod.rs b/compiler/rustc_trait_selection/src/traits/specialize/mod.rs
+index 0e45f7a195f04..5bf3dbcbc3273 100644
+--- a/compiler/rustc_trait_selection/src/traits/specialize/mod.rs
++++ b/compiler/rustc_trait_selection/src/traits/specialize/mod.rs
+@@ -19,7 +19,9 @@ use rustc_infer::infer::DefineOpaqueTypes;
+ use rustc_middle::bug;
+ use rustc_middle::query::LocalCrate;
+ use rustc_middle::ty::print::PrintTraitRefExt as _;
+-use rustc_middle::ty::{self, GenericArgsRef, ImplSubject, Ty, TyCtxt, TypeVisitableExt};
++use rustc_middle::ty::{
++    self, GenericArgsRef, ImplSubject, Ty, TyCtxt, TypeVisitableExt, TypingMode,
++};
+ use rustc_session::lint::builtin::{COHERENCE_LEAK_CHECK, ORDER_DEPENDENT_TRAIT_OBJECTS};
+ use rustc_span::{DUMMY_SP, ErrorGuaranteed, Span, sym};
+ use specialization_graph::GraphExt;
+@@ -184,7 +186,7 @@ pub(super) fn specializes(tcx: TyCtxt<'_>, (impl1_def_id, impl2_def_id): (DefId,
+     let penv = tcx.param_env(impl1_def_id);
+ 
+     // Create an infcx, taking the predicates of impl1 as assumptions:
+-    let infcx = tcx.infer_ctxt().build();
++    let infcx = tcx.infer_ctxt().build(TypingMode::non_body_analysis());
+ 
+     // Attempt to prove that impl2 applies, given all of the above.
+     fulfill_implication(
+diff --git a/compiler/rustc_trait_selection/src/traits/vtable.rs b/compiler/rustc_trait_selection/src/traits/vtable.rs
+index ed221e2a1835f..bb56d6eaf544f 100644
+--- a/compiler/rustc_trait_selection/src/traits/vtable.rs
++++ b/compiler/rustc_trait_selection/src/traits/vtable.rs
+@@ -9,7 +9,8 @@ use rustc_infer::traits::util::PredicateSet;
+ use rustc_middle::bug;
+ use rustc_middle::query::Providers;
+ use rustc_middle::ty::{
+-    self, GenericArgs, GenericParamDefKind, Ty, TyCtxt, TypeVisitableExt, Upcast, VtblEntry,
++    self, GenericArgs, GenericParamDefKind, Ty, TyCtxt, TypeVisitableExt, TypingMode, Upcast,
++    VtblEntry,
+ };
+ use rustc_span::{DUMMY_SP, Span, sym};
+ use smallvec::{SmallVec, smallvec};
+@@ -439,7 +440,7 @@ fn trait_refs_are_compatible<'tcx>(
+         return false;
+     }
+ 
+-    let infcx = tcx.infer_ctxt().build();
++    let infcx = tcx.infer_ctxt().build(TypingMode::PostAnalysis);
+     let param_env = ty::ParamEnv::reveal_all();
+     let ocx = ObligationCtxt::new(&infcx);
+     let hr_source_principal =
+diff --git a/compiler/rustc_traits/src/codegen.rs b/compiler/rustc_traits/src/codegen.rs
+index 1118219824652..d8c1c50d79a85 100644
+--- a/compiler/rustc_traits/src/codegen.rs
++++ b/compiler/rustc_traits/src/codegen.rs
+@@ -6,7 +6,7 @@
+ use rustc_infer::infer::TyCtxtInferExt;
+ use rustc_middle::bug;
+ use rustc_middle::traits::CodegenObligationError;
+-use rustc_middle::ty::{self, TyCtxt, TypeVisitableExt};
++use rustc_middle::ty::{self, TyCtxt, TypeVisitableExt, TypingMode};
+ use rustc_trait_selection::error_reporting::InferCtxtErrorExt;
+ use rustc_trait_selection::traits::{
+     ImplSource, Obligation, ObligationCause, ObligationCtxt, ScrubbedTraitError, SelectionContext,
+@@ -30,7 +30,7 @@ pub(crate) fn codegen_select_candidate<'tcx>(
+ 
+     // Do the initial selection for the obligation. This yields the
+     // shallow result we are looking for -- that is, what specific impl.
+-    let infcx = tcx.infer_ctxt().ignoring_regions().build();
++    let infcx = tcx.infer_ctxt().ignoring_regions().build(TypingMode::from_param_env(param_env));
+     let mut selcx = SelectionContext::new(&infcx);
+ 
+     let obligation_cause = ObligationCause::dummy();
+diff --git a/compiler/rustc_traits/src/normalize_erasing_regions.rs b/compiler/rustc_traits/src/normalize_erasing_regions.rs
+index 3e2794f6489f8..d79059a39a1d1 100644
+--- a/compiler/rustc_traits/src/normalize_erasing_regions.rs
++++ b/compiler/rustc_traits/src/normalize_erasing_regions.rs
+@@ -1,7 +1,7 @@
+ use rustc_infer::infer::TyCtxtInferExt;
+ use rustc_middle::query::Providers;
+ use rustc_middle::traits::query::NoSolution;
+-use rustc_middle::ty::{self, ParamEnvAnd, TyCtxt, TypeFoldable, TypeVisitableExt};
++use rustc_middle::ty::{self, ParamEnvAnd, TyCtxt, TypeFoldable, TypeVisitableExt, TypingMode};
+ use rustc_trait_selection::traits::query::normalize::QueryNormalizeExt;
+ use rustc_trait_selection::traits::{Normalized, ObligationCause};
+ use tracing::debug;
+@@ -22,7 +22,7 @@ fn try_normalize_after_erasing_regions<'tcx, T: TypeFoldable<TyCtxt<'tcx>> + Par
+     goal: ParamEnvAnd<'tcx, T>,
+ ) -> Result<T, NoSolution> {
+     let ParamEnvAnd { param_env, value } = goal;
+-    let infcx = tcx.infer_ctxt().build();
++    let infcx = tcx.infer_ctxt().build(TypingMode::from_param_env(param_env));
+     let cause = ObligationCause::dummy();
+     match infcx.at(&cause, param_env).query_normalize(value) {
+         Ok(Normalized { value: normalized_value, obligations: normalized_obligations }) => {
+diff --git a/compiler/rustc_ty_utils/src/common_traits.rs b/compiler/rustc_ty_utils/src/common_traits.rs
+index 51b908881eb49..c26b41d896005 100644
+--- a/compiler/rustc_ty_utils/src/common_traits.rs
++++ b/compiler/rustc_ty_utils/src/common_traits.rs
+@@ -3,7 +3,7 @@
+ use rustc_hir::lang_items::LangItem;
+ use rustc_infer::infer::TyCtxtInferExt;
+ use rustc_middle::query::Providers;
+-use rustc_middle::ty::{self, Ty, TyCtxt};
++use rustc_middle::ty::{self, Ty, TyCtxt, TypingMode};
+ use rustc_trait_selection::traits;
+ 
+ fn is_copy_raw<'tcx>(tcx: TyCtxt<'tcx>, query: ty::ParamEnvAnd<'tcx, Ty<'tcx>>) -> bool {
+@@ -29,7 +29,7 @@ fn is_item_raw<'tcx>(
+ ) -> bool {
+     let (param_env, ty) = query.into_parts();
+     let trait_def_id = tcx.require_lang_item(item, None);
+-    let infcx = tcx.infer_ctxt().build();
++    let infcx = tcx.infer_ctxt().build(TypingMode::from_param_env(param_env));
+     traits::type_known_to_meet_bound_modulo_regions(&infcx, param_env, ty, trait_def_id)
+ }
+ 
+diff --git a/compiler/rustc_ty_utils/src/instance.rs b/compiler/rustc_ty_utils/src/instance.rs
+index 9b764133f2c6a..e258b6dae0b46 100644
+--- a/compiler/rustc_ty_utils/src/instance.rs
++++ b/compiler/rustc_ty_utils/src/instance.rs
+@@ -6,7 +6,7 @@ use rustc_middle::bug;
+ use rustc_middle::query::Providers;
+ use rustc_middle::traits::{BuiltinImplSource, CodegenObligationError};
+ use rustc_middle::ty::util::AsyncDropGlueMorphology;
+-use rustc_middle::ty::{self, GenericArgsRef, Instance, TyCtxt, TypeVisitableExt};
++use rustc_middle::ty::{self, GenericArgsRef, Instance, TyCtxt, TypeVisitableExt, TypingMode};
+ use rustc_span::sym;
+ use rustc_trait_selection::traits;
+ use rustc_type_ir::ClosureKind;
+@@ -130,7 +130,7 @@ fn resolve_associated_item<'tcx>(
+                 .unwrap_or_else(|| {
+                     bug!("{:?} not found in {:?}", trait_item_id, impl_data.impl_def_id);
+                 });
+-            let infcx = tcx.infer_ctxt().build();
++            let infcx = tcx.infer_ctxt().build(TypingMode::PostAnalysis);
+             let param_env = param_env.with_reveal_all_normalized(tcx);
+             let args = rcvr_args.rebase_onto(tcx, trait_def_id, impl_data.args);
+             let args = translate_args(
+diff --git a/compiler/rustc_ty_utils/src/structural_match.rs b/compiler/rustc_ty_utils/src/structural_match.rs
+index 1ead7b731e76c..0b4efab1d9c44 100644
+--- a/compiler/rustc_ty_utils/src/structural_match.rs
++++ b/compiler/rustc_ty_utils/src/structural_match.rs
+@@ -1,7 +1,7 @@
+ use rustc_hir::lang_items::LangItem;
+ use rustc_infer::infer::TyCtxtInferExt;
+ use rustc_middle::query::Providers;
+-use rustc_middle::ty::{self, Ty, TyCtxt};
++use rustc_middle::ty::{self, Ty, TyCtxt, TypingMode};
+ use rustc_trait_selection::traits::{ObligationCause, ObligationCtxt};
+ 
+ /// This method returns true if and only if `adt_ty` itself has been marked as
+@@ -11,7 +11,7 @@ use rustc_trait_selection::traits::{ObligationCause, ObligationCtxt};
+ /// Note that this does *not* recursively check if the substructure of `adt_ty`
+ /// implements the trait.
+ fn has_structural_eq_impl<'tcx>(tcx: TyCtxt<'tcx>, adt_ty: Ty<'tcx>) -> bool {
+-    let infcx = &tcx.infer_ctxt().build();
++    let infcx = &tcx.infer_ctxt().build(TypingMode::non_body_analysis());
+     let cause = ObligationCause::dummy();
+ 
+     let ocx = ObligationCtxt::new(infcx);
+diff --git a/compiler/rustc_type_ir/src/canonical.rs b/compiler/rustc_type_ir/src/canonical.rs
+index 3fb7d87bcc4bc..24b2ebc1fbe79 100644
+--- a/compiler/rustc_type_ir/src/canonical.rs
++++ b/compiler/rustc_type_ir/src/canonical.rs
+@@ -8,7 +8,7 @@ use rustc_macros::{HashStable_NoContext, TyDecodable, TyEncodable};
+ use rustc_type_ir_macros::{Lift_Generic, TypeFoldable_Generic, TypeVisitable_Generic};
+ 
+ use crate::inherent::*;
+-use crate::{self as ty, Interner, UniverseIndex};
++use crate::{self as ty, Interner, TypingMode, UniverseIndex};
+ 
+ #[derive_where(Clone; I: Interner, V: Clone)]
+ #[derive_where(Hash; I: Interner, V: Hash)]
+@@ -19,7 +19,7 @@ use crate::{self as ty, Interner, UniverseIndex};
+ #[cfg_attr(feature = "nightly", derive(TyEncodable, TyDecodable, HashStable_NoContext))]
+ pub struct CanonicalQueryInput<I: Interner, V> {
+     pub canonical: Canonical<I, V>,
+-    pub defining_opaque_types: I::DefiningOpaqueTypes,
++    pub typing_mode: TypingMode<I>,
+ }
+ 
+ /// A "canonicalized" type `V` is one where all free inference
+diff --git a/compiler/rustc_type_ir/src/infer_ctxt.rs b/compiler/rustc_type_ir/src/infer_ctxt.rs
+index 7c6a3c65ebfb4..22223e4a8900a 100644
+--- a/compiler/rustc_type_ir/src/infer_ctxt.rs
++++ b/compiler/rustc_type_ir/src/infer_ctxt.rs
+@@ -1,9 +1,68 @@
++use derive_where::derive_where;
++#[cfg(feature = "nightly")]
++use rustc_macros::{HashStable_NoContext, TyDecodable, TyEncodable};
++
+ use crate::fold::TypeFoldable;
++use crate::inherent::*;
+ use crate::relate::RelateResult;
+ use crate::relate::combine::PredicateEmittingRelation;
+-use crate::solve::SolverMode;
++use crate::solve::Reveal;
+ use crate::{self as ty, Interner};
+ 
++/// The current typing mode of an inference context. We unfortunately have some
++/// slightly different typing rules depending on the current context. See the
++/// doc comment for each variant for how and why they are used.
++#[derive_where(Clone, Copy, Hash, PartialEq, Eq, Debug; I: Interner)]
++#[cfg_attr(feature = "nightly", derive(TyEncodable, TyDecodable, HashStable_NoContext))]
++pub enum TypingMode<I: Interner> {
++    /// When checking whether impls overlap, we check whether any obligations
++    /// are guaranteed to never hold when unifying the impls. This requires us
++    /// to be complete: we must never fail to prove something which may actually
++    /// hold.
++    ///
++    /// In this typing mode we bail with ambiguity in case its not knowable
++    /// whether a trait goal may hold, e.g. because the trait may get implemented
++    /// in a downstream or sibling crate.
++    ///
++    /// We also have to be careful when generalizing aliases inside of higher-ranked
++    /// types to not unnecessarily constrain any inference variables.
++    Coherence,
++    /// Analysis includes type inference, checking that items are well-formed, and
++    /// pretty much everything else which may emit proper type errors to the user.
++    ///
++    /// We only normalize opaque types which may get defined by the current body,
++    /// which are stored in `defining_opaque_types`.
++    Analysis { defining_opaque_types: I::DefiningOpaqueTypes },
++    /// After analysis, mostly during codegen and MIR optimizations, we're able to
++    /// reveal all opaque types.
++    PostAnalysis,
++}
++
++impl<I: Interner> TypingMode<I> {
++    /// Analysis outside of a body does not define any opaque types.
++    pub fn non_body_analysis() -> TypingMode<I> {
++        TypingMode::Analysis { defining_opaque_types: Default::default() }
++    }
++
++    /// While typechecking a body, we need to be able to define the opaque
++    /// types defined by that body.
++    pub fn analysis_in_body(cx: I, body_def_id: I::LocalDefId) -> TypingMode<I> {
++        TypingMode::Analysis { defining_opaque_types: cx.opaque_types_defined_by(body_def_id) }
++    }
++
++    /// FIXME(#132279): Using this function is questionable as the `param_env`
++    /// does not track `defining_opaque_types` and whether we're in coherence mode.
++    /// Many uses of this function should also use a not-yet implemented typing mode
++    /// which reveals already defined opaque types in the future. This function will
++    /// get completely removed at some point.
++    pub fn from_param_env(param_env: I::ParamEnv) -> TypingMode<I> {
++        match param_env.reveal() {
++            Reveal::UserFacing => TypingMode::non_body_analysis(),
++            Reveal::All => TypingMode::PostAnalysis,
++        }
++    }
++}
++
+ pub trait InferCtxtLike: Sized {
+     type Interner: Interner;
+     fn cx(&self) -> Self::Interner;
+@@ -16,7 +75,10 @@ pub trait InferCtxtLike: Sized {
+         true
+     }
+ 
+-    fn solver_mode(&self) -> SolverMode;
++    fn typing_mode(
++        &self,
++        param_env_for_debug_assertion: <Self::Interner as Interner>::ParamEnv,
++    ) -> TypingMode<Self::Interner>;
+ 
+     fn universe(&self) -> ty::UniverseIndex;
+     fn create_next_universe(&self) -> ty::UniverseIndex;
+@@ -43,8 +105,6 @@ pub trait InferCtxtLike: Sized {
+         vid: ty::RegionVid,
+     ) -> <Self::Interner as Interner>::Region;
+ 
+-    fn defining_opaque_types(&self) -> <Self::Interner as Interner>::DefiningOpaqueTypes;
+-
+     fn next_ty_infer(&self) -> <Self::Interner as Interner>::Ty;
+     fn next_const_infer(&self) -> <Self::Interner as Interner>::Const;
+     fn fresh_args_for_item(
+diff --git a/compiler/rustc_type_ir/src/interner.rs b/compiler/rustc_type_ir/src/interner.rs
+index 6a8113b38b7bd..36ddddccfa253 100644
+--- a/compiler/rustc_type_ir/src/interner.rs
++++ b/compiler/rustc_type_ir/src/interner.rs
+@@ -11,9 +11,7 @@ use crate::inherent::*;
+ use crate::ir_print::IrPrint;
+ use crate::lang_items::TraitSolverLangItem;
+ use crate::relate::Relate;
+-use crate::solve::{
+-    CanonicalInput, ExternalConstraintsData, PredefinedOpaquesData, QueryResult, SolverMode,
+-};
++use crate::solve::{CanonicalInput, ExternalConstraintsData, PredefinedOpaquesData, QueryResult};
+ use crate::visit::{Flags, TypeSuperVisitable, TypeVisitable};
+ use crate::{self as ty, search_graph};
+ 
+@@ -130,11 +128,7 @@ pub trait Interner:
+     type Clause: Clause<Self>;
+     type Clauses: Copy + Debug + Hash + Eq + TypeSuperVisitable<Self> + Flags;
+ 
+-    fn with_global_cache<R>(
+-        self,
+-        mode: SolverMode,
+-        f: impl FnOnce(&mut search_graph::GlobalCache<Self>) -> R,
+-    ) -> R;
++    fn with_global_cache<R>(self, f: impl FnOnce(&mut search_graph::GlobalCache<Self>) -> R) -> R;
+ 
+     fn evaluation_is_concurrent(&self) -> bool;
+ 
+@@ -298,6 +292,11 @@ pub trait Interner:
+         self,
+         binder: ty::Binder<Self, T>,
+     ) -> ty::Binder<Self, T>;
++
++    fn opaque_types_defined_by(
++        self,
++        defining_anchor: Self::LocalDefId,
++    ) -> Self::DefiningOpaqueTypes;
+ }
+ 
+ /// Imagine you have a function `F: FnOnce(&[T]) -> R`, plus an iterator `iter`
+@@ -414,12 +413,8 @@ impl<I: Interner> search_graph::Cx for I {
+     fn with_cached_task<T>(self, task: impl FnOnce() -> T) -> (T, I::DepNodeIndex) {
+         I::with_cached_task(self, task)
+     }
+-    fn with_global_cache<R>(
+-        self,
+-        mode: SolverMode,
+-        f: impl FnOnce(&mut search_graph::GlobalCache<Self>) -> R,
+-    ) -> R {
+-        I::with_global_cache(self, mode, f)
++    fn with_global_cache<R>(self, f: impl FnOnce(&mut search_graph::GlobalCache<Self>) -> R) -> R {
++        I::with_global_cache(self, f)
+     }
+     fn evaluation_is_concurrent(&self) -> bool {
+         self.evaluation_is_concurrent()
+diff --git a/compiler/rustc_type_ir/src/relate/combine.rs b/compiler/rustc_type_ir/src/relate/combine.rs
+index 17a3912730f57..53751f7711a71 100644
+--- a/compiler/rustc_type_ir/src/relate/combine.rs
++++ b/compiler/rustc_type_ir/src/relate/combine.rs
+@@ -6,9 +6,9 @@ use super::{
+ };
+ use crate::error::TypeError;
+ use crate::inherent::*;
+-use crate::solve::{Goal, SolverMode};
++use crate::solve::Goal;
+ use crate::visit::TypeVisitableExt as _;
+-use crate::{self as ty, InferCtxtLike, Interner, Upcast};
++use crate::{self as ty, InferCtxtLike, Interner, TypingMode, Upcast};
+ 
+ pub trait PredicateEmittingRelation<Infcx, I = <Infcx as InferCtxtLike>::Interner>:
+     TypeRelation<I>
+@@ -128,19 +128,19 @@ where
+         }
+ 
+         (ty::Alias(ty::Opaque, _), _) | (_, ty::Alias(ty::Opaque, _)) => {
+-            match infcx.solver_mode() {
+-                SolverMode::Normal => {
+-                    assert!(!infcx.next_trait_solver());
+-                    structurally_relate_tys(relation, a, b)
+-                }
++            assert!(!infcx.next_trait_solver());
++            match infcx.typing_mode(relation.param_env()) {
+                 // During coherence, opaque types should be treated as *possibly*
+-                // equal to any other type (except for possibly itinfcx). This is an
++                // equal to any other type. This is an
+                 // extremely heavy hammer, but can be relaxed in a forwards-compatible
+                 // way later.
+-                SolverMode::Coherence => {
++                TypingMode::Coherence => {
+                     relation.register_predicates([ty::Binder::dummy(ty::PredicateKind::Ambiguous)]);
+                     Ok(a)
+                 }
++                TypingMode::Analysis { .. } | TypingMode::PostAnalysis => {
++                    structurally_relate_tys(relation, a, b)
++                }
+             }
+         }
+ 
+diff --git a/compiler/rustc_type_ir/src/search_graph/mod.rs b/compiler/rustc_type_ir/src/search_graph/mod.rs
+index 3fd2bb61ba583..5010fc09adc39 100644
+--- a/compiler/rustc_type_ir/src/search_graph/mod.rs
++++ b/compiler/rustc_type_ir/src/search_graph/mod.rs
+@@ -22,7 +22,6 @@ use rustc_index::{Idx, IndexVec};
+ use tracing::debug;
+ 
+ use crate::data_structures::HashMap;
+-use crate::solve::SolverMode;
+ 
+ mod global_cache;
+ use global_cache::CacheData;
+@@ -48,11 +47,7 @@ pub trait Cx: Copy {
+     fn get_tracked<T: Debug + Clone>(self, tracked: &Self::Tracked<T>) -> T;
+     fn with_cached_task<T>(self, task: impl FnOnce() -> T) -> (T, Self::DepNodeIndex);
+ 
+-    fn with_global_cache<R>(
+-        self,
+-        mode: SolverMode,
+-        f: impl FnOnce(&mut GlobalCache<Self>) -> R,
+-    ) -> R;
++    fn with_global_cache<R>(self, f: impl FnOnce(&mut GlobalCache<Self>) -> R) -> R;
+ 
+     fn evaluation_is_concurrent(&self) -> bool;
+ }
+@@ -358,7 +353,6 @@ struct ProvisionalCacheEntry<X: Cx> {
+ }
+ 
+ pub struct SearchGraph<D: Delegate<Cx = X>, X: Cx = <D as Delegate>::Cx> {
+-    mode: SolverMode,
+     root_depth: AvailableDepth,
+     /// The stack of goals currently being computed.
+     ///
+@@ -374,9 +368,8 @@ pub struct SearchGraph<D: Delegate<Cx = X>, X: Cx = <D as Delegate>::Cx> {
+ }
+ 
+ impl<D: Delegate<Cx = X>, X: Cx> SearchGraph<D> {
+-    pub fn new(mode: SolverMode, root_depth: usize) -> SearchGraph<D> {
++    pub fn new(root_depth: usize) -> SearchGraph<D> {
+         Self {
+-            mode,
+             root_depth: AvailableDepth(root_depth),
+             stack: Default::default(),
+             provisional_cache: Default::default(),
+@@ -384,10 +377,6 @@ impl<D: Delegate<Cx = X>, X: Cx> SearchGraph<D> {
+         }
+     }
+ 
+-    pub fn solver_mode(&self) -> SolverMode {
+-        self.mode
+-    }
+-
+     /// Lazily update the stack entry for the parent goal.
+     /// This behavior is shared between actually evaluating goals
+     /// and using existing global cache entries to make sure they
+@@ -829,7 +818,7 @@ impl<D: Delegate<Cx = X>, X: Cx> SearchGraph<D> {
+         input: X::Input,
+         available_depth: AvailableDepth,
+     ) -> Option<X::Result> {
+-        cx.with_global_cache(self.mode, |cache| {
++        cx.with_global_cache(|cache| {
+             cache
+                 .get(cx, input, available_depth, |nested_goals| {
+                     Self::candidate_is_applicable(
+@@ -852,7 +841,7 @@ impl<D: Delegate<Cx = X>, X: Cx> SearchGraph<D> {
+         input: X::Input,
+         available_depth: AvailableDepth,
+     ) -> Option<X::Result> {
+-        cx.with_global_cache(self.mode, |cache| {
++        cx.with_global_cache(|cache| {
+             let CacheData { result, additional_depth, encountered_overflow, nested_goals } = cache
+                 .get(cx, input, available_depth, |nested_goals| {
+                     Self::candidate_is_applicable(
+@@ -1041,7 +1030,7 @@ impl<D: Delegate<Cx = X>, X: Cx> SearchGraph<D> {
+     ) {
+         let additional_depth = final_entry.reached_depth.as_usize() - self.stack.len();
+         debug!(?final_entry, ?result, "insert global cache");
+-        cx.with_global_cache(self.mode, |cache| {
++        cx.with_global_cache(|cache| {
+             cache.insert(
+                 cx,
+                 input,
+diff --git a/compiler/rustc_type_ir/src/solve/mod.rs b/compiler/rustc_type_ir/src/solve/mod.rs
+index b3f8390bbf062..fe4558730513a 100644
+--- a/compiler/rustc_type_ir/src/solve/mod.rs
++++ b/compiler/rustc_type_ir/src/solve/mod.rs
+@@ -58,19 +58,6 @@ pub enum Reveal {
+     All,
+ }
+ 
+-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+-pub enum SolverMode {
+-    /// Ordinary trait solving, using everywhere except for coherence.
+-    Normal,
+-    /// Trait solving during coherence. There are a few notable differences
+-    /// between coherence and ordinary trait solving.
+-    ///
+-    /// Most importantly, trait solving during coherence must not be incomplete,
+-    /// i.e. return `Err(NoSolution)` for goals for which a solution exists.
+-    /// This means that we must not make any guesses or arbitrary choices.
+-    Coherence,
+-}
+-
+ pub type CanonicalInput<I, T = <I as Interner>::Predicate> =
+     ty::CanonicalQueryInput<I, QueryInput<I, T>>;
+ pub type CanonicalResponse<I> = Canonical<I, Response<I>>;
+diff --git a/src/librustdoc/clean/blanket_impl.rs b/src/librustdoc/clean/blanket_impl.rs
+index 1f3cb4a61b895..a6d9676dd84ad 100644
+--- a/src/librustdoc/clean/blanket_impl.rs
++++ b/src/librustdoc/clean/blanket_impl.rs
+@@ -1,7 +1,7 @@
+ use rustc_hir as hir;
+ use rustc_infer::infer::{DefineOpaqueTypes, InferOk, TyCtxtInferExt};
+ use rustc_infer::traits;
+-use rustc_middle::ty::{self, Upcast};
++use rustc_middle::ty::{self, TypingMode, Upcast};
+ use rustc_span::DUMMY_SP;
+ use rustc_span::def_id::DefId;
+ use rustc_trait_selection::traits::query::evaluate_obligation::InferCtxtExt;
+@@ -38,7 +38,7 @@ pub(crate) fn synthesize_blanket_impls(
+             if !matches!(trait_ref.skip_binder().self_ty().kind(), ty::Param(_)) {
+                 continue;
+             }
+-            let infcx = tcx.infer_ctxt().build();
++            let infcx = tcx.infer_ctxt().build(TypingMode::non_body_analysis());
+             let args = infcx.fresh_args_for_item(DUMMY_SP, item_def_id);
+             let impl_ty = ty.instantiate(tcx, args);
+             let param_env = ty::ParamEnv::empty();
+diff --git a/src/librustdoc/clean/mod.rs b/src/librustdoc/clean/mod.rs
+index ea349f878e0ef..87b629078ff8e 100644
+--- a/src/librustdoc/clean/mod.rs
++++ b/src/librustdoc/clean/mod.rs
+@@ -45,7 +45,7 @@ use rustc_hir::def_id::{DefId, DefIdMap, DefIdSet, LOCAL_CRATE, LocalDefId};
+ use rustc_hir_analysis::lower_ty;
+ use rustc_middle::metadata::Reexport;
+ use rustc_middle::middle::resolve_bound_vars as rbv;
+-use rustc_middle::ty::{self, AdtKind, GenericArgsRef, Ty, TyCtxt, TypeVisitableExt};
++use rustc_middle::ty::{self, AdtKind, GenericArgsRef, Ty, TyCtxt, TypeVisitableExt, TypingMode};
+ use rustc_middle::{bug, span_bug};
+ use rustc_span::ExpnKind;
+ use rustc_span::hygiene::{AstPass, MacroKind};
+@@ -1863,7 +1863,7 @@ fn normalize<'tcx>(
+     use rustc_trait_selection::traits::query::normalize::QueryNormalizeExt;
+ 
+     // Try to normalize `<X as Y>::T` to a type
+-    let infcx = cx.tcx.infer_ctxt().build();
++    let infcx = cx.tcx.infer_ctxt().build(TypingMode::non_body_analysis());
+     let normalized = infcx
+         .at(&ObligationCause::dummy(), cx.param_env)
+         .query_normalize(ty)
+@@ -2399,7 +2399,7 @@ pub(crate) fn clean_variant_def_with_args<'tcx>(
+     use rustc_trait_selection::infer::TyCtxtInferExt;
+     use rustc_trait_selection::traits::query::normalize::QueryNormalizeExt;
+ 
+-    let infcx = cx.tcx.infer_ctxt().build();
++    let infcx = cx.tcx.infer_ctxt().build(TypingMode::non_body_analysis());
+     let kind = match variant.ctor_kind() {
+         Some(CtorKind::Const) => VariantKind::CLike,
+         Some(CtorKind::Fn) => VariantKind::Tuple(
+diff --git a/src/librustdoc/html/format.rs b/src/librustdoc/html/format.rs
+index 8e8e5c6ade8cb..47c21d89177bf 100644
+--- a/src/librustdoc/html/format.rs
++++ b/src/librustdoc/html/format.rs
+@@ -20,8 +20,7 @@ use rustc_hir as hir;
+ use rustc_hir::def::DefKind;
+ use rustc_hir::def_id::{DefId, LOCAL_CRATE};
+ use rustc_metadata::creader::{CStore, LoadedMacro};
+-use rustc_middle::ty;
+-use rustc_middle::ty::TyCtxt;
++use rustc_middle::ty::{self, TyCtxt, TypingMode};
+ use rustc_span::symbol::kw;
+ use rustc_span::{Symbol, sym};
+ use rustc_target::spec::abi::Abi;
+@@ -613,7 +612,7 @@ fn generate_item_def_id_path(
+     // No need to try to infer the actual parent item if it's not an associated item from the `impl`
+     // block.
+     if def_id != original_def_id && matches!(tcx.def_kind(def_id), DefKind::Impl { .. }) {
+-        let infcx = tcx.infer_ctxt().build();
++        let infcx = tcx.infer_ctxt().build(TypingMode::non_body_analysis());
+         def_id = infcx
+             .at(&ObligationCause::dummy(), tcx.param_env(def_id))
+             .query_normalize(ty::Binder::dummy(tcx.type_of(def_id).instantiate_identity()))
+diff --git a/src/tools/clippy/clippy_lints/src/eta_reduction.rs b/src/tools/clippy/clippy_lints/src/eta_reduction.rs
+index cabc659225828..6ca599ed36113 100644
+--- a/src/tools/clippy/clippy_lints/src/eta_reduction.rs
++++ b/src/tools/clippy/clippy_lints/src/eta_reduction.rs
+@@ -9,7 +9,8 @@ use rustc_hir::{BindingMode, Expr, ExprKind, FnRetTy, Param, PatKind, QPath, Saf
+ use rustc_infer::infer::TyCtxtInferExt;
+ use rustc_lint::{LateContext, LateLintPass};
+ use rustc_middle::ty::{
+-    self, Binder, ClosureKind, FnSig, GenericArg, GenericArgKind, List, Region, Ty, TypeVisitableExt, TypeckResults,
++    self, Binder, ClosureKind, FnSig, GenericArg, GenericArgKind, List, Region, Ty, TypeVisitableExt,
++    TypeckResults,
+ };
+ use rustc_session::declare_lint_pass;
+ use rustc_span::symbol::sym;
+@@ -203,7 +204,7 @@ fn check_clousure<'tcx>(cx: &LateContext<'tcx>, outer_receiver: Option<&Expr<'tc
+                             // 'cuz currently nothing changes after deleting this check.
+                             local_used_in(cx, l, args) || local_used_after_expr(cx, l, expr)
+                         }) {
+-                            match cx.tcx.infer_ctxt().build().err_ctxt().type_implements_fn_trait(
++                            match cx.tcx.infer_ctxt().build(cx.typing_mode()).err_ctxt().type_implements_fn_trait(
+                                 cx.param_env,
+                                 Binder::bind_with_vars(callee_ty_adjusted, List::empty()),
+                                 ty::PredicatePolarity::Positive,
+diff --git a/src/tools/clippy/clippy_lints/src/functions/must_use.rs b/src/tools/clippy/clippy_lints/src/functions/must_use.rs
+index cfd11e9339fb7..c74ba088b78e6 100644
+--- a/src/tools/clippy/clippy_lints/src/functions/must_use.rs
++++ b/src/tools/clippy/clippy_lints/src/functions/must_use.rs
+@@ -117,7 +117,7 @@ fn check_needless_must_use(
+     } else if attr.value_str().is_none() && is_must_use_ty(cx, return_ty(cx, item_id)) {
+         // Ignore async functions unless Future::Output type is a must_use type
+         if sig.header.is_async() {
+-            let infcx = cx.tcx.infer_ctxt().build();
++            let infcx = cx.tcx.infer_ctxt().build(cx.typing_mode());
+             if let Some(future_ty) = infcx.err_ctxt().get_impl_future_output_ty(return_ty(cx, item_id))
+                 && !is_must_use_ty(cx, future_ty)
+             {
+diff --git a/src/tools/clippy/clippy_lints/src/future_not_send.rs b/src/tools/clippy/clippy_lints/src/future_not_send.rs
+index a4dbe134f3650..cf08c16458bd5 100644
+--- a/src/tools/clippy/clippy_lints/src/future_not_send.rs
++++ b/src/tools/clippy/clippy_lints/src/future_not_send.rs
+@@ -74,7 +74,7 @@ impl<'tcx> LateLintPass<'tcx> for FutureNotSend {
+             if is_future {
+                 let send_trait = cx.tcx.get_diagnostic_item(sym::Send).unwrap();
+                 let span = decl.output.span();
+-                let infcx = cx.tcx.infer_ctxt().build();
++                let infcx = cx.tcx.infer_ctxt().build(cx.typing_mode());
+                 let ocx = ObligationCtxt::new_with_diagnostics(&infcx);
+                 let cause = traits::ObligationCause::misc(span, fn_def_id);
+                 ocx.register_bound(cause, cx.param_env, ret_ty, send_trait);
+diff --git a/src/tools/clippy/clippy_lints/src/methods/unnecessary_to_owned.rs b/src/tools/clippy/clippy_lints/src/methods/unnecessary_to_owned.rs
+index cfa1fdb81372f..82549413fa918 100644
+--- a/src/tools/clippy/clippy_lints/src/methods/unnecessary_to_owned.rs
++++ b/src/tools/clippy/clippy_lints/src/methods/unnecessary_to_owned.rs
+@@ -568,7 +568,7 @@ fn can_change_type<'a>(cx: &LateContext<'a>, mut expr: &'a Expr<'a>, mut ty: Ty<
+                             let obligation = Obligation::new(cx.tcx, ObligationCause::dummy(), cx.param_env, predicate);
+                             !cx.tcx
+                                 .infer_ctxt()
+-                                .build()
++                                .build(cx.typing_mode())
+                                 .predicate_must_hold_modulo_regions(&obligation)
+                         }) {
+                             return false;
+diff --git a/src/tools/clippy/clippy_lints/src/needless_borrows_for_generic_args.rs b/src/tools/clippy/clippy_lints/src/needless_borrows_for_generic_args.rs
+index f6db12ed84e86..f7fa31d83aa4a 100644
+--- a/src/tools/clippy/clippy_lints/src/needless_borrows_for_generic_args.rs
++++ b/src/tools/clippy/clippy_lints/src/needless_borrows_for_generic_args.rs
+@@ -278,7 +278,7 @@ fn needless_borrow_count<'tcx>(
+ 
+             let predicate = EarlyBinder::bind(predicate).instantiate(cx.tcx, &args_with_referent_ty[..]);
+             let obligation = Obligation::new(cx.tcx, ObligationCause::dummy(), cx.param_env, predicate);
+-            let infcx = cx.tcx.infer_ctxt().build();
++            let infcx = cx.tcx.infer_ctxt().build(cx.typing_mode());
+             infcx.predicate_must_hold_modulo_regions(&obligation)
+         })
+     };
+diff --git a/src/tools/clippy/clippy_lints/src/no_effect.rs b/src/tools/clippy/clippy_lints/src/no_effect.rs
+index 392cfcb813e85..2e5195d459f4d 100644
+--- a/src/tools/clippy/clippy_lints/src/no_effect.rs
++++ b/src/tools/clippy/clippy_lints/src/no_effect.rs
+@@ -160,7 +160,7 @@ impl NoEffect {
+                                 // Remove `impl Future<Output = T>` to get `T`
+                                 if cx.tcx.ty_is_opaque_future(ret_ty)
+                                     && let Some(true_ret_ty) =
+-                                        cx.tcx.infer_ctxt().build().err_ctxt().get_impl_future_output_ty(ret_ty)
++                                        cx.tcx.infer_ctxt().build(cx.typing_mode()).err_ctxt().get_impl_future_output_ty(ret_ty)
+                                 {
+                                     ret_ty = true_ret_ty;
+                                 }
+diff --git a/src/tools/clippy/clippy_lints/src/ptr.rs b/src/tools/clippy/clippy_lints/src/ptr.rs
+index f5fcf521b96cc..a548c6ef3b1fd 100644
+--- a/src/tools/clippy/clippy_lints/src/ptr.rs
++++ b/src/tools/clippy/clippy_lints/src/ptr.rs
+@@ -695,7 +695,7 @@ fn matches_preds<'tcx>(
+     ty: Ty<'tcx>,
+     preds: &'tcx [ty::PolyExistentialPredicate<'tcx>],
+ ) -> bool {
+-    let infcx = cx.tcx.infer_ctxt().build();
++    let infcx = cx.tcx.infer_ctxt().build(cx.typing_mode());
+     preds
+         .iter()
+         .all(|&p| match cx.tcx.instantiate_bound_regions_with_erased(p) {
+diff --git a/src/tools/clippy/clippy_lints/src/useless_conversion.rs b/src/tools/clippy/clippy_lints/src/useless_conversion.rs
+index ec3a693d2efec..3b05abc546f47 100644
+--- a/src/tools/clippy/clippy_lints/src/useless_conversion.rs
++++ b/src/tools/clippy/clippy_lints/src/useless_conversion.rs
+@@ -114,7 +114,7 @@ fn into_iter_bound<'tcx>(
+                     if !cx
+                         .tcx
+                         .infer_ctxt()
+-                        .build()
++                        .build(cx.typing_mode())
+                         .predicate_must_hold_modulo_regions(&obligation)
+                     {
+                         return None;
+diff --git a/src/tools/clippy/clippy_utils/src/qualify_min_const_fn.rs b/src/tools/clippy/clippy_utils/src/qualify_min_const_fn.rs
+index 46739862de6b2..dbadc8432f630 100644
+--- a/src/tools/clippy/clippy_utils/src/qualify_min_const_fn.rs
++++ b/src/tools/clippy/clippy_utils/src/qualify_min_const_fn.rs
+@@ -17,7 +17,7 @@ use rustc_middle::mir::{
+ };
+ use rustc_middle::traits::{BuiltinImplSource, ImplSource, ObligationCause};
+ use rustc_middle::ty::adjustment::PointerCoercion;
+-use rustc_middle::ty::{self, GenericArgKind, TraitRef, Ty, TyCtxt};
++use rustc_middle::ty::{self, GenericArgKind, TraitRef, Ty, TyCtxt, TypingMode};
+ use rustc_span::Span;
+ use rustc_span::symbol::sym;
+ use rustc_trait_selection::traits::{ObligationCtxt, SelectionContext};
+@@ -420,7 +420,7 @@ fn is_ty_const_destruct<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>, body: &Body<'tcx>
+             TraitRef::new(tcx, tcx.require_lang_item(LangItem::Destruct, Some(body.span)), [ty]),
+         );
+ 
+-        let infcx = tcx.infer_ctxt().build();
++        let infcx = tcx.infer_ctxt().build(TypingMode::from_param_env(obligation.param_env));
+         let mut selcx = SelectionContext::new(&infcx);
+         let Some(impl_src) = selcx.select(&obligation).ok().flatten() else {
+             return false;
+diff --git a/src/tools/clippy/clippy_utils/src/ty.rs b/src/tools/clippy/clippy_utils/src/ty.rs
+index 07c3d0eada005..c618bfe4488c1 100644
+--- a/src/tools/clippy/clippy_utils/src/ty.rs
++++ b/src/tools/clippy/clippy_utils/src/ty.rs
+@@ -19,7 +19,7 @@ use rustc_middle::ty::layout::ValidityRequirement;
+ use rustc_middle::ty::{
+     self, AdtDef, AliasTy, AssocItem, AssocKind, Binder, BoundRegion, FnSig, GenericArg, GenericArgKind,
+     GenericArgsRef, GenericParamDefKind, IntTy, ParamEnv, Region, RegionKind, TraitRef, Ty, TyCtxt, TypeSuperVisitable,
+-    TypeVisitable, TypeVisitableExt, TypeVisitor, UintTy, Upcast, VariantDef, VariantDiscr,
++    TypeVisitable, TypeVisitableExt, TypeVisitor, UintTy, Upcast, VariantDef, VariantDiscr, TypingMode,
+ };
+ use rustc_span::symbol::Ident;
+ use rustc_span::{DUMMY_SP, Span, Symbol, sym};
+@@ -268,7 +268,7 @@ pub fn implements_trait_with_env_from_iter<'tcx>(
+         return false;
+     }
+ 
+-    let infcx = tcx.infer_ctxt().build();
++    let infcx = tcx.infer_ctxt().build(TypingMode::from_param_env(param_env));
+     let args = args
+         .into_iter()
+         .map(|arg| arg.into().unwrap_or_else(|| infcx.next_ty_var(DUMMY_SP).into()))
+@@ -362,7 +362,7 @@ fn is_normalizable_helper<'tcx>(
+     }
+     // prevent recursive loops, false-negative is better than endless loop leading to stack overflow
+     cache.insert(ty, false);
+-    let infcx = cx.tcx.infer_ctxt().build();
++    let infcx = cx.tcx.infer_ctxt().build(TypingMode::from_param_env(param_env));
+     let cause = ObligationCause::dummy();
+     let result = if infcx.at(&cause, param_env).query_normalize(ty).is_ok() {
+         match ty.kind() {
+@@ -1268,7 +1268,7 @@ pub fn make_normalized_projection_with_regions<'tcx>(
+         let cause = ObligationCause::dummy();
+         match tcx
+             .infer_ctxt()
+-            .build()
++            .build(TypingMode::from_param_env(param_env))
+             .at(&cause, param_env)
+             .query_normalize(Ty::new_projection_from_args(tcx, ty.def_id, ty.args))
+         {
+@@ -1284,7 +1284,7 @@ pub fn make_normalized_projection_with_regions<'tcx>(
+ 
+ pub fn normalize_with_regions<'tcx>(tcx: TyCtxt<'tcx>, param_env: ParamEnv<'tcx>, ty: Ty<'tcx>) -> Ty<'tcx> {
+     let cause = ObligationCause::dummy();
+-    match tcx.infer_ctxt().build().at(&cause, param_env).query_normalize(ty) {
++    match tcx.infer_ctxt().build(TypingMode::from_param_env(param_env)).at(&cause, param_env).query_normalize(ty) {
+         Ok(ty) => ty.value,
+         Err(_) => ty,
+     }

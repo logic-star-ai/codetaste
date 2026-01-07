@@ -1,0 +1,5672 @@
+diff --git a/packages/bsky/src/api/app/bsky/actor/getProfile.ts b/packages/bsky/src/api/app/bsky/actor/getProfile.ts
+index aab10478a32..09699b8914b 100644
+--- a/packages/bsky/src/api/app/bsky/actor/getProfile.ts
++++ b/packages/bsky/src/api/app/bsky/actor/getProfile.ts
+@@ -1,48 +1,107 @@
+ import { InvalidRequestError } from '@atproto/xrpc-server'
+ import { Server } from '../../../../lexicon'
++import { QueryParams } from '../../../../lexicon/types/app/bsky/actor/getProfile'
+ import { softDeleted } from '../../../../db/util'
+ import AppContext from '../../../../context'
++import { Database } from '../../../../db'
++import { Actor } from '../../../../db/tables/actor'
++import {
++  ActorService,
++  ProfileDetailHydrationState,
++} from '../../../../services/actor'
+ import { setRepoRev } from '../../../util'
++import { createPipeline, noRules } from '../../../../pipeline'
+ 
+ export default function (server: Server, ctx: AppContext) {
++  const getProfile = createPipeline(skeleton, hydration, noRules, presentation)
+   server.app.bsky.actor.getProfile({
+     auth: ctx.authOptionalAccessOrRoleVerifier,
+     handler: async ({ auth, params, res }) => {
+-      const { actor } = params
+-      const requester = 'did' in auth.credentials ? auth.credentials.did : null
+-      const canViewTakendownProfile =
+-        auth.credentials.type === 'role' && auth.credentials.triage
+       const db = ctx.db.getReplica()
+       const actorService = ctx.services.actor(db)
++      const viewer = 'did' in auth.credentials ? auth.credentials.did : null
++      const canViewTakendownProfile =
++        auth.credentials.type === 'role' && auth.credentials.triage
+ 
+-      const [actorRes, repoRev] = await Promise.all([
+-        actorService.getActor(actor, true),
+-        actorService.getRepoRev(requester),
++      const [result, repoRev] = await Promise.allSettled([
++        getProfile(
++          { ...params, viewer, canViewTakendownProfile },
++          { db, actorService },
++        ),
++        actorService.getRepoRev(viewer),
+       ])
+-      setRepoRev(res, repoRev)
+ 
+-      if (!actorRes) {
+-        throw new InvalidRequestError('Profile not found')
+-      }
+-      if (!canViewTakendownProfile && softDeleted(actorRes)) {
+-        throw new InvalidRequestError(
+-          'Account has been taken down',
+-          'AccountTakedown',
+-        )
++      if (repoRev.status === 'fulfilled') {
++        setRepoRev(res, repoRev.value)
+       }
+-      const profile = await actorService.views.profileDetailed(
+-        actorRes,
+-        requester,
+-        { includeSoftDeleted: canViewTakendownProfile },
+-      )
+-      if (!profile) {
+-        throw new InvalidRequestError('Profile not found')
++      if (result.status === 'rejected') {
++        throw result.reason
+       }
+ 
+       return {
+         encoding: 'application/json',
+-        body: profile,
++        body: result.value,
+       }
+     },
+   })
+ }
++
++const skeleton = async (
++  params: Params,
++  ctx: Context,
++): Promise<SkeletonState> => {
++  const { actorService } = ctx
++  const { canViewTakendownProfile } = params
++  const actor = await actorService.getActor(params.actor, true)
++  if (!actor) {
++    throw new InvalidRequestError('Profile not found')
++  }
++  if (!canViewTakendownProfile && softDeleted(actor)) {
++    throw new InvalidRequestError(
++      'Account has been taken down',
++      'AccountTakedown',
++    )
++  }
++  return { params, actor }
++}
++
++const hydration = async (state: SkeletonState, ctx: Context) => {
++  const { actorService } = ctx
++  const { params, actor } = state
++  const { viewer, canViewTakendownProfile } = params
++  const hydration = await actorService.views.profileDetailHydration(
++    [actor.did],
++    { viewer, includeSoftDeleted: canViewTakendownProfile },
++  )
++  return { ...state, ...hydration }
++}
++
++const presentation = (state: HydrationState, ctx: Context) => {
++  const { actorService } = ctx
++  const { params, actor } = state
++  const { viewer } = params
++  const profiles = actorService.views.profileDetailPresentation(
++    [actor.did],
++    state,
++    { viewer },
++  )
++  const profile = profiles[actor.did]
++  if (!profile) {
++    throw new InvalidRequestError('Profile not found')
++  }
++  return profile
++}
++
++type Context = {
++  db: Database
++  actorService: ActorService
++}
++
++type Params = QueryParams & {
++  viewer: string | null
++  canViewTakendownProfile: boolean
++}
++
++type SkeletonState = { params: Params; actor: Actor }
++
++type HydrationState = SkeletonState & ProfileDetailHydrationState
+diff --git a/packages/bsky/src/api/app/bsky/actor/getProfiles.ts b/packages/bsky/src/api/app/bsky/actor/getProfiles.ts
+index 0fd7cdf844c..f2e0eb3fd50 100644
+--- a/packages/bsky/src/api/app/bsky/actor/getProfiles.ts
++++ b/packages/bsky/src/api/app/bsky/actor/getProfiles.ts
+@@ -1,31 +1,78 @@
++import { mapDefined } from '@atproto/common'
+ import { Server } from '../../../../lexicon'
++import { QueryParams } from '../../../../lexicon/types/app/bsky/actor/getProfiles'
+ import AppContext from '../../../../context'
++import { Database } from '../../../../db'
++import {
++  ActorService,
++  ProfileDetailHydrationState,
++} from '../../../../services/actor'
+ import { setRepoRev } from '../../../util'
++import { createPipeline, noRules } from '../../../../pipeline'
+ 
+ export default function (server: Server, ctx: AppContext) {
++  const getProfile = createPipeline(skeleton, hydration, noRules, presentation)
+   server.app.bsky.actor.getProfiles({
+     auth: ctx.authOptionalVerifier,
+     handler: async ({ auth, params, res }) => {
+-      const { actors } = params
+-      const requester = auth.credentials.did
+       const db = ctx.db.getReplica()
+       const actorService = ctx.services.actor(db)
++      const viewer = auth.credentials.did
+ 
+-      const [actorsRes, repoRev] = await Promise.all([
+-        actorService.getActors(actors),
+-        actorService.getRepoRev(requester),
++      const [result, repoRev] = await Promise.all([
++        getProfile({ ...params, viewer }, { db, actorService }),
++        actorService.getRepoRev(viewer),
+       ])
++
+       setRepoRev(res, repoRev)
+ 
+       return {
+         encoding: 'application/json',
+-        body: {
+-          profiles: await actorService.views.hydrateProfilesDetailed(
+-            actorsRes,
+-            requester,
+-          ),
+-        },
++        body: result,
+       }
+     },
+   })
+ }
++
++const skeleton = async (
++  params: Params,
++  ctx: Context,
++): Promise<SkeletonState> => {
++  const { actorService } = ctx
++  const actors = await actorService.getActors(params.actors)
++  return { params, dids: actors.map((a) => a.did) }
++}
++
++const hydration = async (state: SkeletonState, ctx: Context) => {
++  const { actorService } = ctx
++  const { params, dids } = state
++  const { viewer } = params
++  const hydration = await actorService.views.profileDetailHydration(dids, {
++    viewer,
++  })
++  return { ...state, ...hydration }
++}
++
++const presentation = (state: HydrationState, ctx: Context) => {
++  const { actorService } = ctx
++  const { params, dids } = state
++  const { viewer } = params
++  const profiles = actorService.views.profileDetailPresentation(dids, state, {
++    viewer,
++  })
++  const profileViews = mapDefined(dids, (did) => profiles[did])
++  return { profiles: profileViews }
++}
++
++type Context = {
++  db: Database
++  actorService: ActorService
++}
++
++type Params = QueryParams & {
++  viewer: string | null
++}
++
++type SkeletonState = { params: Params; dids: string[] }
++
++type HydrationState = SkeletonState & ProfileDetailHydrationState
+diff --git a/packages/bsky/src/api/app/bsky/actor/getSuggestions.ts b/packages/bsky/src/api/app/bsky/actor/getSuggestions.ts
+index a19cdd0a7a9..18ab99debe2 100644
+--- a/packages/bsky/src/api/app/bsky/actor/getSuggestions.ts
++++ b/packages/bsky/src/api/app/bsky/actor/getSuggestions.ts
+@@ -1,75 +1,126 @@
++import { mapDefined } from '@atproto/common'
+ import AppContext from '../../../../context'
++import { Database } from '../../../../db'
++import { Actor } from '../../../../db/tables/actor'
+ import { notSoftDeletedClause } from '../../../../db/util'
+ import { Server } from '../../../../lexicon'
++import { QueryParams } from '../../../../lexicon/types/app/bsky/actor/getSuggestions'
++import { createPipeline } from '../../../../pipeline'
++import { ActorInfoMap, ActorService } from '../../../../services/actor'
++import { BlockAndMuteState, GraphService } from '../../../../services/graph'
+ 
+ export default function (server: Server, ctx: AppContext) {
++  const getSuggestions = createPipeline(
++    skeleton,
++    hydration,
++    noBlocksOrMutes,
++    presentation,
++  )
+   server.app.bsky.actor.getSuggestions({
+     auth: ctx.authOptionalVerifier,
+     handler: async ({ params, auth }) => {
+-      const { limit, cursor } = params
+-      const viewer = auth.credentials.did
+-
+       const db = ctx.db.getReplica()
+       const actorService = ctx.services.actor(db)
+       const graphService = ctx.services.graph(db)
++      const viewer = auth.credentials.did
+ 
+-      const { ref } = db.db.dynamic
+-
+-      let suggestionsQb = db.db
+-        .selectFrom('suggested_follow')
+-        .innerJoin('actor', 'actor.did', 'suggested_follow.did')
+-        .innerJoin('profile_agg', 'profile_agg.did', 'actor.did')
+-        .where(notSoftDeletedClause(ref('actor')))
+-        .where('suggested_follow.did', '!=', viewer ?? '')
+-        .whereNotExists((qb) =>
+-          qb
+-            .selectFrom('follow')
+-            .selectAll()
+-            .where('creator', '=', viewer ?? '')
+-            .whereRef('subjectDid', '=', ref('actor.did')),
+-        )
+-        .selectAll()
+-        .select('profile_agg.postsCount as postsCount')
+-        .limit(limit)
+-        .orderBy('suggested_follow.order', 'asc')
+-
+-      if (cursor) {
+-        const cursorRow = await db.db
+-          .selectFrom('suggested_follow')
+-          .where('did', '=', cursor)
+-          .selectAll()
+-          .executeTakeFirst()
+-        if (cursorRow) {
+-          suggestionsQb = suggestionsQb.where(
+-            'suggested_follow.order',
+-            '>',
+-            cursorRow.order,
+-          )
+-        }
+-      }
+-
+-      const suggestionsRes = await suggestionsQb.execute()
+-      const suggestionsSafe = await graphService.filterBlocksAndMutes(
+-        suggestionsRes,
+-        {
+-          getBlockPairs(item) {
+-            if (viewer) {
+-              return [[viewer, item.did]]
+-            }
+-          },
+-        },
++      const result = await getSuggestions(
++        { ...params, viewer },
++        { db, actorService, graphService },
+       )
+ 
+       return {
+         encoding: 'application/json',
+-        body: {
+-          cursor: suggestionsRes.at(-1)?.did,
+-          actors: await actorService.views.hydrateProfiles(
+-            suggestionsSafe,
+-            viewer,
+-          ),
+-        },
++        body: result,
+       }
+     },
+   })
+ }
++
++const skeleton = async (
++  params: Params,
++  ctx: Context,
++): Promise<SkeletonState> => {
++  const { db } = ctx
++  const { limit, cursor, viewer } = params
++  const { ref } = db.db.dynamic
++  let suggestionsQb = db.db
++    .selectFrom('suggested_follow')
++    .innerJoin('actor', 'actor.did', 'suggested_follow.did')
++    .innerJoin('profile_agg', 'profile_agg.did', 'actor.did')
++    .where(notSoftDeletedClause(ref('actor')))
++    .where('suggested_follow.did', '!=', viewer ?? '')
++    .whereNotExists((qb) =>
++      qb
++        .selectFrom('follow')
++        .selectAll()
++        .where('creator', '=', viewer ?? '')
++        .whereRef('subjectDid', '=', ref('actor.did')),
++    )
++    .selectAll()
++    .select('profile_agg.postsCount as postsCount')
++    .limit(limit)
++    .orderBy('suggested_follow.order', 'asc')
++
++  if (cursor) {
++    const cursorRow = await db.db
++      .selectFrom('suggested_follow')
++      .where('did', '=', cursor)
++      .selectAll()
++      .executeTakeFirst()
++    if (cursorRow) {
++      suggestionsQb = suggestionsQb.where(
++        'suggested_follow.order',
++        '>',
++        cursorRow.order,
++      )
++    }
++  }
++  const suggestions = await suggestionsQb.execute()
++  return { params, suggestions, cursor: suggestions.at(-1)?.did }
++}
++
++const hydration = async (state: SkeletonState, ctx: Context) => {
++  const { graphService, actorService } = ctx
++  const { params, suggestions } = state
++  const { viewer } = params
++  const [actors, bam] = await Promise.all([
++    actorService.views.profiles(suggestions, viewer),
++    graphService.getBlockAndMuteState(
++      viewer ? suggestions.map((sug) => [viewer, sug.did]) : [],
++    ),
++  ])
++  return { ...state, bam, actors }
++}
++
++const noBlocksOrMutes = (state: HydrationState) => {
++  const { viewer } = state.params
++  if (!viewer) return state
++  state.suggestions = state.suggestions.filter(
++    (item) =>
++      !state.bam.block([viewer, item.did]) &&
++      !state.bam.mute([viewer, item.did]),
++  )
++  return state
++}
++
++const presentation = (state: HydrationState) => {
++  const { suggestions, actors, cursor } = state
++  const suggestedActors = mapDefined(suggestions, (sug) => actors[sug.did])
++  return { actors: suggestedActors, cursor }
++}
++
++type Context = {
++  db: Database
++  actorService: ActorService
++  graphService: GraphService
++}
++
++type Params = QueryParams & { viewer: string | null }
++
++type SkeletonState = { params: Params; suggestions: Actor[]; cursor?: string }
++
++type HydrationState = SkeletonState & {
++  bam: BlockAndMuteState
++  actors: ActorInfoMap
++}
+diff --git a/packages/bsky/src/api/app/bsky/actor/searchActors.ts b/packages/bsky/src/api/app/bsky/actor/searchActors.ts
+index 9f462608885..df5821a03f9 100644
+--- a/packages/bsky/src/api/app/bsky/actor/searchActors.ts
++++ b/packages/bsky/src/api/app/bsky/actor/searchActors.ts
+@@ -27,7 +27,7 @@ export default function (server: Server, ctx: AppContext) {
+ 
+       const actors = await ctx.services
+         .actor(db)
+-        .views.hydrateProfiles(results, requester)
++        .views.profilesList(results, requester)
+       const filtered = actors.filter(
+         (actor) => !actor.viewer?.blocking && !actor.viewer?.blockedBy,
+       )
+diff --git a/packages/bsky/src/api/app/bsky/actor/searchActorsTypeahead.ts b/packages/bsky/src/api/app/bsky/actor/searchActorsTypeahead.ts
+index b8533073be5..64bcd811d02 100644
+--- a/packages/bsky/src/api/app/bsky/actor/searchActorsTypeahead.ts
++++ b/packages/bsky/src/api/app/bsky/actor/searchActorsTypeahead.ts
+@@ -23,11 +23,14 @@ export default function (server: Server, ctx: AppContext) {
+ 
+       const actors = await ctx.services
+         .actor(db)
+-        .views.hydrateProfilesBasic(results, requester)
++        .views.profilesBasic(results, requester, { omitLabels: true })
+ 
+-      const filtered = actors.filter(
+-        (actor) => !actor.viewer?.blocking && !actor.viewer?.blockedBy,
+-      )
++      const SKIP = []
++      const filtered = results.flatMap((res) => {
++        const actor = actors[res.did]
++        if (actor.viewer?.blocking || actor.viewer?.blockedBy) return SKIP
++        return actor
++      })
+ 
+       return {
+         encoding: 'application/json',
+diff --git a/packages/bsky/src/api/app/bsky/feed/getActorFeeds.ts b/packages/bsky/src/api/app/bsky/feed/getActorFeeds.ts
+index a9e02d2cd59..deb5c3a5a1b 100644
+--- a/packages/bsky/src/api/app/bsky/feed/getActorFeeds.ts
++++ b/packages/bsky/src/api/app/bsky/feed/getActorFeeds.ts
+@@ -34,14 +34,13 @@ export default function (server: Server, ctx: AppContext) {
+         keyset,
+       })
+ 
+-      const [feedsRes, creatorProfile] = await Promise.all([
++      const [feedsRes, profiles] = await Promise.all([
+         feedsQb.execute(),
+-        actorService.views.profile(creatorRes, viewer),
++        actorService.views.profiles([creatorRes], viewer),
+       ])
+-      if (!creatorProfile) {
++      if (!profiles[creatorRes.did]) {
+         throw new InvalidRequestError(`Actor not found: ${actor}`)
+       }
+-      const profiles = { [creatorProfile.did]: creatorProfile }
+ 
+       const feeds = feedsRes.map((row) => {
+         const feed = {
+diff --git a/packages/bsky/src/api/app/bsky/feed/getActorLikes.ts b/packages/bsky/src/api/app/bsky/feed/getActorLikes.ts
+index 42769bb1a79..73b8b070262 100644
+--- a/packages/bsky/src/api/app/bsky/feed/getActorLikes.ts
++++ b/packages/bsky/src/api/app/bsky/feed/getActorLikes.ts
+@@ -1,73 +1,127 @@
++import { InvalidRequestError } from '@atproto/xrpc-server'
+ import { Server } from '../../../../lexicon'
++import { QueryParams } from '../../../../lexicon/types/app/bsky/feed/getActorLikes'
+ import { FeedKeyset } from '../util/feed'
+ import { paginate } from '../../../../db/pagination'
+ import AppContext from '../../../../context'
+-import { InvalidRequestError } from '@atproto/xrpc-server'
+ import { setRepoRev } from '../../../util'
++import {
++  FeedHydrationState,
++  FeedRow,
++  FeedService,
++} from '../../../../services/feed'
++import { Database } from '../../../../db'
++import { ActorService } from '../../../../services/actor'
++import { GraphService } from '../../../../services/graph'
++import { createPipeline } from '../../../../pipeline'
+ 
+ export default function (server: Server, ctx: AppContext) {
++  const getActorLikes = createPipeline(
++    skeleton,
++    hydration,
++    noPostBlocks,
++    presentation,
++  )
+   server.app.bsky.feed.getActorLikes({
+     auth: ctx.authOptionalVerifier,
+     handler: async ({ params, auth, res }) => {
+-      const { actor, limit, cursor } = params
+       const viewer = auth.credentials.did
+       const db = ctx.db.getReplica()
+-      const { ref } = db.db.dynamic
+-
+       const actorService = ctx.services.actor(db)
+       const feedService = ctx.services.feed(db)
+       const graphService = ctx.services.graph(db)
+ 
+-      // maybe resolve did first
+-      const actorRes = await actorService.getActor(actor)
+-      if (!actorRes) {
+-        throw new InvalidRequestError('Profile not found')
+-      }
+-      const actorDid = actorRes.did
++      const [result, repoRev] = await Promise.all([
++        getActorLikes(
++          { ...params, viewer },
++          { db, actorService, feedService, graphService },
++        ),
++        actorService.getRepoRev(viewer),
++      ])
++
++      setRepoRev(res, repoRev)
+ 
+-      if (!viewer || viewer !== actorDid) {
+-        throw new InvalidRequestError('Profile not found')
++      return {
++        encoding: 'application/json',
++        body: result,
+       }
++    },
++  })
++}
+ 
+-      let feedItemsQb = feedService
+-        .selectFeedItemQb()
+-        .innerJoin('like', 'like.subject', 'feed_item.uri')
+-        .where('like.creator', '=', actorDid)
++const skeleton = async (
++  params: Params,
++  ctx: Context,
++): Promise<SkeletonState> => {
++  const { db, actorService, feedService } = ctx
++  const { actor, limit, cursor, viewer } = params
++  const { ref } = db.db.dynamic
+ 
+-      const keyset = new FeedKeyset(
+-        ref('feed_item.sortAt'),
+-        ref('feed_item.cid'),
+-      )
++  const actorRes = await actorService.getActor(actor)
++  if (!actorRes) {
++    throw new InvalidRequestError('Profile not found')
++  }
++  const actorDid = actorRes.did
+ 
+-      feedItemsQb = paginate(feedItemsQb, {
+-        limit,
+-        cursor,
+-        keyset,
+-      })
++  if (!viewer || viewer !== actorDid) {
++    throw new InvalidRequestError('Profile not found')
++  }
+ 
+-      const [feedItems, repoRev] = await Promise.all([
+-        feedItemsQb.execute(),
+-        actorService.getRepoRev(viewer),
+-      ])
+-      setRepoRev(res, repoRev)
++  let feedItemsQb = feedService
++    .selectFeedItemQb()
++    .innerJoin('like', 'like.subject', 'feed_item.uri')
++    .where('like.creator', '=', actorDid)
++
++  const keyset = new FeedKeyset(ref('feed_item.sortAt'), ref('feed_item.cid'))
+ 
+-      const feedItemsSafe = await graphService.filterBlocksAndMutes(feedItems, {
+-        getBlockPairs(item) {
+-          if (viewer) {
+-            return [[viewer, item.postAuthorDid]]
+-          }
+-        },
+-      })
++  feedItemsQb = paginate(feedItemsQb, {
++    limit,
++    cursor,
++    keyset,
++  })
+ 
+-      const feed = await feedService.hydrateFeed(feedItemsSafe, viewer)
++  const feedItems = await feedItemsQb.execute()
+ 
+-      return {
+-        encoding: 'application/json',
+-        body: {
+-          feed,
+-          cursor: keyset.packFromResult(feedItems),
+-        },
+-      }
+-    },
++  return { params, feedItems, cursor: keyset.packFromResult(feedItems) }
++}
++
++const hydration = async (state: SkeletonState, ctx: Context) => {
++  const { feedService } = ctx
++  const { params, feedItems } = state
++  const refs = feedService.feedItemRefs(feedItems)
++  const hydrated = await feedService.feedHydration({
++    ...refs,
++    viewer: params.viewer,
+   })
++  return { ...state, ...hydrated }
++}
++
++const noPostBlocks = (state: HydrationState) => {
++  const { viewer } = state.params
++  state.feedItems = state.feedItems.filter(
++    (item) => !viewer || !state.bam.block([viewer, item.postAuthorDid]),
++  )
++  return state
+ }
++
++const presentation = (state: HydrationState, ctx: Context) => {
++  const { feedService } = ctx
++  const { feedItems, cursor, params } = state
++  const feed = feedService.views.formatFeed(feedItems, state, {
++    viewer: params.viewer,
++  })
++  return { feed, cursor }
++}
++
++type Context = {
++  db: Database
++  feedService: FeedService
++  actorService: ActorService
++  graphService: GraphService
++}
++
++type Params = QueryParams & { viewer: string | null }
++
++type SkeletonState = { params: Params; feedItems: FeedRow[]; cursor?: string }
++
++type HydrationState = SkeletonState & FeedHydrationState
+diff --git a/packages/bsky/src/api/app/bsky/feed/getAuthorFeed.ts b/packages/bsky/src/api/app/bsky/feed/getAuthorFeed.ts
+index 8aca55e2321..9f25eb131e1 100644
+--- a/packages/bsky/src/api/app/bsky/feed/getAuthorFeed.ts
++++ b/packages/bsky/src/api/app/bsky/feed/getAuthorFeed.ts
+@@ -1,112 +1,171 @@
++import { InvalidRequestError } from '@atproto/xrpc-server'
+ import { Server } from '../../../../lexicon'
++import { QueryParams } from '../../../../lexicon/types/app/bsky/feed/getAuthorFeed'
+ import { FeedKeyset } from '../util/feed'
+ import { paginate } from '../../../../db/pagination'
+ import AppContext from '../../../../context'
+-import { InvalidRequestError } from '@atproto/xrpc-server'
+ import { setRepoRev } from '../../../util'
++import { Database } from '../../../../db'
++import {
++  FeedHydrationState,
++  FeedRow,
++  FeedService,
++} from '../../../../services/feed'
++import { ActorService } from '../../../../services/actor'
++import { GraphService } from '../../../../services/graph'
++import { createPipeline } from '../../../../pipeline'
+ 
+ export default function (server: Server, ctx: AppContext) {
++  const getAuthorFeed = createPipeline(
++    skeleton,
++    hydration,
++    noBlocksOrMutedReposts,
++    presentation,
++  )
+   server.app.bsky.feed.getAuthorFeed({
+     auth: ctx.authOptionalAccessOrRoleVerifier,
+     handler: async ({ params, auth, res }) => {
+-      const { actor, limit, cursor, filter } = params
+-      const viewer =
+-        auth.credentials.type === 'access' ? auth.credentials.did : null
+-
+       const db = ctx.db.getReplica()
+-      const { ref } = db.db.dynamic
+-
+-      // first verify there is not a block between requester & subject
+-      if (viewer !== null) {
+-        const blocks = await ctx.services.graph(db).getBlocks(viewer, actor)
+-        if (blocks.blocking) {
+-          throw new InvalidRequestError(
+-            `Requester has blocked actor: ${actor}`,
+-            'BlockedActor',
+-          )
+-        } else if (blocks.blockedBy) {
+-          throw new InvalidRequestError(
+-            `Requester is blocked by actor: $${actor}`,
+-            'BlockedByActor',
+-          )
+-        }
+-      }
+-
+       const actorService = ctx.services.actor(db)
+       const feedService = ctx.services.feed(db)
+       const graphService = ctx.services.graph(db)
++      const viewer =
++        auth.credentials.type === 'access' ? auth.credentials.did : null
+ 
+-      // maybe resolve did first
+-      const actorRes = await actorService.getActor(actor)
+-      if (!actorRes) {
+-        throw new InvalidRequestError('Profile not found')
+-      }
+-      const actorDid = actorRes.did
+-
+-      // defaults to posts, reposts, and replies
+-      let feedItemsQb = feedService
+-        .selectFeedItemQb()
+-        .where('originatorDid', '=', actorDid)
+-
+-      if (filter === 'posts_with_media') {
+-        feedItemsQb = feedItemsQb
+-          // and only your own posts/reposts
+-          .where('post.creator', '=', actorDid)
+-          // only posts with media
+-          .whereExists((qb) =>
+-            qb
+-              .selectFrom('post_embed_image')
+-              .select('post_embed_image.postUri')
+-              .whereRef('post_embed_image.postUri', '=', 'feed_item.postUri'),
+-          )
+-      } else if (filter === 'posts_no_replies') {
+-        feedItemsQb = feedItemsQb.where((qb) =>
+-          qb
+-            .where('post.replyParent', 'is', null)
+-            .orWhere('type', '=', 'repost'),
+-        )
+-      }
+-
+-      const keyset = new FeedKeyset(
+-        ref('feed_item.sortAt'),
+-        ref('feed_item.cid'),
+-      )
+-
+-      feedItemsQb = paginate(feedItemsQb, {
+-        limit,
+-        cursor,
+-        keyset,
+-      })
+-
+-      const [feedItems, repoRev] = await Promise.all([
+-        feedItemsQb.execute(),
++      const [result, repoRev] = await Promise.all([
++        getAuthorFeed(
++          { ...params, viewer },
++          { db, actorService, feedService, graphService },
++        ),
+         actorService.getRepoRev(viewer),
+       ])
+-      setRepoRev(res, repoRev)
+ 
+-      const feedItemsSafe = await graphService.filterBlocksAndMutes(feedItems, {
+-        getBlockPairs(item) {
+-          if (viewer) {
+-            return [[viewer, item.postAuthorDid]]
+-          }
+-        },
+-        getMutePairs(item) {
+-          // Hide reposts of muted content
+-          if (viewer && item.type === 'repost') {
+-            return [[viewer, item.postAuthorDid]]
+-          }
+-        },
+-      })
+-
+-      const feed = await feedService.hydrateFeed(feedItemsSafe, viewer)
++      setRepoRev(res, repoRev)
+ 
+       return {
+         encoding: 'application/json',
+-        body: {
+-          feed,
+-          cursor: keyset.packFromResult(feedItems),
+-        },
++        body: result,
+       }
+     },
+   })
+ }
++
++export const skeleton = async (
++  params: Params,
++  ctx: Context,
++): Promise<SkeletonState> => {
++  const { cursor, limit, actor, filter, viewer } = params
++  const { db, actorService, feedService, graphService } = ctx
++  const { ref } = db.db.dynamic
++
++  // maybe resolve did first
++  const actorRes = await actorService.getActor(actor)
++  if (!actorRes) {
++    throw new InvalidRequestError('Profile not found')
++  }
++  const actorDid = actorRes.did
++
++  // verify there is not a block between requester & subject
++  if (viewer !== null) {
++    const blocks = await graphService.getBlockState([[viewer, actorDid]])
++    if (blocks.blocking([viewer, actorDid])) {
++      throw new InvalidRequestError(
++        `Requester has blocked actor: ${actor}`,
++        'BlockedActor',
++      )
++    }
++    if (blocks.blockedBy([viewer, actorDid])) {
++      throw new InvalidRequestError(
++        `Requester is blocked by actor: $${actor}`,
++        'BlockedByActor',
++      )
++    }
++  }
++
++  // defaults to posts, reposts, and replies
++  let feedItemsQb = feedService
++    .selectFeedItemQb()
++    .where('originatorDid', '=', actorDid)
++
++  if (filter === 'posts_with_media') {
++    feedItemsQb = feedItemsQb
++      // and only your own posts/reposts
++      .where('post.creator', '=', actorDid)
++      // only posts with media
++      .whereExists((qb) =>
++        qb
++          .selectFrom('post_embed_image')
++          .select('post_embed_image.postUri')
++          .whereRef('post_embed_image.postUri', '=', 'feed_item.postUri'),
++      )
++  } else if (filter === 'posts_no_replies') {
++    feedItemsQb = feedItemsQb.where((qb) =>
++      qb.where('post.replyParent', 'is', null).orWhere('type', '=', 'repost'),
++    )
++  }
++
++  const keyset = new FeedKeyset(ref('feed_item.sortAt'), ref('feed_item.cid'))
++
++  feedItemsQb = paginate(feedItemsQb, {
++    limit,
++    cursor,
++    keyset,
++  })
++
++  const feedItems = await feedItemsQb.execute()
++
++  return {
++    params,
++    feedItems,
++    cursor: keyset.packFromResult(feedItems),
++  }
++}
++
++const hydration = async (state: SkeletonState, ctx: Context) => {
++  const { feedService } = ctx
++  const { params, feedItems } = state
++  const refs = feedService.feedItemRefs(feedItems)
++  const hydrated = await feedService.feedHydration({
++    ...refs,
++    viewer: params.viewer,
++  })
++  return { ...state, ...hydrated }
++}
++
++const noBlocksOrMutedReposts = (state: HydrationState) => {
++  const { viewer } = state.params
++  state.feedItems = state.feedItems.filter((item) => {
++    if (!viewer) return true
++    return (
++      !state.bam.block([viewer, item.postAuthorDid]) &&
++      (item.type === 'post' || !state.bam.mute([viewer, item.postAuthorDid]))
++    )
++  })
++  return state
++}
++
++const presentation = (state: HydrationState, ctx: Context) => {
++  const { feedService } = ctx
++  const { feedItems, cursor, params } = state
++  const feed = feedService.views.formatFeed(feedItems, state, {
++    viewer: params.viewer,
++  })
++  return { feed, cursor }
++}
++
++type Context = {
++  db: Database
++  actorService: ActorService
++  feedService: FeedService
++  graphService: GraphService
++}
++
++type Params = QueryParams & { viewer: string | null }
++
++type SkeletonState = {
++  params: Params
++  feedItems: FeedRow[]
++  cursor?: string
++}
++
++type HydrationState = SkeletonState & FeedHydrationState
+diff --git a/packages/bsky/src/api/app/bsky/feed/getFeed.ts b/packages/bsky/src/api/app/bsky/feed/getFeed.ts
+index 1f300791ba4..8af159decd3 100644
+--- a/packages/bsky/src/api/app/bsky/feed/getFeed.ts
++++ b/packages/bsky/src/api/app/bsky/feed/getFeed.ts
+@@ -13,48 +13,45 @@ import {
+ import { AtpAgent, AppBskyFeedGetFeedSkeleton } from '@atproto/api'
+ import { QueryParams as GetFeedParams } from '../../../../lexicon/types/app/bsky/feed/getFeed'
+ import { OutputSchema as SkeletonOutput } from '../../../../lexicon/types/app/bsky/feed/getFeedSkeleton'
++import { SkeletonFeedPost } from '../../../../lexicon/types/app/bsky/feed/defs'
+ import { Server } from '../../../../lexicon'
+ import AppContext from '../../../../context'
+ import { AlgoResponse } from '../../../../feed-gen/types'
+ import { Database } from '../../../../db'
++import {
++  FeedHydrationState,
++  FeedRow,
++  FeedService,
++} from '../../../../services/feed'
++import { createPipeline } from '../../../../pipeline'
+ 
+ export default function (server: Server, ctx: AppContext) {
++  const getFeed = createPipeline(
++    skeleton,
++    hydration,
++    noBlocksOrMutes,
++    presentation,
++  )
+   server.app.bsky.feed.getFeed({
+     auth: ctx.authVerifierAnyAudience,
+     handler: async ({ params, auth, req }) => {
+-      const { feed } = params
+-      const viewer = auth.credentials.did
+-
+       const db = ctx.db.getReplica()
+       const feedService = ctx.services.feed(db)
+-      const localAlgo = ctx.algos[feed]
+-
+-      const timerSkele = new ServerTimer('skele').start()
+-      const skeleton =
+-        localAlgo !== undefined
+-          ? await localAlgo(ctx, params, viewer)
+-          : await skeletonFromFeedGen(
+-              ctx,
+-              db,
+-              params,
+-              viewer,
+-              req.headers['authorization'],
+-            )
+-      timerSkele.stop()
+-
+-      const timerHydr = new ServerTimer('hydr').start()
+-      const cleanedFeed = await ctx.services
+-        .feed(db)
+-        .cleanFeedSkeleton(skeleton.feed, viewer)
+-      const hydrated = await feedService.hydrateFeed(cleanedFeed, viewer)
+-      timerHydr.stop()
++      const viewer = auth.credentials.did
++
++      const { timerSkele, timerHydr, ...result } = await getFeed(
++        { ...params, viewer },
++        {
++          db,
++          feedService,
++          appCtx: ctx,
++          authorization: req.headers['authorization'],
++        },
++      )
+ 
+       return {
+         encoding: 'application/json',
+-        body: {
+-          ...skeleton,
+-          feed: hydrated,
+-        },
++        body: result,
+         headers: {
+           'server-timing': serverTimingHeader([timerSkele, timerHydr]),
+         },
+@@ -63,13 +60,94 @@ export default function (server: Server, ctx: AppContext) {
+   })
+ }
+ 
+-async function skeletonFromFeedGen(
+-  ctx: AppContext,
+-  db: Database,
++const skeleton = async (
++  params: Params,
++  ctx: Context,
++): Promise<SkeletonState> => {
++  const timerSkele = new ServerTimer('skele').start()
++  const localAlgo = ctx.appCtx.algos[params.feed]
++  const feedParams: GetFeedParams = {
++    feed: params.feed,
++    limit: params.limit,
++    cursor: params.cursor,
++  }
++  const { feedItems, cursor, ...passthrough } =
++    localAlgo !== undefined
++      ? await localAlgo(ctx.appCtx, params, params.viewer)
++      : await skeletonFromFeedGen(ctx, feedParams)
++  return {
++    params,
++    cursor,
++    feedItems,
++    timerSkele: timerSkele.stop(),
++    passthrough,
++  }
++}
++
++const hydration = async (state: SkeletonState, ctx: Context) => {
++  const timerHydr = new ServerTimer('hydr').start()
++  const { feedService } = ctx
++  const { params, feedItems } = state
++  const refs = feedService.feedItemRefs(feedItems)
++  const hydrated = await feedService.feedHydration({
++    ...refs,
++    viewer: params.viewer,
++  })
++  return { ...state, ...hydrated, timerHydr: timerHydr.stop() }
++}
++
++const noBlocksOrMutes = (state: HydrationState) => {
++  const { viewer } = state.params
++  state.feedItems = state.feedItems.filter(
++    (item) =>
++      !state.bam.block([viewer, item.postAuthorDid]) &&
++      !state.bam.block([viewer, item.originatorDid]) &&
++      !state.bam.mute([viewer, item.postAuthorDid]) &&
++      !state.bam.mute([viewer, item.originatorDid]),
++  )
++  return state
++}
++
++const presentation = (state: HydrationState, ctx: Context) => {
++  const { feedService } = ctx
++  const { feedItems, cursor, passthrough, params } = state
++  const feed = feedService.views.formatFeed(feedItems, state, {
++    viewer: params.viewer,
++  })
++  return {
++    feed,
++    cursor,
++    timerSkele: state.timerSkele,
++    timerHydr: state.timerHydr,
++    ...passthrough,
++  }
++}
++
++type Context = {
++  db: Database
++  feedService: FeedService
++  appCtx: AppContext
++  authorization?: string
++}
++
++type Params = GetFeedParams & { viewer: string }
++
++type SkeletonState = {
++  params: Params
++  feedItems: FeedRow[]
++  passthrough: Record<string, unknown> // pass through additional items in feedgen response
++  cursor?: string
++  timerSkele: ServerTimer
++}
++
++type HydrationState = SkeletonState &
++  FeedHydrationState & { feedItems: FeedRow[]; timerHydr: ServerTimer }
++
++const skeletonFromFeedGen = async (
++  ctx: Context,
+   params: GetFeedParams,
+-  viewer: string,
+-  authorization?: string,
+-): Promise<AlgoResponse> {
++): Promise<AlgoResponse> => {
++  const { db, appCtx, authorization } = ctx
+   const { feed } = params
+   // Resolve and fetch feed skeleton
+   const found = await db.db
+@@ -84,7 +162,7 @@ async function skeletonFromFeedGen(
+ 
+   let resolved: DidDocument | null
+   try {
+-    resolved = await ctx.idResolver.did.resolve(feedDid)
++    resolved = await appCtx.idResolver.did.resolve(feedDid)
+   } catch (err) {
+     if (err instanceof PoorlyFormattedDidDocumentError) {
+       throw new InvalidRequestError(`invalid did document: ${feedDid}`)
+@@ -108,7 +186,7 @@ async function skeletonFromFeedGen(
+   try {
+     // @TODO currently passthrough auth headers from pds
+     const headers: Record<string, string> = authorization
+-      ? { authorization }
++      ? { authorization: authorization }
+       : {}
+     const result = await agent.api.app.bsky.feed.getFeedSkeleton(params, {
+       headers,
+@@ -132,8 +210,34 @@ async function skeletonFromFeedGen(
+     throw err
+   }
+ 
+-  return {
+-    ...skeleton,
+-    feed: skeleton.feed.slice(0, params.limit), // enforce limit
++  const { feed: feedSkele, ...skele } = skeleton
++  const feedItems = await skeletonToFeedItems(
++    feedSkele.slice(0, params.limit),
++    ctx,
++  )
++
++  return { ...skele, feedItems }
++}
++
++const skeletonToFeedItems = async (
++  skeleton: SkeletonFeedPost[],
++  ctx: Context,
++): Promise<FeedRow[]> => {
++  const { feedService } = ctx
++  const feedItemUris = skeleton.map(getSkeleFeedItemUri)
++  const feedItemsRaw = await feedService.getFeedItems(feedItemUris)
++  const results: FeedRow[] = []
++  for (const skeleItem of skeleton) {
++    const feedItem = feedItemsRaw[getSkeleFeedItemUri(skeleItem)]
++    if (feedItem && feedItem.postUri === skeleItem.post) {
++      results.push(feedItem)
++    }
+   }
++  return results
++}
++
++const getSkeleFeedItemUri = (item: SkeletonFeedPost) => {
++  return typeof item.reason?.repost === 'string'
++    ? item.reason.repost
++    : item.post
+ }
+diff --git a/packages/bsky/src/api/app/bsky/feed/getFeedGenerator.ts b/packages/bsky/src/api/app/bsky/feed/getFeedGenerator.ts
+index 1612e19c9b4..6207ba1e1aa 100644
+--- a/packages/bsky/src/api/app/bsky/feed/getFeedGenerator.ts
++++ b/packages/bsky/src/api/app/bsky/feed/getFeedGenerator.ts
+@@ -47,7 +47,7 @@ export default function (server: Server, ctx: AppContext) {
+         )
+       }
+ 
+-      const profiles = await actorService.views.profiles(
++      const profiles = await actorService.views.profilesBasic(
+         [feedInfo.creator],
+         viewer,
+       )
+diff --git a/packages/bsky/src/api/app/bsky/feed/getFeedGenerators.ts b/packages/bsky/src/api/app/bsky/feed/getFeedGenerators.ts
+index 861fe719b1e..a973ee6c2fb 100644
+--- a/packages/bsky/src/api/app/bsky/feed/getFeedGenerators.ts
++++ b/packages/bsky/src/api/app/bsky/feed/getFeedGenerators.ts
+@@ -1,33 +1,79 @@
+ import { Server } from '../../../../lexicon'
+ import AppContext from '../../../../context'
++import { FeedGenInfo, FeedService } from '../../../../services/feed'
++import { createPipeline, noRules } from '../../../../pipeline'
++import { ActorInfoMap, ActorService } from '../../../../services/actor'
++import { Database } from '../../../../db'
+ 
+ export default function (server: Server, ctx: AppContext) {
++  const getFeedGenerators = createPipeline(
++    skeleton,
++    hydration,
++    noRules,
++    presentation,
++  )
+   server.app.bsky.feed.getFeedGenerators({
+     auth: ctx.authOptionalVerifier,
+     handler: async ({ params, auth }) => {
+       const { feeds } = params
+-      const requester = auth.credentials.did
+-
++      const viewer = auth.credentials.did
+       const db = ctx.db.getReplica()
+       const feedService = ctx.services.feed(db)
+       const actorService = ctx.services.actor(db)
+ 
+-      const genInfos = await feedService.getFeedGeneratorInfos(feeds, requester)
+-      const genList = Object.values(genInfos)
+-
+-      const creators = genList.map((gen) => gen.creator)
+-      const profiles = await actorService.views.profiles(creators, requester)
+-
+-      const feedViews = genList.map((gen) =>
+-        feedService.views.formatFeedGeneratorView(gen, profiles),
++      const view = await getFeedGenerators(
++        { feeds, viewer },
++        { db, feedService, actorService },
+       )
+ 
+       return {
+         encoding: 'application/json',
+-        body: {
+-          feeds: feedViews,
+-        },
++        body: view,
+       }
+     },
+   })
+ }
++
++const skeleton = async (params: Params, ctx: Context) => {
++  const { feedService } = ctx
++  const genInfos = await feedService.getFeedGeneratorInfos(
++    params.feeds,
++    params.viewer,
++  )
++  return {
++    params,
++    generators: Object.values(genInfos),
++  }
++}
++
++const hydration = async (state: SkeletonState, ctx: Context) => {
++  const { actorService } = ctx
++  const profiles = await actorService.views.profilesBasic(
++    state.generators.map((gen) => gen.creator),
++    state.params.viewer,
++  )
++  return {
++    ...state,
++    profiles,
++  }
++}
++
++const presentation = (state: HydrationState, ctx: Context) => {
++  const { feedService } = ctx
++  const feeds = state.generators.map((gen) =>
++    feedService.views.formatFeedGeneratorView(gen, state.profiles),
++  )
++  return { feeds }
++}
++
++type Context = {
++  db: Database
++  feedService: FeedService
++  actorService: ActorService
++}
++
++type Params = { viewer: string | null; feeds: string[] }
++
++type SkeletonState = { params: Params; generators: FeedGenInfo[] }
++
++type HydrationState = SkeletonState & { profiles: ActorInfoMap }
+diff --git a/packages/bsky/src/api/app/bsky/feed/getFeedSkeleton.ts b/packages/bsky/src/api/app/bsky/feed/getFeedSkeleton.ts
+index 998f787aa3f..5d65044f86f 100644
+--- a/packages/bsky/src/api/app/bsky/feed/getFeedSkeleton.ts
++++ b/packages/bsky/src/api/app/bsky/feed/getFeedSkeleton.ts
+@@ -1,6 +1,7 @@
+ import { InvalidRequestError } from '@atproto/xrpc-server'
+ import { Server } from '../../../../lexicon'
+ import AppContext from '../../../../context'
++import { toSkeletonItem } from '../../../../feed-gen/types'
+ 
+ export default function (server: Server, ctx: AppContext) {
+   server.app.bsky.feed.getFeedSkeleton({
+@@ -19,7 +20,8 @@ export default function (server: Server, ctx: AppContext) {
+       return {
+         encoding: 'application/json',
+         body: {
+-          feed: result.feed, // @TODO should we proactively filter blocks/mutes from the skeleton, or treat this similar to other cusotm feeds?
++          // @TODO should we proactively filter blocks/mutes from the skeleton, or treat this similar to other custom feeds?
++          feed: result.feedItems.map(toSkeletonItem),
+           cursor: result.cursor,
+         },
+       }
+diff --git a/packages/bsky/src/api/app/bsky/feed/getLikes.ts b/packages/bsky/src/api/app/bsky/feed/getLikes.ts
+index 8f8fb986a4f..893617f6bb0 100644
+--- a/packages/bsky/src/api/app/bsky/feed/getLikes.ts
++++ b/packages/bsky/src/api/app/bsky/feed/getLikes.ts
+@@ -1,78 +1,127 @@
+ import { mapDefined } from '@atproto/common'
+ import { Server } from '../../../../lexicon'
++import { QueryParams } from '../../../../lexicon/types/app/bsky/feed/getLikes'
+ import { paginate, TimeCidKeyset } from '../../../../db/pagination'
+ import AppContext from '../../../../context'
+ import { notSoftDeletedClause } from '../../../../db/util'
++import { BlockAndMuteState, GraphService } from '../../../../services/graph'
++import { ActorInfoMap, ActorService } from '../../../../services/actor'
++import { Actor } from '../../../../db/tables/actor'
++import { Database } from '../../../../db'
++import { createPipeline } from '../../../../pipeline'
+ 
+ export default function (server: Server, ctx: AppContext) {
++  const getLikes = createPipeline(skeleton, hydration, noBlocks, presentation)
+   server.app.bsky.feed.getLikes({
+     auth: ctx.authOptionalVerifier,
+     handler: async ({ params, auth }) => {
+-      const { uri, limit, cursor, cid } = params
+-      const requester = auth.credentials.did
+-
+       const db = ctx.db.getReplica()
++      const actorService = ctx.services.actor(db)
+       const graphService = ctx.services.graph(db)
++      const viewer = auth.credentials.did
+ 
+-      const { ref } = db.db.dynamic
+-
+-      let builder = db.db
+-        .selectFrom('like')
+-        .where('like.subject', '=', uri)
+-        .innerJoin('actor as creator', 'creator.did', 'like.creator')
+-        .where(notSoftDeletedClause(ref('creator')))
+-        .selectAll('creator')
+-        .select([
+-          'like.cid as cid',
+-          'like.createdAt as createdAt',
+-          'like.indexedAt as indexedAt',
+-          'like.sortAt as sortAt',
+-        ])
+-
+-      if (cid) {
+-        builder = builder.where('like.subjectCid', '=', cid)
+-      }
+-
+-      const keyset = new TimeCidKeyset(ref('like.sortAt'), ref('like.cid'))
+-      builder = paginate(builder, {
+-        limit,
+-        cursor,
+-        keyset,
+-      })
+-
+-      const likesRes = await builder.execute()
+-
+-      const likesSafe = await graphService.filterBlocksAndMutes(likesRes, {
+-        getBlockPairs: (like) => {
+-          if (requester) {
+-            return [[requester, like.did]]
+-          }
+-        },
+-      })
+-
+-      const actors = await ctx.services
+-        .actor(db)
+-        .views.profiles(likesSafe, requester)
+-
+-      const likes = mapDefined(likesSafe, (row) =>
+-        actors[row.did]
+-          ? {
+-              createdAt: row.createdAt,
+-              indexedAt: row.indexedAt,
+-              actor: actors[row.did],
+-            }
+-          : undefined,
++      const result = await getLikes(
++        { ...params, viewer },
++        { db, actorService, graphService },
+       )
+ 
+       return {
+         encoding: 'application/json',
+-        body: {
+-          uri,
+-          cid,
+-          cursor: keyset.packFromResult(likesRes),
+-          likes,
+-        },
++        body: result,
+       }
+     },
+   })
+ }
++
++const skeleton = async (
++  params: Params,
++  ctx: Context,
++): Promise<SkeletonState> => {
++  const { db } = ctx
++  const { uri, cid, limit, cursor } = params
++  const { ref } = db.db.dynamic
++
++  let builder = db.db
++    .selectFrom('like')
++    .where('like.subject', '=', uri)
++    .innerJoin('actor as creator', 'creator.did', 'like.creator')
++    .where(notSoftDeletedClause(ref('creator')))
++    .selectAll('creator')
++    .select([
++      'like.cid as cid',
++      'like.createdAt as createdAt',
++      'like.indexedAt as indexedAt',
++      'like.sortAt as sortAt',
++    ])
++
++  if (cid) {
++    builder = builder.where('like.subjectCid', '=', cid)
++  }
++
++  const keyset = new TimeCidKeyset(ref('like.sortAt'), ref('like.cid'))
++  builder = paginate(builder, {
++    limit,
++    cursor,
++    keyset,
++  })
++
++  const likes = await builder.execute()
++
++  return { params, likes, cursor: keyset.packFromResult(likes) }
++}
++
++const hydration = async (state: SkeletonState, ctx: Context) => {
++  const { graphService, actorService } = ctx
++  const { params, likes } = state
++  const { viewer } = params
++  const [actors, bam] = await Promise.all([
++    actorService.views.profiles(likes, viewer),
++    graphService.getBlockAndMuteState(
++      viewer ? likes.map((like) => [viewer, like.did]) : [],
++    ),
++  ])
++  return { ...state, bam, actors }
++}
++
++const noBlocks = (state: HydrationState) => {
++  const { viewer } = state.params
++  if (!viewer) return state
++  state.likes = state.likes.filter(
++    (item) => !state.bam.block([viewer, item.did]),
++  )
++  return state
++}
++
++const presentation = (state: HydrationState) => {
++  const { params, likes, actors, cursor } = state
++  const { uri, cid } = params
++  const likesView = mapDefined(likes, (like) =>
++    actors[like.did]
++      ? {
++          createdAt: like.createdAt,
++          indexedAt: like.indexedAt,
++          actor: actors[like.did],
++        }
++      : undefined,
++  )
++  return { likes: likesView, cursor, uri, cid }
++}
++
++type Context = {
++  db: Database
++  actorService: ActorService
++  graphService: GraphService
++}
++
++type Params = QueryParams & { viewer: string | null }
++
++type SkeletonState = {
++  params: Params
++  likes: (Actor & { createdAt: string })[]
++  cursor?: string
++}
++
++type HydrationState = SkeletonState & {
++  bam: BlockAndMuteState
++  actors: ActorInfoMap
++}
+diff --git a/packages/bsky/src/api/app/bsky/feed/getPostThread.ts b/packages/bsky/src/api/app/bsky/feed/getPostThread.ts
+index 4fc310fe0ab..5c3b4b178e9 100644
+--- a/packages/bsky/src/api/app/bsky/feed/getPostThread.ts
++++ b/packages/bsky/src/api/app/bsky/feed/getPostThread.ts
+@@ -1,97 +1,104 @@
+ import { InvalidRequestError } from '@atproto/xrpc-server'
+ import { Server } from '../../../../lexicon'
+-import AppContext from '../../../../context'
+-import {
+-  FeedRow,
+-  ActorInfoMap,
+-  PostEmbedViews,
+-  PostBlocksMap,
+-} from '../../../../services/feed/types'
+-import { FeedService, PostInfoMap } from '../../../../services/feed'
+-import { Labels } from '../../../../services/label'
+ import {
+   BlockedPost,
+   NotFoundPost,
+   ThreadViewPost,
+   isNotFoundPost,
+ } from '../../../../lexicon/types/app/bsky/feed/defs'
++import { QueryParams } from '../../../../lexicon/types/app/bsky/feed/getPostThread'
++import AppContext from '../../../../context'
++import {
++  FeedService,
++  FeedRow,
++  FeedHydrationState,
++} from '../../../../services/feed'
+ import {
+   getAncestorsAndSelfQb,
+   getDescendentsQb,
+ } from '../../../../services/util/post'
+ import { Database } from '../../../../db'
+ import { setRepoRev } from '../../../util'
+-
+-export type PostThread = {
+-  post: FeedRow
+-  parent?: PostThread | ParentNotFoundError
+-  replies?: PostThread[]
+-}
++import { createPipeline, noRules } from '../../../../pipeline'
++import { ActorService } from '../../../../services/actor'
+ 
+ export default function (server: Server, ctx: AppContext) {
++  const getPostThread = createPipeline(
++    skeleton,
++    hydration,
++    noRules, // handled in presentation: 3p block-violating replies are turned to #blockedPost, viewer blocks turned to #notFoundPost.
++    presentation,
++  )
+   server.app.bsky.feed.getPostThread({
+     auth: ctx.authOptionalVerifier,
+     handler: async ({ params, auth, res }) => {
+-      const { uri, depth, parentHeight } = params
+-      const requester = auth.credentials.did
+-
++      const viewer = auth.credentials.did
+       const db = ctx.db.getReplica('thread')
+-      const actorService = ctx.services.actor(db)
+       const feedService = ctx.services.feed(db)
+-      const labelService = ctx.services.label(db)
++      const actorService = ctx.services.actor(db)
+ 
+-      const [threadData, repoRev] = await Promise.all([
+-        getThreadData(ctx, db, uri, depth, parentHeight),
+-        actorService.getRepoRev(requester),
++      const [result, repoRev] = await Promise.allSettled([
++        getPostThread({ ...params, viewer }, { db, feedService, actorService }),
++        actorService.getRepoRev(viewer),
+       ])
+-      setRepoRev(res, repoRev)
+ 
+-      if (!threadData) {
+-        throw new InvalidRequestError(`Post not found: ${uri}`, 'NotFound')
++      if (repoRev.status === 'fulfilled') {
++        setRepoRev(res, repoRev.value)
+       }
+-      const relevant = getRelevantIds(threadData)
+-      const [actors, posts, labels] = await Promise.all([
+-        actorService.views.profiles(Array.from(relevant.dids), requester, {
+-          skipLabels: true,
+-        }),
+-        feedService.getPostInfos(Array.from(relevant.uris), requester),
+-        labelService.getLabelsForSubjects([...relevant.uris, ...relevant.dids]),
+-      ])
+-      const blocks = await feedService.blocksForPosts(posts)
+-      const embeds = await feedService.embedsForPosts(posts, blocks, requester)
+-
+-      const thread = composeThread(
+-        threadData,
+-        feedService,
+-        posts,
+-        actors,
+-        embeds,
+-        blocks,
+-        labels,
+-      )
+-
+-      if (isNotFoundPost(thread)) {
+-        // @TODO technically this could be returned as a NotFoundPost based on lexicon
+-        throw new InvalidRequestError(`Post not found: ${uri}`, 'NotFound')
++      if (result.status === 'rejected') {
++        throw result.reason
+       }
+ 
+       return {
+         encoding: 'application/json',
+-        body: { thread },
++        body: result.value,
+       }
+     },
+   })
+ }
+ 
++const skeleton = async (params: Params, ctx: Context) => {
++  const threadData = await getThreadData(params, ctx)
++  if (!threadData) {
++    throw new InvalidRequestError(`Post not found: ${params.uri}`, 'NotFound')
++  }
++  return { params, threadData }
++}
++
++const hydration = async (state: SkeletonState, ctx: Context) => {
++  const { feedService } = ctx
++  const {
++    threadData,
++    params: { viewer },
++  } = state
++  const relevant = getRelevantIds(threadData)
++  const hydrated = await feedService.feedHydration({ ...relevant, viewer })
++  return { ...state, ...hydrated }
++}
++
++const presentation = (state: HydrationState, ctx: Context) => {
++  const { params } = state
++  const thread = composeThread(state.threadData, state, ctx)
++  if (isNotFoundPost(thread)) {
++    // @TODO technically this could be returned as a NotFoundPost based on lexicon
++    throw new InvalidRequestError(`Post not found: ${params.uri}`, 'NotFound')
++  }
++  return { thread }
++}
++
+ const composeThread = (
+   threadData: PostThread,
+-  feedService: FeedService,
+-  posts: PostInfoMap,
+-  actors: ActorInfoMap,
+-  embeds: PostEmbedViews,
+-  blocks: PostBlocksMap,
+-  labels: Labels,
++  state: HydrationState,
++  ctx: Context,
+ ) => {
++  const { feedService, actorService } = ctx
++  const { profiles, posts, embeds, blocks, labels, params } = state
++
++  const actors = actorService.views.profileBasicPresentation(
++    Object.keys(profiles),
++    state,
++    { viewer: params.viewer },
++  )
+   const post = feedService.views.formatPostView(
+     threadData.post.postUri,
+     actors,
+@@ -134,30 +141,14 @@ const composeThread = (
+         notFound: true,
+       }
+     } else {
+-      parent = composeThread(
+-        threadData.parent,
+-        feedService,
+-        posts,
+-        actors,
+-        embeds,
+-        blocks,
+-        labels,
+-      )
++      parent = composeThread(threadData.parent, state, ctx)
+     }
+   }
+ 
+   let replies: (ThreadViewPost | NotFoundPost | BlockedPost)[] | undefined
+   if (threadData.replies) {
+     replies = threadData.replies.flatMap((reply) => {
+-      const thread = composeThread(
+-        reply,
+-        feedService,
+-        posts,
+-        actors,
+-        embeds,
+-        blocks,
+-        labels,
+-      )
++      const thread = composeThread(reply, state, ctx)
+       // e.g. don't bother including #postNotFound reply placeholders for takedowns. either way matches api contract.
+       const skip = []
+       return isNotFoundPost(thread) ? skip : thread
+@@ -195,13 +186,12 @@ const getRelevantIds = (
+ }
+ 
+ const getThreadData = async (
+-  ctx: AppContext,
+-  db: Database,
+-  uri: string,
+-  depth: number,
+-  parentHeight: number,
++  params: Params,
++  ctx: Context,
+ ): Promise<PostThread | null> => {
+-  const feedService = ctx.services.feed(db)
++  const { db, feedService } = ctx
++  const { uri, depth, parentHeight } = params
++
+   const [parents, children] = await Promise.all([
+     getAncestorsAndSelfQb(db.db, { uri, parentHeight })
+       .selectFrom('ancestor')
+@@ -278,3 +268,24 @@ class ParentNotFoundError extends Error {
+     super(`Parent not found: ${uri}`)
+   }
+ }
++
++type PostThread = {
++  post: FeedRow
++  parent?: PostThread | ParentNotFoundError
++  replies?: PostThread[]
++}
++
++type Context = {
++  db: Database
++  feedService: FeedService
++  actorService: ActorService
++}
++
++type Params = QueryParams & { viewer: string | null }
++
++type SkeletonState = {
++  params: Params
++  threadData: PostThread
++}
++
++type HydrationState = SkeletonState & FeedHydrationState
+diff --git a/packages/bsky/src/api/app/bsky/feed/getPosts.ts b/packages/bsky/src/api/app/bsky/feed/getPosts.ts
+index 4b092a5e717..fc35b203034 100644
+--- a/packages/bsky/src/api/app/bsky/feed/getPosts.ts
++++ b/packages/bsky/src/api/app/bsky/feed/getPosts.ts
+@@ -1,36 +1,96 @@
+-import * as common from '@atproto/common'
++import { dedupeStrs } from '@atproto/common'
++import { AtUri } from '@atproto/syntax'
+ import { Server } from '../../../../lexicon'
++import { QueryParams } from '../../../../lexicon/types/app/bsky/feed/getPosts'
+ import AppContext from '../../../../context'
+-import { PostView } from '../../../../lexicon/types/app/bsky/feed/defs'
++import { Database } from '../../../../db'
++import { FeedHydrationState, FeedService } from '../../../../services/feed'
++import { createPipeline } from '../../../../pipeline'
++import { ActorService } from '../../../../services/actor'
+ 
+ export default function (server: Server, ctx: AppContext) {
++  const getPosts = createPipeline(skeleton, hydration, noBlocks, presentation)
+   server.app.bsky.feed.getPosts({
+     auth: ctx.authOptionalVerifier,
+     handler: async ({ params, auth }) => {
+-      const requester = auth.credentials.did
+-
+-      const uris = common.dedupeStrs(params.uris)
+-
+       const db = ctx.db.getReplica()
+-      const postViews = await ctx.services
+-        .feed(db)
+-        .getPostViews(uris, requester)
+-
+-      const posts: PostView[] = []
+-      for (const uri of uris) {
+-        const post = postViews[uri]
+-        const isBlocked =
+-          post?.author.viewer?.blockedBy === true ||
+-          typeof post?.author.viewer?.blocking === 'string'
+-        if (post && !isBlocked) {
+-          posts.push(post)
+-        }
+-      }
++      const feedService = ctx.services.feed(db)
++      const actorService = ctx.services.actor(db)
++      const viewer = auth.credentials.did
++
++      const results = await getPosts(
++        { ...params, viewer },
++        { db, feedService, actorService },
++      )
+ 
+       return {
+         encoding: 'application/json',
+-        body: { posts },
++        body: results,
+       }
+     },
+   })
+ }
++
++const skeleton = async (params: Params) => {
++  return { params, postUris: dedupeStrs(params.uris) }
++}
++
++const hydration = async (state: SkeletonState, ctx: Context) => {
++  const { feedService } = ctx
++  const { params, postUris } = state
++  const uris = new Set<string>(postUris)
++  const dids = new Set<string>(postUris.map((uri) => new AtUri(uri).hostname))
++  const hydrated = await feedService.feedHydration({
++    uris,
++    dids,
++    viewer: params.viewer,
++  })
++  return { ...state, ...hydrated }
++}
++
++const noBlocks = (state: HydrationState) => {
++  const { viewer } = state.params
++  state.postUris = state.postUris.filter((uri) => {
++    const post = state.posts[uri]
++    if (!viewer || !post) return true
++    return !state.bam.block([viewer, post.creator])
++  })
++  return state
++}
++
++const presentation = (state: HydrationState, ctx: Context) => {
++  const { feedService, actorService } = ctx
++  const { postUris, profiles, params } = state
++  const SKIP = []
++  const actors = actorService.views.profileBasicPresentation(
++    Object.keys(profiles),
++    state,
++    { viewer: params.viewer },
++  )
++  const postViews = postUris.flatMap((uri) => {
++    const postView = feedService.views.formatPostView(
++      uri,
++      actors,
++      state.posts,
++      state.embeds,
++      state.labels,
++    )
++    return postView ?? SKIP
++  })
++  return { posts: postViews }
++}
++
++type Context = {
++  db: Database
++  feedService: FeedService
++  actorService: ActorService
++}
++
++type Params = QueryParams & { viewer: string | null }
++
++type SkeletonState = {
++  params: Params
++  postUris: string[]
++}
++
++type HydrationState = SkeletonState & FeedHydrationState
+diff --git a/packages/bsky/src/api/app/bsky/feed/getRepostedBy.ts b/packages/bsky/src/api/app/bsky/feed/getRepostedBy.ts
+index 1939507d02c..5ca5c452b63 100644
+--- a/packages/bsky/src/api/app/bsky/feed/getRepostedBy.ts
++++ b/packages/bsky/src/api/app/bsky/feed/getRepostedBy.ts
+@@ -1,62 +1,118 @@
++import { mapDefined } from '@atproto/common'
+ import { Server } from '../../../../lexicon'
++import { QueryParams } from '../../../../lexicon/types/app/bsky/feed/getRepostedBy'
+ import { paginate, TimeCidKeyset } from '../../../../db/pagination'
+ import AppContext from '../../../../context'
+ import { notSoftDeletedClause } from '../../../../db/util'
++import { Database } from '../../../../db'
++import { ActorInfoMap, ActorService } from '../../../../services/actor'
++import { BlockAndMuteState, GraphService } from '../../../../services/graph'
++import { Actor } from '../../../../db/tables/actor'
++import { createPipeline } from '../../../../pipeline'
+ 
+ export default function (server: Server, ctx: AppContext) {
++  const getRepostedBy = createPipeline(
++    skeleton,
++    hydration,
++    noBlocks,
++    presentation,
++  )
+   server.app.bsky.feed.getRepostedBy({
+     auth: ctx.authOptionalVerifier,
+     handler: async ({ params, auth }) => {
+-      const { uri, limit, cursor, cid } = params
+-      const requester = auth.credentials.did
+       const db = ctx.db.getReplica()
++      const actorService = ctx.services.actor(db)
+       const graphService = ctx.services.graph(db)
+-      const { ref } = db.db.dynamic
+-
+-      let builder = db.db
+-        .selectFrom('repost')
+-        .where('repost.subject', '=', uri)
+-        .innerJoin('actor as creator', 'creator.did', 'repost.creator')
+-        .where(notSoftDeletedClause(ref('creator')))
+-        .selectAll('creator')
+-        .select(['repost.cid as cid', 'repost.sortAt as sortAt'])
+-
+-      if (cid) {
+-        builder = builder.where('repost.subjectCid', '=', cid)
+-      }
++      const viewer = auth.credentials.did
+ 
+-      const keyset = new TimeCidKeyset(ref('repost.sortAt'), ref('repost.cid'))
+-      builder = paginate(builder, {
+-        limit,
+-        cursor,
+-        keyset,
+-      })
+-
+-      const repostedByRes = await builder.execute()
+-      const repostedBySafe = await graphService.filterBlocksAndMutes(
+-        repostedByRes,
+-        {
+-          getBlockPairs(item) {
+-            if (requester) {
+-              return [[requester, item.did]]
+-            }
+-          },
+-        },
++      const result = await getRepostedBy(
++        { ...params, viewer },
++        { db, actorService, graphService },
+       )
+ 
+-      const repostedBy = await ctx.services
+-        .actor(db)
+-        .views.hydrateProfiles(repostedBySafe, requester)
+-
+       return {
+         encoding: 'application/json',
+-        body: {
+-          uri,
+-          cid,
+-          repostedBy,
+-          cursor: keyset.packFromResult(repostedByRes),
+-        },
++        body: result,
+       }
+     },
+   })
+ }
++
++const skeleton = async (
++  params: Params,
++  ctx: Context,
++): Promise<SkeletonState> => {
++  const { db } = ctx
++  const { limit, cursor, uri, cid } = params
++  const { ref } = db.db.dynamic
++
++  let builder = db.db
++    .selectFrom('repost')
++    .where('repost.subject', '=', uri)
++    .innerJoin('actor as creator', 'creator.did', 'repost.creator')
++    .where(notSoftDeletedClause(ref('creator')))
++    .selectAll('creator')
++    .select(['repost.cid as cid', 'repost.sortAt as sortAt'])
++
++  if (cid) {
++    builder = builder.where('repost.subjectCid', '=', cid)
++  }
++
++  const keyset = new TimeCidKeyset(ref('repost.sortAt'), ref('repost.cid'))
++  builder = paginate(builder, {
++    limit,
++    cursor,
++    keyset,
++  })
++
++  const repostedBy = await builder.execute()
++  return { params, repostedBy, cursor: keyset.packFromResult(repostedBy) }
++}
++
++const hydration = async (state: SkeletonState, ctx: Context) => {
++  const { graphService, actorService } = ctx
++  const { params, repostedBy } = state
++  const { viewer } = params
++  const [actors, bam] = await Promise.all([
++    actorService.views.profiles(repostedBy, viewer),
++    graphService.getBlockAndMuteState(
++      viewer ? repostedBy.map((item) => [viewer, item.did]) : [],
++    ),
++  ])
++  return { ...state, bam, actors }
++}
++
++const noBlocks = (state: HydrationState) => {
++  const { viewer } = state.params
++  if (!viewer) return state
++  state.repostedBy = state.repostedBy.filter(
++    (item) => !state.bam.block([viewer, item.did]),
++  )
++  return state
++}
++
++const presentation = (state: HydrationState) => {
++  const { params, repostedBy, actors, cursor } = state
++  const { uri, cid } = params
++  const repostedByView = mapDefined(repostedBy, (item) => actors[item.did])
++  return { repostedBy: repostedByView, cursor, uri, cid }
++}
++
++type Context = {
++  db: Database
++  actorService: ActorService
++  graphService: GraphService
++}
++
++type Params = QueryParams & { viewer: string | null }
++
++type SkeletonState = {
++  params: Params
++  repostedBy: Actor[]
++  cursor?: string
++}
++
++type HydrationState = SkeletonState & {
++  bam: BlockAndMuteState
++  actors: ActorInfoMap
++}
+diff --git a/packages/bsky/src/api/app/bsky/feed/getSuggestedFeeds.ts b/packages/bsky/src/api/app/bsky/feed/getSuggestedFeeds.ts
+index 23bf349f53e..c437e0d0dcb 100644
+--- a/packages/bsky/src/api/app/bsky/feed/getSuggestedFeeds.ts
++++ b/packages/bsky/src/api/app/bsky/feed/getSuggestedFeeds.ts
+@@ -9,6 +9,7 @@ export default function (server: Server, ctx: AppContext) {
+ 
+       const db = ctx.db.getReplica()
+       const feedService = ctx.services.feed(db)
++      const actorService = ctx.services.actor(db)
+       const feedsRes = await db.db
+         .selectFrom('suggested_feed')
+         .orderBy('suggested_feed.order', 'asc')
+@@ -22,7 +23,7 @@ export default function (server: Server, ctx: AppContext) {
+       const genList = Object.values(genInfos)
+ 
+       const creators = genList.map((gen) => gen.creator)
+-      const profiles = await feedService.getActorInfos(creators, viewer)
++      const profiles = await actorService.views.profilesBasic(creators, viewer)
+ 
+       const feedViews = genList.map((gen) =>
+         feedService.views.formatFeedGeneratorView(gen, profiles),
+diff --git a/packages/bsky/src/api/app/bsky/feed/getTimeline.ts b/packages/bsky/src/api/app/bsky/feed/getTimeline.ts
+index 3e083c1c955..e9d61764a99 100644
+--- a/packages/bsky/src/api/app/bsky/feed/getTimeline.ts
++++ b/packages/bsky/src/api/app/bsky/feed/getTimeline.ts
+@@ -4,53 +4,57 @@ import { FeedAlgorithm, FeedKeyset, getFeedDateThreshold } from '../util/feed'
+ import { paginate } from '../../../../db/pagination'
+ import AppContext from '../../../../context'
+ import { Database } from '../../../../db'
+-import { SkeletonFeedPost } from '../../../../lexicon/types/app/bsky/feed/defs'
++import { QueryParams } from '../../../../lexicon/types/app/bsky/feed/getTimeline'
+ import { setRepoRev } from '../../../util'
++import {
++  FeedHydrationState,
++  FeedRow,
++  FeedService,
++} from '../../../../services/feed'
++import { createPipeline } from '../../../../pipeline'
+ 
+ export default function (server: Server, ctx: AppContext) {
++  const getTimeline = createPipeline(
++    skeleton,
++    hydration,
++    noBlocksOrMutes,
++    presentation,
++  )
+   server.app.bsky.feed.getTimeline({
+     auth: ctx.authVerifier,
+     handler: async ({ params, auth, res }) => {
+-      const { algorithm, limit, cursor } = params
+       const viewer = auth.credentials.did
+-
+-      if (algorithm && algorithm !== FeedAlgorithm.ReverseChronological) {
+-        throw new InvalidRequestError(`Unsupported algorithm: ${algorithm}`)
+-      }
+       const db = ctx.db.getReplica('timeline')
++      const feedService = ctx.services.feed(db)
++      const actorService = ctx.services.actor(db)
+ 
+-      const [skeleton, repoRev] = await Promise.all([
+-        getTimelineSkeleton(db, viewer, limit, cursor),
+-        ctx.services.actor(db).getRepoRev(viewer),
++      const [result, repoRev] = await Promise.all([
++        getTimeline({ ...params, viewer }, { db, feedService }),
++        actorService.getRepoRev(viewer),
+       ])
+-      setRepoRev(res, repoRev)
+ 
+-      const feedService = ctx.services.feed(db)
+-      const feedItems = await feedService.cleanFeedSkeleton(
+-        skeleton.feed,
+-        viewer,
+-      )
+-      const feed = await feedService.hydrateFeed(feedItems, viewer)
++      setRepoRev(res, repoRev)
+ 
+       return {
+         encoding: 'application/json',
+-        body: {
+-          feed,
+-          cursor: skeleton.cursor,
+-        },
++        body: result,
+       }
+     },
+   })
+ }
+ 
+-export const getTimelineSkeleton = async (
+-  db: Database,
+-  viewer: string,
+-  limit: number,
+-  cursor?: string,
+-): Promise<{ feed: SkeletonFeedPost[]; cursor?: string }> => {
++export const skeleton = async (
++  params: Params,
++  ctx: Context,
++): Promise<SkeletonState> => {
++  const { cursor, limit, algorithm, viewer } = params
++  const { db } = ctx
+   const { ref } = db.db.dynamic
+ 
++  if (algorithm && algorithm !== FeedAlgorithm.ReverseChronological) {
++    throw new InvalidRequestError(`Unsupported algorithm: ${algorithm}`)
++  }
++
+   const keyset = new FeedKeyset(ref('feed_item.sortAt'), ref('feed_item.cid'))
+   const sortFrom = keyset.unpack(cursor)?.primary
+ 
+@@ -98,26 +102,67 @@ export const getTimelineSkeleton = async (
+     selfQb.execute(),
+   ])
+ 
+-  const feedItems = [...followRes, ...selfRes]
++  const feedItems: FeedRow[] = [...followRes, ...selfRes]
+     .sort((a, b) => {
+       if (a.sortAt > b.sortAt) return -1
+       if (a.sortAt < b.sortAt) return 1
+       return a.cid > b.cid ? -1 : 1
+     })
+     .slice(0, limit)
+-  const feed = feedItems.map((item) => ({
+-    post: item.postUri,
+-    reason:
+-      item.uri === item.postUri
+-        ? undefined
+-        : {
+-            $type: 'app.bsky.feed.defs#skeletonReasonRepost',
+-            repost: item.uri,
+-          },
+-  }))
+ 
+   return {
++    params,
++    feedItems,
+     cursor: keyset.packFromResult(feedItems),
+-    feed,
+   }
+ }
++
++const hydration = async (
++  state: SkeletonState,
++  ctx: Context,
++): Promise<HydrationState> => {
++  const { feedService } = ctx
++  const { params, feedItems } = state
++  const refs = feedService.feedItemRefs(feedItems)
++  const hydrated = await feedService.feedHydration({
++    ...refs,
++    viewer: params.viewer,
++  })
++  return { ...state, ...hydrated }
++}
++
++const noBlocksOrMutes = (state: HydrationState): HydrationState => {
++  const { viewer } = state.params
++  state.feedItems = state.feedItems.filter(
++    (item) =>
++      !state.bam.block([viewer, item.postAuthorDid]) &&
++      !state.bam.block([viewer, item.originatorDid]) &&
++      !state.bam.mute([viewer, item.postAuthorDid]) &&
++      !state.bam.mute([viewer, item.originatorDid]),
++  )
++  return state
++}
++
++const presentation = (state: HydrationState, ctx: Context) => {
++  const { feedService } = ctx
++  const { feedItems, cursor, params } = state
++  const feed = feedService.views.formatFeed(feedItems, state, {
++    viewer: params.viewer,
++  })
++  return { feed, cursor }
++}
++
++type Context = {
++  db: Database
++  feedService: FeedService
++}
++
++type Params = QueryParams & { viewer: string }
++
++type SkeletonState = {
++  params: Params
++  feedItems: FeedRow[]
++  cursor?: string
++}
++
++type HydrationState = SkeletonState & FeedHydrationState
+diff --git a/packages/bsky/src/api/app/bsky/graph/getBlocks.ts b/packages/bsky/src/api/app/bsky/graph/getBlocks.ts
+index bb9c0fd2356..66b809d70ce 100644
+--- a/packages/bsky/src/api/app/bsky/graph/getBlocks.ts
++++ b/packages/bsky/src/api/app/bsky/graph/getBlocks.ts
+@@ -33,10 +33,7 @@ export default function (server: Server, ctx: AppContext) {
+       const blocksRes = await blocksReq.execute()
+ 
+       const actorService = ctx.services.actor(db)
+-      const blocks = await actorService.views.hydrateProfiles(
+-        blocksRes,
+-        requester,
+-      )
++      const blocks = await actorService.views.profilesList(blocksRes, requester)
+ 
+       return {
+         encoding: 'application/json',
+diff --git a/packages/bsky/src/api/app/bsky/graph/getFollowers.ts b/packages/bsky/src/api/app/bsky/graph/getFollowers.ts
+index 0a95a2f826f..1382c1f87c7 100644
+--- a/packages/bsky/src/api/app/bsky/graph/getFollowers.ts
++++ b/packages/bsky/src/api/app/bsky/graph/getFollowers.ts
+@@ -1,84 +1,146 @@
++import { mapDefined } from '@atproto/common'
+ import { InvalidRequestError } from '@atproto/xrpc-server'
+ import { Server } from '../../../../lexicon'
+-import { paginate, TimeCidKeyset } from '../../../../db/pagination'
++import { QueryParams } from '../../../../lexicon/types/app/bsky/graph/getFollowers'
+ import AppContext from '../../../../context'
++import { Database } from '../../../../db'
+ import { notSoftDeletedClause } from '../../../../db/util'
++import { paginate, TimeCidKeyset } from '../../../../db/pagination'
++import { Actor } from '../../../../db/tables/actor'
++import { ActorInfoMap, ActorService } from '../../../../services/actor'
++import { BlockAndMuteState, GraphService } from '../../../../services/graph'
++import { createPipeline } from '../../../../pipeline'
+ 
+ export default function (server: Server, ctx: AppContext) {
++  const getFollowers = createPipeline(
++    skeleton,
++    hydration,
++    noBlocksInclInvalid,
++    presentation,
++  )
+   server.app.bsky.graph.getFollowers({
+     auth: ctx.authOptionalAccessOrRoleVerifier,
+     handler: async ({ params, auth }) => {
+-      const { actor, limit, cursor } = params
+-      const requester = 'did' in auth.credentials ? auth.credentials.did : null
+-      const canViewTakendownProfile =
+-        auth.credentials.type === 'role' && auth.credentials.triage
+       const db = ctx.db.getReplica()
+-      const { ref } = db.db.dynamic
+-
+       const actorService = ctx.services.actor(db)
+       const graphService = ctx.services.graph(db)
++      const viewer = 'did' in auth.credentials ? auth.credentials.did : null
++      const canViewTakendownProfile =
++        auth.credentials.type === 'role' && auth.credentials.triage
+ 
+-      const subjectRes = await actorService.getActor(
+-        actor,
+-        canViewTakendownProfile,
++      const result = await getFollowers(
++        { ...params, viewer, canViewTakendownProfile },
++        { db, actorService, graphService },
+       )
+-      if (!subjectRes) {
+-        throw new InvalidRequestError(`Actor not found: ${actor}`)
++
++      return {
++        encoding: 'application/json',
++        body: result,
+       }
++    },
++  })
++}
+ 
+-      let followersReq = db.db
+-        .selectFrom('follow')
+-        .where('follow.subjectDid', '=', subjectRes.did)
+-        .innerJoin('actor as creator', 'creator.did', 'follow.creator')
+-        .if(!canViewTakendownProfile, (qb) =>
+-          qb.where(notSoftDeletedClause(ref('creator'))),
+-        )
+-        .selectAll('creator')
+-        .select(['follow.cid as cid', 'follow.sortAt as sortAt'])
++const skeleton = async (
++  params: Params,
++  ctx: Context,
++): Promise<SkeletonState> => {
++  const { db, actorService } = ctx
++  const { limit, cursor, actor, canViewTakendownProfile } = params
++  const { ref } = db.db.dynamic
+ 
+-      const keyset = new TimeCidKeyset(ref('follow.sortAt'), ref('follow.cid'))
+-      followersReq = paginate(followersReq, {
+-        limit,
+-        cursor,
+-        keyset,
+-      })
++  const subject = await actorService.getActor(actor, canViewTakendownProfile)
++  if (!subject) {
++    throw new InvalidRequestError(`Actor not found: ${actor}`)
++  }
+ 
+-      const followersRes = await followersReq.execute()
+-      const followersSafe = await graphService.filterBlocksAndMutes(
+-        followersRes,
+-        {
+-          getBlockPairs(item) {
+-            return requester
+-              ? [
+-                  [requester, item.did],
+-                  [subjectRes.did, item.did],
+-                ]
+-              : [[subjectRes.did, item.did]]
+-          },
+-        },
+-      )
++  let followersReq = db.db
++    .selectFrom('follow')
++    .where('follow.subjectDid', '=', subject.did)
++    .innerJoin('actor as creator', 'creator.did', 'follow.creator')
++    .if(!canViewTakendownProfile, (qb) =>
++      qb.where(notSoftDeletedClause(ref('creator'))),
++    )
++    .selectAll('creator')
++    .select(['follow.cid as cid', 'follow.sortAt as sortAt'])
+ 
+-      const [followers, subject] = await Promise.all([
+-        actorService.views.hydrateProfiles(followersSafe, requester, {
+-          includeSoftDeleted: canViewTakendownProfile,
+-        }),
+-        actorService.views.profile(subjectRes, requester, {
+-          includeSoftDeleted: canViewTakendownProfile,
+-        }),
+-      ])
++  const keyset = new TimeCidKeyset(ref('follow.sortAt'), ref('follow.cid'))
++  followersReq = paginate(followersReq, {
++    limit,
++    cursor,
++    keyset,
++  })
+ 
+-      if (!subject) {
+-        throw new InvalidRequestError(`Actor not found: ${actor}`)
+-      }
++  const followers = await followersReq.execute()
++  return {
++    params,
++    followers,
++    subject,
++    cursor: keyset.packFromResult(followers),
++  }
++}
+ 
+-      return {
+-        encoding: 'application/json',
+-        body: {
+-          subject,
+-          followers,
+-          cursor: keyset.packFromResult(followersRes),
+-        },
+-      }
+-    },
+-  })
++const hydration = async (state: SkeletonState, ctx: Context) => {
++  const { graphService, actorService } = ctx
++  const { params, followers, subject } = state
++  const { viewer } = params
++  const [actors, bam] = await Promise.all([
++    actorService.views.profiles([subject, ...followers], viewer),
++    graphService.getBlockAndMuteState(
++      followers.flatMap((item) => {
++        if (viewer) {
++          return [
++            [viewer, item.did],
++            [subject.did, item.did],
++          ]
++        }
++        return [[subject.did, item.did]]
++      }),
++    ),
++  ])
++  return { ...state, bam, actors }
++}
++
++const noBlocksInclInvalid = (state: HydrationState) => {
++  const { subject } = state
++  const { viewer } = state.params
++  state.followers = state.followers.filter(
++    (item) =>
++      !state.bam.block([subject.did, item.did]) &&
++      (!viewer || !state.bam.block([viewer, item.did])),
++  )
++  return state
++}
++
++const presentation = (state: HydrationState) => {
++  const { params, followers, subject, actors, cursor } = state
++  const subjectView = actors[subject.did]
++  const followersView = mapDefined(followers, (item) => actors[item.did])
++  if (!subjectView) {
++    throw new InvalidRequestError(`Actor not found: ${params.actor}`)
++  }
++  return { followers: followersView, subject: subjectView, cursor }
++}
++
++type Context = {
++  db: Database
++  actorService: ActorService
++  graphService: GraphService
++}
++
++type Params = QueryParams & {
++  viewer: string | null
++  canViewTakendownProfile: boolean
++}
++
++type SkeletonState = {
++  params: Params
++  followers: Actor[]
++  subject: Actor
++  cursor?: string
++}
++
++type HydrationState = SkeletonState & {
++  bam: BlockAndMuteState
++  actors: ActorInfoMap
+ }
+diff --git a/packages/bsky/src/api/app/bsky/graph/getFollows.ts b/packages/bsky/src/api/app/bsky/graph/getFollows.ts
+index 2ac1762fb01..34b5d72a605 100644
+--- a/packages/bsky/src/api/app/bsky/graph/getFollows.ts
++++ b/packages/bsky/src/api/app/bsky/graph/getFollows.ts
+@@ -1,81 +1,147 @@
++import { mapDefined } from '@atproto/common'
+ import { InvalidRequestError } from '@atproto/xrpc-server'
+ import { Server } from '../../../../lexicon'
+-import { paginate, TimeCidKeyset } from '../../../../db/pagination'
++import { QueryParams } from '../../../../lexicon/types/app/bsky/graph/getFollows'
+ import AppContext from '../../../../context'
++import { Database } from '../../../../db'
+ import { notSoftDeletedClause } from '../../../../db/util'
++import { paginate, TimeCidKeyset } from '../../../../db/pagination'
++import { Actor } from '../../../../db/tables/actor'
++import { ActorInfoMap, ActorService } from '../../../../services/actor'
++import { BlockAndMuteState, GraphService } from '../../../../services/graph'
++import { createPipeline } from '../../../../pipeline'
+ 
+ export default function (server: Server, ctx: AppContext) {
++  const getFollows = createPipeline(
++    skeleton,
++    hydration,
++    noBlocksInclInvalid,
++    presentation,
++  )
+   server.app.bsky.graph.getFollows({
+     auth: ctx.authOptionalAccessOrRoleVerifier,
+     handler: async ({ params, auth }) => {
+-      const { actor, limit, cursor } = params
+-      const requester = 'did' in auth.credentials ? auth.credentials.did : null
+-      const canViewTakendownProfile =
+-        auth.credentials.type === 'role' && auth.credentials.triage
+       const db = ctx.db.getReplica()
+-      const { ref } = db.db.dynamic
+-
+       const actorService = ctx.services.actor(db)
+       const graphService = ctx.services.graph(db)
++      const viewer = 'did' in auth.credentials ? auth.credentials.did : null
++      const canViewTakendownProfile =
++        auth.credentials.type === 'role' && auth.credentials.triage
+ 
+-      const creatorRes = await actorService.getActor(
+-        actor,
+-        canViewTakendownProfile,
++      const result = await getFollows(
++        { ...params, viewer, canViewTakendownProfile },
++        { db, actorService, graphService },
+       )
+-      if (!creatorRes) {
+-        throw new InvalidRequestError(`Actor not found: ${actor}`)
+-      }
+-
+-      let followsReq = db.db
+-        .selectFrom('follow')
+-        .where('follow.creator', '=', creatorRes.did)
+-        .innerJoin('actor as subject', 'subject.did', 'follow.subjectDid')
+-        .if(!canViewTakendownProfile, (qb) =>
+-          qb.where(notSoftDeletedClause(ref('subject'))),
+-        )
+-        .selectAll('subject')
+-        .select(['follow.cid as cid', 'follow.sortAt as sortAt'])
+-
+-      const keyset = new TimeCidKeyset(ref('follow.sortAt'), ref('follow.cid'))
+-      followsReq = paginate(followsReq, {
+-        limit,
+-        cursor,
+-        keyset,
+-      })
+-
+-      const followsRes = await followsReq.execute()
+-      const followsSafe = await graphService.filterBlocksAndMutes(followsRes, {
+-        getBlockPairs(item) {
+-          return requester
+-            ? [
+-                [requester, item.did],
+-                [creatorRes.did, item.did],
+-              ]
+-            : [[creatorRes.did, item.did]]
+-        },
+-      })
+-
+-      const [follows, subject] = await Promise.all([
+-        actorService.views.hydrateProfiles(followsSafe, requester, {
+-          includeSoftDeleted: canViewTakendownProfile,
+-        }),
+-        actorService.views.profile(creatorRes, requester, {
+-          includeSoftDeleted: canViewTakendownProfile,
+-        }),
+-      ])
+-
+-      if (!subject) {
+-        throw new InvalidRequestError(`Actor not found: ${actor}`)
+-      }
+ 
+       return {
+         encoding: 'application/json',
+-        body: {
+-          subject,
+-          follows,
+-          cursor: keyset.packFromResult(followsRes),
+-        },
++        body: result,
+       }
+     },
+   })
+ }
++
++const skeleton = async (
++  params: Params,
++  ctx: Context,
++): Promise<SkeletonState> => {
++  const { db, actorService } = ctx
++  const { limit, cursor, actor, canViewTakendownProfile } = params
++  const { ref } = db.db.dynamic
++
++  const creator = await actorService.getActor(actor, canViewTakendownProfile)
++  if (!creator) {
++    throw new InvalidRequestError(`Actor not found: ${actor}`)
++  }
++
++  let followsReq = db.db
++    .selectFrom('follow')
++    .where('follow.creator', '=', creator.did)
++    .innerJoin('actor as subject', 'subject.did', 'follow.subjectDid')
++    .if(!canViewTakendownProfile, (qb) =>
++      qb.where(notSoftDeletedClause(ref('subject'))),
++    )
++    .selectAll('subject')
++    .select(['follow.cid as cid', 'follow.sortAt as sortAt'])
++
++  const keyset = new TimeCidKeyset(ref('follow.sortAt'), ref('follow.cid'))
++  followsReq = paginate(followsReq, {
++    limit,
++    cursor,
++    keyset,
++  })
++
++  const follows = await followsReq.execute()
++
++  return {
++    params,
++    follows,
++    creator,
++    cursor: keyset.packFromResult(follows),
++  }
++}
++
++const hydration = async (state: SkeletonState, ctx: Context) => {
++  const { graphService, actorService } = ctx
++  const { params, follows, creator } = state
++  const { viewer } = params
++  const [actors, bam] = await Promise.all([
++    actorService.views.profiles([creator, ...follows], viewer),
++    graphService.getBlockAndMuteState(
++      follows.flatMap((item) => {
++        if (viewer) {
++          return [
++            [viewer, item.did],
++            [creator.did, item.did],
++          ]
++        }
++        return [[creator.did, item.did]]
++      }),
++    ),
++  ])
++  return { ...state, bam, actors }
++}
++
++const noBlocksInclInvalid = (state: HydrationState) => {
++  const { creator } = state
++  const { viewer } = state.params
++  state.follows = state.follows.filter(
++    (item) =>
++      !state.bam.block([creator.did, item.did]) &&
++      (!viewer || !state.bam.block([viewer, item.did])),
++  )
++  return state
++}
++
++const presentation = (state: HydrationState) => {
++  const { params, follows, creator, actors, cursor } = state
++  const creatorView = actors[creator.did]
++  const followsView = mapDefined(follows, (item) => actors[item.did])
++  if (!creatorView) {
++    throw new InvalidRequestError(`Actor not found: ${params.actor}`)
++  }
++  return { follows: followsView, subject: creatorView, cursor }
++}
++
++type Context = {
++  db: Database
++  actorService: ActorService
++  graphService: GraphService
++}
++
++type Params = QueryParams & {
++  viewer: string | null
++  canViewTakendownProfile: boolean
++}
++
++type SkeletonState = {
++  params: Params
++  follows: Actor[]
++  creator: Actor
++  cursor?: string
++}
++
++type HydrationState = SkeletonState & {
++  bam: BlockAndMuteState
++  actors: ActorInfoMap
++}
+diff --git a/packages/bsky/src/api/app/bsky/graph/getList.ts b/packages/bsky/src/api/app/bsky/graph/getList.ts
+index 068b35fb6df..5535ae22243 100644
+--- a/packages/bsky/src/api/app/bsky/graph/getList.ts
++++ b/packages/bsky/src/api/app/bsky/graph/getList.ts
+@@ -39,14 +39,18 @@ export default function (server: Server, ctx: AppContext) {
+       const itemsRes = await itemsReq.execute()
+ 
+       const actorService = ctx.services.actor(db)
+-      const profiles = await actorService.views.hydrateProfiles(
++      const profiles = await actorService.views.profilesList(
+         itemsRes,
+         requester,
+       )
+ 
+       const items = profiles.map((subject) => ({ subject }))
+ 
+-      const creator = await actorService.views.profile(listRes, requester)
++      const profilesCreator = await actorService.views.profiles(
++        [listRes],
++        requester,
++      )
++      const creator = profilesCreator[listRes.did]
+       if (!creator) {
+         throw new InvalidRequestError(`Actor not found: ${listRes.handle}`)
+       }
+diff --git a/packages/bsky/src/api/app/bsky/graph/getLists.ts b/packages/bsky/src/api/app/bsky/graph/getLists.ts
+index 966bf0a594b..e6ca61fa9c7 100644
+--- a/packages/bsky/src/api/app/bsky/graph/getLists.ts
++++ b/packages/bsky/src/api/app/bsky/graph/getLists.ts
+@@ -31,19 +31,16 @@ export default function (server: Server, ctx: AppContext) {
+         keyset,
+       })
+ 
+-      const [listsRes, creator] = await Promise.all([
++      const [listsRes, profiles] = await Promise.all([
+         listsReq.execute(),
+-        actorService.views.profile(creatorRes, requester),
++        actorService.views.profiles([creatorRes], requester),
+       ])
+-      if (!creator) {
++      if (!profiles[creatorRes.did]) {
+         throw new InvalidRequestError(`Actor not found: ${actor}`)
+       }
+-      const profileMap = {
+-        [creator.did]: creator,
+-      }
+ 
+       const lists = listsRes.map((row) =>
+-        graphService.formatListView(row, profileMap),
++        graphService.formatListView(row, profiles),
+       )
+ 
+       return {
+diff --git a/packages/bsky/src/api/app/bsky/graph/getMutes.ts b/packages/bsky/src/api/app/bsky/graph/getMutes.ts
+index 0bac37edfdd..e69803d144a 100644
+--- a/packages/bsky/src/api/app/bsky/graph/getMutes.ts
++++ b/packages/bsky/src/api/app/bsky/graph/getMutes.ts
+@@ -38,7 +38,7 @@ export default function (server: Server, ctx: AppContext) {
+         encoding: 'application/json',
+         body: {
+           cursor: keyset.packFromResult(mutesRes),
+-          mutes: await actorService.views.hydrateProfiles(mutesRes, requester),
++          mutes: await actorService.views.profilesList(mutesRes, requester),
+         },
+       }
+     },
+diff --git a/packages/bsky/src/api/app/bsky/notification/listNotifications.ts b/packages/bsky/src/api/app/bsky/notification/listNotifications.ts
+index 6a37838b8c8..7bcc88f12d3 100644
+--- a/packages/bsky/src/api/app/bsky/notification/listNotifications.ts
++++ b/packages/bsky/src/api/app/bsky/notification/listNotifications.ts
+@@ -2,139 +2,198 @@ import { InvalidRequestError } from '@atproto/xrpc-server'
+ import { jsonStringToLex } from '@atproto/lexicon'
+ import { mapDefined } from '@atproto/common'
+ import { Server } from '../../../../lexicon'
+-import { paginate, TimeCidKeyset } from '../../../../db/pagination'
++import { QueryParams } from '../../../../lexicon/types/app/bsky/notification/listNotifications'
+ import AppContext from '../../../../context'
++import { Database } from '../../../../db'
+ import { notSoftDeletedClause } from '../../../../db/util'
+-import { getSelfLabels } from '../../../../services/label'
++import { paginate, TimeCidKeyset } from '../../../../db/pagination'
++import { BlockAndMuteState, GraphService } from '../../../../services/graph'
++import { ActorInfoMap, ActorService } from '../../../../services/actor'
++import { getSelfLabels, Labels, LabelService } from '../../../../services/label'
++import { createPipeline } from '../../../../pipeline'
+ 
+ export default function (server: Server, ctx: AppContext) {
++  const listNotifications = createPipeline(
++    skeleton,
++    hydration,
++    noBlockOrMutes,
++    presentation,
++  )
+   server.app.bsky.notification.listNotifications({
+     auth: ctx.authVerifier,
+     handler: async ({ params, auth }) => {
+-      const { limit, cursor } = params
+-      const requester = auth.credentials.did
+-      if (params.seenAt) {
+-        throw new InvalidRequestError('The seenAt parameter is unsupported')
+-      }
+-
+       const db = ctx.db.getReplica()
++      const actorService = ctx.services.actor(db)
+       const graphService = ctx.services.graph(db)
++      const labelService = ctx.services.label(db)
++      const viewer = auth.credentials.did
+ 
+-      const { ref } = db.db.dynamic
+-      let notifBuilder = db.db
+-        .selectFrom('notification as notif')
+-        .innerJoin('record', 'record.uri', 'notif.recordUri')
+-        .innerJoin('actor as author', 'author.did', 'notif.author')
+-        .where(notSoftDeletedClause(ref('record')))
+-        .where(notSoftDeletedClause(ref('author')))
+-        .where('notif.did', '=', requester)
+-        .where((clause) =>
+-          clause
+-            .where('reasonSubject', 'is', null)
+-            .orWhereExists(
+-              db.db
+-                .selectFrom('record as subject')
+-                .selectAll()
+-                .whereRef('subject.uri', '=', ref('notif.reasonSubject')),
+-            ),
+-        )
+-        .select([
+-          'notif.recordUri as uri',
+-          'notif.recordCid as cid',
+-          'author.did as authorDid',
+-          'author.handle as authorHandle',
+-          'author.indexedAt as authorIndexedAt',
+-          'author.takedownId as authorTakedownId',
+-          'notif.reason as reason',
+-          'notif.reasonSubject as reasonSubject',
+-          'notif.sortAt as indexedAt',
+-          'record.json as recordJson',
+-        ])
+-
+-      const keyset = new NotifsKeyset(
+-        ref('notif.sortAt'),
+-        ref('notif.recordCid'),
++      const result = await listNotifications(
++        { ...params, viewer },
++        { db, actorService, graphService, labelService },
+       )
+-      notifBuilder = paginate(notifBuilder, {
+-        cursor,
+-        limit,
+-        keyset,
+-      })
+-
+-      const actorStateQuery = db.db
+-        .selectFrom('actor_state')
+-        .selectAll()
+-        .where('did', '=', requester)
+-
+-      const [actorState, notifs] = await Promise.all([
+-        actorStateQuery.executeTakeFirst(),
+-        notifBuilder.execute(),
+-      ])
+-
+-      const seenAt = actorState?.lastSeenNotifs
+-
+-      const actorService = ctx.services.actor(db)
+-      const labelService = ctx.services.label(db)
+-      const recordUris = notifs.map((notif) => notif.uri)
+-      const [notifsSafe, authors, labels] = await Promise.all([
+-        graphService.filterBlocksAndMutes(notifs, {
+-          getBlockPairs(item) {
+-            return [[requester, item.authorDid]]
+-          },
+-          getMutePairs(item) {
+-            return [[requester, item.authorDid]]
+-          },
+-        }),
+-        actorService.views.profiles(
+-          notifs.map((notif) => ({
+-            did: notif.authorDid,
+-            handle: notif.authorHandle,
+-            indexedAt: notif.authorIndexedAt,
+-            takedownId: notif.authorTakedownId,
+-          })),
+-          requester,
+-        ),
+-        labelService.getLabelsForUris(recordUris),
+-      ])
+-
+-      const notifications = mapDefined(notifsSafe, (notif) => {
+-        const author = authors[notif.authorDid]
+-        if (!author) return undefined
+-        const record = jsonStringToLex(notif.recordJson) as Record<
+-          string,
+-          unknown
+-        >
+-        const recordLabels = labels[notif.uri] ?? []
+-        const recordSelfLabels = getSelfLabels({
+-          uri: notif.uri,
+-          cid: notif.cid,
+-          record,
+-        })
+-        return {
+-          uri: notif.uri,
+-          cid: notif.cid,
+-          author,
+-          reason: notif.reason,
+-          reasonSubject: notif.reasonSubject || undefined,
+-          record,
+-          isRead: seenAt ? notif.indexedAt <= seenAt : false,
+-          indexedAt: notif.indexedAt,
+-          labels: [...recordLabels, ...recordSelfLabels],
+-        }
+-      })
+ 
+       return {
+         encoding: 'application/json',
+-        body: {
+-          notifications,
+-          cursor: keyset.packFromResult(notifs),
+-        },
++        body: result,
+       }
+     },
+   })
+ }
+ 
+-type NotifRow = { indexedAt: string; cid: string }
++const skeleton = async (
++  params: Params,
++  ctx: Context,
++): Promise<SkeletonState> => {
++  const { db } = ctx
++  const { limit, cursor, viewer } = params
++  const { ref } = db.db.dynamic
++  if (params.seenAt) {
++    throw new InvalidRequestError('The seenAt parameter is unsupported')
++  }
++  let notifBuilder = db.db
++    .selectFrom('notification as notif')
++    .innerJoin('record', 'record.uri', 'notif.recordUri')
++    .innerJoin('actor as author', 'author.did', 'notif.author')
++    .where(notSoftDeletedClause(ref('record')))
++    .where(notSoftDeletedClause(ref('author')))
++    .where('notif.did', '=', viewer)
++    .where((clause) =>
++      clause
++        .where('reasonSubject', 'is', null)
++        .orWhereExists(
++          db.db
++            .selectFrom('record as subject')
++            .selectAll()
++            .whereRef('subject.uri', '=', ref('notif.reasonSubject')),
++        ),
++    )
++    .select([
++      'notif.recordUri as uri',
++      'notif.recordCid as cid',
++      'author.did as authorDid',
++      'author.handle as authorHandle',
++      'author.indexedAt as authorIndexedAt',
++      'author.takedownId as authorTakedownId',
++      'notif.reason as reason',
++      'notif.reasonSubject as reasonSubject',
++      'notif.sortAt as indexedAt',
++      'record.json as recordJson',
++    ])
++
++  const keyset = new NotifsKeyset(ref('notif.sortAt'), ref('notif.recordCid'))
++  notifBuilder = paginate(notifBuilder, {
++    cursor,
++    limit,
++    keyset,
++  })
++
++  const actorStateQuery = db.db
++    .selectFrom('actor_state')
++    .selectAll()
++    .where('did', '=', viewer)
++
++  const [notifs, actorState] = await Promise.all([
++    notifBuilder.execute(),
++    actorStateQuery.executeTakeFirst(),
++  ])
++
++  return {
++    params,
++    notifs,
++    cursor: keyset.packFromResult(notifs),
++    lastSeenNotifs: actorState?.lastSeenNotifs,
++  }
++}
++
++const hydration = async (state: SkeletonState, ctx: Context) => {
++  const { graphService, actorService, labelService } = ctx
++  const { params, notifs } = state
++  const { viewer } = params
++  const dids = notifs.map((notif) => notif.authorDid)
++  const uris = notifs.map((notif) => notif.uri)
++  const [actors, labels, bam] = await Promise.all([
++    actorService.views.profiles(dids, viewer),
++    labelService.getLabelsForUris(uris),
++    graphService.getBlockAndMuteState(dids.map((did) => [viewer, did])),
++  ])
++  return { ...state, actors, labels, bam }
++}
++
++const noBlockOrMutes = (state: HydrationState) => {
++  const { viewer } = state.params
++  state.notifs = state.notifs.filter(
++    (item) =>
++      !state.bam.block([viewer, item.authorDid]) &&
++      !state.bam.mute([viewer, item.authorDid]),
++  )
++  return state
++}
++
++const presentation = (state: HydrationState) => {
++  const { notifs, cursor, actors, labels, lastSeenNotifs } = state
++  const notifications = mapDefined(notifs, (notif) => {
++    const author = actors[notif.authorDid]
++    if (!author) return undefined
++    const record = jsonStringToLex(notif.recordJson) as Record<string, unknown>
++    const recordLabels = labels[notif.uri] ?? []
++    const recordSelfLabels = getSelfLabels({
++      uri: notif.uri,
++      cid: notif.cid,
++      record,
++    })
++    return {
++      uri: notif.uri,
++      cid: notif.cid,
++      author,
++      reason: notif.reason,
++      reasonSubject: notif.reasonSubject || undefined,
++      record,
++      isRead: lastSeenNotifs ? notif.indexedAt <= lastSeenNotifs : false,
++      indexedAt: notif.indexedAt,
++      labels: [...recordLabels, ...recordSelfLabels],
++    }
++  })
++  return { notifications, cursor }
++}
++
++type Context = {
++  db: Database
++  actorService: ActorService
++  graphService: GraphService
++  labelService: LabelService
++}
++
++type Params = QueryParams & {
++  viewer: string
++}
++
++type SkeletonState = {
++  params: Params
++  notifs: NotifRow[]
++  lastSeenNotifs?: string
++  cursor?: string
++}
++
++type HydrationState = SkeletonState & {
++  bam: BlockAndMuteState
++  actors: ActorInfoMap
++  labels: Labels
++}
++
++type NotifRow = {
++  indexedAt: string
++  cid: string
++  uri: string
++  authorDid: string
++  authorHandle: string | null
++  authorIndexedAt: string
++  authorTakedownId: number | null
++  reason: string
++  reasonSubject: string | null
++  recordJson: string
++}
++
+ class NotifsKeyset extends TimeCidKeyset<NotifRow> {
+   labelResult(result: NotifRow) {
+     return { primary: result.indexedAt, secondary: result.cid }
+diff --git a/packages/bsky/src/api/app/bsky/unspecced/getTimelineSkeleton.ts b/packages/bsky/src/api/app/bsky/unspecced/getTimelineSkeleton.ts
+index fa0e8626ca9..821eeda655f 100644
+--- a/packages/bsky/src/api/app/bsky/unspecced/getTimelineSkeleton.ts
++++ b/packages/bsky/src/api/app/bsky/unspecced/getTimelineSkeleton.ts
+@@ -1,21 +1,25 @@
+ import { Server } from '../../../../lexicon'
+ import AppContext from '../../../../context'
+-import { getTimelineSkeleton } from '../feed/getTimeline'
++import { skeleton } from '../feed/getTimeline'
++import { toSkeletonItem } from '../../../../feed-gen/types'
+ 
+ // THIS IS A TEMPORARY UNSPECCED ROUTE
+ export default function (server: Server, ctx: AppContext) {
+   server.app.bsky.unspecced.getTimelineSkeleton({
+     auth: ctx.authVerifier,
+     handler: async ({ auth, params }) => {
+-      const { limit, cursor } = params
++      const db = ctx.db.getReplica('timeline')
++      const feedService = ctx.services.feed(db)
+       const viewer = auth.credentials.did
+ 
+-      const db = ctx.db.getReplica('timeline')
+-      const skeleton = await getTimelineSkeleton(db, viewer, limit, cursor)
++      const result = await skeleton({ ...params, viewer }, { db, feedService })
+ 
+       return {
+         encoding: 'application/json',
+-        body: skeleton,
++        body: {
++          feed: result.feedItems.map(toSkeletonItem),
++          cursor: result.cursor,
++        },
+       }
+     },
+   })
+diff --git a/packages/bsky/src/feed-gen/best-of-follows.ts b/packages/bsky/src/feed-gen/best-of-follows.ts
+index d40fc58e860..c1d4ee4d21b 100644
+--- a/packages/bsky/src/feed-gen/best-of-follows.ts
++++ b/packages/bsky/src/feed-gen/best-of-follows.ts
+@@ -1,6 +1,6 @@
+ import { InvalidRequestError } from '@atproto/xrpc-server'
+ import { QueryParams as SkeletonParams } from '../lexicon/types/app/bsky/feed/getFeedSkeleton'
+-import { AlgoHandler, AlgoResponse, toSkeletonItem } from './types'
++import { AlgoHandler, AlgoResponse } from './types'
+ import { GenericKeyset, paginate } from '../db/pagination'
+ import AppContext from '../context'
+ 
+@@ -39,7 +39,7 @@ const handler: AlgoHandler = async (
+   const feedItems = await builder.execute()
+ 
+   return {
+-    feed: feedItems.map(toSkeletonItem),
++    feedItems,
+     cursor: keyset.packFromResult(feedItems),
+   }
+ }
+diff --git a/packages/bsky/src/feed-gen/bsky-team.ts b/packages/bsky/src/feed-gen/bsky-team.ts
+index a00546dd692..3592dd42e26 100644
+--- a/packages/bsky/src/feed-gen/bsky-team.ts
++++ b/packages/bsky/src/feed-gen/bsky-team.ts
+@@ -2,7 +2,7 @@ import { NotEmptyArray } from '@atproto/common'
+ import { QueryParams as SkeletonParams } from '../lexicon/types/app/bsky/feed/getFeedSkeleton'
+ import AppContext from '../context'
+ import { paginate } from '../db/pagination'
+-import { AlgoHandler, AlgoResponse, toSkeletonItem } from './types'
++import { AlgoHandler, AlgoResponse } from './types'
+ import { FeedKeyset } from '../api/app/bsky/util/feed'
+ 
+ const BSKY_TEAM: NotEmptyArray<string> = [
+@@ -34,7 +34,7 @@ const handler: AlgoHandler = async (
+   const feedItems = await feedQb.execute()
+ 
+   return {
+-    feed: feedItems.map(toSkeletonItem),
++    feedItems,
+     cursor: keyset.packFromResult(feedItems),
+   }
+ }
+diff --git a/packages/bsky/src/feed-gen/hot-classic.ts b/packages/bsky/src/feed-gen/hot-classic.ts
+index 265be4bfa5d..c042cea7116 100644
+--- a/packages/bsky/src/feed-gen/hot-classic.ts
++++ b/packages/bsky/src/feed-gen/hot-classic.ts
+@@ -2,7 +2,7 @@ import AppContext from '../context'
+ import { NotEmptyArray } from '@atproto/common'
+ import { QueryParams as SkeletonParams } from '../lexicon/types/app/bsky/feed/getFeedSkeleton'
+ import { paginate } from '../db/pagination'
+-import { AlgoHandler, AlgoResponse, toSkeletonItem } from './types'
++import { AlgoHandler, AlgoResponse } from './types'
+ import { FeedKeyset } from '../api/app/bsky/util/feed'
+ import { valuesList } from '../db/util'
+ 
+@@ -47,7 +47,7 @@ const handler: AlgoHandler = async (
+   const feedItems = await feedQb.execute()
+ 
+   return {
+-    feed: feedItems.map(toSkeletonItem),
++    feedItems,
+     cursor: keyset.packFromResult(feedItems),
+   }
+ }
+diff --git a/packages/bsky/src/feed-gen/mutuals.ts b/packages/bsky/src/feed-gen/mutuals.ts
+index 623b0cfb67e..65a3311a524 100644
+--- a/packages/bsky/src/feed-gen/mutuals.ts
++++ b/packages/bsky/src/feed-gen/mutuals.ts
+@@ -1,7 +1,7 @@
+ import { QueryParams as SkeletonParams } from '../lexicon/types/app/bsky/feed/getFeedSkeleton'
+ import AppContext from '../context'
+ import { paginate } from '../db/pagination'
+-import { AlgoHandler, AlgoResponse, toSkeletonItem } from './types'
++import { AlgoHandler, AlgoResponse } from './types'
+ import { FeedKeyset, getFeedDateThreshold } from '../api/app/bsky/util/feed'
+ 
+ const handler: AlgoHandler = async (
+@@ -45,7 +45,7 @@ const handler: AlgoHandler = async (
+   const feedItems = await feedQb.execute()
+ 
+   return {
+-    feed: feedItems.map(toSkeletonItem),
++    feedItems,
+     cursor: keyset.packFromResult(feedItems),
+   }
+ }
+diff --git a/packages/bsky/src/feed-gen/types.ts b/packages/bsky/src/feed-gen/types.ts
+index 9f4c91716d5..11ebf53fb39 100644
+--- a/packages/bsky/src/feed-gen/types.ts
++++ b/packages/bsky/src/feed-gen/types.ts
+@@ -1,9 +1,10 @@
+ import AppContext from '../context'
+ import { SkeletonFeedPost } from '../lexicon/types/app/bsky/feed/defs'
+ import { QueryParams as SkeletonParams } from '../lexicon/types/app/bsky/feed/getFeedSkeleton'
++import { FeedRow } from '../services/feed'
+ 
+ export type AlgoResponse = {
+-  feed: SkeletonFeedPost[]
++  feedItems: FeedRow[]
+   cursor?: string
+ }
+ 
+diff --git a/packages/bsky/src/feed-gen/whats-hot.ts b/packages/bsky/src/feed-gen/whats-hot.ts
+index bf74bc02e8d..511c767804e 100644
+--- a/packages/bsky/src/feed-gen/whats-hot.ts
++++ b/packages/bsky/src/feed-gen/whats-hot.ts
+@@ -1,7 +1,7 @@
+ import { NotEmptyArray } from '@atproto/common'
+ import { InvalidRequestError } from '@atproto/xrpc-server'
+ import { QueryParams as SkeletonParams } from '../lexicon/types/app/bsky/feed/getFeedSkeleton'
+-import { AlgoHandler, AlgoResponse, toSkeletonItem } from './types'
++import { AlgoHandler, AlgoResponse } from './types'
+ import { GenericKeyset, paginate } from '../db/pagination'
+ import AppContext from '../context'
+ import { valuesList } from '../db/util'
+@@ -51,6 +51,11 @@ const handler: AlgoHandler = async (
+       sql<FeedItemType>`${'post'}`.as('type'),
+       'post.uri as uri',
+       'post.uri as postUri',
++      'post.creator as originatorDid',
++      'post.creator as postAuthorDid',
++      'post.replyParent as replyParent',
++      'post.replyRoot as replyRoot',
++      'post.indexedAt as sortAt',
+       'candidate.score',
+       'candidate.cid',
+     ])
+@@ -61,7 +66,7 @@ const handler: AlgoHandler = async (
+   const feedItems = await builder.execute()
+ 
+   return {
+-    feed: feedItems.map(toSkeletonItem),
++    feedItems,
+     cursor: keyset.packFromResult(feedItems),
+   }
+ }
+diff --git a/packages/bsky/src/feed-gen/with-friends.ts b/packages/bsky/src/feed-gen/with-friends.ts
+index efd4b961e9d..98f784102a5 100644
+--- a/packages/bsky/src/feed-gen/with-friends.ts
++++ b/packages/bsky/src/feed-gen/with-friends.ts
+@@ -29,6 +29,7 @@ const handler: AlgoHandler = async (
+   postsQb = paginate(postsQb, { limit, cursor, keyset, tryIndex: true })
+ 
+   const feedItems = await postsQb.execute()
++
+   return {
+     feedItems,
+     cursor: keyset.packFromResult(feedItems),
+diff --git a/packages/bsky/src/pipeline.ts b/packages/bsky/src/pipeline.ts
+new file mode 100644
+index 00000000000..7798519bfa2
+--- /dev/null
++++ b/packages/bsky/src/pipeline.ts
+@@ -0,0 +1,22 @@
++export function createPipeline<
++  Params,
++  SkeletonState,
++  HydrationState extends SkeletonState,
++  View,
++  Context,
++>(
++  skeleton: (params: Params, ctx: Context) => Promise<SkeletonState>,
++  hydration: (state: SkeletonState, ctx: Context) => Promise<HydrationState>,
++  rules: (state: HydrationState, ctx: Context) => HydrationState,
++  presentation: (state: HydrationState, ctx: Context) => View,
++) {
++  return async (params: Params, ctx: Context) => {
++    const skeletonState = await skeleton(params, ctx)
++    const hydrationState = await hydration(skeletonState, ctx)
++    return presentation(rules(hydrationState, ctx), ctx)
++  }
++}
++
++export function noRules<T>(state: T) {
++  return state
++}
+diff --git a/packages/bsky/src/services/actor/types.ts b/packages/bsky/src/services/actor/types.ts
+index 33906909979..e853406e22e 100644
+--- a/packages/bsky/src/services/actor/types.ts
++++ b/packages/bsky/src/services/actor/types.ts
+@@ -1,21 +1,74 @@
++import { ListViewBasic } from '../../lexicon/types/app/bsky/graph/defs'
+ import { Label } from '../../lexicon/types/com/atproto/label/defs'
+-
+-export const kSelfLabels = Symbol('selfLabels')
++import { BlockAndMuteState } from '../graph'
++import { ListInfoMap } from '../graph/types'
++import { Labels } from '../label'
+ 
+ export type ActorInfo = {
+   did: string
+   handle: string
+   displayName?: string
++  description?: string // omitted from basic profile view
+   avatar?: string
++  indexedAt?: string // omitted from basic profile view
+   viewer?: {
+     muted?: boolean
++    mutedByList?: ListViewBasic
+     blockedBy?: boolean
+     blocking?: string
+     following?: string
+     followedBy?: string
+   }
+   labels?: Label[]
+-  // allows threading self-labels through if they are going to be applied later, i.e. when using skipLabels option.
+-  [kSelfLabels]?: Label[]
+ }
+ export type ActorInfoMap = { [did: string]: ActorInfo }
++
++export type ProfileViewMap = ActorInfoMap
++
++export type ProfileInfo = {
++  did: string
++  handle: string | null
++  profileUri: string | null
++  profileCid: string | null
++  displayName: string | null
++  description: string | null
++  avatarCid: string | null
++  indexedAt: string | null
++  profileJson: string | null
++  viewerFollowing: string | null
++  viewerFollowedBy: string | null
++}
++
++export type ProfileInfoMap = { [did: string]: ProfileInfo }
++
++export type ProfileHydrationState = {
++  profiles: ProfileInfoMap
++  labels: Labels
++  lists: ListInfoMap
++  bam: BlockAndMuteState
++}
++
++export type ProfileDetailInfo = ProfileInfo & {
++  bannerCid: string | null
++  followsCount: number | null
++  followersCount: number | null
++  postsCount: number | null
++}
++
++export type ProfileDetailInfoMap = { [did: string]: ProfileDetailInfo }
++
++export type ProfileDetailHydrationState = {
++  profilesDetailed: ProfileDetailInfoMap
++  labels: Labels
++  lists: ListInfoMap
++  bam: BlockAndMuteState
++}
++
++export const toMapByDid = <T extends { did: string }>(
++  items: T[],
++): Record<string, T> => {
++  return items.reduce((cur, item) => {
++    cur[item.did] = item
++    return cur
++  }, {} as Record<string, T>)
++}
+diff --git a/packages/bsky/src/services/actor/views.ts b/packages/bsky/src/services/actor/views.ts
+index b1983adae29..80652599f80 100644
+--- a/packages/bsky/src/services/actor/views.ts
++++ b/packages/bsky/src/services/actor/views.ts
+@@ -4,16 +4,23 @@ import { jsonStringToLex } from '@atproto/lexicon'
+ import {
+   ProfileViewDetailed,
+   ProfileView,
+-  ProfileViewBasic,
+ } from '../../lexicon/types/app/bsky/actor/defs'
+ import { Database } from '../../db'
+ import { noMatch, notSoftDeletedClause } from '../../db/util'
+ import { Actor } from '../../db/tables/actor'
+ import { ImageUriBuilder } from '../../image/uri'
+-import { LabelService, getSelfLabels } from '../label'
+-import { GraphService } from '../graph'
++import { LabelService, Labels, getSelfLabels } from '../label'
++import { BlockAndMuteState, GraphService } from '../graph'
+ import { LabelCache } from '../../label-cache'
+-import { ActorInfoMap, kSelfLabels } from './types'
++import {
++  ActorInfoMap,
++  ProfileDetailHydrationState,
++  ProfileHydrationState,
++  ProfileInfoMap,
++  ProfileViewMap,
++  toMapByDid,
++} from './types'
++import { ListInfoMap } from '../graph/types'
+ 
+ export class ActorViews {
+   constructor(
+@@ -27,20 +34,65 @@ export class ActorViews {
+     graph: GraphService.creator(this.imgUriBuilder)(this.db),
+   }
+ 
+-  async profilesDetailed(
+-    results: ActorResult[],
++  async profiles(
++    results: (ActorResult | string)[], // @TODO simplify down to just string[]
+     viewer: string | null,
+-    opts?: { skipLabels?: boolean; includeSoftDeleted?: boolean },
+-  ): Promise<Record<string, ProfileViewDetailed>> {
++    opts?: { includeSoftDeleted?: boolean },
++  ): Promise<ActorInfoMap> {
+     if (results.length === 0) return {}
++    const dids = results.map((res) => (typeof res === 'string' ? res : res.did))
++    const hydrated = await this.profileHydration(dids, {
++      viewer,
++      ...opts,
++    })
++    return this.profilePresentation(dids, hydrated, {
++      viewer,
++      ...opts,
++    })
++  }
+ 
+-    const { ref } = this.db.db.dynamic
+-    const { skipLabels = false, includeSoftDeleted = false } = opts ?? {}
+-    const dids = results.map((r) => r.did)
++  async profilesBasic(
++    results: (ActorResult | string)[],
++    viewer: string | null,
++    opts?: { omitLabels?: boolean; includeSoftDeleted?: boolean },
++  ): Promise<ActorInfoMap> {
++    if (results.length === 0) return {}
++    const dids = results.map((res) => (typeof res === 'string' ? res : res.did))
++    const hydrated = await this.profileHydration(dids, {
++      viewer,
++      includeSoftDeleted: opts?.includeSoftDeleted,
++    })
++    return this.profileBasicPresentation(dids, hydrated, {
++      viewer,
++      omitLabels: opts?.omitLabels,
++    })
++  }
+ 
++  async profilesList(
++    results: ActorResult[],
++    viewer: string | null,
++    opts?: { includeSoftDeleted?: boolean },
++  ): Promise<ProfileView[]> {
++    const profiles = await this.profiles(results, viewer, opts)
++    return mapDefined(results, (result) => profiles[result.did])
++  }
++
++  async profileDetailHydration(
++    dids: string[],
++    opts: {
++      viewer?: string | null
++      includeSoftDeleted?: boolean
++    },
++    state?: {
++      bam: BlockAndMuteState
++      labels: Labels
++    },
++  ): Promise<ProfileDetailHydrationState> {
++    const { viewer = null, includeSoftDeleted } = opts
++    const { ref } = this.db.db.dynamic
+     const profileInfosQb = this.db.db
+       .selectFrom('actor')
+-      .where('actor.did', 'in', dids)
++      .where('actor.did', 'in', dids.length ? dids : [''])
+       .leftJoin('profile', 'profile.creator', 'actor.did')
+       .leftJoin('profile_agg', 'profile_agg.did', 'actor.did')
+       .leftJoin('record', 'record.uri', 'profile.uri')
+@@ -67,138 +119,107 @@ export class ActorViews {
+           .where('creator', '=', viewer ?? '')
+           .whereRef('subjectDid', '=', ref('actor.did'))
+           .select('uri')
+-          .as('requesterFollowing'),
++          .as('viewerFollowing'),
+         this.db.db
+           .selectFrom('follow')
+           .if(!viewer, (q) => q.where(noMatch))
+           .whereRef('creator', '=', ref('actor.did'))
+           .where('subjectDid', '=', viewer ?? '')
+           .select('uri')
+-          .as('requesterFollowedBy'),
+-        this.db.db
+-          .selectFrom('actor_block')
+-          .if(!viewer, (q) => q.where(noMatch))
+-          .where('creator', '=', viewer ?? '')
+-          .whereRef('subjectDid', '=', ref('actor.did'))
+-          .select('uri')
+-          .as('requesterBlocking'),
+-        this.db.db
+-          .selectFrom('actor_block')
+-          .if(!viewer, (q) => q.where(noMatch))
+-          .whereRef('creator', '=', ref('actor.did'))
+-          .where('subjectDid', '=', viewer ?? '')
+-          .select('uri')
+-          .as('requesterBlockedBy'),
+-        this.db.db
+-          .selectFrom('mute')
+-          .if(!viewer, (q) => q.where(noMatch))
+-          .whereRef('subjectDid', '=', ref('actor.did'))
+-          .where('mutedByDid', '=', viewer ?? '')
+-          .select('subjectDid')
+-          .as('requesterMuted'),
+-        this.db.db
+-          .selectFrom('list_item')
+-          .if(!viewer, (q) => q.where(noMatch))
+-          .innerJoin('list_mute', 'list_mute.listUri', 'list_item.listUri')
+-          .where('list_mute.mutedByDid', '=', viewer ?? '')
+-          .whereRef('list_item.subjectDid', '=', ref('actor.did'))
+-          .select('list_item.listUri')
+-          .limit(1)
+-          .as('requesterMutedByList'),
++          .as('viewerFollowedBy'),
+       ])
+-
+-    const [profileInfos, labels] = await Promise.all([
++    const [profiles, labels, bam] = await Promise.all([
+       profileInfosQb.execute(),
+-      this.services.label.getLabelsForSubjects(skipLabels ? [] : dids),
++      this.services.label.getLabelsForSubjects(dids, state?.labels),
++      this.services.graph.getBlockAndMuteState(
++        viewer ? dids.map((did) => [viewer, did]) : [],
++        state?.bam,
++      ),
+     ])
++    const listUris = mapDefined(profiles, ({ did }) => {
++      const list = viewer && bam.muteList([viewer, did])
++      if (!list) return
++      return list
++    })
++    const lists = await this.services.graph.getListViews(listUris, viewer)
++    return { profilesDetailed: toMapByDid(profiles), labels, bam, lists }
++  }
+ 
+-    const listUris: string[] = profileInfos
+-      .map((a) => a.requesterMutedByList)
+-      .filter((list) => !!list)
+-    const listViews = await this.services.graph.getListViews(listUris, viewer)
+-
+-    return profileInfos.reduce((acc, cur) => {
+-      const avatar = cur?.avatarCid
+-        ? this.imgUriBuilder.getPresetUri('avatar', cur.did, cur.avatarCid)
++  profileDetailPresentation(
++    dids: string[],
++    state: ProfileDetailHydrationState,
++    opts: {
++      viewer?: string | null
++    },
++  ): Record<string, ProfileViewDetailed> {
++    const { viewer } = opts
++    const { profilesDetailed, lists, labels, bam } = state
++    return dids.reduce((acc, did) => {
++      const prof = profilesDetailed[did]
++      if (!prof) return acc
++      const avatar = prof?.avatarCid
++        ? this.imgUriBuilder.getPresetUri('avatar', prof.did, prof.avatarCid)
+         : undefined
+-      const banner = cur?.bannerCid
+-        ? this.imgUriBuilder.getPresetUri('banner', cur.did, cur.bannerCid)
++      const banner = prof?.bannerCid
++        ? this.imgUriBuilder.getPresetUri('banner', prof.did, prof.bannerCid)
+         : undefined
++      const mutedByListUri = viewer && bam.muteList([viewer, did])
+       const mutedByList =
+-        cur.requesterMutedByList && listViews[cur.requesterMutedByList]
+-          ? this.services.graph.formatListViewBasic(
+-              listViews[cur.requesterMutedByList],
+-            )
++        mutedByListUri && lists[mutedByListUri]
++          ? this.services.graph.formatListViewBasic(lists[mutedByListUri])
+           : undefined
+-      const actorLabels = labels[cur.did] ?? []
++      const actorLabels = labels[did] ?? []
+       const selfLabels = getSelfLabels({
+-        uri: cur.profileUri,
+-        cid: cur.profileCid,
++        uri: prof.profileUri,
++        cid: prof.profileCid,
+         record:
+-          cur.profileJson !== null
+-            ? (jsonStringToLex(cur.profileJson) as Record<string, unknown>)
++          prof.profileJson !== null
++            ? (jsonStringToLex(prof.profileJson) as Record<string, unknown>)
+             : null,
+       })
+-      const profile = {
+-        did: cur.did,
+-        handle: cur.handle ?? INVALID_HANDLE,
+-        displayName: cur?.displayName || undefined,
+-        description: cur?.description || undefined,
++      acc[did] = {
++        did: prof.did,
++        handle: prof.handle ?? INVALID_HANDLE,
++        displayName: prof?.displayName || undefined,
++        description: prof?.description || undefined,
+         avatar,
+         banner,
+-        followsCount: cur?.followsCount ?? 0,
+-        followersCount: cur?.followersCount ?? 0,
+-        postsCount: cur?.postsCount ?? 0,
+-        indexedAt: cur?.indexedAt || undefined,
++        followsCount: prof?.followsCount ?? 0,
++        followersCount: prof?.followersCount ?? 0,
++        postsCount: prof?.postsCount ?? 0,
++        indexedAt: prof?.indexedAt || undefined,
+         viewer: viewer
+           ? {
+-              following: cur?.requesterFollowing || undefined,
+-              followedBy: cur?.requesterFollowedBy || undefined,
+-              muted: !!cur?.requesterMuted || !!cur.requesterMutedByList,
++              muted: bam.mute([viewer, did]),
+               mutedByList,
+-              blockedBy: !!cur.requesterBlockedBy,
+-              blocking: cur.requesterBlocking || undefined,
++              blockedBy: !!bam.blockedBy([viewer, did]),
++              blocking: bam.blocking([viewer, did]) ?? undefined,
++              following: prof?.viewerFollowing || undefined,
++              followedBy: prof?.viewerFollowedBy || undefined,
+             }
+           : undefined,
+-        labels: skipLabels ? undefined : [...actorLabels, ...selfLabels],
++        labels: [...actorLabels, ...selfLabels],
+       }
+-      acc[cur.did] = profile
+       return acc
+     }, {} as Record<string, ProfileViewDetailed>)
+   }
+ 
+-  async hydrateProfilesDetailed(
+-    results: ActorResult[],
+-    viewer: string | null,
+-    opts?: { skipLabels?: boolean; includeSoftDeleted?: boolean },
+-  ): Promise<ProfileViewDetailed[]> {
+-    const profiles = await this.profilesDetailed(results, viewer, opts)
+-    return mapDefined(results, (result) => profiles[result.did])
+-  }
+-
+-  async profileDetailed(
+-    result: ActorResult,
+-    viewer: string | null,
+-    opts?: { skipLabels?: boolean; includeSoftDeleted?: boolean },
+-  ): Promise<ProfileViewDetailed | null> {
+-    const profiles = await this.profilesDetailed([result], viewer, opts)
+-    return profiles[result.did] ?? null
+-  }
+-
+-  async profiles(
+-    results: (ActorResult | string)[], // @TODO simplify down to just srring[]
+-    viewer: string | null,
+-    opts?: { skipLabels?: boolean; includeSoftDeleted?: boolean },
+-  ): Promise<ActorInfoMap> {
+-    if (results.length === 0) return {}
+-
++  async profileHydration(
++    dids: string[],
++    opts: {
++      viewer?: string | null
++      includeSoftDeleted?: boolean
++    },
++    state?: {
++      bam: BlockAndMuteState
++      labels: Labels
++    },
++  ): Promise<ProfileHydrationState> {
++    const { viewer = null, includeSoftDeleted } = opts
+     const { ref } = this.db.db.dynamic
+-    const { skipLabels = false, includeSoftDeleted = false } = opts ?? {}
+-    const dids = results.map((r) => (typeof r === 'string' ? r : r.did))
+-
+     const profileInfosQb = this.db.db
+       .selectFrom('actor')
+-      .where('actor.did', 'in', dids)
++      .where('actor.did', 'in', dids.length ? dids : [''])
+       .leftJoin('profile', 'profile.creator', 'actor.did')
+       .leftJoin('record', 'record.uri', 'profile.uri')
+       .if(!includeSoftDeleted, (qb) =>
+@@ -220,155 +241,110 @@ export class ActorViews {
+           .where('creator', '=', viewer ?? '')
+           .whereRef('subjectDid', '=', ref('actor.did'))
+           .select('uri')
+-          .as('requesterFollowing'),
++          .as('viewerFollowing'),
+         this.db.db
+           .selectFrom('follow')
+           .if(!viewer, (q) => q.where(noMatch))
+           .whereRef('creator', '=', ref('actor.did'))
+           .where('subjectDid', '=', viewer ?? '')
+           .select('uri')
+-          .as('requesterFollowedBy'),
+-        this.db.db
+-          .selectFrom('actor_block')
+-          .if(!viewer, (q) => q.where(noMatch))
+-          .where('creator', '=', viewer ?? '')
+-          .whereRef('subjectDid', '=', ref('actor.did'))
+-          .select('uri')
+-          .as('requesterBlocking'),
+-        this.db.db
+-          .selectFrom('actor_block')
+-          .if(!viewer, (q) => q.where(noMatch))
+-          .whereRef('creator', '=', ref('actor.did'))
+-          .where('subjectDid', '=', viewer ?? '')
+-          .select('uri')
+-          .as('requesterBlockedBy'),
+-        this.db.db
+-          .selectFrom('mute')
+-          .if(!viewer, (q) => q.where(noMatch))
+-          .whereRef('subjectDid', '=', ref('actor.did'))
+-          .where('mutedByDid', '=', viewer ?? '')
+-          .select('subjectDid')
+-          .as('requesterMuted'),
+-        this.db.db
+-          .selectFrom('list_item')
+-          .if(!viewer, (q) => q.where(noMatch))
+-          .innerJoin('list_mute', 'list_mute.listUri', 'list_item.listUri')
+-          .where('list_mute.mutedByDid', '=', viewer ?? '')
+-          .whereRef('list_item.subjectDid', '=', ref('actor.did'))
+-          .select('list_item.listUri')
+-          .limit(1)
+-          .as('requesterMutedByList'),
++          .as('viewerFollowedBy'),
+       ])
+-
+-    const [profileInfos, labels] = await Promise.all([
++    const [profiles, labels, bam] = await Promise.all([
+       profileInfosQb.execute(),
+-      this.services.label.getLabelsForSubjects(skipLabels ? [] : dids),
++      this.services.label.getLabelsForSubjects(dids, state?.labels),
++      this.services.graph.getBlockAndMuteState(
++        viewer ? dids.map((did) => [viewer, did]) : [],
++        state?.bam,
++      ),
+     ])
++    const listUris = mapDefined(profiles, ({ did }) => {
++      const list = viewer && bam.muteList([viewer, did])
++      if (!list) return
++      return list
++    })
++    const lists = await this.services.graph.getListViews(listUris, viewer)
++    return { profiles: toMapByDid(profiles), labels, bam, lists }
++  }
+ 
+-    const listUris: string[] = profileInfos
+-      .map((a) => a.requesterMutedByList)
+-      .filter((list) => !!list)
+-    const listViews = await this.services.graph.getListViews(listUris, viewer)
+-
+-    return profileInfos.reduce((acc, cur) => {
+-      const avatar = cur?.avatarCid
+-        ? this.imgUriBuilder.getPresetUri('avatar', cur.did, cur.avatarCid)
++  profilePresentation(
++    dids: string[],
++    state: {
++      profiles: ProfileInfoMap
++      lists: ListInfoMap
++      labels: Labels
++      bam: BlockAndMuteState
++    },
++    opts?: {
++      viewer?: string | null
++    },
++  ): ProfileViewMap {
++    const { viewer } = opts ?? {}
++    const { profiles, lists, labels, bam } = state
++    return dids.reduce((acc, did) => {
++      const prof = profiles[did]
++      if (!prof) return acc
++      const avatar = prof?.avatarCid
++        ? this.imgUriBuilder.getPresetUri('avatar', prof.did, prof.avatarCid)
+         : undefined
++      const mutedByListUri = viewer && bam.muteList([viewer, did])
+       const mutedByList =
+-        cur.requesterMutedByList && listViews[cur.requesterMutedByList]
+-          ? this.services.graph.formatListViewBasic(
+-              listViews[cur.requesterMutedByList],
+-            )
++        mutedByListUri && lists[mutedByListUri]
++          ? this.services.graph.formatListViewBasic(lists[mutedByListUri])
+           : undefined
+-      const actorLabels = labels[cur.did] ?? []
++      const actorLabels = labels[did] ?? []
+       const selfLabels = getSelfLabels({
+-        uri: cur.profileUri,
+-        cid: cur.profileCid,
++        uri: prof.profileUri,
++        cid: prof.profileCid,
+         record:
+-          cur.profileJson !== null
+-            ? (jsonStringToLex(cur.profileJson) as Record<string, unknown>)
++          prof.profileJson !== null
++            ? (jsonStringToLex(prof.profileJson) as Record<string, unknown>)
+             : null,
+       })
+-      const profile = {
+-        did: cur.did,
+-        handle: cur.handle ?? INVALID_HANDLE,
+-        displayName: cur?.displayName || undefined,
+-        description: cur?.description || undefined,
++      acc[did] = {
++        did: prof.did,
++        handle: prof.handle ?? INVALID_HANDLE,
++        displayName: prof?.displayName || undefined,
++        description: prof?.description || undefined,
+         avatar,
+-        indexedAt: cur?.indexedAt || undefined,
++        indexedAt: prof?.indexedAt || undefined,
+         viewer: viewer
+           ? {
+-              muted: !!cur?.requesterMuted || !!cur.requesterMutedByList,
++              muted: bam.mute([viewer, did]),
+               mutedByList,
+-              blockedBy: !!cur.requesterBlockedBy,
+-              blocking: cur.requesterBlocking || undefined,
+-              following: cur?.requesterFollowing || undefined,
+-              followedBy: cur?.requesterFollowedBy || undefined,
++              blockedBy: !!bam.blockedBy([viewer, did]),
++              blocking: bam.blocking([viewer, did]) ?? undefined,
++              following: prof?.viewerFollowing || undefined,
++              followedBy: prof?.viewerFollowedBy || undefined,
+             }
+           : undefined,
+-        labels: skipLabels ? undefined : [...actorLabels, ...selfLabels],
+-        [kSelfLabels]: selfLabels,
++        labels: [...actorLabels, ...selfLabels],
+       }
+-      acc[cur.did] = profile
+       return acc
+-    }, {} as ActorInfoMap)
++    }, {} as ProfileViewMap)
+   }
+ 
+-  async hydrateProfiles(
+-    results: ActorResult[],
+-    viewer: string | null,
+-    opts?: { skipLabels?: boolean; includeSoftDeleted?: boolean },
+-  ): Promise<ProfileView[]> {
+-    const profiles = await this.profiles(results, viewer, opts)
+-    return mapDefined(results, (result) => profiles[result.did])
+-  }
+-
+-  async profile(
+-    result: ActorResult,
+-    viewer: string | null,
+-    opts?: { skipLabels?: boolean; includeSoftDeleted?: boolean },
+-  ): Promise<ProfileView | null> {
+-    const profiles = await this.profiles([result], viewer, opts)
+-    return profiles[result.did] ?? null
+-  }
+-
+-  // @NOTE keep in sync with feedService.getActorViews()
+-  async profilesBasic(
+-    results: ActorResult[],
+-    viewer: string | null,
+-    opts?: { skipLabels?: boolean; includeSoftDeleted?: boolean },
+-  ): Promise<Record<string, ProfileViewBasic>> {
+-    if (results.length === 0) return {}
+-    const profiles = await this.profiles(results, viewer, opts)
+-    return Object.values(profiles).reduce((acc, cur) => {
+-      const profile = {
+-        did: cur.did,
+-        handle: cur.handle,
+-        displayName: cur.displayName,
+-        avatar: cur.avatar,
+-        viewer: cur.viewer,
++  profileBasicPresentation(
++    dids: string[],
++    state: ProfileHydrationState,
++    opts?: {
++      viewer?: string | null
++      omitLabels?: boolean
++    },
++  ): ProfileViewMap {
++    const result = this.profilePresentation(dids, state, opts)
++    return Object.values(result).reduce((acc, prof) => {
++      const profileBasic = {
++        did: prof.did,
++        handle: prof.handle,
++        displayName: prof.displayName,
++        avatar: prof.avatar,
++        viewer: prof.viewer,
++        labels: opts?.omitLabels ? undefined : prof.labels,
+       }
+-      acc[cur.did] = profile
++      acc[prof.did] = profileBasic
+       return acc
+-    }, {} as Record<string, ProfileViewBasic>)
+-  }
+-
+-  async hydrateProfilesBasic(
+-    results: ActorResult[],
+-    viewer: string | null,
+-    opts?: { skipLabels?: boolean; includeSoftDeleted?: boolean },
+-  ): Promise<ProfileViewBasic[]> {
+-    const profiles = await this.profilesBasic(results, viewer, opts)
+-    return mapDefined(results, (result) => profiles[result.did])
+-  }
+-
+-  async profileBasic(
+-    result: ActorResult,
+-    viewer: string | null,
+-    opts?: { skipLabels?: boolean; includeSoftDeleted?: boolean },
+-  ): Promise<ProfileViewBasic | null> {
+-    const profiles = await this.profilesBasic([result], viewer, opts)
+-    return profiles[result.did] ?? null
++    }, {} as ProfileViewMap)
+   }
+ }
+ 
+diff --git a/packages/bsky/src/services/feed/index.ts b/packages/bsky/src/services/feed/index.ts
+index 8cfabfcf9d9..db32f1971bc 100644
+--- a/packages/bsky/src/services/feed/index.ts
++++ b/packages/bsky/src/services/feed/index.ts
+@@ -1,6 +1,5 @@
+ import { sql } from 'kysely'
+ import { AtUri } from '@atproto/syntax'
+-import { dedupeStrs } from '@atproto/common'
+ import { jsonStringToLex } from '@atproto/lexicon'
+ import { Database } from '../../db'
+ import { countAll, noMatch, notSoftDeletedClause } from '../../db/util'
+@@ -17,25 +16,21 @@ import {
+   isViewRecord,
+ } from '../../lexicon/types/app/bsky/embed/record'
+ import { isMain as isEmbedRecordWithMedia } from '../../lexicon/types/app/bsky/embed/recordWithMedia'
+-import {
+-  FeedViewPost,
+-  SkeletonFeedPost,
+-} from '../../lexicon/types/app/bsky/feed/defs'
+ import {
+   PostInfoMap,
+   FeedItemType,
+   FeedRow,
+   FeedGenInfoMap,
+-  PostViews,
+   PostEmbedViews,
+   RecordEmbedViewRecordMap,
+   PostInfo,
+   RecordEmbedViewRecord,
+   PostBlocksMap,
++  FeedHydrationState,
+ } from './types'
+-import { LabelService, Labels } from '../label'
+-import { ActorInfoMap, ActorService } from '../actor'
+-import { GraphService, RelationshipPair } from '../graph'
++import { LabelService } from '../label'
++import { ActorService } from '../actor'
++import { BlockAndMuteState, GraphService, RelationshipPair } from '../graph'
+ import { FeedViews } from './views'
+ import { LabelCache } from '../../label-cache'
+ 
+@@ -48,7 +43,7 @@ export class FeedService {
+     public labelCache: LabelCache,
+   ) {}
+ 
+-  views = new FeedViews(this.db, this.imgUriBuilder)
++  views = new FeedViews(this.db, this.imgUriBuilder, this.labelCache)
+ 
+   services = {
+     label: LabelService.creator(this.labelCache)(this.db),
+@@ -183,43 +178,6 @@ export class FeedService {
+     )
+   }
+ 
+-  async getPostViews(
+-    postUris: string[],
+-    requester: string | null,
+-    precomputed?: {
+-      actors?: ActorInfoMap
+-      posts?: PostInfoMap
+-      embeds?: PostEmbedViews
+-      blocks?: PostBlocksMap
+-      labels?: Labels
+-    },
+-  ): Promise<PostViews> {
+-    const uris = dedupeStrs(postUris)
+-    const dids = dedupeStrs(postUris.map((uri) => new AtUri(uri).hostname))
+-
+-    const [actors, posts, labels] = await Promise.all([
+-      precomputed?.actors ??
+-        this.services.actor.views.profiles(dids, requester, {
+-          skipLabels: true,
+-        }),
+-      precomputed?.posts ?? this.getPostInfos(uris, requester),
+-      precomputed?.labels ??
+-        this.services.label.getLabelsForSubjects([...uris, ...dids]),
+-    ])
+-    const blocks = precomputed?.blocks ?? (await this.blocksForPosts(posts))
+-    const embeds =
+-      precomputed?.embeds ??
+-      (await this.embedsForPosts(posts, blocks, requester))
+-
+-    return uris.reduce((acc, cur) => {
+-      const view = this.views.formatPostView(cur, actors, posts, embeds, labels)
+-      if (view) {
+-        acc[cur] = view
+-      }
+-      return acc
+-    }, {} as PostViews)
+-  }
+-
+   async getFeedItems(uris: string[]): Promise<Record<string, FeedRow>> {
+     if (uris.length < 1) return {}
+     const feedItems = await this.selectFeedItemQb()
+@@ -230,47 +188,13 @@ export class FeedService {
+     }, {} as Record<string, FeedRow>)
+   }
+ 
+-  async cleanFeedSkeleton(
+-    skeleton: SkeletonFeedPost[],
+-    requester: string,
+-  ): Promise<FeedRow[]> {
+-    const feedItemUris = skeleton.map(getSkeleFeedItemUri)
+-    const [feedItems, skeletonSafe] = await Promise.all([
+-      this.getFeedItems(feedItemUris),
+-      this.services.graph.filterBlocksAndMutes(skeleton, {
+-        getBlockPairs(item) {
+-          return getPostAndRepostPairs(item, requester)
+-        },
+-        getMutePairs(item) {
+-          // Hide posts and reposts of or by muted actors
+-          return getPostAndRepostPairs(item, requester)
+-        },
+-      }),
+-    ])
+-    const cleaned: FeedRow[] = []
+-    for (const skeleItem of skeletonSafe) {
+-      const feedItem = feedItems[getSkeleFeedItemUri(skeleItem)]
+-      if (feedItem && feedItem.postUri === skeleItem.post) {
+-        cleaned.push(feedItem)
+-      }
+-    }
+-    return cleaned
+-  }
+-
+-  async hydrateFeed(
+-    items: FeedRow[],
+-    viewer: string | null,
+-    // @TODO (deprecated) remove this once all clients support the blocked/not-found union on post views
+-    usePostViewUnion?: boolean,
+-  ): Promise<FeedViewPost[]> {
++  feedItemRefs(items: FeedRow[]) {
+     const actorDids = new Set<string>()
+     const postUris = new Set<string>()
+     for (const item of items) {
+-      actorDids.add(item.postAuthorDid)
+       postUris.add(item.postUri)
+-      if (item.postAuthorDid !== item.originatorDid) {
+-        actorDids.add(item.originatorDid)
+-      }
++      actorDids.add(item.postAuthorDid)
++      actorDids.add(item.originatorDid)
+       if (item.replyParent) {
+         postUris.add(item.replyParent)
+         actorDids.add(new AtUri(item.replyParent).hostname)
+@@ -280,29 +204,51 @@ export class FeedService {
+         actorDids.add(new AtUri(item.replyRoot).hostname)
+       }
+     }
+-    const [actors, posts, labels] = await Promise.all([
+-      this.services.actor.views.profiles(Array.from(actorDids), viewer, {
+-        skipLabels: true,
+-      }),
+-      this.getPostInfos(Array.from(postUris), viewer),
+-      this.services.label.getLabelsForSubjects([...postUris, ...actorDids]),
+-    ])
+-    const blocks = await this.blocksForPosts(posts)
+-    const embeds = await this.embedsForPosts(posts, blocks, viewer)
++    return { dids: actorDids, uris: postUris }
++  }
+ 
+-    return this.views.formatFeed(
+-      items,
+-      actors,
++  async feedHydration(
++    refs: {
++      dids: Set<string>
++      uris: Set<string>
++      viewer: string | null
++    },
++    depth = 0,
++  ): Promise<FeedHydrationState> {
++    const { viewer, dids, uris } = refs
++    const [posts, labels, bam] = await Promise.all([
++      this.getPostInfos(Array.from(uris), viewer),
++      this.services.label.getLabelsForSubjects([...uris, ...dids]),
++      this.services.graph.getBlockAndMuteState(
++        viewer ? [...dids].map((did) => [viewer, did]) : [],
++      ),
++    ])
++    // profileState for labels and bam handled above, profileHydration() shouldn't fetch additional
++    const [profileState, blocks] = await Promise.all([
++      this.services.actor.views.profileHydration(
++        Array.from(dids),
++        { viewer },
++        { bam, labels },
++      ),
++      this.blocksForPosts(posts, bam),
++    ])
++    const embeds = await this.embedsForPosts(posts, blocks, viewer, depth)
++    return {
+       posts,
+-      embeds,
+-      labels,
+       blocks,
+-      usePostViewUnion,
+-    )
++      embeds,
++      labels, // includes info for profiles
++      bam, // includes info for profiles
++      profiles: profileState.profiles,
++      lists: profileState.lists,
++    }
+   }
+ 
+   // applies blocks for visibility to third-parties (i.e. based on post content)
+-  async blocksForPosts(posts: PostInfoMap): Promise<PostBlocksMap> {
++  async blocksForPosts(
++    posts: PostInfoMap,
++    bam?: BlockAndMuteState,
++  ): Promise<PostBlocksMap> {
+     const relationships: RelationshipPair[] = []
+     const byPost: Record<string, PostRelationships> = {}
+     const didFromUri = (uri) => new AtUri(uri).host
+@@ -329,15 +275,17 @@ export class FeedService {
+       }
+     }
+     // compute block state from all actor relationships among posts
+-    const blockSet = await this.services.graph.getBlockSet(relationships)
+-    if (blockSet.empty()) return {}
++    const blockState = await this.services.graph.getBlockState(
++      relationships,
++      bam,
++    )
+     const result: PostBlocksMap = {}
+     Object.entries(byPost).forEach(([uri, block]) => {
+-      if (block.embed && blockSet.has(block.embed)) {
++      if (block.embed && blockState.block(block.embed)) {
+         result[uri] ??= {}
+         result[uri].embed = true
+       }
+-      if (block.reply && blockSet.has(block.reply)) {
++      if (block.reply && blockState.block(block.reply)) {
+         result[uri] ??= {}
+         result[uri].reply = true
+       }
+@@ -349,7 +297,7 @@ export class FeedService {
+     postInfos: PostInfoMap,
+     blocks: PostBlocksMap,
+     viewer: string | null,
+-    depth = 0,
++    depth: number,
+   ) {
+     const postMap = postRecordsFromInfos(postInfos)
+     const posts = Object.values(postMap)
+@@ -400,41 +348,37 @@ export class FeedService {
+   ): Promise<RecordEmbedViewRecordMap> {
+     const nestedUris = nestedRecordUris(posts)
+     if (nestedUris.length < 1) return {}
+-    const nestedPostUris: string[] = []
+-    const nestedFeedGenUris: string[] = []
+-    const nestedListUris: string[] = []
+-    const nestedDidsSet = new Set<string>()
++    const nestedDids = new Set<string>()
++    const nestedPostUris = new Set<string>()
++    const nestedFeedGenUris = new Set<string>()
++    const nestedListUris = new Set<string>()
+     for (const uri of nestedUris) {
+       const parsed = new AtUri(uri)
+-      nestedDidsSet.add(parsed.hostname)
++      nestedDids.add(parsed.hostname)
+       if (parsed.collection === ids.AppBskyFeedPost) {
+-        nestedPostUris.push(uri)
++        nestedPostUris.add(uri)
+       } else if (parsed.collection === ids.AppBskyFeedGenerator) {
+-        nestedFeedGenUris.push(uri)
++        nestedFeedGenUris.add(uri)
+       } else if (parsed.collection === ids.AppBskyGraphList) {
+-        nestedListUris.push(uri)
++        nestedListUris.add(uri)
+       }
+     }
+-    const nestedDids = [...nestedDidsSet]
+-    const [postInfos, actorInfos, labelViews, feedGenInfos, listViews] =
+-      await Promise.all([
+-        this.getPostInfos(nestedPostUris, viewer),
+-        this.services.actor.views.profiles(nestedDids, viewer, {
+-          skipLabels: true,
+-        }),
+-        this.services.label.getLabelsForSubjects([
+-          ...nestedPostUris,
+-          ...nestedDids,
+-        ]),
+-        this.getFeedGeneratorInfos(nestedFeedGenUris, viewer),
+-        this.services.graph.getListViews(nestedListUris, viewer),
+-      ])
+-    const deepBlocks = await this.blocksForPosts(postInfos)
+-    const deepEmbedViews = await this.embedsForPosts(
+-      postInfos,
+-      deepBlocks,
+-      viewer,
+-      depth + 1,
++    const [feedState, feedGenInfos, listViews] = await Promise.all([
++      this.feedHydration(
++        {
++          dids: nestedDids,
++          uris: nestedPostUris,
++          viewer,
++        },
++        depth + 1,
++      ),
++      this.getFeedGeneratorInfos([...nestedFeedGenUris], viewer),
++      this.services.graph.getListViews([...nestedListUris], viewer),
++    ])
++    const actorInfos = this.services.actor.views.profileBasicPresentation(
++      [...nestedDids],
++      feedState,
++      { viewer },
+     )
+     const recordEmbedViews: RecordEmbedViewRecordMap = {}
+     for (const uri of nestedUris) {
+@@ -442,24 +386,20 @@ export class FeedService {
+       if (collection === ids.AppBskyFeedGenerator && feedGenInfos[uri]) {
+         recordEmbedViews[uri] = {
+           $type: 'app.bsky.feed.defs#generatorView',
+-          ...this.views.formatFeedGeneratorView(
+-            feedGenInfos[uri],
+-            actorInfos,
+-            labelViews,
+-          ),
++          ...this.views.formatFeedGeneratorView(feedGenInfos[uri], actorInfos),
+         }
+       } else if (collection === ids.AppBskyGraphList && listViews[uri]) {
+         recordEmbedViews[uri] = {
+           $type: 'app.bsky.graph.defs#listView',
+           ...this.services.graph.formatListView(listViews[uri], actorInfos),
+         }
+-      } else if (collection === ids.AppBskyFeedPost && postInfos[uri]) {
++      } else if (collection === ids.AppBskyFeedPost && feedState.posts[uri]) {
+         const formatted = this.views.formatPostView(
+           uri,
+           actorInfos,
+-          postInfos,
+-          deepEmbedViews,
+-          labelViews,
++          feedState.posts,
++          feedState.embeds,
++          feedState.labels,
+         )
+         recordEmbedViews[uri] = this.views.getRecordEmbedView(
+           uri,
+@@ -530,20 +470,3 @@ function applyEmbedBlock(
+   }
+   return view
+ }
+-
+-function getSkeleFeedItemUri(item: SkeletonFeedPost) {
+-  return typeof item.reason?.repost === 'string'
+-    ? item.reason.repost
+-    : item.post
+-}
+-
+-function getPostAndRepostPairs(
+-  item: SkeletonFeedPost,
+-  requester: string,
+-): RelationshipPair[] {
+-  const uriStrs =
+-    typeof item.reason?.repost === 'string'
+-      ? [item.post, item.reason.repost]
+-      : [item.post]
+-  return uriStrs.map((uriStr) => [requester, new AtUri(uriStr).host])
+-}
+diff --git a/packages/bsky/src/services/feed/types.ts b/packages/bsky/src/services/feed/types.ts
+index 2baf1591af9..894ee0a564f 100644
+--- a/packages/bsky/src/services/feed/types.ts
++++ b/packages/bsky/src/services/feed/types.ts
+@@ -16,6 +16,9 @@ import {
+ } from '../../lexicon/types/app/bsky/feed/defs'
+ import { FeedGenerator } from '../../db/tables/feed-generator'
+ import { ListView } from '../../lexicon/types/app/bsky/graph/defs'
++import { ProfileHydrationState } from '../actor'
++import { Labels } from '../label'
++import { BlockAndMuteState } from '../graph'
+ 
+ export type PostEmbedViews = {
+   [uri: string]: PostEmbedView
+@@ -27,8 +30,6 @@ export type PostEmbedView =
+   | RecordEmbedView
+   | RecordWithMediaEmbedView
+ 
+-export type PostViews = { [uri: string]: PostView }
+-
+ export type PostInfo = {
+   uri: string
+   cid: string
+@@ -82,3 +83,11 @@ export type RecordEmbedViewRecord =
+   | ListView
+ 
+ export type RecordEmbedViewRecordMap = { [uri: string]: RecordEmbedViewRecord }
++
++export type FeedHydrationState = ProfileHydrationState & {
++  posts: PostInfoMap
++  embeds: PostEmbedViews
++  labels: Labels
++  blocks: PostBlocksMap
++  bam: BlockAndMuteState
++}
+diff --git a/packages/bsky/src/services/feed/views.ts b/packages/bsky/src/services/feed/views.ts
+index c040f96522c..a7ed2790c58 100644
+--- a/packages/bsky/src/services/feed/views.ts
++++ b/packages/bsky/src/services/feed/views.ts
+@@ -21,7 +21,6 @@ import {
+   ViewRecord,
+ } from '../../lexicon/types/app/bsky/embed/record'
+ import {
+-  ActorInfoMap,
+   PostEmbedViews,
+   FeedGenInfo,
+   FeedRow,
+@@ -29,31 +28,33 @@ import {
+   PostInfoMap,
+   RecordEmbedViewRecord,
+   PostBlocksMap,
+-  kSelfLabels,
++  FeedHydrationState,
+ } from './types'
+ import { Labels, getSelfLabels } from '../label'
+ import { ImageUriBuilder } from '../../image/uri'
++import { LabelCache } from '../../label-cache'
++import { ActorInfoMap, ActorService } from '../actor'
+ 
+ export class FeedViews {
+-  constructor(public db: Database, public imgUriBuilder: ImageUriBuilder) {}
++  constructor(
++    public db: Database,
++    public imgUriBuilder: ImageUriBuilder,
++    public labelCache: LabelCache,
++  ) {}
+ 
+-  static creator(imgUriBuilder: ImageUriBuilder) {
+-    return (db: Database) => new FeedViews(db, imgUriBuilder)
++  static creator(imgUriBuilder: ImageUriBuilder, labelCache: LabelCache) {
++    return (db: Database) => new FeedViews(db, imgUriBuilder, labelCache)
++  }
++
++  services = {
++    actor: ActorService.creator(this.imgUriBuilder, this.labelCache)(this.db),
+   }
+ 
+   formatFeedGeneratorView(
+     info: FeedGenInfo,
+     profiles: ActorInfoMap,
+-    labels?: Labels,
+   ): GeneratorView {
+     const profile = profiles[info.creator]
+-    if (profile && !profile.labels) {
+-      // If the creator labels are not hydrated yet, attempt to pull them
+-      // from labels: e.g. compatible with embedsForPosts() batching label hydration.
+-      const profileLabels = labels?.[info.creator] ?? []
+-      const profileSelfLabels = profile[kSelfLabels] ?? []
+-      profile.labels = [...profileLabels, ...profileSelfLabels]
+-    }
+     return {
+       uri: info.uri,
+       cid: info.cid,
+@@ -83,13 +84,18 @@ export class FeedViews {
+ 
+   formatFeed(
+     items: FeedRow[],
+-    actors: ActorInfoMap,
+-    posts: PostInfoMap,
+-    embeds: PostEmbedViews,
+-    labels: Labels,
+-    blocks: PostBlocksMap,
+-    usePostViewUnion?: boolean,
++    state: FeedHydrationState,
++    opts?: {
++      viewer?: string | null
++      usePostViewUnion?: boolean
++    },
+   ): FeedViewPost[] {
++    const { posts, profiles, blocks, embeds, labels } = state
++    const actors = this.services.actor.views.profileBasicPresentation(
++      Object.keys(profiles),
++      state,
++      opts,
++    )
+     const feed: FeedViewPost[] = []
+     for (const item of items) {
+       const post = this.formatPostView(
+@@ -110,14 +116,9 @@ export class FeedViews {
+         if (!originator) {
+           continue
+         } else {
+-          const originatorLabels = labels[item.originatorDid] ?? []
+-          const originatorSelfLabels = originator[kSelfLabels] ?? []
+           feedPost['reason'] = {
+             $type: 'app.bsky.feed.defs#reasonRepost',
+-            by: {
+-              ...originator,
+-              labels: [...originatorLabels, ...originatorSelfLabels],
+-            },
++            by: originator,
+             indexedAt: item.sortAt,
+           }
+         }
+@@ -130,7 +131,7 @@ export class FeedViews {
+           embeds,
+           labels,
+           blocks,
+-          usePostViewUnion,
++          opts,
+         )
+         const replyRoot = this.formatMaybePostView(
+           item.replyRoot,
+@@ -139,7 +140,7 @@ export class FeedViews {
+           embeds,
+           labels,
+           blocks,
+-          usePostViewUnion,
++          opts,
+         )
+         if (replyRoot && replyParent) {
+           feedPost['reply'] = {
+@@ -163,11 +164,6 @@ export class FeedViews {
+     const post = posts[uri]
+     const author = actors[post?.creator]
+     if (!post || !author) return undefined
+-    // If the author labels are not hydrated yet, attempt to pull them
+-    // from labels: e.g. compatible with hydrateFeed() batching label hydration.
+-    const authorLabels = labels[author.did] ?? []
+-    const authorSelfLabels = author[kSelfLabels] ?? []
+-    author.labels ??= [...authorLabels, ...authorSelfLabels]
+     const postLabels = labels[uri] ?? []
+     const postSelfLabels = getSelfLabels({
+       uri: post.uri,
+@@ -201,11 +197,13 @@ export class FeedViews {
+     embeds: PostEmbedViews,
+     labels: Labels,
+     blocks: PostBlocksMap,
+-    usePostViewUnion?: boolean,
++    opts?: {
++      usePostViewUnion?: boolean
++    },
+   ): MaybePostView | undefined {
+     const post = this.formatPostView(uri, actors, posts, embeds, labels)
+     if (!post) {
+-      if (!usePostViewUnion) return
++      if (!opts?.usePostViewUnion) return
+       return this.notFoundPost(uri)
+     }
+     if (
+@@ -213,7 +211,7 @@ export class FeedViews {
+       post.author.viewer?.blocking ||
+       blocks[uri]?.reply
+     ) {
+-      if (!usePostViewUnion) return
++      if (!opts?.usePostViewUnion) return
+       return this.blockedPost(post)
+     }
+     return {
+diff --git a/packages/bsky/src/services/graph/index.ts b/packages/bsky/src/services/graph/index.ts
+index 45128c678b4..cce71d9dc69 100644
+--- a/packages/bsky/src/services/graph/index.ts
++++ b/packages/bsky/src/services/graph/index.ts
+@@ -1,9 +1,9 @@
+-import { Selectable, sql } from 'kysely'
++import { sql } from 'kysely'
+ import { Database } from '../../db'
+ import { ImageUriBuilder } from '../../image/uri'
+-import { ProfileView } from '../../lexicon/types/app/bsky/actor/defs'
+-import { List } from '../../db/tables/list'
+ import { valuesList } from '../../db/util'
++import { ListInfo } from './types'
++import { ActorInfoMap } from '../actor'
+ 
+ export class GraphService {
+   constructor(public db: Database, public imgUriBuilder: ImageUriBuilder) {}
+@@ -94,95 +94,13 @@ export class GraphService {
+       .select(['list_item.cid as cid', 'list_item.sortAt as sortAt'])
+   }
+ 
+-  async getBlocks(
+-    requester: string,
+-    subjectHandleOrDid: string,
+-  ): Promise<{ blocking: boolean; blockedBy: boolean }> {
+-    let subjectDid
+-    if (subjectHandleOrDid.startsWith('did:')) {
+-      subjectDid = subjectHandleOrDid
+-    } else {
+-      const res = await this.db.db
+-        .selectFrom('actor')
+-        .where('handle', '=', subjectHandleOrDid)
+-        .select('did')
+-        .executeTakeFirst()
+-      if (!res) {
+-        return { blocking: false, blockedBy: false }
+-      }
+-      subjectDid = res.did
+-    }
+-
+-    const blockSet = await this.getBlockSet([[requester, subjectDid]], false)
+-
+-    return {
+-      blocking: blockSet.has([requester, subjectDid]),
+-      blockedBy: blockSet.has([subjectDid, requester]),
+-    }
+-  }
+-
+-  async getBlockSet(relationships: RelationshipPair[], bidirectional = true) {
+-    const { ref } = this.db.db.dynamic
+-    const blockSet = new RelationshipSet()
+-    if (!relationships.length) return blockSet
+-    const relationshipSet = new RelationshipSet()
+-    relationships.forEach((pair) => relationshipSet.add(pair, true))
+-    // compute actual block set from all actor relationships
+-    const blockRows = await this.db.db
+-      .selectFrom('actor_block')
+-      .select(['creator', 'subjectDid']) // index-only columns
+-      .where(
+-        sql`(${ref('creator')}, ${ref('subjectDid')})`,
+-        'in',
+-        valuesList(
+-          relationshipSet.listAllPairs().map(([a, b]) => sql`${a}, ${b}`),
+-        ),
+-      )
+-      .execute()
+-    blockRows.forEach((r) =>
+-      blockSet.add([r.creator, r.subjectDid], bidirectional),
+-    )
+-    return blockSet
+-  }
+-
+-  async getMuteSet(relationships: RelationshipPair[]) {
+-    const { ref } = this.db.db.dynamic
+-    const muteSet = new RelationshipSet()
+-    if (!relationships.length) return muteSet
+-    const relationshipSet = new RelationshipSet()
+-    relationships.forEach((pair) => relationshipSet.add(pair))
+-    // compute actual mute set from all actor relationships
+-    const muteRows = await this.db.db
+-      .selectFrom('mute')
+-      .select(['mutedByDid', 'subjectDid'])
+-      .where(
+-        sql`(${ref('mutedByDid')}, ${ref('subjectDid')})`,
+-        'in',
+-        valuesList(
+-          relationshipSet.listAllPairs().map(([a, b]) => sql`${a}, ${b}`),
+-        ),
+-      )
+-      .unionAll(
+-        this.db.db
+-          .selectFrom('list_item')
+-          .innerJoin('list_mute', 'list_mute.listUri', 'list_item.listUri')
+-          .where(
+-            sql`(${ref('list_mute.mutedByDid')}, ${ref(
+-              'list_item.subjectDid',
+-            )})`,
+-            'in',
+-            valuesList(
+-              relationshipSet.listAllPairs().map(([a, b]) => sql`${a}, ${b}`),
+-            ),
+-          )
+-          .select(['list_mute.mutedByDid', 'list_item.subjectDid']),
+-      )
+-      .execute()
+-    muteRows.forEach((r) => muteSet.add([r.mutedByDid, r.subjectDid]))
+-    return muteSet
+-  }
+-
+-  async getBlockAndMuteState(pairs: RelationshipPair[]) {
++  async getBlockAndMuteState(
++    pairs: RelationshipPair[],
++    bam?: BlockAndMuteState,
++  ) {
++    pairs = bam ? pairs.filter((pair) => !bam.has(pair)) : pairs
++    const result = bam ?? new BlockAndMuteState()
++    if (!pairs.length) return result
+     const { ref } = this.db.db.dynamic
+     const sourceRef = ref('pair.source')
+     const targetRef = ref('pair.target')
+@@ -221,34 +139,40 @@ export class GraphService {
+       ])
+       .selectAll()
+       .execute()
+-    return new BlockAndMuteState(items)
++    items.forEach((item) => result.add(item))
++    return result
+   }
+ 
+-  async filterBlocksAndMutes<T>(
+-    items: T[],
+-    opts: {
+-      getBlockPairs?: (item: T) => RelationshipPair[] | undefined
+-      getMutePairs?: (item: T) => RelationshipPair[] | undefined
+-    },
+-  ) {
+-    const blockPairsPerItem = items.map(
+-      (item) => opts.getBlockPairs?.(item) ?? [],
+-    )
+-    const mutePairsPerItem = items.map(
+-      (item) => opts.getMutePairs?.(item) ?? [],
+-    )
+-    const [blockSet, muteSet] = await Promise.all([
+-      this.getBlockSet(blockPairsPerItem.flat()),
+-      this.getMuteSet(mutePairsPerItem.flat()),
+-    ])
+-    return items.filter((_, i) => {
+-      const blockPairs = blockPairsPerItem[i]
+-      const mutePairs = mutePairsPerItem[i]
+-      return (
+-        blockPairs.every((pair) => !blockSet.has(pair)) &&
+-        mutePairs.every((pair) => !muteSet.has(pair))
+-      )
+-    })
++  async getBlockState(pairs: RelationshipPair[], bam?: BlockAndMuteState) {
++    pairs = bam ? pairs.filter((pair) => !bam.has(pair)) : pairs
++    const result = bam ?? new BlockAndMuteState()
++    if (!pairs.length) return result
++    const { ref } = this.db.db.dynamic
++    const sourceRef = ref('pair.source')
++    const targetRef = ref('pair.target')
++    const values = valuesList(pairs.map((p) => sql`${p[0]}, ${p[1]}`))
++    const items = await this.db.db
++      .selectFrom(values.as(sql`pair (source, target)`))
++      .select([
++        sql<string>`${sourceRef}`.as('source'),
++        sql<string>`${targetRef}`.as('target'),
++        this.db.db
++          .selectFrom('actor_block')
++          .whereRef('creator', '=', sourceRef)
++          .whereRef('subjectDid', '=', targetRef)
++          .select('uri')
++          .as('blocking'),
++        this.db.db
++          .selectFrom('actor_block')
++          .whereRef('creator', '=', targetRef)
++          .whereRef('subjectDid', '=', sourceRef)
++          .select('uri')
++          .as('blockedBy'),
++      ])
++      .selectAll()
++      .execute()
++    items.forEach((item) => result.add(item))
++    return result
+   }
+ 
+   async getListViews(listUris: string[], requester: string | null) {
+@@ -265,7 +189,7 @@ export class GraphService {
+     )
+   }
+ 
+-  formatListView(list: ListInfo, profiles: Record<string, ProfileView>) {
++  formatListView(list: ListInfo, profiles: ActorInfoMap) {
+     return {
+       uri: list.uri,
+       cid: list.cid,
+@@ -311,45 +235,13 @@ export class GraphService {
+   }
+ }
+ 
+-type ListInfo = Selectable<List> & {
+-  viewerMuted: string | null
+-}
+-
+ export type RelationshipPair = [didA: string, didB: string]
+ 
+-export class RelationshipSet {
+-  index = new Map<string, Set<string>>()
+-  add([didA, didB]: RelationshipPair, bididrectional = false) {
+-    const didAIdx = this.index.get(didA) ?? new Set()
+-    if (!this.index.has(didA)) this.index.set(didA, didAIdx)
+-    didAIdx.add(didB)
+-    if (bididrectional) {
+-      const didBIdx = this.index.get(didB) ?? new Set()
+-      if (!this.index.has(didB)) this.index.set(didB, didBIdx)
+-      didBIdx.add(didA)
+-    }
+-  }
+-  has([didA, didB]: RelationshipPair) {
+-    return !!this.index.get(didA)?.has(didB)
+-  }
+-  listAllPairs() {
+-    const pairs: RelationshipPair[] = []
+-    for (const [didA, didBIdx] of this.index.entries()) {
+-      for (const didB of didBIdx) {
+-        pairs.push([didA, didB])
+-      }
+-    }
+-    return pairs
+-  }
+-  empty() {
+-    return this.index.size === 0
+-  }
+-}
+-
+ export class BlockAndMuteState {
+-  blockIdx = new Map<string, Map<string, string>>()
+-  muteIdx = new Map<string, Set<string>>()
+-  muteListIdx = new Map<string, Map<string, string>>()
++  hasIdx = new Map<string, Set<string>>() // did -> did
++  blockIdx = new Map<string, Map<string, string>>() // did -> did -> block uri
++  muteIdx = new Map<string, Set<string>>() // did -> did
++  muteListIdx = new Map<string, Map<string, string>>() // did -> did -> list uri
+   constructor(items: BlockAndMuteInfo[] = []) {
+     items.forEach((item) => this.add(item))
+   }
+@@ -382,6 +274,11 @@ export class BlockAndMuteState {
+         this.muteListIdx.set(item.source, map)
+       }
+     }
++    const set = this.hasIdx.get(item.source) ?? new Set()
++    set.add(item.target)
++    if (!this.hasIdx.has(item.source)) {
++      this.hasIdx.set(item.source, set)
++    }
+   }
+   block(pair: RelationshipPair): boolean {
+     return !!this.blocking(pair) || !!this.blockedBy(pair)
+@@ -398,13 +295,16 @@ export class BlockAndMuteState {
+   muteList(pair: RelationshipPair): string | null {
+     return this.muteListIdx.get(pair[0])?.get(pair[1]) ?? null
+   }
++  has(pair: RelationshipPair) {
++    return !!this.hasIdx.get(pair[0])?.has(pair[1])
++  }
+ }
+ 
+ type BlockAndMuteInfo = {
+   source: string
+   target: string
+-  blocking: string | null
+-  blockedBy: string | null
+-  muting: true | null
+-  mutingViaList: string | null
++  blocking?: string | null
++  blockedBy?: string | null
++  muting?: true | null
++  mutingViaList?: string | null
+ }
+diff --git a/packages/bsky/src/services/graph/types.ts b/packages/bsky/src/services/graph/types.ts
+new file mode 100644
+index 00000000000..579c47d6536
+--- /dev/null
++++ b/packages/bsky/src/services/graph/types.ts
+@@ -0,0 +1,8 @@
++import { Selectable } from 'kysely'
++import { List } from '../../db/tables/list'
++
++export type ListInfo = Selectable<List> & {
++  viewerMuted: string | null
++}
++
++export type ListInfoMap = Record<string, ListInfo>
+diff --git a/packages/bsky/src/services/label/index.ts b/packages/bsky/src/services/label/index.ts
+index 42b263138ab..cd9167b24c0 100644
+--- a/packages/bsky/src/services/label/index.ts
++++ b/packages/bsky/src/services/label/index.ts
+@@ -98,9 +98,11 @@ export class LabelService {
+       includeNeg?: boolean
+       skipCache?: boolean
+     },
++    labels: Labels = {},
+   ): Promise<Labels> {
+-    if (subjects.length < 1) return {}
++    if (subjects.length < 1) return labels
+     const expandedSubjects = subjects.flatMap((subject) => {
++      if (labels[subject]) return [] // skip over labels we already have fetched
+       if (subject.startsWith('did:')) {
+         return [
+           subject,
+@@ -109,8 +111,8 @@ export class LabelService {
+       }
+       return subject
+     })
+-    const labels = await this.getLabelsForUris(expandedSubjects, opts)
+-    return Object.keys(labels).reduce((acc, cur) => {
++    const labelsByUri = await this.getLabelsForUris(expandedSubjects, opts)
++    return Object.keys(labelsByUri).reduce((acc, cur) => {
+       const uri = cur.startsWith('at://') ? new AtUri(cur) : null
+       if (
+         uri &&
+@@ -120,12 +122,12 @@ export class LabelService {
+         // combine labels for profile + did
+         const did = uri.hostname
+         acc[did] ??= []
+-        acc[did].push(...labels[cur])
++        acc[did].push(...labelsByUri[cur])
+       }
+       acc[cur] ??= []
+-      acc[cur].push(...labels[cur])
++      acc[cur].push(...labelsByUri[cur])
+       return acc
+-    }, {} as Labels)
++    }, labels)
+   }
+ 
+   async getLabels(
+diff --git a/packages/bsky/tests/views/__snapshots__/follows.test.ts.snap b/packages/bsky/tests/views/__snapshots__/follows.test.ts.snap
+index 2061726d8e6..c85b0549de7 100644
+--- a/packages/bsky/tests/views/__snapshots__/follows.test.ts.snap
++++ b/packages/bsky/tests/views/__snapshots__/follows.test.ts.snap
+@@ -5,9 +5,9 @@ Object {
+   "cursor": "0000000000000::bafycid",
+   "followers": Array [
+     Object {
+-      "avatar": "https://bsky.public.url/img/avatar/plain/user(3)/cids(0)@jpeg",
++      "avatar": "https://bsky.public.url/img/avatar/plain/user(1)/cids(0)@jpeg",
+       "description": "descript-eve",
+-      "did": "user(2)",
++      "did": "user(0)",
+       "displayName": "display-eve",
+       "handle": "eve.test",
+       "indexedAt": "1970-01-01T00:00:00.000Z",
+@@ -20,9 +20,9 @@ Object {
+       },
+     },
+     Object {
+-      "avatar": "https://bsky.public.url/img/avatar/plain/user(5)/cids(0)@jpeg",
++      "avatar": "https://bsky.public.url/img/avatar/plain/user(3)/cids(0)@jpeg",
+       "description": "descript-dan",
+-      "did": "user(4)",
++      "did": "user(2)",
+       "displayName": "display-dan",
+       "handle": "dan.test",
+       "indexedAt": "1970-01-01T00:00:00.000Z",
+@@ -35,9 +35,9 @@ Object {
+       },
+     },
+     Object {
+-      "avatar": "https://bsky.public.url/img/avatar/plain/user(7)/cids(0)@jpeg",
++      "avatar": "https://bsky.public.url/img/avatar/plain/user(5)/cids(0)@jpeg",
+       "description": "descript-bob",
+-      "did": "user(6)",
++      "did": "user(4)",
+       "displayName": "display-bob",
+       "handle": "bob.test",
+       "indexedAt": "1970-01-01T00:00:00.000Z",
+@@ -50,9 +50,9 @@ Object {
+       },
+     },
+     Object {
+-      "avatar": "https://bsky.public.url/img/avatar/plain/user(9)/cids(0)@jpeg",
++      "avatar": "https://bsky.public.url/img/avatar/plain/user(7)/cids(0)@jpeg",
+       "description": "descript-carol",
+-      "did": "user(8)",
++      "did": "user(6)",
+       "displayName": "display-carol",
+       "handle": "carol.test",
+       "indexedAt": "1970-01-01T00:00:00.000Z",
+@@ -66,9 +66,9 @@ Object {
+     },
+   ],
+   "subject": Object {
+-    "avatar": "https://bsky.public.url/img/avatar/plain/user(1)/cids(0)@jpeg",
++    "avatar": "https://bsky.public.url/img/avatar/plain/user(9)/cids(0)@jpeg",
+     "description": "descript-alice",
+-    "did": "user(0)",
++    "did": "user(8)",
+     "displayName": "display-alice",
+     "handle": "alice.test",
+     "indexedAt": "1970-01-01T00:00:00.000Z",
+@@ -86,24 +86,24 @@ Object {
+   "cursor": "0000000000000::bafycid",
+   "followers": Array [
+     Object {
+-      "avatar": "https://bsky.public.url/img/avatar/plain/user(3)/cids(0)@jpeg",
++      "avatar": "https://bsky.public.url/img/avatar/plain/user(1)/cids(0)@jpeg",
+       "description": "descript-dan",
+-      "did": "user(2)",
++      "did": "user(0)",
+       "displayName": "display-dan",
+       "handle": "dan.test",
+       "indexedAt": "1970-01-01T00:00:00.000Z",
+       "labels": Array [],
+       "viewer": Object {
+         "blockedBy": false,
+-        "followedBy": "record(3)",
+-        "following": "record(2)",
++        "followedBy": "record(1)",
++        "following": "record(0)",
+         "muted": false,
+       },
+     },
+     Object {
+-      "avatar": "https://bsky.public.url/img/avatar/plain/user(5)/cids(0)@jpeg",
++      "avatar": "https://bsky.public.url/img/avatar/plain/user(3)/cids(0)@jpeg",
+       "description": "descript-alice",
+-      "did": "user(4)",
++      "did": "user(2)",
+       "displayName": "display-alice",
+       "handle": "alice.test",
+       "indexedAt": "1970-01-01T00:00:00.000Z",
+@@ -115,17 +115,17 @@ Object {
+     },
+   ],
+   "subject": Object {
+-    "avatar": "https://bsky.public.url/img/avatar/plain/user(1)/cids(0)@jpeg",
++    "avatar": "https://bsky.public.url/img/avatar/plain/user(5)/cids(0)@jpeg",
+     "description": "descript-bob",
+-    "did": "user(0)",
++    "did": "user(4)",
+     "displayName": "display-bob",
+     "handle": "bob.test",
+     "indexedAt": "1970-01-01T00:00:00.000Z",
+     "labels": Array [],
+     "viewer": Object {
+       "blockedBy": false,
+-      "followedBy": "record(1)",
+-      "following": "record(0)",
++      "followedBy": "record(3)",
++      "following": "record(2)",
+       "muted": false,
+     },
+   },
+@@ -137,39 +137,39 @@ Object {
+   "cursor": "0000000000000::bafycid",
+   "followers": Array [
+     Object {
+-      "avatar": "https://bsky.public.url/img/avatar/plain/user(3)/cids(0)@jpeg",
++      "avatar": "https://bsky.public.url/img/avatar/plain/user(1)/cids(0)@jpeg",
+       "description": "descript-eve",
+-      "did": "user(2)",
++      "did": "user(0)",
+       "displayName": "display-eve",
+       "handle": "eve.test",
+       "indexedAt": "1970-01-01T00:00:00.000Z",
+       "labels": Array [],
+       "viewer": Object {
+         "blockedBy": false,
+-        "followedBy": "record(3)",
+-        "following": "record(2)",
++        "followedBy": "record(1)",
++        "following": "record(0)",
+         "muted": false,
+       },
+     },
+     Object {
+-      "avatar": "https://bsky.public.url/img/avatar/plain/user(5)/cids(0)@jpeg",
++      "avatar": "https://bsky.public.url/img/avatar/plain/user(3)/cids(0)@jpeg",
+       "description": "descript-bob",
+-      "did": "user(4)",
++      "did": "user(2)",
+       "displayName": "display-bob",
+       "handle": "bob.test",
+       "indexedAt": "1970-01-01T00:00:00.000Z",
+       "labels": Array [],
+       "viewer": Object {
+         "blockedBy": false,
+-        "followedBy": "record(5)",
+-        "following": "record(4)",
++        "followedBy": "record(3)",
++        "following": "record(2)",
+         "muted": false,
+       },
+     },
+     Object {
+-      "avatar": "https://bsky.public.url/img/avatar/plain/user(7)/cids(0)@jpeg",
++      "avatar": "https://bsky.public.url/img/avatar/plain/user(5)/cids(0)@jpeg",
+       "description": "descript-alice",
+-      "did": "user(6)",
++      "did": "user(4)",
+       "displayName": "display-alice",
+       "handle": "alice.test",
+       "indexedAt": "1970-01-01T00:00:00.000Z",
+@@ -181,17 +181,17 @@ Object {
+     },
+   ],
+   "subject": Object {
+-    "avatar": "https://bsky.public.url/img/avatar/plain/user(1)/cids(0)@jpeg",
++    "avatar": "https://bsky.public.url/img/avatar/plain/user(7)/cids(0)@jpeg",
+     "description": "descript-carol",
+-    "did": "user(0)",
++    "did": "user(6)",
+     "displayName": "display-carol",
+     "handle": "carol.test",
+     "indexedAt": "1970-01-01T00:00:00.000Z",
+     "labels": Array [],
+     "viewer": Object {
+       "blockedBy": false,
+-      "followedBy": "record(1)",
+-      "following": "record(0)",
++      "followedBy": "record(5)",
++      "following": "record(4)",
+       "muted": false,
+     },
+   },
+@@ -203,9 +203,9 @@ Object {
+   "cursor": "0000000000000::bafycid",
+   "followers": Array [
+     Object {
+-      "avatar": "https://bsky.public.url/img/avatar/plain/user(3)/cids(0)@jpeg",
++      "avatar": "https://bsky.public.url/img/avatar/plain/user(1)/cids(0)@jpeg",
+       "description": "descript-alice",
+-      "did": "user(2)",
++      "did": "user(0)",
+       "displayName": "display-alice",
+       "handle": "alice.test",
+       "indexedAt": "1970-01-01T00:00:00.000Z",
+@@ -217,9 +217,9 @@ Object {
+     },
+   ],
+   "subject": Object {
+-    "avatar": "https://bsky.public.url/img/avatar/plain/user(1)/cids(0)@jpeg",
++    "avatar": "https://bsky.public.url/img/avatar/plain/user(3)/cids(0)@jpeg",
+     "description": "descript-dan",
+-    "did": "user(0)",
++    "did": "user(2)",
+     "displayName": "display-dan",
+     "handle": "dan.test",
+     "indexedAt": "1970-01-01T00:00:00.000Z",
+@@ -239,24 +239,24 @@ Object {
+   "cursor": "0000000000000::bafycid",
+   "followers": Array [
+     Object {
+-      "avatar": "https://bsky.public.url/img/avatar/plain/user(3)/cids(0)@jpeg",
++      "avatar": "https://bsky.public.url/img/avatar/plain/user(1)/cids(0)@jpeg",
+       "description": "descript-dan",
+-      "did": "user(2)",
++      "did": "user(0)",
+       "displayName": "display-dan",
+       "handle": "dan.test",
+       "indexedAt": "1970-01-01T00:00:00.000Z",
+       "labels": Array [],
+       "viewer": Object {
+         "blockedBy": false,
+-        "followedBy": "record(3)",
+-        "following": "record(2)",
++        "followedBy": "record(1)",
++        "following": "record(0)",
+         "muted": false,
+       },
+     },
+     Object {
+-      "avatar": "https://bsky.public.url/img/avatar/plain/user(5)/cids(0)@jpeg",
++      "avatar": "https://bsky.public.url/img/avatar/plain/user(3)/cids(0)@jpeg",
+       "description": "descript-alice",
+-      "did": "user(4)",
++      "did": "user(2)",
+       "displayName": "display-alice",
+       "handle": "alice.test",
+       "indexedAt": "1970-01-01T00:00:00.000Z",
+@@ -268,17 +268,17 @@ Object {
+     },
+   ],
+   "subject": Object {
+-    "avatar": "https://bsky.public.url/img/avatar/plain/user(1)/cids(0)@jpeg",
++    "avatar": "https://bsky.public.url/img/avatar/plain/user(5)/cids(0)@jpeg",
+     "description": "descript-eve",
+-    "did": "user(0)",
++    "did": "user(4)",
+     "displayName": "display-eve",
+     "handle": "eve.test",
+     "indexedAt": "1970-01-01T00:00:00.000Z",
+     "labels": Array [],
+     "viewer": Object {
+       "blockedBy": false,
+-      "followedBy": "record(1)",
+-      "following": "record(0)",
++      "followedBy": "record(3)",
++      "following": "record(2)",
+       "muted": false,
+     },
+   },
+@@ -290,9 +290,9 @@ Object {
+   "cursor": "0000000000000::bafycid",
+   "follows": Array [
+     Object {
+-      "avatar": "https://bsky.public.url/img/avatar/plain/user(3)/cids(0)@jpeg",
++      "avatar": "https://bsky.public.url/img/avatar/plain/user(1)/cids(0)@jpeg",
+       "description": "descript-eve",
+-      "did": "user(2)",
++      "did": "user(0)",
+       "displayName": "display-eve",
+       "handle": "eve.test",
+       "indexedAt": "1970-01-01T00:00:00.000Z",
+@@ -305,9 +305,9 @@ Object {
+       },
+     },
+     Object {
+-      "avatar": "https://bsky.public.url/img/avatar/plain/user(5)/cids(0)@jpeg",
++      "avatar": "https://bsky.public.url/img/avatar/plain/user(3)/cids(0)@jpeg",
+       "description": "descript-dan",
+-      "did": "user(4)",
++      "did": "user(2)",
+       "displayName": "display-dan",
+       "handle": "dan.test",
+       "indexedAt": "1970-01-01T00:00:00.000Z",
+@@ -320,9 +320,9 @@ Object {
+       },
+     },
+     Object {
+-      "avatar": "https://bsky.public.url/img/avatar/plain/user(7)/cids(0)@jpeg",
++      "avatar": "https://bsky.public.url/img/avatar/plain/user(5)/cids(0)@jpeg",
+       "description": "descript-carol",
+-      "did": "user(6)",
++      "did": "user(4)",
+       "displayName": "display-carol",
+       "handle": "carol.test",
+       "indexedAt": "1970-01-01T00:00:00.000Z",
+@@ -335,9 +335,9 @@ Object {
+       },
+     },
+     Object {
+-      "avatar": "https://bsky.public.url/img/avatar/plain/user(9)/cids(0)@jpeg",
++      "avatar": "https://bsky.public.url/img/avatar/plain/user(7)/cids(0)@jpeg",
+       "description": "descript-bob",
+-      "did": "user(8)",
++      "did": "user(6)",
+       "displayName": "display-bob",
+       "handle": "bob.test",
+       "indexedAt": "1970-01-01T00:00:00.000Z",
+@@ -351,9 +351,9 @@ Object {
+     },
+   ],
+   "subject": Object {
+-    "avatar": "https://bsky.public.url/img/avatar/plain/user(1)/cids(0)@jpeg",
++    "avatar": "https://bsky.public.url/img/avatar/plain/user(9)/cids(0)@jpeg",
+     "description": "descript-alice",
+-    "did": "user(0)",
++    "did": "user(8)",
+     "displayName": "display-alice",
+     "handle": "alice.test",
+     "indexedAt": "1970-01-01T00:00:00.000Z",
+@@ -371,24 +371,24 @@ Object {
+   "cursor": "0000000000000::bafycid",
+   "follows": Array [
+     Object {
+-      "avatar": "https://bsky.public.url/img/avatar/plain/user(3)/cids(0)@jpeg",
++      "avatar": "https://bsky.public.url/img/avatar/plain/user(1)/cids(0)@jpeg",
+       "description": "descript-carol",
+-      "did": "user(2)",
++      "did": "user(0)",
+       "displayName": "display-carol",
+       "handle": "carol.test",
+       "indexedAt": "1970-01-01T00:00:00.000Z",
+       "labels": Array [],
+       "viewer": Object {
+         "blockedBy": false,
+-        "followedBy": "record(3)",
+-        "following": "record(2)",
++        "followedBy": "record(1)",
++        "following": "record(0)",
+         "muted": false,
+       },
+     },
+     Object {
+-      "avatar": "https://bsky.public.url/img/avatar/plain/user(5)/cids(0)@jpeg",
++      "avatar": "https://bsky.public.url/img/avatar/plain/user(3)/cids(0)@jpeg",
+       "description": "descript-alice",
+-      "did": "user(4)",
++      "did": "user(2)",
+       "displayName": "display-alice",
+       "handle": "alice.test",
+       "indexedAt": "1970-01-01T00:00:00.000Z",
+@@ -400,17 +400,17 @@ Object {
+     },
+   ],
+   "subject": Object {
+-    "avatar": "https://bsky.public.url/img/avatar/plain/user(1)/cids(0)@jpeg",
++    "avatar": "https://bsky.public.url/img/avatar/plain/user(5)/cids(0)@jpeg",
+     "description": "descript-bob",
+-    "did": "user(0)",
++    "did": "user(4)",
+     "displayName": "display-bob",
+     "handle": "bob.test",
+     "indexedAt": "1970-01-01T00:00:00.000Z",
+     "labels": Array [],
+     "viewer": Object {
+       "blockedBy": false,
+-      "followedBy": "record(1)",
+-      "following": "record(0)",
++      "followedBy": "record(3)",
++      "following": "record(2)",
+       "muted": false,
+     },
+   },
+@@ -422,9 +422,9 @@ Object {
+   "cursor": "0000000000000::bafycid",
+   "follows": Array [
+     Object {
+-      "avatar": "https://bsky.public.url/img/avatar/plain/user(3)/cids(0)@jpeg",
++      "avatar": "https://bsky.public.url/img/avatar/plain/user(1)/cids(0)@jpeg",
+       "description": "descript-alice",
+-      "did": "user(2)",
++      "did": "user(0)",
+       "displayName": "display-alice",
+       "handle": "alice.test",
+       "indexedAt": "1970-01-01T00:00:00.000Z",
+@@ -436,9 +436,9 @@ Object {
+     },
+   ],
+   "subject": Object {
+-    "avatar": "https://bsky.public.url/img/avatar/plain/user(1)/cids(0)@jpeg",
++    "avatar": "https://bsky.public.url/img/avatar/plain/user(3)/cids(0)@jpeg",
+     "description": "descript-carol",
+-    "did": "user(0)",
++    "did": "user(2)",
+     "displayName": "display-carol",
+     "handle": "carol.test",
+     "indexedAt": "1970-01-01T00:00:00.000Z",
+@@ -458,39 +458,39 @@ Object {
+   "cursor": "0000000000000::bafycid",
+   "follows": Array [
+     Object {
+-      "avatar": "https://bsky.public.url/img/avatar/plain/user(3)/cids(0)@jpeg",
++      "avatar": "https://bsky.public.url/img/avatar/plain/user(1)/cids(0)@jpeg",
+       "description": "descript-eve",
+-      "did": "user(2)",
++      "did": "user(0)",
+       "displayName": "display-eve",
+       "handle": "eve.test",
+       "indexedAt": "1970-01-01T00:00:00.000Z",
+       "labels": Array [],
+       "viewer": Object {
+         "blockedBy": false,
+-        "followedBy": "record(3)",
+-        "following": "record(2)",
++        "followedBy": "record(1)",
++        "following": "record(0)",
+         "muted": false,
+       },
+     },
+     Object {
+-      "avatar": "https://bsky.public.url/img/avatar/plain/user(5)/cids(0)@jpeg",
++      "avatar": "https://bsky.public.url/img/avatar/plain/user(3)/cids(0)@jpeg",
+       "description": "descript-bob",
+-      "did": "user(4)",
++      "did": "user(2)",
+       "displayName": "display-bob",
+       "handle": "bob.test",
+       "indexedAt": "1970-01-01T00:00:00.000Z",
+       "labels": Array [],
+       "viewer": Object {
+         "blockedBy": false,
+-        "followedBy": "record(5)",
+-        "following": "record(4)",
++        "followedBy": "record(3)",
++        "following": "record(2)",
+         "muted": false,
+       },
+     },
+     Object {
+-      "avatar": "https://bsky.public.url/img/avatar/plain/user(7)/cids(0)@jpeg",
++      "avatar": "https://bsky.public.url/img/avatar/plain/user(5)/cids(0)@jpeg",
+       "description": "descript-alice",
+-      "did": "user(6)",
++      "did": "user(4)",
+       "displayName": "display-alice",
+       "handle": "alice.test",
+       "indexedAt": "1970-01-01T00:00:00.000Z",
+@@ -502,17 +502,17 @@ Object {
+     },
+   ],
+   "subject": Object {
+-    "avatar": "https://bsky.public.url/img/avatar/plain/user(1)/cids(0)@jpeg",
++    "avatar": "https://bsky.public.url/img/avatar/plain/user(7)/cids(0)@jpeg",
+     "description": "descript-dan",
+-    "did": "user(0)",
++    "did": "user(6)",
+     "displayName": "display-dan",
+     "handle": "dan.test",
+     "indexedAt": "1970-01-01T00:00:00.000Z",
+     "labels": Array [],
+     "viewer": Object {
+       "blockedBy": false,
+-      "followedBy": "record(1)",
+-      "following": "record(0)",
++      "followedBy": "record(5)",
++      "following": "record(4)",
+       "muted": false,
+     },
+   },
+@@ -524,24 +524,24 @@ Object {
+   "cursor": "0000000000000::bafycid",
+   "follows": Array [
+     Object {
+-      "avatar": "https://bsky.public.url/img/avatar/plain/user(3)/cids(0)@jpeg",
++      "avatar": "https://bsky.public.url/img/avatar/plain/user(1)/cids(0)@jpeg",
+       "description": "descript-carol",
+-      "did": "user(2)",
++      "did": "user(0)",
+       "displayName": "display-carol",
+       "handle": "carol.test",
+       "indexedAt": "1970-01-01T00:00:00.000Z",
+       "labels": Array [],
+       "viewer": Object {
+         "blockedBy": false,
+-        "followedBy": "record(3)",
+-        "following": "record(2)",
++        "followedBy": "record(1)",
++        "following": "record(0)",
+         "muted": false,
+       },
+     },
+     Object {
+-      "avatar": "https://bsky.public.url/img/avatar/plain/user(5)/cids(0)@jpeg",
++      "avatar": "https://bsky.public.url/img/avatar/plain/user(3)/cids(0)@jpeg",
+       "description": "descript-alice",
+-      "did": "user(4)",
++      "did": "user(2)",
+       "displayName": "display-alice",
+       "handle": "alice.test",
+       "indexedAt": "1970-01-01T00:00:00.000Z",
+@@ -553,17 +553,17 @@ Object {
+     },
+   ],
+   "subject": Object {
+-    "avatar": "https://bsky.public.url/img/avatar/plain/user(1)/cids(0)@jpeg",
++    "avatar": "https://bsky.public.url/img/avatar/plain/user(5)/cids(0)@jpeg",
+     "description": "descript-eve",
+-    "did": "user(0)",
++    "did": "user(4)",
+     "displayName": "display-eve",
+     "handle": "eve.test",
+     "indexedAt": "1970-01-01T00:00:00.000Z",
+     "labels": Array [],
+     "viewer": Object {
+       "blockedBy": false,
+-      "followedBy": "record(1)",
+-      "following": "record(0)",
++      "followedBy": "record(3)",
++      "following": "record(2)",
+       "muted": false,
+     },
+   },
+diff --git a/packages/bsky/tests/views/__snapshots__/likes.test.ts.snap b/packages/bsky/tests/views/__snapshots__/likes.test.ts.snap
+index 53f37486d1c..426467a3fa7 100644
+--- a/packages/bsky/tests/views/__snapshots__/likes.test.ts.snap
++++ b/packages/bsky/tests/views/__snapshots__/likes.test.ts.snap
+@@ -24,7 +24,7 @@ Object {
+         "labels": Array [],
+         "viewer": Object {
+           "blockedBy": false,
+-          "following": "record(1)",
++          "following": "record(0)",
+           "muted": false,
+         },
+       },
+@@ -38,8 +38,8 @@ Object {
+         "labels": Array [],
+         "viewer": Object {
+           "blockedBy": false,
+-          "followedBy": "record(3)",
+-          "following": "record(2)",
++          "followedBy": "record(2)",
++          "following": "record(1)",
+           "muted": false,
+         },
+       },
+@@ -57,8 +57,8 @@ Object {
+         "labels": Array [],
+         "viewer": Object {
+           "blockedBy": false,
+-          "followedBy": "record(5)",
+-          "following": "record(4)",
++          "followedBy": "record(4)",
++          "following": "record(3)",
+           "muted": false,
+         },
+       },
+@@ -66,7 +66,7 @@ Object {
+       "indexedAt": "1970-01-01T00:00:00.000Z",
+     },
+   ],
+-  "uri": "record(0)",
++  "uri": "record(5)",
+ }
+ `;
+ 
+@@ -81,8 +81,8 @@ Object {
+         "labels": Array [],
+         "viewer": Object {
+           "blockedBy": false,
+-          "followedBy": "record(2)",
+-          "following": "record(1)",
++          "followedBy": "record(1)",
++          "following": "record(0)",
+           "muted": false,
+         },
+       },
+@@ -90,6 +90,6 @@ Object {
+       "indexedAt": "1970-01-01T00:00:00.000Z",
+     },
+   ],
+-  "uri": "record(0)",
++  "uri": "record(2)",
+ }
+ `;
+diff --git a/packages/bsky/tests/views/__snapshots__/mute-lists.test.ts.snap b/packages/bsky/tests/views/__snapshots__/mute-lists.test.ts.snap
+index 748180f4d57..4fdb9662919 100644
+--- a/packages/bsky/tests/views/__snapshots__/mute-lists.test.ts.snap
++++ b/packages/bsky/tests/views/__snapshots__/mute-lists.test.ts.snap
+@@ -41,6 +41,24 @@ Object {
+         "did": "user(0)",
+         "displayName": "ali",
+         "handle": "alice.test",
++        "labels": Array [
++          Object {
++            "cid": "cids(2)",
++            "cts": "1970-01-01T00:00:00.000Z",
++            "neg": false,
++            "src": "user(0)",
++            "uri": "record(1)",
++            "val": "self-label-a",
++          },
++          Object {
++            "cid": "cids(2)",
++            "cts": "1970-01-01T00:00:00.000Z",
++            "neg": false,
++            "src": "user(0)",
++            "uri": "record(1)",
++            "val": "self-label-b",
++          },
++        ],
+         "viewer": Object {
+           "blockedBy": false,
+           "muted": false,
+diff --git a/packages/pds/tests/proxied/__snapshots__/views.test.ts.snap b/packages/pds/tests/proxied/__snapshots__/views.test.ts.snap
+index 65baff8fa50..9a8396ca220 100644
+--- a/packages/pds/tests/proxied/__snapshots__/views.test.ts.snap
++++ b/packages/pds/tests/proxied/__snapshots__/views.test.ts.snap
+@@ -117,9 +117,9 @@ exports[`proxies view requests actor.getSuggestions 1`] = `
+ Object {
+   "actors": Array [
+     Object {
+-      "avatar": "https://bsky.public.url/img/avatar/plain/user(2)/cids(0)@jpeg",
++      "avatar": "https://bsky.public.url/img/avatar/plain/user(1)/cids(0)@jpeg",
+       "description": "hi im bob label_me",
+-      "did": "user(1)",
++      "did": "user(0)",
+       "displayName": "bobby",
+       "handle": "bob.test",
+       "indexedAt": "1970-01-01T00:00:00.000Z",
+@@ -128,7 +128,7 @@ Object {
+           "cid": "cids(1)",
+           "cts": "1970-01-01T00:00:00.000Z",
+           "neg": false,
+-          "src": "user(1)",
++          "src": "user(0)",
+           "uri": "record(1)",
+           "val": "self-label-a",
+         },
+@@ -136,7 +136,7 @@ Object {
+           "cid": "cids(1)",
+           "cts": "1970-01-01T00:00:00.000Z",
+           "neg": false,
+-          "src": "user(1)",
++          "src": "user(0)",
+           "uri": "record(1)",
+           "val": "self-label-b",
+         },
+@@ -148,7 +148,7 @@ Object {
+       },
+     },
+     Object {
+-      "did": "user(0)",
++      "did": "user(2)",
+       "handle": "dan.test",
+       "labels": Array [],
+       "viewer": Object {
+@@ -157,7 +157,7 @@ Object {
+       },
+     },
+   ],
+-  "cursor": "user(0)",
++  "cursor": "user(2)",
+ }
+ `;
+ 
+@@ -697,7 +697,7 @@ Object {
+             "cts": "1970-01-01T00:00:00.000Z",
+             "neg": false,
+             "src": "user(0)",
+-            "uri": "record(3)",
++            "uri": "record(2)",
+             "val": "self-label-a",
+           },
+           Object {
+@@ -705,14 +705,14 @@ Object {
+             "cts": "1970-01-01T00:00:00.000Z",
+             "neg": false,
+             "src": "user(0)",
+-            "uri": "record(3)",
++            "uri": "record(2)",
+             "val": "self-label-b",
+           },
+         ],
+         "viewer": Object {
+           "blockedBy": false,
+-          "followedBy": "record(2)",
+-          "following": "record(1)",
++          "followedBy": "record(1)",
++          "following": "record(0)",
+           "muted": false,
+         },
+       },
+@@ -733,7 +733,7 @@ Object {
+             "cts": "1970-01-01T00:00:00.000Z",
+             "neg": false,
+             "src": "user(2)",
+-            "uri": "record(4)",
++            "uri": "record(3)",
+             "val": "self-label-a",
+           },
+           Object {
+@@ -741,7 +741,7 @@ Object {
+             "cts": "1970-01-01T00:00:00.000Z",
+             "neg": false,
+             "src": "user(2)",
+-            "uri": "record(4)",
++            "uri": "record(3)",
+             "val": "self-label-b",
+           },
+         ],
+@@ -754,7 +754,7 @@ Object {
+       "indexedAt": "1970-01-01T00:00:00.000Z",
+     },
+   ],
+-  "uri": "record(0)",
++  "uri": "record(4)",
+ }
+ `;
+ 
+@@ -955,13 +955,13 @@ Object {
+       "labels": Array [],
+       "viewer": Object {
+         "blockedBy": false,
+-        "followedBy": "record(2)",
+-        "following": "record(1)",
++        "followedBy": "record(1)",
++        "following": "record(0)",
+         "muted": false,
+       },
+     },
+   ],
+-  "uri": "record(0)",
++  "uri": "record(2)",
+ }
+ `;
+ 
+@@ -2209,37 +2209,37 @@ Object {
+   "cursor": "0000000000000::bafycid",
+   "followers": Array [
+     Object {
+-      "did": "user(2)",
++      "did": "user(0)",
+       "handle": "dan.test",
+       "labels": Array [],
+       "viewer": Object {
+         "blockedBy": false,
+-        "following": "record(3)",
++        "following": "record(0)",
+         "muted": false,
+       },
+     },
+     Object {
+-      "avatar": "https://bsky.public.url/img/avatar/plain/user(4)/cids(0)@jpeg",
++      "avatar": "https://bsky.public.url/img/avatar/plain/user(2)/cids(0)@jpeg",
+       "description": "its me!",
+-      "did": "user(3)",
++      "did": "user(1)",
+       "displayName": "ali",
+       "handle": "alice.test",
+       "indexedAt": "1970-01-01T00:00:00.000Z",
+       "labels": Array [
+         Object {
+-          "cid": "cids(2)",
++          "cid": "cids(1)",
+           "cts": "1970-01-01T00:00:00.000Z",
+           "neg": false,
+-          "src": "user(3)",
+-          "uri": "record(4)",
++          "src": "user(1)",
++          "uri": "record(1)",
+           "val": "self-label-a",
+         },
+         Object {
+-          "cid": "cids(2)",
++          "cid": "cids(1)",
+           "cts": "1970-01-01T00:00:00.000Z",
+           "neg": false,
+-          "src": "user(3)",
+-          "uri": "record(4)",
++          "src": "user(1)",
++          "uri": "record(1)",
+           "val": "self-label-b",
+         },
+       ],
+@@ -2250,34 +2250,34 @@ Object {
+     },
+   ],
+   "subject": Object {
+-    "avatar": "https://bsky.public.url/img/avatar/plain/user(1)/cids(0)@jpeg",
++    "avatar": "https://bsky.public.url/img/avatar/plain/user(4)/cids(0)@jpeg",
+     "description": "hi im bob label_me",
+-    "did": "user(0)",
++    "did": "user(3)",
+     "displayName": "bobby",
+     "handle": "bob.test",
+     "indexedAt": "1970-01-01T00:00:00.000Z",
+     "labels": Array [
+       Object {
+-        "cid": "cids(1)",
++        "cid": "cids(2)",
+         "cts": "1970-01-01T00:00:00.000Z",
+         "neg": false,
+-        "src": "user(0)",
+-        "uri": "record(2)",
++        "src": "user(3)",
++        "uri": "record(4)",
+         "val": "self-label-a",
+       },
+       Object {
+-        "cid": "cids(1)",
++        "cid": "cids(2)",
+         "cts": "1970-01-01T00:00:00.000Z",
+         "neg": false,
+-        "src": "user(0)",
+-        "uri": "record(2)",
++        "src": "user(3)",
++        "uri": "record(4)",
+         "val": "self-label-b",
+       },
+     ],
+     "viewer": Object {
+       "blockedBy": false,
+-      "followedBy": "record(1)",
+-      "following": "record(0)",
++      "followedBy": "record(3)",
++      "following": "record(2)",
+       "muted": false,
+     },
+   },
+@@ -2289,38 +2289,38 @@ Object {
+   "cursor": "0000000000000::bafycid",
+   "follows": Array [
+     Object {
+-      "did": "user(2)",
++      "did": "user(0)",
+       "handle": "carol.test",
+       "labels": Array [],
+       "viewer": Object {
+         "blockedBy": false,
+-        "followedBy": "record(4)",
+-        "following": "record(3)",
++        "followedBy": "record(1)",
++        "following": "record(0)",
+         "muted": false,
+       },
+     },
+     Object {
+-      "avatar": "https://bsky.public.url/img/avatar/plain/user(4)/cids(0)@jpeg",
++      "avatar": "https://bsky.public.url/img/avatar/plain/user(2)/cids(0)@jpeg",
+       "description": "its me!",
+-      "did": "user(3)",
++      "did": "user(1)",
+       "displayName": "ali",
+       "handle": "alice.test",
+       "indexedAt": "1970-01-01T00:00:00.000Z",
+       "labels": Array [
+         Object {
+-          "cid": "cids(2)",
++          "cid": "cids(1)",
+           "cts": "1970-01-01T00:00:00.000Z",
+           "neg": false,
+-          "src": "user(3)",
+-          "uri": "record(5)",
++          "src": "user(1)",
++          "uri": "record(2)",
+           "val": "self-label-a",
+         },
+         Object {
+-          "cid": "cids(2)",
++          "cid": "cids(1)",
+           "cts": "1970-01-01T00:00:00.000Z",
+           "neg": false,
+-          "src": "user(3)",
+-          "uri": "record(5)",
++          "src": "user(1)",
++          "uri": "record(2)",
+           "val": "self-label-b",
+         },
+       ],
+@@ -2331,34 +2331,34 @@ Object {
+     },
+   ],
+   "subject": Object {
+-    "avatar": "https://bsky.public.url/img/avatar/plain/user(1)/cids(0)@jpeg",
++    "avatar": "https://bsky.public.url/img/avatar/plain/user(4)/cids(0)@jpeg",
+     "description": "hi im bob label_me",
+-    "did": "user(0)",
++    "did": "user(3)",
+     "displayName": "bobby",
+     "handle": "bob.test",
+     "indexedAt": "1970-01-01T00:00:00.000Z",
+     "labels": Array [
+       Object {
+-        "cid": "cids(1)",
++        "cid": "cids(2)",
+         "cts": "1970-01-01T00:00:00.000Z",
+         "neg": false,
+-        "src": "user(0)",
+-        "uri": "record(2)",
++        "src": "user(3)",
++        "uri": "record(5)",
+         "val": "self-label-a",
+       },
+       Object {
+-        "cid": "cids(1)",
++        "cid": "cids(2)",
+         "cts": "1970-01-01T00:00:00.000Z",
+         "neg": false,
+-        "src": "user(0)",
+-        "uri": "record(2)",
++        "src": "user(3)",
++        "uri": "record(5)",
+         "val": "self-label-b",
+       },
+     ],
+     "viewer": Object {
+       "blockedBy": false,
+-      "followedBy": "record(1)",
+-      "following": "record(0)",
++      "followedBy": "record(4)",
++      "following": "record(3)",
+       "muted": false,
+     },
+   },

@@ -1,0 +1,2377 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index af5df2a730c4..475ecfb449a2 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -2899,6 +2899,25 @@ dependencies = [
+  "thiserror",
+ ]
+ 
++[[package]]
++name = "polars-expr"
++version = "0.39.2"
++dependencies = [
++ "ahash",
++ "bitflags 2.5.0",
++ "once_cell",
++ "polars-arrow",
++ "polars-core",
++ "polars-io",
++ "polars-json",
++ "polars-ops",
++ "polars-plan",
++ "polars-time",
++ "polars-utils",
++ "rayon",
++ "smartstring",
++]
++
+ [[package]]
+ name = "polars-ffi"
+ version = "0.39.2"
+@@ -2981,6 +3000,7 @@ dependencies = [
+  "once_cell",
+  "polars-arrow",
+  "polars-core",
++ "polars-expr",
+  "polars-io",
+  "polars-json",
+  "polars-ops",
+@@ -3073,6 +3093,7 @@ dependencies = [
+  "polars-arrow",
+  "polars-compute",
+  "polars-core",
++ "polars-expr",
+  "polars-io",
+  "polars-ops",
+  "polars-plan",
+diff --git a/Cargo.toml b/Cargo.toml
+index 8f3afe1113eb..295cde242325 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -103,6 +103,7 @@ polars-row = { version = "0.39.2", path = "crates/polars-row", default-features
+ polars-sql = { version = "0.39.2", path = "crates/polars-sql", default-features = false }
+ polars-time = { version = "0.39.2", path = "crates/polars-time", default-features = false }
+ polars-utils = { version = "0.39.2", path = "crates/polars-utils", default-features = false }
++polars-expr = { version = "0.39.2", path = "crates/polars-expr", default-features = false }
+ 
+ [workspace.dependencies.arrow-format]
+ package = "polars-arrow-format"
+diff --git a/crates/Makefile b/crates/Makefile
+index 925482e9af3f..e9577059bef4 100644
+--- a/crates/Makefile
++++ b/crates/Makefile
+@@ -115,6 +115,7 @@ publish:  ## Publish Polars crates
+ 	cargo publish --allow-dirty -p polars-parquet
+ 	cargo publish --allow-dirty -p polars-io
+ 	cargo publish --allow-dirty -p polars-plan
++	cargo publish --allow-dirty -p polars-expr
+ 	cargo publish --allow-dirty -p polars-pipe
+ 	cargo publish --allow-dirty -p polars-lazy
+ 	cargo publish --allow-dirty -p polars-sql
+diff --git a/crates/polars-core/src/datatypes/any_value.rs b/crates/polars-core/src/datatypes/any_value.rs
+index 7773a02e8527..0a1c52f29153 100644
+--- a/crates/polars-core/src/datatypes/any_value.rs
++++ b/crates/polars-core/src/datatypes/any_value.rs
+@@ -9,6 +9,7 @@ use polars_utils::sync::SyncPtr;
+ use polars_utils::total_ord::ToTotalOrd;
+ use polars_utils::unwrap::UnwrapUncheckedRelease;
+ 
++#[derive(Clone)]
+ pub struct Scalar {
+     dtype: DataType,
+     value: AnyValue<'static>,
+@@ -32,6 +33,14 @@ impl Scalar {
+     pub fn into_series(self, name: &str) -> Series {
+         Series::from_any_values_and_dtype(name, &[self.as_any_value()], &self.dtype, true).unwrap()
+     }
++
++    pub fn dtype(&self) -> &DataType {
++        &self.dtype
++    }
++
++    pub fn update(&mut self, value: AnyValue<'static>) {
++        self.value = value;
++    }
+ }
+ 
+ use super::*;
+@@ -1014,7 +1023,7 @@ impl PartialOrd for AnyValue<'_> {
+     /// Only implemented for the same types and physical types!
+     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+         use AnyValue::*;
+-        match (self.as_borrowed(), &other.as_borrowed()) {
++        match (self, &other) {
+             (UInt8(l), UInt8(r)) => l.partial_cmp(r),
+             (UInt16(l), UInt16(r)) => l.partial_cmp(r),
+             (UInt32(l), UInt32(r)) => l.partial_cmp(r),
+@@ -1025,13 +1034,22 @@ impl PartialOrd for AnyValue<'_> {
+             (Int64(l), Int64(r)) => l.partial_cmp(r),
+             (Float32(l), Float32(r)) => l.to_total_ord().partial_cmp(&r.to_total_ord()),
+             (Float64(l), Float64(r)) => l.to_total_ord().partial_cmp(&r.to_total_ord()),
+-            (String(l), String(r)) => l.partial_cmp(*r),
+-            (Binary(l), Binary(r)) => l.partial_cmp(*r),
+-            _ => None,
++            _ => match (self.as_borrowed(), other.as_borrowed()) {
++                (String(l), String(r)) => l.partial_cmp(r),
++                (Binary(l), Binary(r)) => l.partial_cmp(r),
++                _ => None,
++            },
+         }
+     }
+ }
+ 
++impl TotalEq for AnyValue<'_> {
++    #[inline]
++    fn tot_eq(&self, other: &Self) -> bool {
++        self.eq_missing(other, true)
++    }
++}
++
+ #[cfg(feature = "dtype-struct")]
+ fn struct_to_avs_static(idx: usize, arr: &StructArray, fields: &[Field]) -> Vec<AnyValue<'static>> {
+     let arrs = arr.values();
+diff --git a/crates/polars-expr/Cargo.toml b/crates/polars-expr/Cargo.toml
+new file mode 100644
+index 000000000000..9abd7019a095
+--- /dev/null
++++ b/crates/polars-expr/Cargo.toml
+@@ -0,0 +1,74 @@
++[package]
++name = "polars-expr"
++version.workspace = true
++authors.workspace = true
++edition.workspace = true
++homepage.workspace = true
++license.workspace = true
++repository.workspace = true
++
++[dependencies]
++ahash = { workspace = true }
++arrow = { workspace = true }
++bitflags = { workspace = true }
++once_cell = { workspace = true }
++polars-core = { workspace = true, features = ["lazy", "zip_with", "random"] }
++polars-io = { workspace = true, features = ["lazy"] }
++polars-json = { workspace = true, optional = true }
++polars-ops = { workspace = true, features = ["chunked_ids"] }
++polars-plan = { workspace = true }
++polars-time = { workspace = true, optional = true }
++polars-utils = { workspace = true }
++rayon = { workspace = true }
++smartstring = { workspace = true }
++
++[features]
++nightly = ["polars-core/nightly", "polars-plan/nightly"]
++streaming = ["polars-plan/streaming", "polars-ops/chunked_ids"]
++parquet = ["polars-io/parquet", "polars-plan/parquet"]
++temporal = [
++  "dtype-datetime",
++  "dtype-date",
++  "dtype-time",
++  "dtype-i8",
++  "dtype-i16",
++  "dtype-duration",
++  "polars-plan/temporal",
++]
++
++dtype-full = [
++  "dtype-array",
++  "dtype-categorical",
++  "dtype-date",
++  "dtype-datetime",
++  "dtype-decimal",
++  "dtype-duration",
++  "dtype-i16",
++  "dtype-i8",
++  "dtype-struct",
++  "dtype-time",
++  "dtype-u16",
++  "dtype-u8",
++]
++dtype-array = ["polars-plan/dtype-array", "polars-ops/dtype-array"]
++dtype-categorical = ["polars-plan/dtype-categorical"]
++dtype-date = ["polars-plan/dtype-date", "polars-time/dtype-date", "temporal"]
++dtype-datetime = ["polars-plan/dtype-datetime", "polars-time/dtype-datetime", "temporal"]
++dtype-decimal = ["polars-plan/dtype-decimal"]
++dtype-duration = ["polars-plan/dtype-duration", "polars-time/dtype-duration", "temporal"]
++dtype-i16 = ["polars-plan/dtype-i16"]
++dtype-i8 = ["polars-plan/dtype-i8"]
++dtype-struct = ["polars-plan/dtype-struct", "polars-ops/dtype-struct"]
++dtype-time = ["polars-plan/dtype-time", "polars-time/dtype-time", "temporal"]
++dtype-u16 = ["polars-plan/dtype-u16"]
++dtype-u8 = ["polars-plan/dtype-u8"]
++
++# operations
++approx_unique = ["polars-plan/approx_unique"]
++is_in = ["polars-plan/is_in", "polars-ops/is_in"]
++
++round_series = ["polars-plan/round_series", "polars-ops/round_series"]
++is_between = ["polars-plan/is_between"]
++dynamic_group_by = ["polars-plan/dynamic_group_by", "polars-time", "temporal"]
++propagate_nans = ["polars-plan/propagate_nans"]
++panic_on_schema = ["polars-plan/panic_on_schema"]
+diff --git a/crates/polars-lazy/src/physical_plan/expressions/aggregation.rs b/crates/polars-expr/src/expressions/aggregation.rs
+similarity index 99%
+rename from crates/polars-lazy/src/physical_plan/expressions/aggregation.rs
+rename to crates/polars-expr/src/expressions/aggregation.rs
+index 5799f3177934..9bce91bcde50 100644
+--- a/crates/polars-lazy/src/physical_plan/expressions/aggregation.rs
++++ b/crates/polars-expr/src/expressions/aggregation.rs
+@@ -11,9 +11,11 @@ use polars_core::POOL;
+ #[cfg(feature = "propagate_nans")]
+ use polars_ops::prelude::nan_propagating_aggregate;
+ 
+-use crate::physical_plan::state::ExecutionState;
+-use crate::prelude::AggState::{AggregatedList, AggregatedScalar};
+-use crate::prelude::*;
++use super::*;
++use crate::expressions::AggState::{AggregatedList, AggregatedScalar};
++use crate::expressions::{
++    AggState, AggregationContext, PartitionedAggregation, PhysicalExpr, UpdateGroups,
++};
+ 
+ pub(crate) struct AggregationExpr {
+     pub(crate) input: Arc<dyn PhysicalExpr>,
+diff --git a/crates/polars-lazy/src/physical_plan/expressions/alias.rs b/crates/polars-expr/src/expressions/alias.rs
+similarity index 96%
+rename from crates/polars-lazy/src/physical_plan/expressions/alias.rs
+rename to crates/polars-expr/src/expressions/alias.rs
+index c715083b01f4..fa755fd2b233 100644
+--- a/crates/polars-lazy/src/physical_plan/expressions/alias.rs
++++ b/crates/polars-expr/src/expressions/alias.rs
+@@ -1,7 +1,7 @@
+ use polars_core::prelude::*;
+ 
+-use crate::physical_plan::state::ExecutionState;
+-use crate::prelude::*;
++use super::*;
++use crate::expressions::{AggregationContext, PartitionedAggregation, PhysicalExpr};
+ 
+ pub struct AliasExpr {
+     pub(crate) physical_expr: Arc<dyn PhysicalExpr>,
+diff --git a/crates/polars-lazy/src/physical_plan/expressions/apply.rs b/crates/polars-expr/src/expressions/apply.rs
+similarity index 99%
+rename from crates/polars-lazy/src/physical_plan/expressions/apply.rs
+rename to crates/polars-expr/src/expressions/apply.rs
+index b510f8471370..7bddd3781bc6 100644
+--- a/crates/polars-lazy/src/physical_plan/expressions/apply.rs
++++ b/crates/polars-expr/src/expressions/apply.rs
+@@ -8,8 +8,10 @@ use polars_io::predicates::{BatchStats, StatsEvaluator};
+ use polars_ops::prelude::ClosedInterval;
+ use rayon::prelude::*;
+ 
+-use crate::physical_plan::state::ExecutionState;
+-use crate::prelude::*;
++use super::*;
++use crate::expressions::{
++    AggState, AggregationContext, PartitionedAggregation, PhysicalExpr, UpdateGroups,
++};
+ 
+ pub struct ApplyExpr {
+     inputs: Vec<Arc<dyn PhysicalExpr>>,
+diff --git a/crates/polars-lazy/src/physical_plan/expressions/binary.rs b/crates/polars-expr/src/expressions/binary.rs
+similarity index 99%
+rename from crates/polars-lazy/src/physical_plan/expressions/binary.rs
+rename to crates/polars-expr/src/expressions/binary.rs
+index f3b3d4e2f51b..5f0ce6aab85e 100644
+--- a/crates/polars-lazy/src/physical_plan/expressions/binary.rs
++++ b/crates/polars-expr/src/expressions/binary.rs
+@@ -3,8 +3,10 @@ use polars_core::POOL;
+ #[cfg(feature = "round_series")]
+ use polars_ops::prelude::floor_div_series;
+ 
+-use crate::physical_plan::state::ExecutionState;
+-use crate::prelude::*;
++use super::*;
++use crate::expressions::{
++    AggState, AggregationContext, PartitionedAggregation, PhysicalExpr, UpdateGroups,
++};
+ 
+ pub struct BinaryExpr {
+     left: Arc<dyn PhysicalExpr>,
+diff --git a/crates/polars-lazy/src/physical_plan/expressions/cast.rs b/crates/polars-expr/src/expressions/cast.rs
+similarity index 96%
+rename from crates/polars-lazy/src/physical_plan/expressions/cast.rs
+rename to crates/polars-expr/src/expressions/cast.rs
+index 32ad204ba867..d2e463a5cad2 100644
+--- a/crates/polars-lazy/src/physical_plan/expressions/cast.rs
++++ b/crates/polars-expr/src/expressions/cast.rs
+@@ -1,7 +1,7 @@
+ use polars_core::prelude::*;
+ 
+-use crate::physical_plan::state::ExecutionState;
+-use crate::prelude::*;
++use super::*;
++use crate::expressions::{AggState, AggregationContext, PartitionedAggregation, PhysicalExpr};
+ 
+ pub struct CastExpr {
+     pub(crate) input: Arc<dyn PhysicalExpr>,
+diff --git a/crates/polars-lazy/src/physical_plan/expressions/column.rs b/crates/polars-expr/src/expressions/column.rs
+similarity index 98%
+rename from crates/polars-lazy/src/physical_plan/expressions/column.rs
+rename to crates/polars-expr/src/expressions/column.rs
+index bf37377a56cd..cac4b52ddb11 100644
+--- a/crates/polars-lazy/src/physical_plan/expressions/column.rs
++++ b/crates/polars-expr/src/expressions/column.rs
+@@ -3,8 +3,8 @@ use std::borrow::Cow;
+ use polars_core::prelude::*;
+ use polars_plan::constants::CSE_REPLACED;
+ 
+-use crate::physical_plan::state::ExecutionState;
+-use crate::prelude::*;
++use super::*;
++use crate::expressions::{AggregationContext, PartitionedAggregation, PhysicalExpr};
+ 
+ pub struct ColumnExpr {
+     name: Arc<str>,
+diff --git a/crates/polars-lazy/src/physical_plan/expressions/count.rs b/crates/polars-expr/src/expressions/count.rs
+similarity index 94%
+rename from crates/polars-lazy/src/physical_plan/expressions/count.rs
+rename to crates/polars-expr/src/expressions/count.rs
+index 7bcbac360fec..246e939e3ef3 100644
+--- a/crates/polars-lazy/src/physical_plan/expressions/count.rs
++++ b/crates/polars-expr/src/expressions/count.rs
+@@ -3,8 +3,8 @@ use std::borrow::Cow;
+ use polars_core::prelude::*;
+ use polars_plan::constants::LEN;
+ 
+-use crate::physical_plan::state::ExecutionState;
+-use crate::prelude::*;
++use super::*;
++use crate::expressions::{AggregationContext, PartitionedAggregation, PhysicalExpr};
+ 
+ pub struct CountExpr {
+     expr: Expr,
+diff --git a/crates/polars-lazy/src/physical_plan/expressions/filter.rs b/crates/polars-expr/src/expressions/filter.rs
+similarity index 97%
+rename from crates/polars-lazy/src/physical_plan/expressions/filter.rs
+rename to crates/polars-expr/src/expressions/filter.rs
+index b2cfe43e3997..cc0a6edd35eb 100644
+--- a/crates/polars-lazy/src/physical_plan/expressions/filter.rs
++++ b/crates/polars-expr/src/expressions/filter.rs
+@@ -4,9 +4,9 @@ use polars_core::POOL;
+ use polars_utils::idx_vec::IdxVec;
+ use rayon::prelude::*;
+ 
+-use crate::physical_plan::state::ExecutionState;
+-use crate::prelude::UpdateGroups::WithSeriesLen;
+-use crate::prelude::*;
++use super::*;
++use crate::expressions::UpdateGroups::WithSeriesLen;
++use crate::expressions::{AggregationContext, PhysicalExpr};
+ 
+ pub struct FilterExpr {
+     pub(crate) input: Arc<dyn PhysicalExpr>,
+diff --git a/crates/polars-lazy/src/physical_plan/expressions/group_iter.rs b/crates/polars-expr/src/expressions/group_iter.rs
+similarity index 100%
+rename from crates/polars-lazy/src/physical_plan/expressions/group_iter.rs
+rename to crates/polars-expr/src/expressions/group_iter.rs
+diff --git a/crates/polars-lazy/src/physical_plan/expressions/literal.rs b/crates/polars-expr/src/expressions/literal.rs
+similarity index 98%
+rename from crates/polars-lazy/src/physical_plan/expressions/literal.rs
+rename to crates/polars-expr/src/expressions/literal.rs
+index 27d98ea56190..9e6427e78b0d 100644
+--- a/crates/polars-lazy/src/physical_plan/expressions/literal.rs
++++ b/crates/polars-expr/src/expressions/literal.rs
+@@ -5,8 +5,8 @@ use polars_core::prelude::*;
+ use polars_core::utils::NoNull;
+ use polars_plan::constants::LITERAL_NAME;
+ 
+-use crate::physical_plan::state::ExecutionState;
+-use crate::prelude::*;
++use super::*;
++use crate::expressions::{AggregationContext, PartitionedAggregation, PhysicalExpr};
+ 
+ pub struct LiteralExpr(pub LiteralValue, Expr);
+ 
+diff --git a/crates/polars-lazy/src/physical_plan/expressions/mod.rs b/crates/polars-expr/src/expressions/mod.rs
+similarity index 98%
+rename from crates/polars-lazy/src/physical_plan/expressions/mod.rs
+rename to crates/polars-expr/src/expressions/mod.rs
+index 1158268c7da6..98620e70705b 100644
+--- a/crates/polars-lazy/src/physical_plan/expressions/mod.rs
++++ b/crates/polars-expr/src/expressions/mod.rs
+@@ -33,6 +33,7 @@ pub(crate) use filter::*;
+ pub(crate) use literal::*;
+ use polars_core::prelude::*;
+ use polars_io::predicates::PhysicalIoExpr;
++use polars_plan::prelude::*;
+ #[cfg(feature = "dynamic_group_by")]
+ pub(crate) use rolling::RollingExpr;
+ pub(crate) use slice::*;
+@@ -42,11 +43,10 @@ pub(crate) use take::*;
+ pub(crate) use ternary::*;
+ pub(crate) use window::*;
+ 
+-use crate::physical_plan::state::ExecutionState;
+-use crate::prelude::*;
++use crate::state::ExecutionState;
+ 
+ #[derive(Clone, Debug)]
+-pub(crate) enum AggState {
++pub enum AggState {
+     /// Already aggregated: `.agg_list(group_tuples`) is called
+     /// and produced a `Series` of dtype `List`
+     AggregatedList(Series),
+@@ -174,7 +174,7 @@ impl<'a> AggregationContext<'a> {
+         }
+     }
+ 
+-    pub(crate) fn agg_state(&self) -> &AggState {
++    pub fn agg_state(&self) -> &AggState {
+         &self.state
+     }
+ 
+@@ -388,7 +388,7 @@ impl<'a> AggregationContext<'a> {
+     }
+ 
+     /// Get the aggregated version of the series.
+-    pub(crate) fn aggregated(&mut self) -> Series {
++    pub fn aggregated(&mut self) -> Series {
+         // we clone, because we only want to call `self.groups()` if needed.
+         // self groups may instantiate new groups and thus can be expensive.
+         match self.state.clone() {
+@@ -425,7 +425,7 @@ impl<'a> AggregationContext<'a> {
+     }
+ 
+     /// Get the final aggregated version of the series.
+-    pub(crate) fn finalize(&mut self) -> Series {
++    pub fn finalize(&mut self) -> Series {
+         // we clone, because we only want to call `self.groups()` if needed.
+         // self groups may instantiate new groups and thus can be expensive.
+         match &self.state {
+@@ -450,7 +450,7 @@ impl<'a> AggregationContext<'a> {
+         }
+     }
+ 
+-    pub(crate) fn get_final_aggregation(mut self) -> (Series, Cow<'a, GroupsProxy>) {
++    pub fn get_final_aggregation(mut self) -> (Series, Cow<'a, GroupsProxy>) {
+         let _ = self.groups();
+         let groups = self.groups;
+         match self.state {
+@@ -617,7 +617,7 @@ impl PhysicalIoExpr for PhysicalIoHelper {
+     }
+ }
+ 
+-pub(crate) fn phys_expr_to_io_expr(expr: Arc<dyn PhysicalExpr>) -> Arc<dyn PhysicalIoExpr> {
++pub fn phys_expr_to_io_expr(expr: Arc<dyn PhysicalExpr>) -> Arc<dyn PhysicalIoExpr> {
+     let has_window_function = if let Some(expr) = expr.as_expression() {
+         expr.into_iter()
+             .any(|expr| matches!(expr, Expr::Window { .. }))
+diff --git a/crates/polars-lazy/src/physical_plan/expressions/rolling.rs b/crates/polars-expr/src/expressions/rolling.rs
+similarity index 97%
+rename from crates/polars-lazy/src/physical_plan/expressions/rolling.rs
+rename to crates/polars-expr/src/expressions/rolling.rs
+index 5fc32d1bb4ac..614673091f07 100644
+--- a/crates/polars-lazy/src/physical_plan/expressions/rolling.rs
++++ b/crates/polars-expr/src/expressions/rolling.rs
+@@ -1,3 +1,5 @@
++use polars_time::{PolarsTemporalGroupby, RollingGroupOptions};
++
+ use super::*;
+ 
+ pub(crate) struct RollingExpr {
+diff --git a/crates/polars-lazy/src/physical_plan/expressions/slice.rs b/crates/polars-expr/src/expressions/slice.rs
+similarity index 99%
+rename from crates/polars-lazy/src/physical_plan/expressions/slice.rs
+rename to crates/polars-expr/src/expressions/slice.rs
+index 3d0129675a96..3b64a098073e 100644
+--- a/crates/polars-lazy/src/physical_plan/expressions/slice.rs
++++ b/crates/polars-expr/src/expressions/slice.rs
+@@ -4,8 +4,8 @@ use polars_core::POOL;
+ use rayon::prelude::*;
+ use AnyValue::Null;
+ 
+-use crate::physical_plan::state::ExecutionState;
+-use crate::prelude::*;
++use super::*;
++use crate::expressions::{AggregationContext, PhysicalExpr};
+ 
+ pub struct SliceExpr {
+     pub(crate) input: Arc<dyn PhysicalExpr>,
+diff --git a/crates/polars-lazy/src/physical_plan/expressions/sort.rs b/crates/polars-expr/src/expressions/sort.rs
+similarity index 97%
+rename from crates/polars-lazy/src/physical_plan/expressions/sort.rs
+rename to crates/polars-expr/src/expressions/sort.rs
+index 207ad3c82915..1e729e0ff701 100644
+--- a/crates/polars-lazy/src/physical_plan/expressions/sort.rs
++++ b/crates/polars-expr/src/expressions/sort.rs
+@@ -4,8 +4,8 @@ use polars_ops::chunked_array::ListNameSpaceImpl;
+ use polars_utils::idx_vec::IdxVec;
+ use rayon::prelude::*;
+ 
+-use crate::physical_plan::state::ExecutionState;
+-use crate::prelude::*;
++use super::*;
++use crate::expressions::{AggState, AggregationContext, PhysicalExpr};
+ 
+ pub struct SortExpr {
+     pub(crate) physical_expr: Arc<dyn PhysicalExpr>,
+diff --git a/crates/polars-lazy/src/physical_plan/expressions/sortby.rs b/crates/polars-expr/src/expressions/sortby.rs
+similarity index 98%
+rename from crates/polars-lazy/src/physical_plan/expressions/sortby.rs
+rename to crates/polars-expr/src/expressions/sortby.rs
+index 1f41cdec5bdf..06c3ef65d976 100644
+--- a/crates/polars-lazy/src/physical_plan/expressions/sortby.rs
++++ b/crates/polars-expr/src/expressions/sortby.rs
+@@ -4,8 +4,11 @@ use polars_core::POOL;
+ use polars_utils::idx_vec::IdxVec;
+ use rayon::prelude::*;
+ 
+-use crate::physical_plan::state::ExecutionState;
+-use crate::prelude::*;
++use super::*;
++use crate::expressions::{
++    map_sorted_indices_to_group_idx, map_sorted_indices_to_group_slice, AggregationContext,
++    PhysicalExpr, UpdateGroups,
++};
+ 
+ pub struct SortByExpr {
+     pub(crate) input: Arc<dyn PhysicalExpr>,
+diff --git a/crates/polars-lazy/src/physical_plan/expressions/take.rs b/crates/polars-expr/src/expressions/take.rs
+similarity index 98%
+rename from crates/polars-lazy/src/physical_plan/expressions/take.rs
+rename to crates/polars-expr/src/expressions/take.rs
+index 5f0e40ab6a29..153a945086cb 100644
+--- a/crates/polars-lazy/src/physical_plan/expressions/take.rs
++++ b/crates/polars-expr/src/expressions/take.rs
+@@ -5,8 +5,8 @@ use polars_core::utils::NoNull;
+ use polars_ops::prelude::{convert_to_unsigned_index, is_positive_idx_uncertain};
+ use polars_utils::slice::GetSaferUnchecked;
+ 
+-use crate::physical_plan::state::ExecutionState;
+-use crate::prelude::*;
++use super::*;
++use crate::expressions::{AggState, AggregationContext, PhysicalExpr, UpdateGroups};
+ 
+ pub struct GatherExpr {
+     pub(crate) phys_expr: Arc<dyn PhysicalExpr>,
+diff --git a/crates/polars-lazy/src/physical_plan/expressions/ternary.rs b/crates/polars-expr/src/expressions/ternary.rs
+similarity index 99%
+rename from crates/polars-lazy/src/physical_plan/expressions/ternary.rs
+rename to crates/polars-expr/src/expressions/ternary.rs
+index d52cb4eb8d61..b84e868efd35 100644
+--- a/crates/polars-lazy/src/physical_plan/expressions/ternary.rs
++++ b/crates/polars-expr/src/expressions/ternary.rs
+@@ -1,8 +1,9 @@
+ use polars_core::prelude::*;
+ use polars_core::POOL;
++use polars_plan::prelude::*;
+ 
+-use crate::physical_plan::state::ExecutionState;
+-use crate::prelude::*;
++use super::*;
++use crate::expressions::{AggregationContext, PhysicalExpr};
+ 
+ pub struct TernaryExpr {
+     predicate: Arc<dyn PhysicalExpr>,
+diff --git a/crates/polars-lazy/src/physical_plan/expressions/window.rs b/crates/polars-expr/src/expressions/window.rs
+similarity index 99%
+rename from crates/polars-lazy/src/physical_plan/expressions/window.rs
+rename to crates/polars-expr/src/expressions/window.rs
+index 2473b2068fc6..85f8b562b7a3 100644
+--- a/crates/polars-lazy/src/physical_plan/expressions/window.rs
++++ b/crates/polars-expr/src/expressions/window.rs
+@@ -8,13 +8,14 @@ use polars_core::utils::_split_offsets;
+ use polars_core::{downcast_as_macro_arg_physical, POOL};
+ use polars_ops::frame::join::{default_join_ids, private_left_join_multiple_keys, ChunkJoinOptIds};
+ use polars_ops::frame::SeriesJoin;
++use polars_ops::prelude::*;
++use polars_plan::prelude::*;
+ use polars_utils::format_smartstring;
+ use polars_utils::sort::perfect_sort;
+ use polars_utils::sync::SyncPtr;
+ use rayon::prelude::*;
+ 
+ use super::*;
+-use crate::prelude::*;
+ 
+ pub struct WindowExpr {
+     /// the root column that the Function will be applied on.
+diff --git a/crates/polars-expr/src/lib.rs b/crates/polars-expr/src/lib.rs
+new file mode 100644
+index 000000000000..5ed4d4a038cc
+--- /dev/null
++++ b/crates/polars-expr/src/lib.rs
+@@ -0,0 +1,4 @@
++mod expressions;
++pub mod planner;
++pub mod prelude;
++pub mod state;
+diff --git a/crates/polars-lazy/src/physical_plan/planner/expr.rs b/crates/polars-expr/src/planner.rs
+similarity index 94%
+rename from crates/polars-lazy/src/physical_plan/planner/expr.rs
+rename to crates/polars-expr/src/planner.rs
+index 28a3a63882ce..83ed01ad7929 100644
+--- a/crates/polars-lazy/src/physical_plan/planner/expr.rs
++++ b/crates/polars-expr/src/planner.rs
+@@ -3,12 +3,13 @@ use polars_core::series::IsSorted;
+ use polars_core::utils::_split_offsets;
+ use polars_core::POOL;
+ use polars_plan::prelude::expr_ir::ExprIR;
++use polars_plan::prelude::*;
+ use rayon::prelude::*;
+ 
+-use super::super::expressions as phys_expr;
+-use crate::prelude::*;
++use crate::expressions as phys_expr;
++use crate::expressions::*;
+ 
+-pub(super) fn get_expr_depth_limit() -> PolarsResult<u16> {
++pub fn get_expr_depth_limit() -> PolarsResult<u16> {
+     let depth = if let Ok(d) = std::env::var("POLARS_MAX_EXPR_DEPTH") {
+         let v = d
+             .parse::<u64>()
+@@ -24,7 +25,7 @@ fn ok_checker(_state: &ExpressionConversionState) -> PolarsResult<()> {
+     Ok(())
+ }
+ 
+-pub(crate) fn create_physical_expressions_from_irs(
++pub fn create_physical_expressions_from_irs(
+     exprs: &[ExprIR],
+     context: Context,
+     expr_arena: &Arena<AExpr>,
+@@ -91,7 +92,7 @@ where
+ }
+ 
+ #[derive(Copy, Clone)]
+-pub(crate) struct ExpressionConversionState {
++pub struct ExpressionConversionState {
+     // settings per context
+     // they remain activate between
+     // expressions
+@@ -126,7 +127,7 @@ impl Default for LocalConversionState {
+ }
+ 
+ impl ExpressionConversionState {
+-    pub(crate) fn new(allow_threading: bool, depth_limit: u16) -> Self {
++    pub fn new(allow_threading: bool, depth_limit: u16) -> Self {
+         Self {
+             depth_limit,
+             has_cache: false,
+@@ -166,7 +167,7 @@ impl ExpressionConversionState {
+     }
+ }
+ 
+-pub(crate) fn create_physical_expr(
++pub fn create_physical_expr(
+     expr_ir: &ExprIR,
+     ctxt: Context,
+     expr_arena: &Arena<AExpr>,
+@@ -347,14 +348,14 @@ fn create_physical_expr_inner(
+             let expr = agg.get_input().first();
+             let input = create_physical_expr_inner(expr, ctxt, expr_arena, schema, state)?;
+             polars_ensure!(!(state.has_implode() && matches!(ctxt, Context::Aggregation)), InvalidOperation: "'implode' followed by an aggregation is not allowed");
+-            state.local.has_implode |= matches!(agg, AAggExpr::Implode(_));
++            state.local.has_implode |= matches!(agg, IRAggExpr::Implode(_));
+ 
+             match ctxt {
+                 // TODO!: implement these functions somewhere else
+                 // this should not be in the planner.
+-                Context::Default if !matches!(agg, AAggExpr::Quantile { .. }) => {
++                Context::Default if !matches!(agg, IRAggExpr::Quantile { .. }) => {
+                     let function = match agg {
+-                        AAggExpr::Min { propagate_nans, .. } => {
++                        IRAggExpr::Min { propagate_nans, .. } => {
+                             let propagate_nans = *propagate_nans;
+                             let state = *state;
+                             SpecialEq::new(Arc::new(move |s: &mut [Series]| {
+@@ -391,7 +392,7 @@ fn create_physical_expr_inner(
+                                 }
+                             }) as Arc<dyn SeriesUdf>)
+                         },
+-                        AAggExpr::Max { propagate_nans, .. } => {
++                        IRAggExpr::Max { propagate_nans, .. } => {
+                             let propagate_nans = *propagate_nans;
+                             let state = *state;
+                             SpecialEq::new(Arc::new(move |s: &mut [Series]| {
+@@ -428,12 +429,13 @@ fn create_physical_expr_inner(
+                                 }
+                             }) as Arc<dyn SeriesUdf>)
+                         },
+-                        AAggExpr::Median(_) => SpecialEq::new(Arc::new(move |s: &mut [Series]| {
+-                            let s = std::mem::take(&mut s[0]);
+-                            s.median_reduce().map(|sc| Some(sc.into_series(s.name())))
+-                        })
+-                            as Arc<dyn SeriesUdf>),
+-                        AAggExpr::NUnique(_) => {
++                        IRAggExpr::Median(_) => {
++                            SpecialEq::new(Arc::new(move |s: &mut [Series]| {
++                                let s = std::mem::take(&mut s[0]);
++                                s.median_reduce().map(|sc| Some(sc.into_series(s.name())))
++                            }) as Arc<dyn SeriesUdf>)
++                        },
++                        IRAggExpr::NUnique(_) => {
+                             SpecialEq::new(Arc::new(move |s: &mut [Series]| {
+                                 let s = std::mem::take(&mut s[0]);
+                                 s.n_unique().map(|count| {
+@@ -444,7 +446,7 @@ fn create_physical_expr_inner(
+                                 })
+                             }) as Arc<dyn SeriesUdf>)
+                         },
+-                        AAggExpr::First(_) => SpecialEq::new(Arc::new(move |s: &mut [Series]| {
++                        IRAggExpr::First(_) => SpecialEq::new(Arc::new(move |s: &mut [Series]| {
+                             let s = std::mem::take(&mut s[0]);
+                             let out = if s.is_empty() {
+                                 Series::full_null(s.name(), 1, s.dtype())
+@@ -454,7 +456,7 @@ fn create_physical_expr_inner(
+                             Ok(Some(out))
+                         })
+                             as Arc<dyn SeriesUdf>),
+-                        AAggExpr::Last(_) => SpecialEq::new(Arc::new(move |s: &mut [Series]| {
++                        IRAggExpr::Last(_) => SpecialEq::new(Arc::new(move |s: &mut [Series]| {
+                             let s = std::mem::take(&mut s[0]);
+                             let out = if s.is_empty() {
+                                 Series::full_null(s.name(), 1, s.dtype())
+@@ -464,21 +466,21 @@ fn create_physical_expr_inner(
+                             Ok(Some(out))
+                         })
+                             as Arc<dyn SeriesUdf>),
+-                        AAggExpr::Mean(_) => SpecialEq::new(Arc::new(move |s: &mut [Series]| {
++                        IRAggExpr::Mean(_) => SpecialEq::new(Arc::new(move |s: &mut [Series]| {
+                             let s = std::mem::take(&mut s[0]);
+                             Ok(Some(s.mean_reduce().into_series(s.name())))
+                         })
+                             as Arc<dyn SeriesUdf>),
+-                        AAggExpr::Implode(_) => {
++                        IRAggExpr::Implode(_) => {
+                             SpecialEq::new(Arc::new(move |s: &mut [Series]| {
+                                 let s = &s[0];
+                                 s.implode().map(|ca| Some(ca.into_series()))
+                             }) as Arc<dyn SeriesUdf>)
+                         },
+-                        AAggExpr::Quantile { .. } => {
++                        IRAggExpr::Quantile { .. } => {
+                             unreachable!()
+                         },
+-                        AAggExpr::Sum(_) => {
++                        IRAggExpr::Sum(_) => {
+                             let state = *state;
+                             SpecialEq::new(Arc::new(move |s: &mut [Series]| {
+                                 let s = std::mem::take(&mut s[0]);
+@@ -490,7 +492,7 @@ fn create_physical_expr_inner(
+                                 )
+                             }) as Arc<dyn SeriesUdf>)
+                         },
+-                        AAggExpr::Count(_, include_nulls) => {
++                        IRAggExpr::Count(_, include_nulls) => {
+                             let include_nulls = *include_nulls;
+                             SpecialEq::new(Arc::new(move |s: &mut [Series]| {
+                                 let s = std::mem::take(&mut s[0]);
+@@ -500,21 +502,21 @@ fn create_physical_expr_inner(
+                                 ))
+                             }) as Arc<dyn SeriesUdf>)
+                         },
+-                        AAggExpr::Std(_, ddof) => {
++                        IRAggExpr::Std(_, ddof) => {
+                             let ddof = *ddof;
+                             SpecialEq::new(Arc::new(move |s: &mut [Series]| {
+                                 let s = std::mem::take(&mut s[0]);
+                                 s.std_reduce(ddof).map(|sc| Some(sc.into_series(s.name())))
+                             }) as Arc<dyn SeriesUdf>)
+                         },
+-                        AAggExpr::Var(_, ddof) => {
++                        IRAggExpr::Var(_, ddof) => {
+                             let ddof = *ddof;
+                             SpecialEq::new(Arc::new(move |s: &mut [Series]| {
+                                 let s = std::mem::take(&mut s[0]);
+                                 s.var_reduce(ddof).map(|sc| Some(sc.into_series(s.name())))
+                             }) as Arc<dyn SeriesUdf>)
+                         },
+-                        AAggExpr::AggGroups(_) => {
++                        IRAggExpr::AggGroups(_) => {
+                             panic!("agg groups expression only supported in aggregation context")
+                         },
+                     };
+@@ -526,7 +528,7 @@ fn create_physical_expr_inner(
+                     )))
+                 },
+                 _ => {
+-                    if let AAggExpr::Quantile {
++                    if let IRAggExpr::Quantile {
+                         expr,
+                         quantile,
+                         interpol,
+diff --git a/crates/polars-expr/src/prelude.rs b/crates/polars-expr/src/prelude.rs
+new file mode 100644
+index 000000000000..36c336c857bb
+--- /dev/null
++++ b/crates/polars-expr/src/prelude.rs
+@@ -0,0 +1,2 @@
++pub use crate::expressions::*;
++pub use crate::state::*;
+diff --git a/crates/polars-lazy/src/physical_plan/state.rs b/crates/polars-expr/src/state/execution_state.rs
+similarity index 82%
+rename from crates/polars-lazy/src/physical_plan/state.rs
+rename to crates/polars-expr/src/state/execution_state.rs
+index a5f22221d2a1..90798ef6b8ee 100644
+--- a/crates/polars-lazy/src/physical_plan/state.rs
++++ b/crates/polars-expr/src/state/execution_state.rs
+@@ -8,7 +8,7 @@ use polars_core::config::verbose;
+ use polars_core::prelude::*;
+ use polars_ops::prelude::ChunkJoinOptIds;
+ 
+-use crate::physical_plan::node_timer::NodeTimer;
++use super::NodeTimer;
+ 
+ pub type JoinTuplesCache = Arc<Mutex<PlHashMap<String, ChunkJoinOptIds>>>;
+ pub type GroupsProxyCache = Arc<RwLock<PlHashMap<String, GroupsProxy>>>;
+@@ -61,15 +61,15 @@ type CachedValue = Arc<(AtomicI64, OnceCell<DataFrame>)>;
+ pub struct ExecutionState {
+     // cached by a `.cache` call and kept in memory for the duration of the plan.
+     df_cache: Arc<Mutex<PlHashMap<usize, CachedValue>>>,
+-    pub(super) schema_cache: RwLock<Option<SchemaRef>>,
++    pub schema_cache: RwLock<Option<SchemaRef>>,
+     /// Used by Window Expression to prevent redundant grouping
+-    pub(super) group_tuples: GroupsProxyCache,
++    pub group_tuples: GroupsProxyCache,
+     /// Used by Window Expression to prevent redundant joins
+-    pub(super) join_tuples: JoinTuplesCache,
++    pub join_tuples: JoinTuplesCache,
+     // every join/union split gets an increment to distinguish between schema state
+-    pub(super) branch_idx: usize,
+-    pub(super) flags: AtomicU8,
+-    pub(super) ext_contexts: Arc<Vec<DataFrame>>,
++    pub branch_idx: usize,
++    pub flags: AtomicU8,
++    pub ext_contexts: Arc<Vec<DataFrame>>,
+     node_timer: Option<NodeTimer>,
+     stop: Arc<AtomicBool>,
+ }
+@@ -94,28 +94,28 @@ impl ExecutionState {
+     }
+ 
+     /// Toggle this to measure execution times.
+-    pub(crate) fn time_nodes(&mut self) {
++    pub fn time_nodes(&mut self) {
+         self.node_timer = Some(NodeTimer::new())
+     }
+-    pub(super) fn has_node_timer(&self) -> bool {
++    pub fn has_node_timer(&self) -> bool {
+         self.node_timer.is_some()
+     }
+ 
+-    pub(crate) fn finish_timer(self) -> PolarsResult<DataFrame> {
++    pub fn finish_timer(self) -> PolarsResult<DataFrame> {
+         self.node_timer.unwrap().finish()
+     }
+ 
+     // This is wrong when the U64 overflows which will never happen.
+-    pub(super) fn should_stop(&self) -> PolarsResult<()> {
++    pub fn should_stop(&self) -> PolarsResult<()> {
+         polars_ensure!(!self.stop.load(Ordering::Relaxed), ComputeError: "query interrupted");
+         Ok(())
+     }
+ 
+-    pub(crate) fn cancel_token(&self) -> Arc<AtomicBool> {
++    pub fn cancel_token(&self) -> Arc<AtomicBool> {
+         self.stop.clone()
+     }
+ 
+-    pub(super) fn record<T, F: FnOnce() -> T>(&self, func: F, name: Cow<'static, str>) -> T {
++    pub fn record<T, F: FnOnce() -> T>(&self, func: F, name: Cow<'static, str>) -> T {
+         match &self.node_timer {
+             None => func(),
+             Some(timer) => {
+@@ -131,7 +131,7 @@ impl ExecutionState {
+ 
+     /// Partially clones and partially clears state
+     /// This should be used when splitting a node, like a join or union
+-    pub(super) fn split(&self) -> Self {
++    pub fn split(&self) -> Self {
+         Self {
+             df_cache: self.df_cache.clone(),
+             schema_cache: Default::default(),
+@@ -145,39 +145,24 @@ impl ExecutionState {
+         }
+     }
+ 
+-    /// clones, but clears no state.
+-    pub(super) fn clone(&self) -> Self {
+-        Self {
+-            df_cache: self.df_cache.clone(),
+-            schema_cache: self.schema_cache.read().unwrap().clone().into(),
+-            group_tuples: self.group_tuples.clone(),
+-            join_tuples: self.join_tuples.clone(),
+-            branch_idx: self.branch_idx,
+-            flags: AtomicU8::new(self.flags.load(Ordering::Relaxed)),
+-            ext_contexts: self.ext_contexts.clone(),
+-            node_timer: self.node_timer.clone(),
+-            stop: self.stop.clone(),
+-        }
+-    }
+-
+-    pub(crate) fn set_schema(&self, schema: SchemaRef) {
++    pub fn set_schema(&self, schema: SchemaRef) {
+         let mut lock = self.schema_cache.write().unwrap();
+         *lock = Some(schema);
+     }
+ 
+     /// Clear the schema. Typically at the end of a projection.
+-    pub(crate) fn clear_schema_cache(&self) {
++    pub fn clear_schema_cache(&self) {
+         let mut lock = self.schema_cache.write().unwrap();
+         *lock = None;
+     }
+ 
+     /// Get the schema.
+-    pub(crate) fn get_schema(&self) -> Option<SchemaRef> {
++    pub fn get_schema(&self) -> Option<SchemaRef> {
+         let lock = self.schema_cache.read().unwrap();
+         lock.clone()
+     }
+ 
+-    pub(crate) fn get_df_cache(&self, key: usize, cache_hits: u32) -> CachedValue {
++    pub fn get_df_cache(&self, key: usize, cache_hits: u32) -> CachedValue {
+         let mut guard = self.df_cache.lock().unwrap();
+         guard
+             .entry(key)
+@@ -185,13 +170,13 @@ impl ExecutionState {
+             .clone()
+     }
+ 
+-    pub(crate) fn remove_df_cache(&self, key: usize) {
++    pub fn remove_df_cache(&self, key: usize) {
+         let mut guard = self.df_cache.lock().unwrap();
+         let _ = guard.remove(&key).unwrap();
+     }
+ 
+     /// Clear the cache used by the Window expressions
+-    pub(crate) fn clear_window_expr_cache(&self) {
++    pub fn clear_window_expr_cache(&self) {
+         {
+             let mut lock = self.group_tuples.write().unwrap();
+             lock.clear();
+@@ -207,38 +192,38 @@ impl ExecutionState {
+     }
+ 
+     /// Indicates that window expression's [`GroupTuples`] may be cached.
+-    pub(super) fn cache_window(&self) -> bool {
++    pub fn cache_window(&self) -> bool {
+         let flags: StateFlags = self.flags.load(Ordering::Relaxed).into();
+         flags.contains(StateFlags::CACHE_WINDOW_EXPR)
+     }
+ 
+     /// Indicates that window expression's [`GroupTuples`] may be cached.
+-    pub(super) fn has_window(&self) -> bool {
++    pub fn has_window(&self) -> bool {
+         let flags: StateFlags = self.flags.load(Ordering::Relaxed).into();
+         flags.contains(StateFlags::HAS_WINDOW)
+     }
+ 
+     /// More verbose logging
+-    pub(super) fn verbose(&self) -> bool {
++    pub fn verbose(&self) -> bool {
+         let flags: StateFlags = self.flags.load(Ordering::Relaxed).into();
+         flags.contains(StateFlags::VERBOSE)
+     }
+ 
+-    pub(super) fn remove_cache_window_flag(&mut self) {
++    pub fn remove_cache_window_flag(&mut self) {
+         self.set_flags(&|mut flags| {
+             flags.remove(StateFlags::CACHE_WINDOW_EXPR);
+             flags
+         });
+     }
+ 
+-    pub(super) fn insert_cache_window_flag(&mut self) {
++    pub fn insert_cache_window_flag(&mut self) {
+         self.set_flags(&|mut flags| {
+             flags.insert(StateFlags::CACHE_WINDOW_EXPR);
+             flags
+         });
+     }
+     // this will trigger some conservative
+-    pub(super) fn insert_has_window_function_flag(&mut self) {
++    pub fn insert_has_window_function_flag(&mut self) {
+         self.set_flags(&|mut flags| {
+             flags.insert(StateFlags::HAS_WINDOW);
+             flags
+@@ -246,7 +231,7 @@ impl ExecutionState {
+     }
+ 
+     #[cfg(feature = "streaming")]
+-    pub(super) fn set_in_streaming_engine(&mut self) {
++    pub fn set_in_streaming_engine(&mut self) {
+         self.set_flags(&|mut flags| {
+             flags.insert(StateFlags::IN_STREAMING);
+             flags
+@@ -254,7 +239,7 @@ impl ExecutionState {
+     }
+ 
+     #[cfg(feature = "streaming")]
+-    pub(super) fn in_streaming_engine(&self) -> bool {
++    pub fn in_streaming_engine(&self) -> bool {
+         let flags: StateFlags = self.flags.load(Ordering::Relaxed).into();
+         flags.contains(StateFlags::IN_STREAMING)
+     }
+@@ -265,3 +250,20 @@ impl Default for ExecutionState {
+         ExecutionState::new()
+     }
+ }
++
++impl Clone for ExecutionState {
++    /// clones, but clears no state.
++    fn clone(&self) -> Self {
++        Self {
++            df_cache: self.df_cache.clone(),
++            schema_cache: self.schema_cache.read().unwrap().clone().into(),
++            group_tuples: self.group_tuples.clone(),
++            join_tuples: self.join_tuples.clone(),
++            branch_idx: self.branch_idx,
++            flags: AtomicU8::new(self.flags.load(Ordering::Relaxed)),
++            ext_contexts: self.ext_contexts.clone(),
++            node_timer: self.node_timer.clone(),
++            stop: self.stop.clone(),
++        }
++    }
++}
+diff --git a/crates/polars-expr/src/state/mod.rs b/crates/polars-expr/src/state/mod.rs
+new file mode 100644
+index 000000000000..d8f5ca5b8ca0
+--- /dev/null
++++ b/crates/polars-expr/src/state/mod.rs
+@@ -0,0 +1,5 @@
++mod execution_state;
++mod node_timer;
++
++pub use execution_state::*;
++use node_timer::*;
+diff --git a/crates/polars-lazy/src/physical_plan/node_timer.rs b/crates/polars-expr/src/state/node_timer.rs
+similarity index 100%
+rename from crates/polars-lazy/src/physical_plan/node_timer.rs
+rename to crates/polars-expr/src/state/node_timer.rs
+diff --git a/crates/polars-lazy/Cargo.toml b/crates/polars-lazy/Cargo.toml
+index 9c92a46d44a2..b00d3f5c34cb 100644
+--- a/crates/polars-lazy/Cargo.toml
++++ b/crates/polars-lazy/Cargo.toml
+@@ -12,6 +12,7 @@ description = "Lazy query engine for the Polars DataFrame library"
+ arrow = { workspace = true }
+ futures = { workspace = true, optional = true }
+ polars-core = { workspace = true, features = ["lazy", "zip_with", "random"] }
++polars-expr = { workspace = true }
+ polars-io = { workspace = true, features = ["lazy"] }
+ polars-json = { workspace = true, optional = true }
+ polars-ops = { workspace = true, features = ["chunked_ids"] }
+@@ -37,8 +38,8 @@ version_check = { workspace = true }
+ 
+ [features]
+ nightly = ["polars-core/nightly", "polars-pipe?/nightly", "polars-plan/nightly"]
+-streaming = ["polars-pipe", "polars-plan/streaming", "polars-ops/chunked_ids"]
+-parquet = ["polars-io/parquet", "polars-plan/parquet", "polars-pipe?/parquet"]
++streaming = ["polars-pipe", "polars-plan/streaming", "polars-ops/chunked_ids", "polars-expr/streaming"]
++parquet = ["polars-io/parquet", "polars-plan/parquet", "polars-pipe?/parquet", "polars-expr/parquet"]
+ async = [
+   "polars-plan/async",
+   "polars-io/cloud",
+@@ -57,6 +58,7 @@ temporal = [
+   "dtype-i16",
+   "dtype-duration",
+   "polars-plan/temporal",
++  "polars-expr/temporal",
+ ]
+ # debugging purposes
+ fmt = ["polars-core/fmt", "polars-plan/fmt"]
+@@ -77,18 +79,23 @@ dtype-full = [
+   "dtype-u16",
+   "dtype-u8",
+ ]
+-dtype-array = ["polars-plan/dtype-array", "polars-pipe?/dtype-array", "polars-ops/dtype-array"]
+-dtype-categorical = ["polars-plan/dtype-categorical", "polars-pipe?/dtype-categorical"]
+-dtype-date = ["polars-plan/dtype-date", "polars-time/dtype-date", "temporal"]
+-dtype-datetime = ["polars-plan/dtype-datetime", "polars-time/dtype-datetime", "temporal"]
+-dtype-decimal = ["polars-plan/dtype-decimal", "polars-pipe?/dtype-decimal"]
+-dtype-duration = ["polars-plan/dtype-duration", "polars-time/dtype-duration", "temporal"]
+-dtype-i16 = ["polars-plan/dtype-i16", "polars-pipe?/dtype-i16"]
+-dtype-i8 = ["polars-plan/dtype-i8", "polars-pipe?/dtype-i8"]
+-dtype-struct = ["polars-plan/dtype-struct", "polars-ops/dtype-struct"]
+-dtype-time = ["polars-plan/dtype-time", "polars-time/dtype-time", "temporal"]
+-dtype-u16 = ["polars-plan/dtype-u16", "polars-pipe?/dtype-u16"]
+-dtype-u8 = ["polars-plan/dtype-u8", "polars-pipe?/dtype-u8"]
++dtype-array = [
++  "polars-plan/dtype-array",
++  "polars-pipe?/dtype-array",
++  "polars-ops/dtype-array",
++  "polars-expr/dtype-array",
++]
++dtype-categorical = ["polars-plan/dtype-categorical", "polars-pipe?/dtype-categorical", "polars-expr/dtype-categorical"]
++dtype-date = ["polars-plan/dtype-date", "polars-time/dtype-date", "temporal", "polars-expr/dtype-date"]
++dtype-datetime = ["polars-plan/dtype-datetime", "polars-time/dtype-datetime", "temporal", "polars-expr/dtype-datetime"]
++dtype-decimal = ["polars-plan/dtype-decimal", "polars-pipe?/dtype-decimal", "polars-expr/dtype-decimal"]
++dtype-duration = ["polars-plan/dtype-duration", "polars-time/dtype-duration", "temporal", "polars-expr/dtype-duration"]
++dtype-i16 = ["polars-plan/dtype-i16", "polars-pipe?/dtype-i16", "polars-expr/dtype-i16"]
++dtype-i8 = ["polars-plan/dtype-i8", "polars-pipe?/dtype-i8", "polars-expr/dtype-i8"]
++dtype-struct = ["polars-plan/dtype-struct", "polars-ops/dtype-struct", "polars-expr/dtype-struct"]
++dtype-time = ["polars-plan/dtype-time", "polars-time/dtype-time", "temporal", "polars-expr/dtype-time"]
++dtype-u16 = ["polars-plan/dtype-u16", "polars-pipe?/dtype-u16", "polars-expr/dtype-u16"]
++dtype-u8 = ["polars-plan/dtype-u8", "polars-pipe?/dtype-u8", "polars-expr/dtype-u8"]
+ 
+ object = ["polars-plan/object"]
+ date_offset = ["polars-plan/date_offset"]
+@@ -103,12 +110,12 @@ extract_jsonpath = ["polars-plan/extract_jsonpath", "polars-ops/extract_jsonpath
+ 
+ # operations
+ approx_unique = ["polars-plan/approx_unique"]
+-is_in = ["polars-plan/is_in", "polars-ops/is_in"]
++is_in = ["polars-plan/is_in", "polars-ops/is_in", "polars-expr/is_in"]
+ repeat_by = ["polars-plan/repeat_by"]
+-round_series = ["polars-plan/round_series", "polars-ops/round_series"]
++round_series = ["polars-plan/round_series", "polars-ops/round_series", "polars-expr/round_series"]
+ is_first_distinct = ["polars-plan/is_first_distinct"]
+ is_last_distinct = ["polars-plan/is_last_distinct"]
+-is_between = ["polars-plan/is_between"]
++is_between = ["polars-plan/is_between", "polars-expr/is_between"]
+ is_unique = ["polars-plan/is_unique"]
+ cross_join = ["polars-plan/cross_join", "polars-pipe?/cross_join", "polars-ops/cross_join"]
+ asof_join = ["polars-plan/asof_join", "polars-time", "polars-ops/asof_join"]
+@@ -131,7 +138,7 @@ pct_change = ["polars-plan/pct_change"]
+ moment = ["polars-plan/moment", "polars-ops/moment"]
+ abs = ["polars-plan/abs"]
+ random = ["polars-plan/random"]
+-dynamic_group_by = ["polars-plan/dynamic_group_by", "polars-time", "temporal"]
++dynamic_group_by = ["polars-plan/dynamic_group_by", "polars-time", "temporal", "polars-expr/dynamic_group_by"]
+ ewma = ["polars-plan/ewma"]
+ ewma_by = ["polars-plan/ewma_by"]
+ dot_diagram = ["polars-plan/dot_diagram"]
+@@ -156,7 +163,7 @@ pivot = ["polars-core/rows", "polars-ops/pivot"]
+ top_k = ["polars-plan/top_k"]
+ semi_anti_join = ["polars-plan/semi_anti_join"]
+ cse = ["polars-plan/cse"]
+-propagate_nans = ["polars-plan/propagate_nans"]
++propagate_nans = ["polars-plan/propagate_nans", "polars-expr/propagate_nans"]
+ coalesce = ["polars-plan/coalesce"]
+ regex = ["polars-plan/regex"]
+ serde = [
+@@ -186,7 +193,7 @@ string_encoding = ["polars-plan/string_encoding"]
+ 
+ bigidx = ["polars-plan/bigidx"]
+ 
+-panic_on_schema = ["polars-plan/panic_on_schema"]
++panic_on_schema = ["polars-plan/panic_on_schema", "polars-expr/panic_on_schema"]
+ 
+ test = [
+   "polars-plan/debugging",
+diff --git a/crates/polars-lazy/src/dsl/eval.rs b/crates/polars-lazy/src/dsl/eval.rs
+index 550de2e72ed9..0846837e3db6 100644
+--- a/crates/polars-lazy/src/dsl/eval.rs
++++ b/crates/polars-lazy/src/dsl/eval.rs
+@@ -3,7 +3,6 @@ use rayon::prelude::*;
+ 
+ use super::*;
+ use crate::physical_plan::planner::{create_physical_expr, ExpressionConversionState};
+-use crate::physical_plan::state::ExecutionState;
+ use crate::prelude::*;
+ 
+ pub(crate) fn eval_field_to_dtype(f: &Field, expr: &Expr, list: bool) -> Field {
+diff --git a/crates/polars-lazy/src/dsl/list.rs b/crates/polars-lazy/src/dsl/list.rs
+index 0b8e6530cf86..4d1b3541910f 100644
+--- a/crates/polars-lazy/src/dsl/list.rs
++++ b/crates/polars-lazy/src/dsl/list.rs
+@@ -9,7 +9,6 @@ use polars_plan::dsl::*;
+ use rayon::prelude::*;
+ 
+ use crate::physical_plan::exotic::prepare_expression_for_context;
+-use crate::physical_plan::state::ExecutionState;
+ use crate::prelude::*;
+ 
+ pub trait IntoListNameSpace {
+diff --git a/crates/polars-lazy/src/frame/mod.rs b/crates/polars-lazy/src/frame/mod.rs
+index 4f09aa0ac48c..82b25a9fcc90 100644
+--- a/crates/polars-lazy/src/frame/mod.rs
++++ b/crates/polars-lazy/src/frame/mod.rs
+@@ -40,7 +40,6 @@ use crate::physical_plan::executors::Executor;
+ use crate::physical_plan::planner::{
+     create_physical_expr, create_physical_plan, ExpressionConversionState,
+ };
+-use crate::physical_plan::state::ExecutionState;
+ #[cfg(feature = "streaming")]
+ use crate::physical_plan::streaming::insert_streaming_nodes;
+ use crate::prelude::*;
+diff --git a/crates/polars-lazy/src/frame/pivot.rs b/crates/polars-lazy/src/frame/pivot.rs
+index e7254ea0d908..e440b6e22bc6 100644
+--- a/crates/polars-lazy/src/frame/pivot.rs
++++ b/crates/polars-lazy/src/frame/pivot.rs
+@@ -11,7 +11,6 @@ use polars_core::prelude::*;
+ use polars_ops::pivot::PivotAgg;
+ 
+ use crate::physical_plan::exotic::{prepare_eval_expr, prepare_expression_for_context};
+-use crate::physical_plan::state::ExecutionState;
+ use crate::prelude::*;
+ 
+ struct PivotExpr(Expr);
+diff --git a/crates/polars-lazy/src/physical_plan/executors/scan/mod.rs b/crates/polars-lazy/src/physical_plan/executors/scan/mod.rs
+index 347498f8222a..bc57098c0001 100644
+--- a/crates/polars-lazy/src/physical_plan/executors/scan/mod.rs
++++ b/crates/polars-lazy/src/physical_plan/executors/scan/mod.rs
+@@ -28,8 +28,6 @@ use polars_plan::global::_set_n_rows_for_scan;
+ pub(crate) use support::ConsecutiveCountState;
+ 
+ use super::*;
+-#[cfg(any(feature = "ipc", feature = "parquet"))]
+-use crate::physical_plan::expressions::phys_expr_to_io_expr;
+ use crate::prelude::*;
+ 
+ #[cfg(any(feature = "ipc", feature = "parquet"))]
+diff --git a/crates/polars-lazy/src/physical_plan/mod.rs b/crates/polars-lazy/src/physical_plan/mod.rs
+index 9a56e434c248..9df8c0880568 100644
+--- a/crates/polars-lazy/src/physical_plan/mod.rs
++++ b/crates/polars-lazy/src/physical_plan/mod.rs
+@@ -1,14 +1,10 @@
+ pub mod executors;
+ #[cfg(any(feature = "list_eval", feature = "pivot"))]
+ pub(crate) mod exotic;
+-pub mod expressions;
+-mod node_timer;
+ pub mod planner;
+-pub(crate) mod state;
+ #[cfg(feature = "streaming")]
+ pub(crate) mod streaming;
+ 
+ use polars_core::prelude::*;
+ 
+-use crate::physical_plan::state::ExecutionState;
+ use crate::prelude::*;
+diff --git a/crates/polars-lazy/src/physical_plan/planner/lp.rs b/crates/polars-lazy/src/physical_plan/planner/lp.rs
+index 678b879e4392..4e0e169847fe 100644
+--- a/crates/polars-lazy/src/physical_plan/planner/lp.rs
++++ b/crates/polars-lazy/src/physical_plan/planner/lp.rs
+@@ -61,7 +61,7 @@ fn partitionable_gb(
+                     match ae {
+                         // struct is needed to keep both states
+                         #[cfg(feature = "dtype-struct")]
+-                        Agg(AAggExpr::Mean(_)) => {
++                        Agg(IRAggExpr::Mean(_)) => {
+                             // only numeric means for now.
+                             // logical types seem to break because of casts to float.
+                             matches!(expr_arena.get(agg).get_type(_input_schema, Context::Default, expr_arena).map(|dt| {
+@@ -71,12 +71,12 @@ fn partitionable_gb(
+                         Agg(agg_e) => {
+                             matches!(
+                                             agg_e,
+-                                            AAggExpr::Min{..}
+-                                                | AAggExpr::Max{..}
+-                                                | AAggExpr::Sum(_)
+-                                                | AAggExpr::Last(_)
+-                                                | AAggExpr::First(_)
+-                                                | AAggExpr::Count(_, true)
++                                            IRAggExpr::Min{..}
++                                                | IRAggExpr::Max{..}
++                                                | IRAggExpr::Sum(_)
++                                                | IRAggExpr::Last(_)
++                                                | IRAggExpr::First(_)
++                                                | IRAggExpr::Count(_, true)
+                                         )
+                         },
+                         Function {input, options, ..} => {
+diff --git a/crates/polars-lazy/src/physical_plan/planner/mod.rs b/crates/polars-lazy/src/physical_plan/planner/mod.rs
+index 8702de230aa5..90364b90f852 100644
+--- a/crates/polars-lazy/src/physical_plan/planner/mod.rs
++++ b/crates/polars-lazy/src/physical_plan/planner/mod.rs
+@@ -1,6 +1,4 @@
+-mod expr;
+ mod lp;
+-
+-pub(crate) use expr::*;
+ pub use lp::*;
++pub(crate) use polars_expr::planner::*;
+ use polars_plan::prelude::*;
+diff --git a/crates/polars-lazy/src/physical_plan/streaming/construct_pipeline.rs b/crates/polars-lazy/src/physical_plan/streaming/construct_pipeline.rs
+index f0d364d64d24..6b906126aeeb 100644
+--- a/crates/polars-lazy/src/physical_plan/streaming/construct_pipeline.rs
++++ b/crates/polars-lazy/src/physical_plan/streaming/construct_pipeline.rs
+@@ -1,4 +1,3 @@
+-use std::any::Any;
+ use std::cell::RefCell;
+ use std::rc::Rc;
+ 
+@@ -10,11 +9,9 @@ use polars_pipe::operators::chunks::DataChunk;
+ use polars_pipe::pipeline::{
+     create_pipeline, execute_pipeline, get_dummy_operator, get_operator, CallBacks, PipeLine,
+ };
+-use polars_pipe::SExecutionContext;
+ use polars_plan::prelude::expr_ir::ExprIR;
+ 
+ use crate::physical_plan::planner::{create_physical_expr, ExpressionConversionState};
+-use crate::physical_plan::state::ExecutionState;
+ use crate::physical_plan::streaming::tree::{PipelineNode, Tree};
+ use crate::prelude::*;
+ 
+@@ -33,8 +30,7 @@ impl PhysicalIoExpr for Wrap {
+     }
+ }
+ impl PhysicalPipedExpr for Wrap {
+-    fn evaluate(&self, chunk: &DataChunk, state: &dyn Any) -> PolarsResult<Series> {
+-        let state = state.downcast_ref::<ExecutionState>().unwrap();
++    fn evaluate(&self, chunk: &DataChunk, state: &ExecutionState) -> PolarsResult<Series> {
+         self.0.evaluate(&chunk.data, state)
+     }
+     fn field(&self, input_schema: &Schema) -> PolarsResult<Field> {
+@@ -233,16 +229,6 @@ pub(super) fn construct(
+     Ok(Some(final_sink))
+ }
+ 
+-impl SExecutionContext for ExecutionState {
+-    fn as_any(&self) -> &dyn Any {
+-        self
+-    }
+-
+-    fn should_stop(&self) -> PolarsResult<()> {
+-        ExecutionState::should_stop(self)
+-    }
+-}
+-
+ fn get_pipeline_node(
+     lp_arena: &mut Arena<IR>,
+     mut pipelines: Vec<PipeLine>,
+@@ -268,7 +254,6 @@ fn get_pipeline_node(
+                     eprintln!("{:?}", &pipelines)
+                 }
+                 state.set_in_streaming_engine();
+-                let state = Box::new(state) as Box<dyn SExecutionContext>;
+                 execute_pipeline(state, std::mem::take(&mut pipelines))
+             }),
+             schema,
+diff --git a/crates/polars-lazy/src/physical_plan/streaming/convert_alp.rs b/crates/polars-lazy/src/physical_plan/streaming/convert_alp.rs
+index 54fe0b1a68f3..03d8a5c6617e 100644
+--- a/crates/polars-lazy/src/physical_plan/streaming/convert_alp.rs
++++ b/crates/polars-lazy/src/physical_plan/streaming/convert_alp.rs
+@@ -204,6 +204,11 @@ pub(crate) fn insert_streaming_nodes(
+                 state.operators_sinks.push(PipelineNode::Operator(root));
+                 stack.push(StackFrame::new(*input, state, current_idx))
+             },
++            Reduce { input, .. } => {
++                state.streamable = true;
++                state.operators_sinks.push(PipelineNode::Sink(root));
++                stack.push(StackFrame::new(*input, state, current_idx))
++            },
+             // Rechunks are ignored
+             MapFunction {
+                 input,
+diff --git a/crates/polars-lazy/src/prelude.rs b/crates/polars-lazy/src/prelude.rs
+index 0cdb926c886a..44aa7e9430e3 100644
+--- a/crates/polars-lazy/src/prelude.rs
++++ b/crates/polars-lazy/src/prelude.rs
+@@ -1,3 +1,4 @@
++pub(crate) use polars_expr::prelude::*;
+ #[cfg(feature = "csv")]
+ pub use polars_io::csv::write::CsvWriterOptions;
+ #[cfg(feature = "ipc")]
+@@ -23,5 +24,4 @@ pub(crate) use polars_utils::arena::{Arena, Node};
+ 
+ pub use crate::dsl::*;
+ pub use crate::frame::*;
+-pub use crate::physical_plan::expressions::*;
+ pub(crate) use crate::scan::*;
+diff --git a/crates/polars-pipe/Cargo.toml b/crates/polars-pipe/Cargo.toml
+index 7c9615ba9d09..b11a43bbaae8 100644
+--- a/crates/polars-pipe/Cargo.toml
++++ b/crates/polars-pipe/Cargo.toml
+@@ -13,6 +13,7 @@ arrow = { workspace = true }
+ futures = { workspace = true, optional = true }
+ polars-compute = { workspace = true }
+ polars-core = { workspace = true, features = ["lazy", "zip_with", "random", "rows"] }
++polars-expr = { workspace = true }
+ polars-io = { workspace = true, features = ["ipc"] }
+ polars-ops = { workspace = true, features = ["search_sorted", "chunked_ids"] }
+ polars-plan = { workspace = true }
+diff --git a/crates/polars-pipe/src/executors/operators/filter.rs b/crates/polars-pipe/src/executors/operators/filter.rs
+index 001a7a1a8a73..5823fb3c860d 100644
+--- a/crates/polars-pipe/src/executors/operators/filter.rs
++++ b/crates/polars-pipe/src/executors/operators/filter.rs
+@@ -17,9 +17,7 @@ impl Operator for FilterOperator {
+         context: &PExecutionContext,
+         chunk: &DataChunk,
+     ) -> PolarsResult<OperatorResult> {
+-        let s = self
+-            .predicate
+-            .evaluate(chunk, context.execution_state.as_any())?;
++        let s = self.predicate.evaluate(chunk, &context.execution_state)?;
+         let mask = s.bool().map_err(|_| {
+             polars_err!(
+                 ComputeError: "filter predicate must be of type `Boolean`, got `{}`", s.dtype()
+diff --git a/crates/polars-pipe/src/executors/operators/projection.rs b/crates/polars-pipe/src/executors/operators/projection.rs
+index df3013b01ec7..e9f896d233be 100644
+--- a/crates/polars-pipe/src/executors/operators/projection.rs
++++ b/crates/polars-pipe/src/executors/operators/projection.rs
+@@ -75,7 +75,7 @@ impl Operator for ProjectionOperator {
+             .iter()
+             .map(|e| {
+                 #[allow(unused_mut)]
+-                let mut s = e.evaluate(chunk, context.execution_state.as_any())?;
++                let mut s = e.evaluate(chunk, &context.execution_state)?;
+ 
+                 has_literals |= s.len() == 1;
+                 has_empty |= s.len() == 0;
+@@ -146,7 +146,7 @@ impl Operator for HstackOperator {
+         let projected = self
+             .exprs
+             .iter()
+-            .map(|e| e.evaluate(chunk, context.execution_state.as_any()))
++            .map(|e| e.evaluate(chunk, &context.execution_state))
+             .collect::<PolarsResult<Vec<_>>>()?;
+ 
+         let columns = chunk.data.get_columns()[..width].to_vec();
+diff --git a/crates/polars-pipe/src/executors/sinks/group_by/aggregates/convert.rs b/crates/polars-pipe/src/executors/sinks/group_by/aggregates/convert.rs
+index e41bb2e5a2d7..e928e2ba8a08 100644
+--- a/crates/polars-pipe/src/executors/sinks/group_by/aggregates/convert.rs
++++ b/crates/polars-pipe/src/executors/sinks/group_by/aggregates/convert.rs
+@@ -1,4 +1,3 @@
+-use std::any::Any;
+ use std::sync::Arc;
+ 
+ use polars_core::datatypes::Field;
+@@ -6,11 +5,12 @@ use polars_core::error::PolarsResult;
+ use polars_core::frame::DataFrame;
+ use polars_core::prelude::{DataType, SchemaRef, Series, IDX_DTYPE};
+ use polars_core::schema::Schema;
++use polars_expr::state::ExecutionState;
+ use polars_io::predicates::PhysicalIoExpr;
+ use polars_plan::dsl::Expr;
+ use polars_plan::logical_plan::expr_ir::ExprIR;
+ use polars_plan::logical_plan::{ArenaExprIter, Context};
+-use polars_plan::prelude::{AAggExpr, AExpr};
++use polars_plan::prelude::{AExpr, IRAggExpr};
+ use polars_utils::arena::{Arena, Node};
+ use polars_utils::IdxSize;
+ 
+@@ -32,7 +32,7 @@ impl PhysicalIoExpr for Len {
+     }
+ }
+ impl PhysicalPipedExpr for Len {
+-    fn evaluate(&self, chunk: &DataChunk, _lazy_state: &dyn Any) -> PolarsResult<Series> {
++    fn evaluate(&self, chunk: &DataChunk, _lazy_state: &ExecutionState) -> PolarsResult<Series> {
+         // the length must match the chunks as the operators expect that
+         // so we fill a null series.
+         Ok(Series::new_null("", chunk.data.height()))
+@@ -85,17 +85,17 @@ pub fn can_convert_to_hash_agg(
+             ae @ AExpr::Agg(agg_fn) => {
+                 matches!(
+                     agg_fn,
+-                    AAggExpr::Sum(_)
+-                        | AAggExpr::First(_)
+-                        | AAggExpr::Last(_)
+-                        | AAggExpr::Mean(_)
+-                        | AAggExpr::Count(_, false)
++                    IRAggExpr::Sum(_)
++                        | IRAggExpr::First(_)
++                        | IRAggExpr::Last(_)
++                        | IRAggExpr::Mean(_)
++                        | IRAggExpr::Count(_, false)
+                 ) || (matches!(
+                     agg_fn,
+-                    AAggExpr::Max {
++                    IRAggExpr::Max {
+                         propagate_nans: false,
+                         ..
+-                    } | AAggExpr::Min {
++                    } | IRAggExpr::Min {
+                         propagate_nans: false,
+                         ..
+                     }
+@@ -135,7 +135,7 @@ where
+             AggregateFunction::Len(CountAgg::new()),
+         ),
+         AExpr::Agg(agg) => match agg {
+-            AAggExpr::Min { input, .. } => {
++            IRAggExpr::Min { input, .. } => {
+                 let phys_expr = to_physical(
+                     &ExprIR::from_node(*input, expr_arena),
+                     expr_arena,
+@@ -159,7 +159,7 @@ where
+                 };
+                 (logical_dtype, phys_expr, agg_fn)
+             },
+-            AAggExpr::Max { input, .. } => {
++            IRAggExpr::Max { input, .. } => {
+                 let phys_expr = to_physical(
+                     &ExprIR::from_node(*input, expr_arena),
+                     expr_arena,
+@@ -183,7 +183,7 @@ where
+                 };
+                 (logical_dtype, phys_expr, agg_fn)
+             },
+-            AAggExpr::Sum(input) => {
++            IRAggExpr::Sum(input) => {
+                 let phys_expr = to_physical(
+                     &ExprIR::from_node(*input, expr_arena),
+                     expr_arena,
+@@ -229,7 +229,7 @@ where
+                 };
+                 (logical_dtype, phys_expr, agg_fn)
+             },
+-            AAggExpr::Mean(input) => {
++            IRAggExpr::Mean(input) => {
+                 let phys_expr = to_physical(
+                     &ExprIR::from_node(*input, expr_arena),
+                     expr_arena,
+@@ -259,7 +259,7 @@ where
+                 };
+                 (logical_dtype, phys_expr, agg_fn)
+             },
+-            AAggExpr::First(input) => {
++            IRAggExpr::First(input) => {
+                 let phys_expr = to_physical(
+                     &ExprIR::from_node(*input, expr_arena),
+                     expr_arena,
+@@ -273,7 +273,7 @@ where
+                     AggregateFunction::First(FirstAgg::new(logical_dtype.to_physical())),
+                 )
+             },
+-            AAggExpr::Last(input) => {
++            IRAggExpr::Last(input) => {
+                 let phys_expr = to_physical(
+                     &ExprIR::from_node(*input, expr_arena),
+                     expr_arena,
+@@ -287,7 +287,7 @@ where
+                     AggregateFunction::Last(LastAgg::new(logical_dtype.to_physical())),
+                 )
+             },
+-            AAggExpr::Count(input, _) => {
++            IRAggExpr::Count(input, _) => {
+                 let phys_expr = to_physical(
+                     &ExprIR::from_node(*input, expr_arena),
+                     expr_arena,
+diff --git a/crates/polars-pipe/src/executors/sinks/group_by/generic/eval.rs b/crates/polars-pipe/src/executors/sinks/group_by/generic/eval.rs
+index c2b4262143da..ccfd390bcf62 100644
+--- a/crates/polars-pipe/src/executors/sinks/group_by/generic/eval.rs
++++ b/crates/polars-pipe/src/executors/sinks/group_by/generic/eval.rs
+@@ -70,12 +70,12 @@ impl Eval {
+         let aggregation_series = &mut *self.aggregation_series.get();
+ 
+         for phys_e in self.aggregation_columns_expr.iter() {
+-            let s = phys_e.evaluate(chunk, context.execution_state.as_any())?;
++            let s = phys_e.evaluate(chunk, &context.execution_state)?;
+             let s = s.to_physical_repr();
+             aggregation_series.push(s.into_owned());
+         }
+         for phys_e in self.key_columns_expr.iter() {
+-            let s = phys_e.evaluate(chunk, context.execution_state.as_any())?;
++            let s = phys_e.evaluate(chunk, &context.execution_state)?;
+             let s = match s.dtype() {
+                 // todo! add binary to physical repr?
+                 DataType::String => unsafe { s.cast_unchecked(&DataType::Binary).unwrap() },
+diff --git a/crates/polars-pipe/src/executors/sinks/group_by/primitive/mod.rs b/crates/polars-pipe/src/executors/sinks/group_by/primitive/mod.rs
+index 30fb437bd6bd..ecc0c9f09c68 100644
+--- a/crates/polars-pipe/src/executors/sinks/group_by/primitive/mod.rs
++++ b/crates/polars-pipe/src/executors/sinks/group_by/primitive/mod.rs
+@@ -270,13 +270,13 @@ where
+         context: &PExecutionContext,
+         chunk: &DataChunk,
+     ) -> PolarsResult<Series> {
+-        let s = self.key.evaluate(chunk, context.execution_state.as_any())?;
++        let s = self.key.evaluate(chunk, &context.execution_state)?;
+         let s = s.to_physical_repr();
+         let s = prepare_key(&s, chunk);
+ 
+         // todo! ammortize allocation
+         for phys_e in self.aggregation_columns.iter() {
+-            let s = phys_e.evaluate(chunk, context.execution_state.as_any())?;
++            let s = phys_e.evaluate(chunk, &context.execution_state)?;
+             let s = s.to_physical_repr();
+             self.aggregation_series.push(s.rechunk());
+         }
+diff --git a/crates/polars-pipe/src/executors/sinks/group_by/string.rs b/crates/polars-pipe/src/executors/sinks/group_by/string.rs
+index 9d8bbf6e5547..c7369b5dd110 100644
+--- a/crates/polars-pipe/src/executors/sinks/group_by/string.rs
++++ b/crates/polars-pipe/src/executors/sinks/group_by/string.rs
+@@ -225,15 +225,13 @@ impl StringGroupbySink {
+         context: &PExecutionContext,
+         chunk: &DataChunk,
+     ) -> PolarsResult<Series> {
+-        let s = self
+-            .key_column
+-            .evaluate(chunk, context.execution_state.as_any())?;
++        let s = self.key_column.evaluate(chunk, &context.execution_state)?;
+         let s = s.to_physical_repr();
+         let s = prepare_key(&s, chunk);
+ 
+         // todo! ammortize allocation
+         for phys_e in self.aggregation_columns.iter() {
+-            let s = phys_e.evaluate(chunk, context.execution_state.as_any())?;
++            let s = phys_e.evaluate(chunk, &context.execution_state)?;
+             let s = s.to_physical_repr();
+             self.aggregation_series.push(s.rechunk());
+         }
+diff --git a/crates/polars-pipe/src/executors/sinks/joins/generic_build.rs b/crates/polars-pipe/src/executors/sinks/joins/generic_build.rs
+index 1fa7ce58a152..1d1b5b742175 100644
+--- a/crates/polars-pipe/src/executors/sinks/joins/generic_build.rs
++++ b/crates/polars-pipe/src/executors/sinks/joins/generic_build.rs
+@@ -139,7 +139,7 @@ impl<K: ExtraPayload> GenericBuild<K> {
+     ) -> PolarsResult<&BinaryArray<i64>> {
+         debug_assert!(self.join_columns.is_empty());
+         for phys_e in self.join_columns_left.iter() {
+-            let s = phys_e.evaluate(chunk, context.execution_state.as_any())?;
++            let s = phys_e.evaluate(chunk, &context.execution_state)?;
+             let arr = s.to_physical_repr().rechunk().array_ref(0).clone();
+             self.join_columns.push(arr);
+         }
+diff --git a/crates/polars-pipe/src/executors/sinks/joins/generic_probe_inner_left.rs b/crates/polars-pipe/src/executors/sinks/joins/generic_probe_inner_left.rs
+index 19f63302dfc6..0e9c7843ee14 100644
+--- a/crates/polars-pipe/src/executors/sinks/joins/generic_probe_inner_left.rs
++++ b/crates/polars-pipe/src/executors/sinks/joins/generic_probe_inner_left.rs
+@@ -81,7 +81,7 @@ impl<K: ExtraPayload> GenericJoinProbe<K> {
+                 .iter()
+                 .flat_map(|phys_e| {
+                     phys_e
+-                        .evaluate(&tmp, context.execution_state.as_any())
++                        .evaluate(&tmp, &context.execution_state)
+                         .ok()
+                         .map(|s| s.name().to_string())
+                 })
+diff --git a/crates/polars-pipe/src/executors/sinks/joins/row_values.rs b/crates/polars-pipe/src/executors/sinks/joins/row_values.rs
+index ecbbbadac8b0..b632d8e2e5e2 100644
+--- a/crates/polars-pipe/src/executors/sinks/joins/row_values.rs
++++ b/crates/polars-pipe/src/executors/sinks/joins/row_values.rs
+@@ -49,7 +49,7 @@ impl RowValues {
+         let mut names = vec![];
+ 
+         for phys_e in self.join_column_eval.iter() {
+-            let s = phys_e.evaluate(chunk, context.execution_state.as_any())?;
++            let s = phys_e.evaluate(chunk, &context.execution_state)?;
+             let s = s.to_physical_repr().rechunk();
+             if determine_idx {
+                 names.push(s.name().to_string());
+diff --git a/crates/polars-pipe/src/expressions.rs b/crates/polars-pipe/src/expressions.rs
+index 93272ece9476..f4efe498cc2d 100644
+--- a/crates/polars-pipe/src/expressions.rs
++++ b/crates/polars-pipe/src/expressions.rs
+@@ -1,6 +1,5 @@
+-use std::any::Any;
+-
+ use polars_core::prelude::*;
++use polars_expr::state::ExecutionState;
+ use polars_io::predicates::PhysicalIoExpr;
+ use polars_plan::dsl::Expr;
+ 
+@@ -9,7 +8,7 @@ use crate::operators::DataChunk;
+ pub trait PhysicalPipedExpr: PhysicalIoExpr + Send + Sync {
+     /// Take a [`DataFrame`] and produces a boolean [`Series`] that serves
+     /// as a predicate mask
+-    fn evaluate(&self, chunk: &DataChunk, lazy_state: &dyn Any) -> PolarsResult<Series>;
++    fn evaluate(&self, chunk: &DataChunk, lazy_state: &ExecutionState) -> PolarsResult<Series>;
+ 
+     fn field(&self, input_schema: &Schema) -> PolarsResult<Field>;
+ 
+diff --git a/crates/polars-pipe/src/lib.rs b/crates/polars-pipe/src/lib.rs
+index bd18b177e4f2..31a5d4e75a0a 100644
+--- a/crates/polars-pipe/src/lib.rs
++++ b/crates/polars-pipe/src/lib.rs
+@@ -2,5 +2,3 @@ mod executors;
+ pub mod expressions;
+ pub mod operators;
+ pub mod pipeline;
+-
+-pub use operators::SExecutionContext;
+diff --git a/crates/polars-pipe/src/operators/context.rs b/crates/polars-pipe/src/operators/context.rs
+index d8e21ea20207..a7e52820bcd4 100644
+--- a/crates/polars-pipe/src/operators/context.rs
++++ b/crates/polars-pipe/src/operators/context.rs
+@@ -1,21 +1,13 @@
+-use std::any::Any;
+-
+-use polars_core::prelude::*;
+-
+-pub trait SExecutionContext: Send + Sync {
+-    fn as_any(&self) -> &dyn Any;
+-
+-    fn should_stop(&self) -> PolarsResult<()>;
+-}
++use polars_expr::state::ExecutionState;
+ 
+ pub struct PExecutionContext {
+     // injected upstream in polars-lazy
+-    pub(crate) execution_state: Box<dyn SExecutionContext>,
++    pub(crate) execution_state: ExecutionState,
+     pub(crate) verbose: bool,
+ }
+ 
+ impl PExecutionContext {
+-    pub(crate) fn new(state: Box<dyn SExecutionContext>, verbose: bool) -> Self {
++    pub(crate) fn new(state: ExecutionState, verbose: bool) -> Self {
+         PExecutionContext {
+             execution_state: state,
+             verbose,
+diff --git a/crates/polars-pipe/src/pipeline/convert.rs b/crates/polars-pipe/src/pipeline/convert.rs
+index 3a933f7cfb89..e094185c4519 100644
+--- a/crates/polars-pipe/src/pipeline/convert.rs
++++ b/crates/polars-pipe/src/pipeline/convert.rs
+@@ -335,6 +335,13 @@ where
+             let slice = SliceSink::new(*offset as u64, *len as usize, input_schema.into_owned());
+             Box::new(slice) as Box<dyn SinkTrait>
+         },
++        Reduce {
++            input: _,
++            exprs: _,
++            schema: _,
++        } => {
++            todo!()
++        },
+         Sort {
+             input,
+             by_column,
+@@ -412,10 +419,10 @@ where
+                                 let col = expr_arena.add(AExpr::Column(name.clone()));
+                                 let node = match options.keep_strategy {
+                                     UniqueKeepStrategy::First | UniqueKeepStrategy::Any => {
+-                                        expr_arena.add(AExpr::Agg(AAggExpr::First(col)))
++                                        expr_arena.add(AExpr::Agg(IRAggExpr::First(col)))
+                                     },
+                                     UniqueKeepStrategy::Last => {
+-                                        expr_arena.add(AExpr::Agg(AAggExpr::Last(col)))
++                                        expr_arena.add(AExpr::Agg(IRAggExpr::Last(col)))
+                                     },
+                                     UniqueKeepStrategy::None => {
+                                         unreachable!()
+diff --git a/crates/polars-pipe/src/pipeline/dispatcher/mod.rs b/crates/polars-pipe/src/pipeline/dispatcher/mod.rs
+index a60f1efb8064..901f1fd771cb 100644
+--- a/crates/polars-pipe/src/pipeline/dispatcher/mod.rs
++++ b/crates/polars-pipe/src/pipeline/dispatcher/mod.rs
+@@ -7,13 +7,14 @@ use std::sync::{Arc, Mutex};
+ use polars_core::error::PolarsResult;
+ use polars_core::utils::accumulate_dataframes_vertical_unchecked;
+ use polars_core::POOL;
++use polars_expr::state::ExecutionState;
+ use polars_utils::sync::SyncPtr;
+ use rayon::prelude::*;
+ 
+ use crate::executors::sources::DataFrameSource;
+ use crate::operators::{
+-    DataChunk, FinalizedSink, OperatorResult, PExecutionContext, SExecutionContext, Sink,
+-    SinkResult, Source, SourceResult,
++    DataChunk, FinalizedSink, OperatorResult, PExecutionContext, Sink, SinkResult, Source,
++    SourceResult,
+ };
+ use crate::pipeline::dispatcher::drive_operator::{par_flush, par_process_chunks};
+ mod drive_operator;
+@@ -310,7 +311,7 @@ impl PipeLine {
+ /// Executes all branches and replaces operators and sinks during execution to ensure
+ /// we materialize.
+ pub fn execute_pipeline(
+-    state: Box<dyn SExecutionContext>,
++    state: ExecutionState,
+     mut pipelines: Vec<PipeLine>,
+ ) -> PolarsResult<DataFrame> {
+     let mut pipeline = pipelines.pop().unwrap();
+diff --git a/crates/polars-plan/Cargo.toml b/crates/polars-plan/Cargo.toml
+index 2d0feed85a08..cfae4ffa0477 100644
+--- a/crates/polars-plan/Cargo.toml
++++ b/crates/polars-plan/Cargo.toml
+@@ -181,6 +181,7 @@ panic_on_schema = []
+ 
+ [package.metadata.docs.rs]
+ features = [
++  "approx_n_unique",
+   "temporal",
+   "serde",
+   "rolling_window",
+diff --git a/crates/polars-plan/src/lib.rs b/crates/polars-plan/src/lib.rs
+index bdb073b70428..af5ac691a1a1 100644
+--- a/crates/polars-plan/src/lib.rs
++++ b/crates/polars-plan/src/lib.rs
+@@ -10,5 +10,6 @@ pub mod frame;
+ pub mod global;
+ pub mod logical_plan;
+ pub mod prelude;
+-mod reduce;
++// Activate later
++// mod reduce;
+ pub mod utils;
+diff --git a/crates/polars-plan/src/logical_plan/aexpr/mod.rs b/crates/polars-plan/src/logical_plan/aexpr/mod.rs
+index 8703d7595986..93fd3520d83a 100644
+--- a/crates/polars-plan/src/logical_plan/aexpr/mod.rs
++++ b/crates/polars-plan/src/logical_plan/aexpr/mod.rs
+@@ -18,7 +18,7 @@ use crate::logical_plan::Context;
+ use crate::prelude::*;
+ 
+ #[derive(Clone, Debug, IntoStaticStr)]
+-pub enum AAggExpr {
++pub enum IRAggExpr {
+     Min {
+         input: Node,
+         propagate_nans: bool,
+@@ -45,7 +45,7 @@ pub enum AAggExpr {
+     AggGroups(Node),
+ }
+ 
+-impl Hash for AAggExpr {
++impl Hash for IRAggExpr {
+     fn hash<H: Hasher>(&self, state: &mut H) {
+         std::mem::discriminant(self).hash(state);
+         match self {
+@@ -59,9 +59,9 @@ impl Hash for AAggExpr {
+     }
+ }
+ 
+-impl AAggExpr {
+-    pub(super) fn equal_nodes(&self, other: &AAggExpr) -> bool {
+-        use AAggExpr::*;
++impl IRAggExpr {
++    pub(super) fn equal_nodes(&self, other: &IRAggExpr) -> bool {
++        use IRAggExpr::*;
+         match (self, other) {
+             (
+                 Min {
+@@ -87,9 +87,9 @@ impl AAggExpr {
+     }
+ }
+ 
+-impl From<AAggExpr> for GroupByMethod {
+-    fn from(value: AAggExpr) -> Self {
+-        use AAggExpr::*;
++impl From<IRAggExpr> for GroupByMethod {
++    fn from(value: IRAggExpr) -> Self {
++        use IRAggExpr::*;
+         match value {
+             Min { propagate_nans, .. } => {
+                 if propagate_nans {
+@@ -156,7 +156,7 @@ pub enum AExpr {
+         input: Node,
+         by: Node,
+     },
+-    Agg(AAggExpr),
++    Agg(IRAggExpr),
+     Ternary {
+         predicate: Node,
+         truthy: Node,
+@@ -355,7 +355,7 @@ impl AExpr {
+             },
+             Agg(a) => {
+                 match a {
+-                    AAggExpr::Quantile { expr, quantile, .. } => {
++                    IRAggExpr::Quantile { expr, quantile, .. } => {
+                         *expr = inputs[0];
+                         *quantile = inputs[1];
+                     },
+@@ -418,9 +418,9 @@ impl AExpr {
+     }
+ }
+ 
+-impl AAggExpr {
++impl IRAggExpr {
+     pub fn get_input(&self) -> NodeInputs {
+-        use AAggExpr::*;
++        use IRAggExpr::*;
+         use NodeInputs::*;
+         match self {
+             Min { input, .. } => Single(*input),
+@@ -440,7 +440,7 @@ impl AAggExpr {
+         }
+     }
+     pub fn set_input(&mut self, input: Node) {
+-        use AAggExpr::*;
++        use IRAggExpr::*;
+         let node = match self {
+             Min { input, .. } => input,
+             Max { input, .. } => input,
+diff --git a/crates/polars-plan/src/logical_plan/aexpr/schema.rs b/crates/polars-plan/src/logical_plan/aexpr/schema.rs
+index 426ca2fd3567..a886c5a1b54c 100644
+--- a/crates/polars-plan/src/logical_plan/aexpr/schema.rs
++++ b/crates/polars-plan/src/logical_plan/aexpr/schema.rs
+@@ -110,7 +110,7 @@ impl AExpr {
+             SortBy { expr, .. } => arena.get(*expr).to_field(schema, ctxt, arena),
+             Filter { input, .. } => arena.get(*input).to_field(schema, ctxt, arena),
+             Agg(agg) => {
+-                use AAggExpr::*;
++                use IRAggExpr::*;
+                 match agg {
+                     Max { input: expr, .. }
+                     | Min { input: expr, .. }
+diff --git a/crates/polars-plan/src/logical_plan/alp/format.rs b/crates/polars-plan/src/logical_plan/alp/format.rs
+index d4e3a4d87151..61cbd9f94d45 100644
+--- a/crates/polars-plan/src/logical_plan/alp/format.rs
++++ b/crates/polars-plan/src/logical_plan/alp/format.rs
+@@ -513,7 +513,7 @@ impl<'a> Display for ExprIRDisplay<'a> {
+                 }
+             },
+             Agg(agg) => {
+-                use AAggExpr::*;
++                use IRAggExpr::*;
+                 match agg {
+                     Min {
+                         input,
+diff --git a/crates/polars-plan/src/logical_plan/conversion/expr_to_ir.rs b/crates/polars-plan/src/logical_plan/conversion/expr_to_ir.rs
+index 84b45dba36cb..a0d518f5df6e 100644
+--- a/crates/polars-plan/src/logical_plan/conversion/expr_to_ir.rs
++++ b/crates/polars-plan/src/logical_plan/conversion/expr_to_ir.rs
+@@ -185,36 +185,36 @@ fn to_aexpr_impl(expr: Expr, arena: &mut Arena<AExpr>, state: &mut ConversionSta
+                 AggExpr::Min {
+                     input,
+                     propagate_nans,
+-                } => AAggExpr::Min {
++                } => IRAggExpr::Min {
+                     input: to_aexpr_impl_materialized_lit(owned(input), arena, state),
+                     propagate_nans,
+                 },
+                 AggExpr::Max {
+                     input,
+                     propagate_nans,
+-                } => AAggExpr::Max {
++                } => IRAggExpr::Max {
+                     input: to_aexpr_impl_materialized_lit(owned(input), arena, state),
+                     propagate_nans,
+                 },
+                 AggExpr::Median(expr) => {
+-                    AAggExpr::Median(to_aexpr_impl_materialized_lit(owned(expr), arena, state))
++                    IRAggExpr::Median(to_aexpr_impl_materialized_lit(owned(expr), arena, state))
+                 },
+                 AggExpr::NUnique(expr) => {
+-                    AAggExpr::NUnique(to_aexpr_impl_materialized_lit(owned(expr), arena, state))
++                    IRAggExpr::NUnique(to_aexpr_impl_materialized_lit(owned(expr), arena, state))
+                 },
+                 AggExpr::First(expr) => {
+-                    AAggExpr::First(to_aexpr_impl_materialized_lit(owned(expr), arena, state))
++                    IRAggExpr::First(to_aexpr_impl_materialized_lit(owned(expr), arena, state))
+                 },
+                 AggExpr::Last(expr) => {
+-                    AAggExpr::Last(to_aexpr_impl_materialized_lit(owned(expr), arena, state))
++                    IRAggExpr::Last(to_aexpr_impl_materialized_lit(owned(expr), arena, state))
+                 },
+                 AggExpr::Mean(expr) => {
+-                    AAggExpr::Mean(to_aexpr_impl_materialized_lit(owned(expr), arena, state))
++                    IRAggExpr::Mean(to_aexpr_impl_materialized_lit(owned(expr), arena, state))
+                 },
+                 AggExpr::Implode(expr) => {
+-                    AAggExpr::Implode(to_aexpr_impl_materialized_lit(owned(expr), arena, state))
++                    IRAggExpr::Implode(to_aexpr_impl_materialized_lit(owned(expr), arena, state))
+                 },
+-                AggExpr::Count(expr, include_nulls) => AAggExpr::Count(
++                AggExpr::Count(expr, include_nulls) => IRAggExpr::Count(
+                     to_aexpr_impl_materialized_lit(owned(expr), arena, state),
+                     include_nulls,
+                 ),
+@@ -222,24 +222,24 @@ fn to_aexpr_impl(expr: Expr, arena: &mut Arena<AExpr>, state: &mut ConversionSta
+                     expr,
+                     quantile,
+                     interpol,
+-                } => AAggExpr::Quantile {
++                } => IRAggExpr::Quantile {
+                     expr: to_aexpr_impl_materialized_lit(owned(expr), arena, state),
+                     quantile: to_aexpr_impl_materialized_lit(owned(quantile), arena, state),
+                     interpol,
+                 },
+                 AggExpr::Sum(expr) => {
+-                    AAggExpr::Sum(to_aexpr_impl_materialized_lit(owned(expr), arena, state))
++                    IRAggExpr::Sum(to_aexpr_impl_materialized_lit(owned(expr), arena, state))
+                 },
+-                AggExpr::Std(expr, ddof) => AAggExpr::Std(
++                AggExpr::Std(expr, ddof) => IRAggExpr::Std(
+                     to_aexpr_impl_materialized_lit(owned(expr), arena, state),
+                     ddof,
+                 ),
+-                AggExpr::Var(expr, ddof) => AAggExpr::Var(
++                AggExpr::Var(expr, ddof) => IRAggExpr::Var(
+                     to_aexpr_impl_materialized_lit(owned(expr), arena, state),
+                     ddof,
+                 ),
+                 AggExpr::AggGroups(expr) => {
+-                    AAggExpr::AggGroups(to_aexpr_impl_materialized_lit(owned(expr), arena, state))
++                    IRAggExpr::AggGroups(to_aexpr_impl_materialized_lit(owned(expr), arena, state))
+                 },
+             };
+             AExpr::Agg(a_agg)
+diff --git a/crates/polars-plan/src/logical_plan/conversion/ir_to_dsl.rs b/crates/polars-plan/src/logical_plan/conversion/ir_to_dsl.rs
+index b2abae180021..7caa4bb8c7b1 100644
+--- a/crates/polars-plan/src/logical_plan/conversion/ir_to_dsl.rs
++++ b/crates/polars-plan/src/logical_plan/conversion/ir_to_dsl.rs
+@@ -79,7 +79,7 @@ pub fn node_to_expr(node: Node, expr_arena: &Arena<AExpr>) -> Expr {
+             }
+         },
+         AExpr::Agg(agg) => match agg {
+-            AAggExpr::Min {
++            IRAggExpr::Min {
+                 input,
+                 propagate_nans,
+             } => {
+@@ -90,7 +90,7 @@ pub fn node_to_expr(node: Node, expr_arena: &Arena<AExpr>) -> Expr {
+                 }
+                 .into()
+             },
+-            AAggExpr::Max {
++            IRAggExpr::Max {
+                 input,
+                 propagate_nans,
+             } => {
+@@ -102,31 +102,31 @@ pub fn node_to_expr(node: Node, expr_arena: &Arena<AExpr>) -> Expr {
+                 .into()
+             },
+ 
+-            AAggExpr::Median(expr) => {
++            IRAggExpr::Median(expr) => {
+                 let exp = node_to_expr(expr, expr_arena);
+                 AggExpr::Median(Arc::new(exp)).into()
+             },
+-            AAggExpr::NUnique(expr) => {
++            IRAggExpr::NUnique(expr) => {
+                 let exp = node_to_expr(expr, expr_arena);
+                 AggExpr::NUnique(Arc::new(exp)).into()
+             },
+-            AAggExpr::First(expr) => {
++            IRAggExpr::First(expr) => {
+                 let exp = node_to_expr(expr, expr_arena);
+                 AggExpr::First(Arc::new(exp)).into()
+             },
+-            AAggExpr::Last(expr) => {
++            IRAggExpr::Last(expr) => {
+                 let exp = node_to_expr(expr, expr_arena);
+                 AggExpr::Last(Arc::new(exp)).into()
+             },
+-            AAggExpr::Mean(expr) => {
++            IRAggExpr::Mean(expr) => {
+                 let exp = node_to_expr(expr, expr_arena);
+                 AggExpr::Mean(Arc::new(exp)).into()
+             },
+-            AAggExpr::Implode(expr) => {
++            IRAggExpr::Implode(expr) => {
+                 let exp = node_to_expr(expr, expr_arena);
+                 AggExpr::Implode(Arc::new(exp)).into()
+             },
+-            AAggExpr::Quantile {
++            IRAggExpr::Quantile {
+                 expr,
+                 quantile,
+                 interpol,
+@@ -140,23 +140,23 @@ pub fn node_to_expr(node: Node, expr_arena: &Arena<AExpr>) -> Expr {
+                 }
+                 .into()
+             },
+-            AAggExpr::Sum(expr) => {
++            IRAggExpr::Sum(expr) => {
+                 let exp = node_to_expr(expr, expr_arena);
+                 AggExpr::Sum(Arc::new(exp)).into()
+             },
+-            AAggExpr::Std(expr, ddof) => {
++            IRAggExpr::Std(expr, ddof) => {
+                 let exp = node_to_expr(expr, expr_arena);
+                 AggExpr::Std(Arc::new(exp), ddof).into()
+             },
+-            AAggExpr::Var(expr, ddof) => {
++            IRAggExpr::Var(expr, ddof) => {
+                 let exp = node_to_expr(expr, expr_arena);
+                 AggExpr::Var(Arc::new(exp), ddof).into()
+             },
+-            AAggExpr::AggGroups(expr) => {
++            IRAggExpr::AggGroups(expr) => {
+                 let exp = node_to_expr(expr, expr_arena);
+                 AggExpr::AggGroups(Arc::new(exp)).into()
+             },
+-            AAggExpr::Count(expr, include_nulls) => {
++            IRAggExpr::Count(expr, include_nulls) => {
+                 let expr = node_to_expr(expr, expr_arena);
+                 AggExpr::Count(Arc::new(expr), include_nulls).into()
+             },
+diff --git a/crates/polars-plan/src/reduce/convert.rs b/crates/polars-plan/src/reduce/convert.rs
+new file mode 100644
+index 000000000000..03484152709b
+--- /dev/null
++++ b/crates/polars-plan/src/reduce/convert.rs
+@@ -0,0 +1,44 @@
++use polars_core::datatypes::Field;
++use polars_utils::arena::{Arena, Node};
++
++use super::*;
++use crate::prelude::{AExpr, IRAggExpr};
++use crate::reduce::sum::SumReduce;
++
++
++struct ReductionImpl {
++    reduce: Box<dyn Reduction>,
++    prepare: Node
++}
++
++impl ReductionImpl {
++    fn new(reduce: Box<dyn Reduction>, prepare: Node) -> Self {
++        ReductionImpl {
++            reduce,
++            prepare
++        }
++
++    }
++
++}
++
++pub fn into_reduction(
++    node: Node,
++    expr_arena: Arena<AExpr>,
++    field: &Field,
++) -> ReductionImpl {
++    match expr_arena.get(node) {
++        AExpr::Agg(agg) => match agg {
++            IRAggExpr::Sum(node) => {
++                ReductionImpl::new(
++                    Box::new(SumReduce::new(field.dtype.clone())),
++                    *node
++                )
++            },
++            _ => todo!(),
++        },
++        _ => {
++            todo!()
++        },
++    }
++}
+diff --git a/crates/polars-plan/src/reduce/extrema.rs b/crates/polars-plan/src/reduce/extrema.rs
+new file mode 100644
+index 000000000000..27ef0d0fb0bb
+--- /dev/null
++++ b/crates/polars-plan/src/reduce/extrema.rs
+@@ -0,0 +1,80 @@
++use polars_core::prelude::AnyValue;
++
++use super::*;
++
++struct MinReduce {
++    value: Scalar,
++}
++
++impl MinReduce {
++    fn update_impl(&mut self, value: &AnyValue<'static>) {
++        if value < self.value.value() {
++            self.value.update(value.clone());
++        }
++    }
++}
++
++impl Reduction for MinReduce {
++    fn init(&mut self) {
++        let av = AnyValue::zero(self.value.dtype());
++        self.value.update(av);
++    }
++
++    fn update(&mut self, batch: &Series) -> PolarsResult<()> {
++        let sc = batch.min_reduce()?;
++        self.update_impl(sc.value());
++        Ok(())
++    }
++
++    fn combine(&mut self, other: &dyn Reduction) -> PolarsResult<()> {
++        let other = other.as_any().downcast_ref::<Self>().unwrap();
++        self.update_impl(&other.value.value());
++        Ok(())
++    }
++
++    fn finalize(&mut self) -> PolarsResult<Scalar> {
++        Ok(self.value.clone())
++    }
++
++    fn as_any(&self) -> &dyn Any {
++        self
++    }
++}
++struct MaxReduce {
++    value: Scalar,
++}
++
++impl MaxReduce {
++    fn update_impl(&mut self, value: &AnyValue<'static>) {
++        if value > self.value.value() {
++            self.value.update(value.clone());
++        }
++    }
++}
++
++impl Reduction for MaxReduce {
++    fn init(&mut self) {
++        let av = AnyValue::zero(self.value.dtype());
++        self.value.update(av);
++    }
++
++    fn update(&mut self, batch: &Series) -> PolarsResult<()> {
++        let sc = batch.max_reduce()?;
++        self.update_impl(sc.value());
++        Ok(())
++    }
++
++    fn combine(&mut self, other: &dyn Reduction) -> PolarsResult<()> {
++        let other = other.as_any().downcast_ref::<Self>().unwrap();
++        self.update_impl(&other.value.value());
++        Ok(())
++    }
++
++    fn finalize(&mut self) -> PolarsResult<Scalar> {
++        Ok(self.value.clone())
++    }
++
++    fn as_any(&self) -> &dyn Any {
++        self
++    }
++}
+diff --git a/crates/polars-plan/src/reduce/mod.rs b/crates/polars-plan/src/reduce/mod.rs
+index 3bdc7be55966..7b4c0f3c8877 100644
+--- a/crates/polars-plan/src/reduce/mod.rs
++++ b/crates/polars-plan/src/reduce/mod.rs
+@@ -1,13 +1,22 @@
++mod convert;
++mod extrema;
++mod sum;
++
++use std::any::Any;
++
++use arrow::legacy::error::PolarsResult;
+ use polars_core::datatypes::Scalar;
+ use polars_core::prelude::Series;
+ 
+ #[allow(dead_code)]
+-trait Reduction {
++trait Reduction: Any {
+     fn init(&mut self);
+ 
+-    fn update(&mut self, batch: &Series);
++    fn update(&mut self, batch: &Series) -> PolarsResult<()>;
++
++    fn combine(&mut self, other: &dyn Reduction) -> PolarsResult<()>;
+ 
+-    fn combine(&mut self, other: &dyn Reduction);
++    fn finalize(&mut self) -> PolarsResult<Scalar>;
+ 
+-    fn finalize(&mut self) -> Scalar;
++    fn as_any(&self) -> &dyn Any;
+ }
+diff --git a/crates/polars-plan/src/reduce/sum.rs b/crates/polars-plan/src/reduce/sum.rs
+new file mode 100644
+index 000000000000..a3bbafaed88e
+--- /dev/null
++++ b/crates/polars-plan/src/reduce/sum.rs
+@@ -0,0 +1,45 @@
++use polars_core::prelude::{AnyValue, DataType};
++
++use super::*;
++
++pub struct SumReduce {
++    value: Scalar,
++}
++
++impl SumReduce {
++    pub(crate) fn new(dtype: DataType) -> Self {
++        let value = Scalar::new(dtype, AnyValue::Null);
++        Self { value }
++    }
++
++    fn update_impl(&mut self, value: &AnyValue<'static>) {
++        self.value.update(self.value.value().add(value))
++    }
++}
++
++impl Reduction for SumReduce {
++    fn init(&mut self) {
++        let av = AnyValue::zero(self.value.dtype());
++        self.value.update(av);
++    }
++
++    fn update(&mut self, batch: &Series) -> PolarsResult<()> {
++        let sc = batch.sum_reduce()?;
++        self.update_impl(sc.value());
++        Ok(())
++    }
++
++    fn combine(&mut self, other: &dyn Reduction) -> PolarsResult<()> {
++        let other = other.as_any().downcast_ref::<Self>().unwrap();
++        self.update_impl(&other.value.value());
++        Ok(())
++    }
++
++    fn finalize(&mut self) -> PolarsResult<Scalar> {
++        Ok(self.value.clone())
++    }
++
++    fn as_any(&self) -> &dyn Any {
++        self
++    }
++}
+diff --git a/py-polars/src/lazyframe/visitor/expr_nodes.rs b/py-polars/src/lazyframe/visitor/expr_nodes.rs
+index d24abaf86689..98fce2b512af 100644
+--- a/py-polars/src/lazyframe/visitor/expr_nodes.rs
++++ b/py-polars/src/lazyframe/visitor/expr_nodes.rs
+@@ -4,7 +4,7 @@ use polars_plan::dsl::function_expr::rolling_by::RollingFunctionBy;
+ use polars_plan::dsl::function_expr::trigonometry::TrigonometricFunction;
+ use polars_plan::dsl::{BooleanFunction, StringFunction};
+ use polars_plan::prelude::{
+-    AAggExpr, AExpr, FunctionExpr, GroupbyOptions, LiteralValue, Operator, PowFunction,
++    AExpr, FunctionExpr, GroupbyOptions, IRAggExpr, LiteralValue, Operator, PowFunction,
+     WindowMapping, WindowType,
+ };
+ use polars_time::prelude::RollingGroupOptions;
+@@ -515,7 +515,7 @@ pub(crate) fn into_py(py: Python<'_>, expr: &AExpr) -> PyResult<PyObject> {
+         }
+         .into_py(py),
+         AExpr::Agg(aggexpr) => match aggexpr {
+-            AAggExpr::Min {
++            IRAggExpr::Min {
+                 input,
+                 propagate_nans,
+             } => Agg {
+@@ -523,7 +523,7 @@ pub(crate) fn into_py(py: Python<'_>, expr: &AExpr) -> PyResult<PyObject> {
+                 arguments: input.0,
+                 options: propagate_nans.to_object(py),
+             },
+-            AAggExpr::Max {
++            IRAggExpr::Max {
+                 input,
+                 propagate_nans,
+             } => Agg {
+@@ -531,54 +531,54 @@ pub(crate) fn into_py(py: Python<'_>, expr: &AExpr) -> PyResult<PyObject> {
+                 arguments: input.0,
+                 options: propagate_nans.to_object(py),
+             },
+-            AAggExpr::Median(n) => Agg {
++            IRAggExpr::Median(n) => Agg {
+                 name: "median".to_object(py),
+                 arguments: n.0,
+                 options: py.None(),
+             },
+-            AAggExpr::NUnique(n) => Agg {
++            IRAggExpr::NUnique(n) => Agg {
+                 name: "nunique".to_object(py),
+                 arguments: n.0,
+                 options: py.None(),
+             },
+-            AAggExpr::First(n) => Agg {
++            IRAggExpr::First(n) => Agg {
+                 name: "first".to_object(py),
+                 arguments: n.0,
+                 options: py.None(),
+             },
+-            AAggExpr::Last(n) => Agg {
++            IRAggExpr::Last(n) => Agg {
+                 name: "last".to_object(py),
+                 arguments: n.0,
+                 options: py.None(),
+             },
+-            AAggExpr::Mean(n) => Agg {
++            IRAggExpr::Mean(n) => Agg {
+                 name: "mean".to_object(py),
+                 arguments: n.0,
+                 options: py.None(),
+             },
+-            AAggExpr::Implode(_) => return Err(PyNotImplementedError::new_err("implode")),
+-            AAggExpr::Quantile { .. } => return Err(PyNotImplementedError::new_err("quantile")),
+-            AAggExpr::Sum(n) => Agg {
++            IRAggExpr::Implode(_) => return Err(PyNotImplementedError::new_err("implode")),
++            IRAggExpr::Quantile { .. } => return Err(PyNotImplementedError::new_err("quantile")),
++            IRAggExpr::Sum(n) => Agg {
+                 name: "sum".to_object(py),
+                 arguments: n.0,
+                 options: py.None(),
+             },
+-            AAggExpr::Count(n, include_null) => Agg {
++            IRAggExpr::Count(n, include_null) => Agg {
+                 name: "count".to_object(py),
+                 arguments: n.0,
+                 options: include_null.to_object(py),
+             },
+-            AAggExpr::Std(n, ddof) => Agg {
++            IRAggExpr::Std(n, ddof) => Agg {
+                 name: "std".to_object(py),
+                 arguments: n.0,
+                 options: ddof.to_object(py),
+             },
+-            AAggExpr::Var(n, ddof) => Agg {
++            IRAggExpr::Var(n, ddof) => Agg {
+                 name: "var".to_object(py),
+                 arguments: n.0,
+                 options: ddof.to_object(py),
+             },
+-            AAggExpr::AggGroups(n) => Agg {
++            IRAggExpr::AggGroups(n) => Agg {
+                 name: "agg_groups".to_object(py),
+                 arguments: n.0,
+                 options: py.None(),

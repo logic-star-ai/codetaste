@@ -1,0 +1,3840 @@
+diff --git a/contrib/devtools/check-deps.sh b/contrib/devtools/check-deps.sh
+new file mode 100755
+index 000000000000..9d2eebe14d8d
+--- /dev/null
++++ b/contrib/devtools/check-deps.sh
+@@ -0,0 +1,203 @@
++#!/usr/bin/env bash
++
++export LC_ALL=C
++set -Eeuo pipefail
++
++# Declare paths to libraries
++declare -A LIBS
++LIBS[cli]="libbitcoin_cli.a"
++LIBS[common]="libbitcoin_common.a"
++LIBS[consensus]="libbitcoin_consensus.a"
++LIBS[crypto]="crypto/.libs/libbitcoin_crypto_base.a crypto/.libs/libbitcoin_crypto_x86_shani.a crypto/.libs/libbitcoin_crypto_sse41.a crypto/.libs/libbitcoin_crypto_avx2.a"
++LIBS[node]="libbitcoin_node.a"
++LIBS[util]="libbitcoin_util.a"
++LIBS[wallet]="libbitcoin_wallet.a"
++LIBS[wallet_tool]="libbitcoin_wallet_tool.a"
++
++# Declare allowed dependencies "X Y" where X is allowed to depend on Y. This
++# list is taken from doc/design/libraries.md.
++ALLOWED_DEPENDENCIES=(
++    "cli common"
++    "cli util"
++    "common consensus"
++    "common crypto"
++    "common util"
++    "consensus crypto"
++    "node common"
++    "node consensus"
++    "node crypto"
++    "node kernel"
++    "node util"
++    "util crypto"
++    "wallet common"
++    "wallet crypto"
++    "wallet util"
++    "wallet_tool util"
++    "wallet_tool wallet"
++)
++
++# Add minor dependencies omitted from doc/design/libraries.md to keep the
++# dependency diagram simple.
++ALLOWED_DEPENDENCIES+=(
++    "wallet consensus"
++    "wallet_tool common"
++    "wallet_tool crypto"
++)
++
++# Declare list of known errors that should be suppressed.
++declare -A SUPPRESS
++# init.cpp file currently calls Berkeley DB sanity check function on startup, so
++# there is an undocumented dependency of the node library on the wallet library.
++SUPPRESS["libbitcoin_node_a-init.o libbitcoin_wallet_a-bdb.o _ZN6wallet27BerkeleyDatabaseSanityCheckEv"]=1
++# init/common.cpp file calls InitError and InitWarning from interface_ui which
++# is currently part of the node library. interface_ui should just be part of the
++# common library instead, and is moved in
++# https://github.com/bitcoin/bitcoin/issues/10102
++SUPPRESS["libbitcoin_common_a-common.o libbitcoin_node_a-interface_ui.o _Z11InitWarningRK13bilingual_str"]=1
++SUPPRESS["libbitcoin_common_a-common.o libbitcoin_node_a-interface_ui.o _Z9InitErrorRK13bilingual_str"]=1
++# rpc/external_signer.cpp adds defines node RPC methods but is built as part of the
++# common library. It should be moved to the node library instead.
++SUPPRESS["libbitcoin_common_a-external_signer.o libbitcoin_node_a-server.o _ZN9CRPCTable13appendCommandERKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEEPK11CRPCCommand"]=1
++
++usage() {
++   echo "Usage: $(basename "${BASH_SOURCE[0]}") [BUILD_DIR]"
++}
++
++# Output makefile targets, converting library .a paths to libtool .la targets
++lib_targets() {
++  for lib in "${!LIBS[@]}"; do
++      for lib_path in ${LIBS[$lib]}; do
++          # shellcheck disable=SC2001
++          sed 's:/.libs/\(.*\)\.a$:/\1.la:g' <<<"$lib_path"
++      done
++  done
++}
++
++# Extract symbol names and object names and write to text files
++extract_symbols() {
++    local temp_dir="$1"
++    for lib in "${!LIBS[@]}"; do
++        for lib_path in ${LIBS[$lib]}; do
++            nm -o "$lib_path" | grep ' T ' | awk '{print $3, $1}' >> "${temp_dir}/${lib}_exports.txt"
++            nm -o "$lib_path" | grep ' U ' | awk '{print $3, $1}' >> "${temp_dir}/${lib}_imports.txt"
++            awk '{print $1}' "${temp_dir}/${lib}_exports.txt" | sort -u > "${temp_dir}/${lib}_exported_symbols.txt"
++            awk '{print $1}' "${temp_dir}/${lib}_imports.txt" | sort -u > "${temp_dir}/${lib}_imported_symbols.txt"
++        done
++    done
++}
++
++# Lookup object name(s) corresponding to symbol name in text file
++obj_names() {
++    local symbol="$1"
++    local txt_file="$2"
++    sed -n "s/^$symbol [^:]\\+:\\([^:]\\+\\):[^:]*\$/\\1/p" "$txt_file" | sort -u
++}
++
++# Iterate through libraries and find disallowed dependencies
++check_libraries() {
++    local temp_dir="$1"
++    local result=0
++    for src in "${!LIBS[@]}"; do
++        for dst in "${!LIBS[@]}"; do
++            if [ "$src" != "$dst" ] && ! is_allowed "$src" "$dst"; then
++                if ! check_disallowed "$src" "$dst" "$temp_dir"; then
++                    result=1
++                fi
++            fi
++        done
++    done
++    check_not_suppressed
++    return $result
++}
++
++# Return whether src library is allowed to depend on dst.
++is_allowed() {
++    local src="$1"
++    local dst="$2"
++    for allowed in "${ALLOWED_DEPENDENCIES[@]}"; do
++        if [ "$src $dst" = "$allowed" ]; then
++            return 0
++        fi
++    done
++    return 1
++}
++
++# Return whether src library imports any symbols from dst, assuming src is not
++# allowed to depend on dst.
++check_disallowed() {
++    local src="$1"
++    local dst="$2"
++    local temp_dir="$3"
++    local result=0
++
++    # Loop over symbol names exported by dst and imported by src
++    while read symbol; do
++        local dst_obj
++        dst_obj=$(obj_names "$symbol" "${temp_dir}/${dst}_exports.txt")
++        while read src_obj; do
++            if ! check_suppress "$src_obj" "$dst_obj" "$symbol"; then
++                echo "Error: $src_obj depends on $dst_obj symbol '$(c++filt "$symbol")', can suppess with:"
++                echo "    SUPPRESS[\"$src_obj $dst_obj $symbol\"]=1"
++                result=1
++            fi
++        done < <(obj_names "$symbol" "${temp_dir}/${src}_imports.txt")
++    done < <(comm -12 "${temp_dir}/${dst}_exported_symbols.txt" "${temp_dir}/${src}_imported_symbols.txt")
++    return $result
++}
++
++# Declare array to track errors which were suppressed.
++declare -A SUPPRESSED
++
++# Return whether error should be suppressed and record suppresssion in
++# SUPPRESSED array.
++check_suppress() {
++    local src_obj="$1"
++    local dst_obj="$2"
++    local symbol="$3"
++    for suppress in "${!SUPPRESS[@]}"; do
++        read suppress_src suppress_dst suppress_pattern <<<"$suppress"
++        if [[ "$src_obj" == "$suppress_src" && "$dst_obj" == "$suppress_dst" && "$symbol" =~ $suppress_pattern ]]; then
++            SUPPRESSED["$suppress"]=1
++            return 0
++        fi
++    done
++    return 1
++}
++
++# Warn about error which were supposed to be suppress, but were not encountered.
++check_not_suppressed() {
++    for suppress in "${!SUPPRESS[@]}"; do
++        if [[ ! -v SUPPRESSED[$suppress] ]]; then
++            echo >&2 "Warning: suppression '$suppress' was ignored, consider deleting."
++        fi
++    done
++}
++
++# Check arguments.
++if [ "$#" = 0 ]; then
++    BUILD_DIR="$(dirname "${BASH_SOURCE[0]}")/../../src"
++elif [ "$#" = 1 ]; then
++    BUILD_DIR="$1"
++else
++    echo >&2 "Error: wrong number of arguments."
++    usage >&2
++    exit 1
++fi
++if [ ! -f "$BUILD_DIR/Makefile" ]; then
++    echo >&2 "Error: directory '$BUILD_DIR' does not contain a makefile, please specify path to build directory for library targets."
++    usage >&2
++    exit 1
++fi
++
++# Build libraries and run checks.
++cd "$BUILD_DIR"
++# shellcheck disable=SC2046
++make -j"$(nproc)" $(lib_targets)
++TEMP_DIR="$(mktemp -d)"
++extract_symbols "$TEMP_DIR"
++if check_libraries "$TEMP_DIR"; then
++    echo "Success! No unexpected dependencies were detected."
++else
++    echo >&2 "Error: Unexpected dependencies were detected. Check previous output."
++fi
++rm -r "$TEMP_DIR"
+diff --git a/doc/design/libraries.md b/doc/design/libraries.md
+index 251c52199d0b..aa8034ab37b4 100644
+--- a/doc/design/libraries.md
++++ b/doc/design/libraries.md
+@@ -5,6 +5,7 @@
+ | *libbitcoin_cli*         | RPC client functionality used by *bitcoin-cli* executable |
+ | *libbitcoin_common*      | Home for common functionality shared by different executables and libraries. Similar to *libbitcoin_util*, but higher-level (see [Dependencies](#dependencies)). |
+ | *libbitcoin_consensus*   | Stable, backwards-compatible consensus functionality used by *libbitcoin_node* and *libbitcoin_wallet*. |
++| *libbitcoin_crypto*      | Hardware-optimized functions for data encryption, hashing, message authentication, and key derivation. |
+ | *libbitcoin_kernel*      | Consensus engine and support library used for validation by *libbitcoin_node*. |
+ | *libbitcoinqt*           | GUI functionality used by *bitcoin-qt* and *bitcoin-gui* executables. |
+ | *libbitcoin_ipc*         | IPC functionality used by *bitcoin-node*, *bitcoin-wallet*, *bitcoin-gui* executables to communicate when [`--enable-multiprocess`](multiprocess.md) is used. |
+@@ -53,13 +54,18 @@ bitcoin-wallet[bitcoin-wallet]-->libbitcoin_wallet_tool;
+ libbitcoin_cli-->libbitcoin_util;
+ libbitcoin_cli-->libbitcoin_common;
+ 
++libbitcoin_consensus-->libbitcoin_crypto;
++
+ libbitcoin_common-->libbitcoin_consensus;
++libbitcoin_common-->libbitcoin_crypto;
+ libbitcoin_common-->libbitcoin_util;
+ 
+ libbitcoin_kernel-->libbitcoin_consensus;
++libbitcoin_kernel-->libbitcoin_crypto;
+ libbitcoin_kernel-->libbitcoin_util;
+ 
+ libbitcoin_node-->libbitcoin_consensus;
++libbitcoin_node-->libbitcoin_crypto;
+ libbitcoin_node-->libbitcoin_kernel;
+ libbitcoin_node-->libbitcoin_common;
+ libbitcoin_node-->libbitcoin_util;
+@@ -67,7 +73,10 @@ libbitcoin_node-->libbitcoin_util;
+ libbitcoinqt-->libbitcoin_common;
+ libbitcoinqt-->libbitcoin_util;
+ 
++libbitcoin_util-->libbitcoin_crypto;
++
+ libbitcoin_wallet-->libbitcoin_common;
++libbitcoin_wallet-->libbitcoin_crypto;
+ libbitcoin_wallet-->libbitcoin_util;
+ 
+ libbitcoin_wallet_tool-->libbitcoin_wallet;
+@@ -78,22 +87,23 @@ class bitcoin-qt,bitcoind,bitcoin-cli,bitcoin-wallet bold
+ ```
+ </td></tr><tr><td>
+ 
+-**Dependency graph**. Arrows show linker symbol dependencies. *Consensus* lib depends on nothing. *Util* lib is depended on by everything. *Kernel* lib depends only on consensus and util.
++**Dependency graph**. Arrows show linker symbol dependencies. *Crypto* lib depends on nothing. *Util* lib is depended on by everything. *Kernel* lib depends only on consensus, crypto, and util.
+ 
+ </td></tr></table>
+ 
+ - The graph shows what _linker symbols_ (functions and variables) from each library other libraries can call and reference directly, but it is not a call graph. For example, there is no arrow connecting *libbitcoin_wallet* and *libbitcoin_node* libraries, because these libraries are intended to be modular and not depend on each other's internal implementation details. But wallet code is still able to call node code indirectly through the `interfaces::Chain` abstract class in [`interfaces/chain.h`](../../src/interfaces/chain.h) and node code calls wallet code through the `interfaces::ChainClient` and `interfaces::Chain::Notifications` abstract classes in the same file. In general, defining abstract classes in [`src/interfaces/`](../../src/interfaces/) can be a convenient way of avoiding unwanted direct dependencies or circular dependencies between libraries.
+ 
+-- *libbitcoin_consensus* should be a standalone dependency that any library can depend on, and it should not depend on any other libraries itself.
++- *libbitcoin_crypto* should be a standalone dependency that any library can depend on, and it should not depend on any other libraries itself.
+ 
+-- *libbitcoin_util* should also be a standalone dependency that any library can depend on, and it should not depend on other internal libraries.
++- *libbitcoin_consensus* should only depend on *libbitcoin_crypto*, and all other libraries besides *libbitcoin_crypto* should be allowed to depend on it.
+ 
+-- *libbitcoin_common* should serve a similar function as *libbitcoin_util* and be a place for miscellaneous code used by various daemon, GUI, and CLI applications and libraries to live. It should not depend on anything other than *libbitcoin_util* and *libbitcoin_consensus*. The boundary between _util_ and _common_ is a little fuzzy but historically _util_ has been used for more generic, lower-level things like parsing hex, and _common_ has been used for bitcoin-specific, higher-level things like parsing base58. The difference between util and common is mostly important because *libbitcoin_kernel* is not supposed to depend on *libbitcoin_common*, only *libbitcoin_util*. In general, if it is ever unclear whether it is better to add code to *util* or *common*, it is probably better to add it to *common* unless it is very generically useful or useful particularly to include in the kernel.
++- *libbitcoin_util* should be a standalone dependency that any library can depend on, and it should not depend on other libraries except *libbitcoin_crypto*. It provides basic utilities that fill in gaps in the C++ standard library and provide lightweight abstractions over platform-specific features. Since the util library is distributed with the kernel and is usable by kernel applications, it shouldn't contain functions that external code shouldn't call, like higher level code targetted at the node or wallet. (*libbitcoin_common* is a better place for higher level code, or code that is meant to be used by internal applications only.)
+ 
++- *libbitcoin_common* is a home for miscellaneous shared code used by different Bitcoin Core applications. It should not depend on anything other than *libbitcoin_util*, *libbitcoin_consensus*, and *libbitcoin_crypto*.
+ 
+-- *libbitcoin_kernel* should only depend on *libbitcoin_util* and *libbitcoin_consensus*.
++- *libbitcoin_kernel* should only depend on *libbitcoin_util*, *libbitcoin_consensus*, and *libbitcoin_crypto*.
+ 
+-- The only thing that should depend on *libbitcoin_kernel* internally should be *libbitcoin_node*. GUI and wallet libraries *libbitcoinqt* and *libbitcoin_wallet* in particular should not depend on *libbitcoin_kernel* and the unneeded functionality it would pull in, like block validation. To the extent that GUI and wallet code need scripting and signing functionality, they should be get able it from *libbitcoin_consensus*, *libbitcoin_common*, and *libbitcoin_util*, instead of *libbitcoin_kernel*.
++- The only thing that should depend on *libbitcoin_kernel* internally should be *libbitcoin_node*. GUI and wallet libraries *libbitcoinqt* and *libbitcoin_wallet* in particular should not depend on *libbitcoin_kernel* and the unneeded functionality it would pull in, like block validation. To the extent that GUI and wallet code need scripting and signing functionality, they should be get able it from *libbitcoin_consensus*, *libbitcoin_common*, *libbitcoin_crypto*, and *libbitcoin_util*, instead of *libbitcoin_kernel*.
+ 
+ - GUI, node, and wallet code internal implementations should all be independent of each other, and the *libbitcoinqt*, *libbitcoin_node*, *libbitcoin_wallet* libraries should never reference each other's symbols. They should only call each other through [`src/interfaces/`](../../src/interfaces/) abstract interfaces.
+ 
+diff --git a/src/Makefile.am b/src/Makefile.am
+index a69daeae2d4f..2562c4cc6559 100644
+--- a/src/Makefile.am
++++ b/src/Makefile.am
+@@ -137,13 +137,16 @@ BITCOIN_CORE_H = \
+   common/bloom.h \
+   common/init.h \
+   common/run_command.h \
++  common/types.h \
+   common/url.h \
+   compat/assumptions.h \
+   compat/byteswap.h \
+   compat/compat.h \
+   compat/cpuid.h \
+   compat/endian.h \
++  common/messages.h \
+   common/settings.h \
++  common/signmessage.h \
+   common/system.h \
+   compressor.h \
+   consensus/consensus.h \
+@@ -233,6 +236,7 @@ BITCOIN_CORE_H = \
+   node/timeoffsets.h \
+   node/transaction.h \
+   node/txreconciliation.h \
++  node/types.h \
+   node/utxo_snapshot.h \
+   node/validation_cache_args.h \
+   noui.h \
+@@ -267,6 +271,7 @@ BITCOIN_CORE_H = \
+   script/descriptor.h \
+   script/keyorigin.h \
+   script/miniscript.h \
++  script/parsing.h \
+   script/sigcache.h \
+   script/sign.h \
+   script/signingprovider.h \
+@@ -297,11 +302,9 @@ BITCOIN_CORE_H = \
+   util/chaintype.h \
+   util/check.h \
+   util/epochguard.h \
+-  util/error.h \
+   util/exception.h \
+   util/fastrange.h \
+   util/feefrac.h \
+-  util/fees.h \
+   util/fs.h \
+   util/fs_helpers.h \
+   util/golombrice.h \
+@@ -309,7 +312,6 @@ BITCOIN_CORE_H = \
+   util/hasher.h \
+   util/insert.h \
+   util/macros.h \
+-  util/message.h \
+   util/moneystr.h \
+   util/overflow.h \
+   util/overloaded.h \
+@@ -319,7 +321,7 @@ BITCOIN_CORE_H = \
+   util/serfloat.h \
+   util/signalinterrupt.h \
+   util/sock.h \
+-  util/spanparsing.h \
++  util/strencodings.h \
+   util/string.h \
+   util/subprocess.h \
+   util/syserror.h \
+@@ -569,6 +571,8 @@ crypto_libbitcoin_crypto_base_la_SOURCES = \
+   crypto/chacha20poly1305.h \
+   crypto/chacha20poly1305.cpp \
+   crypto/common.h \
++  crypto/hex_base.cpp \
++  crypto/hex_base.h \
+   crypto/hkdf_sha256_32.cpp \
+   crypto/hkdf_sha256_32.h \
+   crypto/hmac_sha256.cpp \
+@@ -591,7 +595,8 @@ crypto_libbitcoin_crypto_base_la_SOURCES = \
+   crypto/sha512.cpp \
+   crypto/sha512.h \
+   crypto/siphash.cpp \
+-  crypto/siphash.h
++  crypto/siphash.h \
++  support/cleanse.cpp
+ 
+ # See explanation for -static in crypto_libbitcoin_crypto_base_la's LDFLAGS and
+ # CXXFLAGS above
+@@ -661,9 +666,7 @@ libbitcoin_consensus_a_SOURCES = \
+   span.h \
+   tinyformat.h \
+   uint256.cpp \
+-  uint256.h \
+-  util/strencodings.cpp \
+-  util/strencodings.h
++  uint256.h
+ #
+ 
+ # common #
+@@ -673,6 +676,7 @@ libbitcoin_common_a_SOURCES = \
+   addresstype.cpp \
+   base58.cpp \
+   bech32.cpp \
++  chainparamsbase.cpp \
+   chainparams.cpp \
+   coins.cpp \
+   common/args.cpp \
+@@ -680,8 +684,10 @@ libbitcoin_common_a_SOURCES = \
+   common/config.cpp \
+   common/init.cpp \
+   common/interfaces.cpp \
++  common/messages.cpp \
+   common/run_command.cpp \
+   common/settings.cpp \
++  common/signmessage.cpp \
+   common/system.cpp \
+   common/url.cpp \
+   compressor.cpp \
+@@ -711,6 +717,7 @@ libbitcoin_common_a_SOURCES = \
+   scheduler.cpp \
+   script/descriptor.cpp \
+   script/miniscript.cpp \
++  script/parsing.cpp \
+   script/sign.cpp \
+   script/signingprovider.cpp \
+   script/solver.cpp \
+@@ -723,13 +730,11 @@ libbitcoin_util_a_CPPFLAGS = $(AM_CPPFLAGS) $(BITCOIN_INCLUDES)
+ libbitcoin_util_a_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS)
+ libbitcoin_util_a_SOURCES = \
+   support/lockedpool.cpp \
+-  chainparamsbase.cpp \
+   clientversion.cpp \
+   logging.cpp \
+   random.cpp \
+   randomenv.cpp \
+   streams.cpp \
+-  support/cleanse.cpp \
+   sync.cpp \
+   util/asmap.cpp \
+   util/batchpriority.cpp \
+@@ -737,16 +742,13 @@ libbitcoin_util_a_SOURCES = \
+   util/bytevectorhash.cpp \
+   util/chaintype.cpp \
+   util/check.cpp \
+-  util/error.cpp \
+   util/exception.cpp \
+   util/feefrac.cpp \
+-  util/fees.cpp \
+   util/fs.cpp \
+   util/fs_helpers.cpp \
+   util/hasher.cpp \
+   util/sock.cpp \
+   util/syserror.cpp \
+-  util/message.cpp \
+   util/moneystr.cpp \
+   util/rbf.cpp \
+   util/readwritefile.cpp \
+@@ -755,7 +757,6 @@ libbitcoin_util_a_SOURCES = \
+   util/threadinterrupt.cpp \
+   util/threadnames.cpp \
+   util/serfloat.cpp \
+-  util/spanparsing.cpp \
+   util/strencodings.cpp \
+   util/string.cpp \
+   util/time.cpp \
+@@ -972,7 +973,6 @@ libbitcoinkernel_la_SOURCES = \
+   script/solver.cpp \
+   signet.cpp \
+   streams.cpp \
+-  support/cleanse.cpp \
+   support/lockedpool.cpp \
+   sync.cpp \
+   txdb.cpp \
+diff --git a/src/Makefile.test.include b/src/Makefile.test.include
+index c41faa117d64..fa7cadb726ae 100644
+--- a/src/Makefile.test.include
++++ b/src/Makefile.test.include
+@@ -375,6 +375,7 @@ test_fuzz_fuzz_SOURCES = \
+  test/fuzz/script_format.cpp \
+  test/fuzz/script_interpreter.cpp \
+  test/fuzz/script_ops.cpp \
++ test/fuzz/script_parsing.cpp \
+  test/fuzz/script_sigcache.cpp \
+  test/fuzz/script_sign.cpp \
+  test/fuzz/scriptnum_ops.cpp \
+@@ -384,7 +385,6 @@ test_fuzz_fuzz_SOURCES = \
+  test/fuzz/signet.cpp \
+  test/fuzz/socks5.cpp \
+  test/fuzz/span.cpp \
+- test/fuzz/spanparsing.cpp \
+  test/fuzz/string.cpp \
+  test/fuzz/strprintf.cpp \
+  test/fuzz/system.cpp \
+diff --git a/src/base58.cpp b/src/base58.cpp
+index cf5d62f164f3..f9165ed55f78 100644
+--- a/src/base58.cpp
++++ b/src/base58.cpp
+@@ -14,6 +14,8 @@
+ 
+ #include <limits>
+ 
++using util::ContainsNoNUL;
++
+ /** All alphanumeric characters except for "0", "I", "O", and "l" */
+ static const char* pszBase58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+ static const int8_t mapBase58[256] = {
+diff --git a/src/bench/bench.cpp b/src/bench/bench.cpp
+index a13a693ad778..733f8085ca75 100644
+--- a/src/bench/bench.cpp
++++ b/src/bench/bench.cpp
+@@ -18,6 +18,7 @@
+ #include <vector>
+ 
+ using namespace std::chrono_literals;
++using util::Join;
+ 
+ const std::function<void(const std::string&)> G_TEST_LOG_FUN{};
+ 
+diff --git a/src/bench/bench_bitcoin.cpp b/src/bench/bench_bitcoin.cpp
+index 8c421c3fec6e..a1b880e40b0d 100644
+--- a/src/bench/bench_bitcoin.cpp
++++ b/src/bench/bench_bitcoin.cpp
+@@ -16,6 +16,8 @@
+ #include <sstream>
+ #include <vector>
+ 
++using util::SplitString;
++
+ static const char* DEFAULT_BENCH_FILTER = ".*";
+ static constexpr int64_t DEFAULT_MIN_TIME_MS{10};
+ /** Priority level default value, run "all" priority levels */
+diff --git a/src/bitcoin-cli.cpp b/src/bitcoin-cli.cpp
+index a178abbc93b8..44fc2731639b 100644
+--- a/src/bitcoin-cli.cpp
++++ b/src/bitcoin-cli.cpp
+@@ -42,6 +42,9 @@
+ #include <event2/keyvalq_struct.h>
+ #include <support/events.h>
+ 
++using util::Join;
++using util::ToString;
++
+ // The server returns time values from a mockable system clock, but it is not
+ // trivial to get the mocked time from the server, nor is it needed for now, so
+ // just use a plain system_clock.
+diff --git a/src/bitcoin-tx.cpp b/src/bitcoin-tx.cpp
+index 97096dfe3cc7..89faa0123a55 100644
+--- a/src/bitcoin-tx.cpp
++++ b/src/bitcoin-tx.cpp
+@@ -32,6 +32,11 @@
+ #include <functional>
+ #include <memory>
+ 
++using util::SplitString;
++using util::ToString;
++using util::TrimString;
++using util::TrimStringView;
++
+ static bool fCreateBlank;
+ static std::map<std::string,UniValue> registers;
+ static const int CONTINUE_EXECUTION=-1;
+diff --git a/src/bitcoin-wallet.cpp b/src/bitcoin-wallet.cpp
+index 87af3474738b..b6f5c3f15d5d 100644
+--- a/src/bitcoin-wallet.cpp
++++ b/src/bitcoin-wallet.cpp
+@@ -24,6 +24,8 @@
+ #include <string>
+ #include <tuple>
+ 
++using util::Join;
++
+ const std::function<std::string(const char*)> G_TRANSLATION_FUN = nullptr;
+ 
+ static void SetupWalletToolArgs(ArgsManager& argsman)
+diff --git a/src/blockfilter.cpp b/src/blockfilter.cpp
+index e045b88513e1..5e6702ccc3cc 100644
+--- a/src/blockfilter.cpp
++++ b/src/blockfilter.cpp
+@@ -16,6 +16,8 @@
+ #include <util/golombrice.h>
+ #include <util/string.h>
+ 
++using util::Join;
++
+ static const std::map<BlockFilterType, std::string> g_filter_types = {
+     {BlockFilterType::BASIC, "basic"},
+ };
+diff --git a/src/chainparams.cpp b/src/chainparams.cpp
+index 539578085b5a..5d4401b719c0 100644
+--- a/src/chainparams.cpp
++++ b/src/chainparams.cpp
+@@ -21,6 +21,8 @@
+ #include <stdexcept>
+ #include <vector>
+ 
++using util::SplitString;
++
+ void ReadSigNetArgs(const ArgsManager& args, CChainParams::SigNetOptions& options)
+ {
+     if (args.IsArgSet("-signetseednode")) {
+diff --git a/src/clientversion.cpp b/src/clientversion.cpp
+index 6b9727a158b0..e52703c8bf1b 100644
+--- a/src/clientversion.cpp
++++ b/src/clientversion.cpp
+@@ -13,6 +13,8 @@
+ #include <string>
+ #include <vector>
+ 
++using util::Join;
++
+ /**
+  * Name of client reported in the 'version' message. Report the same name
+  * for both bitcoind and bitcoin-qt, to make it harder for attackers to
+diff --git a/src/common/config.cpp b/src/common/config.cpp
+index 1c85273f69c6..98223fc3e3a5 100644
+--- a/src/common/config.cpp
++++ b/src/common/config.cpp
+@@ -27,6 +27,9 @@
+ #include <utility>
+ #include <vector>
+ 
++using util::TrimString;
++using util::TrimStringView;
++
+ static bool GetConfigOptions(std::istream& stream, const std::string& filepath, std::string& error, std::vector<std::pair<std::string, std::string>>& options, std::list<SectionInfo>& sections)
+ {
+     std::string str, prefix;
+diff --git a/src/common/messages.cpp b/src/common/messages.cpp
+new file mode 100644
+index 000000000000..9e88ca8b0f96
+--- /dev/null
++++ b/src/common/messages.cpp
+@@ -0,0 +1,139 @@
++// Copyright (c) 2009-2010 Satoshi Nakamoto
++// Copyright (c) 2009-2022 The Bitcoin Core developers
++// Distributed under the MIT software license, see the accompanying
++// file COPYING or http://www.opensource.org/licenses/mit-license.php.
++
++#include <common/messages.h>
++
++#include <common/types.h>
++#include <policy/fees.h>
++#include <node/types.h>
++#include <tinyformat.h>
++#include <util/strencodings.h>
++#include <util/string.h>
++#include <util/translation.h>
++
++#include <cassert>
++#include <map>
++#include <string>
++#include <utility>
++#include <vector>
++
++using node::TransactionError;
++using util::Join;
++
++namespace common {
++std::string StringForFeeReason(FeeReason reason)
++{
++    static const std::map<FeeReason, std::string> fee_reason_strings = {
++        {FeeReason::NONE, "None"},
++        {FeeReason::HALF_ESTIMATE, "Half Target 60% Threshold"},
++        {FeeReason::FULL_ESTIMATE, "Target 85% Threshold"},
++        {FeeReason::DOUBLE_ESTIMATE, "Double Target 95% Threshold"},
++        {FeeReason::CONSERVATIVE, "Conservative Double Target longer horizon"},
++        {FeeReason::MEMPOOL_MIN, "Mempool Min Fee"},
++        {FeeReason::PAYTXFEE, "PayTxFee set"},
++        {FeeReason::FALLBACK, "Fallback fee"},
++        {FeeReason::REQUIRED, "Minimum Required Fee"},
++    };
++    auto reason_string = fee_reason_strings.find(reason);
++
++    if (reason_string == fee_reason_strings.end()) return "Unknown";
++
++    return reason_string->second;
++}
++
++const std::vector<std::pair<std::string, FeeEstimateMode>>& FeeModeMap()
++{
++    static const std::vector<std::pair<std::string, FeeEstimateMode>> FEE_MODES = {
++        {"unset", FeeEstimateMode::UNSET},
++        {"economical", FeeEstimateMode::ECONOMICAL},
++        {"conservative", FeeEstimateMode::CONSERVATIVE},
++    };
++    return FEE_MODES;
++}
++
++std::string FeeModes(const std::string& delimiter)
++{
++    return Join(FeeModeMap(), delimiter, [&](const std::pair<std::string, FeeEstimateMode>& i) { return i.first; });
++}
++
++std::string InvalidEstimateModeErrorMessage()
++{
++    return "Invalid estimate_mode parameter, must be one of: \"" + FeeModes("\", \"") + "\"";
++}
++
++bool FeeModeFromString(const std::string& mode_string, FeeEstimateMode& fee_estimate_mode)
++{
++    auto searchkey = ToUpper(mode_string);
++    for (const auto& pair : FeeModeMap()) {
++        if (ToUpper(pair.first) == searchkey) {
++            fee_estimate_mode = pair.second;
++            return true;
++        }
++    }
++    return false;
++}
++
++bilingual_str PSBTErrorString(PSBTError err)
++{
++    switch (err) {
++        case PSBTError::MISSING_INPUTS:
++            return Untranslated("Inputs missing or spent");
++        case PSBTError::SIGHASH_MISMATCH:
++            return Untranslated("Specified sighash value does not match value stored in PSBT");
++        case PSBTError::EXTERNAL_SIGNER_NOT_FOUND:
++            return Untranslated("External signer not found");
++        case PSBTError::EXTERNAL_SIGNER_FAILED:
++            return Untranslated("External signer failed to sign");
++        case PSBTError::UNSUPPORTED:
++            return Untranslated("Signer does not support PSBT");
++        // no default case, so the compiler can warn about missing cases
++    }
++    assert(false);
++}
++
++bilingual_str TransactionErrorString(const TransactionError err)
++{
++    switch (err) {
++        case TransactionError::OK:
++            return Untranslated("No error");
++        case TransactionError::MISSING_INPUTS:
++            return Untranslated("Inputs missing or spent");
++        case TransactionError::ALREADY_IN_CHAIN:
++            return Untranslated("Transaction already in block chain");
++        case TransactionError::MEMPOOL_REJECTED:
++            return Untranslated("Transaction rejected by mempool");
++        case TransactionError::MEMPOOL_ERROR:
++            return Untranslated("Mempool internal error");
++        case TransactionError::MAX_FEE_EXCEEDED:
++            return Untranslated("Fee exceeds maximum configured by user (e.g. -maxtxfee, maxfeerate)");
++        case TransactionError::MAX_BURN_EXCEEDED:
++            return Untranslated("Unspendable output exceeds maximum configured by user (maxburnamount)");
++        case TransactionError::INVALID_PACKAGE:
++            return Untranslated("Transaction rejected due to invalid package");
++        // no default case, so the compiler can warn about missing cases
++    }
++    assert(false);
++}
++
++bilingual_str ResolveErrMsg(const std::string& optname, const std::string& strBind)
++{
++    return strprintf(_("Cannot resolve -%s address: '%s'"), optname, strBind);
++}
++
++bilingual_str InvalidPortErrMsg(const std::string& optname, const std::string& invalid_value)
++{
++    return strprintf(_("Invalid port specified in %s: '%s'"), optname, invalid_value);
++}
++
++bilingual_str AmountHighWarn(const std::string& optname)
++{
++    return strprintf(_("%s is set very high!"), optname);
++}
++
++bilingual_str AmountErrMsg(const std::string& optname, const std::string& strValue)
++{
++    return strprintf(_("Invalid amount for -%s=<amount>: '%s'"), optname, strValue);
++}
++} // namespace common
+diff --git a/src/common/messages.h b/src/common/messages.h
+new file mode 100644
+index 000000000000..68e7bb216966
+--- /dev/null
++++ b/src/common/messages.h
+@@ -0,0 +1,38 @@
++// Copyright (c) 2009-2010 Satoshi Nakamoto
++// Copyright (c) 2009-2020 The Bitcoin Core developers
++// Distributed under the MIT software license, see the accompanying
++// file COPYING or http://www.opensource.org/licenses/mit-license.php.
++
++//! @file common/messages.h is a home for simple string functions returning
++//! descriptive messages that are used in RPC and GUI interfaces or log
++//! messages, and are called in different parts of the codebase across
++//! node/wallet/gui boundaries.
++
++#ifndef BITCOIN_COMMON_MESSAGES_H
++#define BITCOIN_COMMON_MESSAGES_H
++
++#include <string>
++
++struct bilingual_str;
++
++enum class FeeEstimateMode;
++enum class FeeReason;
++namespace node {
++enum class TransactionError;
++} // namespace node
++
++namespace common {
++enum class PSBTError;
++bool FeeModeFromString(const std::string& mode_string, FeeEstimateMode& fee_estimate_mode);
++std::string StringForFeeReason(FeeReason reason);
++std::string FeeModes(const std::string& delimiter);
++std::string InvalidEstimateModeErrorMessage();
++bilingual_str PSBTErrorString(PSBTError error);
++bilingual_str TransactionErrorString(const node::TransactionError error);
++bilingual_str ResolveErrMsg(const std::string& optname, const std::string& strBind);
++bilingual_str InvalidPortErrMsg(const std::string& optname, const std::string& strPort);
++bilingual_str AmountHighWarn(const std::string& optname);
++bilingual_str AmountErrMsg(const std::string& optname, const std::string& strValue);
++} // namespace common
++
++#endif // BITCOIN_COMMON_MESSAGES_H
+diff --git a/src/util/message.cpp b/src/common/signmessage.cpp
+similarity index 98%
+rename from src/util/message.cpp
+rename to src/common/signmessage.cpp
+index 1afb28cc10dc..1612751e44dd 100644
+--- a/src/util/message.cpp
++++ b/src/common/signmessage.cpp
+@@ -3,12 +3,12 @@
+ // Distributed under the MIT software license, see the accompanying
+ // file COPYING or http://www.opensource.org/licenses/mit-license.php.
+ 
++#include <common/signmessage.h>
+ #include <hash.h>
+ #include <key.h>
+ #include <key_io.h>
+ #include <pubkey.h>
+ #include <uint256.h>
+-#include <util/message.h>
+ #include <util/strencodings.h>
+ 
+ #include <cassert>
+diff --git a/src/util/message.h b/src/common/signmessage.h
+similarity index 95%
+rename from src/util/message.h
+rename to src/common/signmessage.h
+index d0e2422574b0..215b563bbb21 100644
+--- a/src/util/message.h
++++ b/src/common/signmessage.h
+@@ -3,8 +3,8 @@
+ // Distributed under the MIT software license, see the accompanying
+ // file COPYING or http://www.opensource.org/licenses/mit-license.php.
+ 
+-#ifndef BITCOIN_UTIL_MESSAGE_H
+-#define BITCOIN_UTIL_MESSAGE_H
++#ifndef BITCOIN_COMMON_SIGNMESSAGE_H
++#define BITCOIN_COMMON_SIGNMESSAGE_H
+ 
+ #include <uint256.h>
+ 
+@@ -74,4 +74,4 @@ uint256 MessageHash(const std::string& message);
+ 
+ std::string SigningResultString(const SigningResult res);
+ 
+-#endif // BITCOIN_UTIL_MESSAGE_H
++#endif // BITCOIN_COMMON_SIGNMESSAGE_H
+diff --git a/src/common/system.cpp b/src/common/system.cpp
+index ddd0feda3b84..6d04c8a7bc3a 100644
+--- a/src/common/system.cpp
++++ b/src/common/system.cpp
+@@ -28,6 +28,8 @@
+ #include <string>
+ #include <thread>
+ 
++using util::ReplaceAll;
++
+ // Application startup time (used for uptime calculation)
+ const int64_t nStartupTime = GetTime();
+ 
+diff --git a/src/common/types.h b/src/common/types.h
+new file mode 100644
+index 000000000000..0d9cb67ce944
+--- /dev/null
++++ b/src/common/types.h
+@@ -0,0 +1,26 @@
++// Copyright (c) 2010-2021 The Bitcoin Core developers
++// Distributed under the MIT software license, see the accompanying
++// file COPYING or http://www.opensource.org/licenses/mit-license.php.
++
++//! @file common/types.h is a home for simple enum and struct type definitions
++//! that can be used internally by functions in the libbitcoin_common library,
++//! but also used externally by node, wallet, and GUI code.
++//!
++//! This file is intended to define only simple types that do not have external
++//! dependencies. More complicated types should be defined in dedicated header
++//! files.
++
++#ifndef BITCOIN_COMMON_TYPES_H
++#define BITCOIN_COMMON_TYPES_H
++
++namespace common {
++enum class PSBTError {
++    MISSING_INPUTS,
++    SIGHASH_MISMATCH,
++    EXTERNAL_SIGNER_NOT_FOUND,
++    EXTERNAL_SIGNER_FAILED,
++    UNSUPPORTED,
++};
++} // namespace common
++
++#endif // BITCOIN_COMMON_TYPES_H
+diff --git a/src/core_read.cpp b/src/core_read.cpp
+index 5956d9df5fa0..114f92fc4580 100644
+--- a/src/core_read.cpp
++++ b/src/core_read.cpp
+@@ -16,6 +16,8 @@
+ #include <algorithm>
+ #include <string>
+ 
++using util::SplitString;
++
+ namespace {
+ class OpCodeParser
+ {
+diff --git a/src/crypto/hex_base.cpp b/src/crypto/hex_base.cpp
+new file mode 100644
+index 000000000000..67d691b63e1b
+--- /dev/null
++++ b/src/crypto/hex_base.cpp
+@@ -0,0 +1,67 @@
++// Copyright (c) 2009-present The Bitcoin Core developers
++// Distributed under the MIT software license, see the accompanying
++// file COPYING or http://www.opensource.org/licenses/mit-license.php.
++
++#include <crypto/hex_base.h>
++
++#include <array>
++#include <cstring>
++#include <string>
++
++namespace {
++
++using ByteAsHex = std::array<char, 2>;
++
++constexpr std::array<ByteAsHex, 256> CreateByteToHexMap()
++{
++    constexpr char hexmap[16] = {'0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f'};
++
++    std::array<ByteAsHex, 256> byte_to_hex{};
++    for (size_t i = 0; i < byte_to_hex.size(); ++i) {
++        byte_to_hex[i][0] = hexmap[i >> 4];
++        byte_to_hex[i][1] = hexmap[i & 15];
++    }
++    return byte_to_hex;
++}
++
++} // namespace
++
++std::string HexStr(const Span<const uint8_t> s)
++{
++    std::string rv(s.size() * 2, '\0');
++    static constexpr auto byte_to_hex = CreateByteToHexMap();
++    static_assert(sizeof(byte_to_hex) == 512);
++
++    char* it = rv.data();
++    for (uint8_t v : s) {
++        std::memcpy(it, byte_to_hex[v].data(), 2);
++        it += 2;
++    }
++
++    assert(it == rv.data() + rv.size());
++    return rv;
++}
++
++const signed char p_util_hexdigit[256] =
++{ -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
++  -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
++  -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
++  0,1,2,3,4,5,6,7,8,9,-1,-1,-1,-1,-1,-1,
++  -1,0xa,0xb,0xc,0xd,0xe,0xf,-1,-1,-1,-1,-1,-1,-1,-1,-1,
++  -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
++  -1,0xa,0xb,0xc,0xd,0xe,0xf,-1,-1,-1,-1,-1,-1,-1,-1,-1,
++  -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
++  -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
++  -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
++  -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
++  -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
++  -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
++  -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
++  -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
++  -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1, };
++
++signed char HexDigit(char c)
++{
++    return p_util_hexdigit[(unsigned char)c];
++}
++
+diff --git a/src/crypto/hex_base.h b/src/crypto/hex_base.h
+new file mode 100644
+index 000000000000..cdfea68c29cc
+--- /dev/null
++++ b/src/crypto/hex_base.h
+@@ -0,0 +1,23 @@
++// Copyright (c) 2009-present The Bitcoin Core developers
++// Distributed under the MIT software license, see the accompanying
++// file COPYING or http://www.opensource.org/licenses/mit-license.php.
++
++#ifndef BITCOIN_CRYPTO_HEX_BASE_H
++#define BITCOIN_CRYPTO_HEX_BASE_H
++
++#include <span.h>
++
++#include <cstddef>
++#include <cstdint>
++#include <string>
++
++/**
++ * Convert a span of bytes to a lower-case hexadecimal string.
++ */
++std::string HexStr(const Span<const uint8_t> s);
++inline std::string HexStr(const Span<const char> s) { return HexStr(MakeUCharSpan(s)); }
++inline std::string HexStr(const Span<const std::byte> s) { return HexStr(MakeUCharSpan(s)); }
++
++signed char HexDigit(char c);
++
++#endif // BITCOIN_CRYPTO_HEX_BASE_H
+diff --git a/src/httprpc.cpp b/src/httprpc.cpp
+index 3eb34dbe6ab0..128597157d6d 100644
+--- a/src/httprpc.cpp
++++ b/src/httprpc.cpp
+@@ -23,6 +23,9 @@
+ #include <string>
+ #include <vector>
+ 
++using util::SplitString;
++using util::TrimStringView;
++
+ /** WWW-Authenticate to present with 401 Unauthorized response */
+ static const char* WWW_AUTH_HEADER_DATA = "Basic realm=\"jsonrpc\"";
+ 
+diff --git a/src/i2p.cpp b/src/i2p.cpp
+index 962adb124d00..a907cfeacb60 100644
+--- a/src/i2p.cpp
++++ b/src/i2p.cpp
+@@ -12,12 +12,12 @@
+ #include <netaddress.h>
+ #include <netbase.h>
+ #include <random.h>
++#include <script/parsing.h>
+ #include <sync.h>
+ #include <tinyformat.h>
+ #include <util/fs.h>
+ #include <util/readwritefile.h>
+ #include <util/sock.h>
+-#include <util/spanparsing.h>
+ #include <util/strencodings.h>
+ #include <util/threadinterrupt.h>
+ 
+@@ -26,6 +26,8 @@
+ #include <stdexcept>
+ #include <string>
+ 
++using util::Split;
++
+ namespace i2p {
+ 
+ /**
+@@ -308,7 +310,7 @@ Session::Reply Session::SendRequestAndGetReply(const Sock& sock,
+ 
+     reply.full = sock.RecvUntilTerminator('\n', recv_timeout, *m_interrupt, MAX_MSG_SIZE);
+ 
+-    for (const auto& kv : spanparsing::Split(reply.full, ' ')) {
++    for (const auto& kv : Split(reply.full, ' ')) {
+         const auto& pos = std::find(kv.begin(), kv.end(), '=');
+         if (pos != kv.end()) {
+             reply.keys.emplace(std::string{kv.begin(), pos}, std::string{pos + 1, kv.end()});
+diff --git a/src/init.cpp b/src/init.cpp
+index 75202c85d343..dec391bb491b 100644
+--- a/src/init.cpp
++++ b/src/init.cpp
+@@ -115,6 +115,9 @@
+ #include <zmq/zmqrpc.h>
+ #endif
+ 
++using common::AmountErrMsg;
++using common::InvalidPortErrMsg;
++using common::ResolveErrMsg;
+ using kernel::DumpMempool;
+ using kernel::LoadMempool;
+ using kernel::ValidationCacheSizes;
+@@ -133,6 +136,9 @@ using node::NodeContext;
+ using node::ShouldPersistMempool;
+ using node::ImportBlocks;
+ using node::VerifyLoadedChainstate;
++using util::Join;
++using util::ReplaceAll;
++using util::ToString;
+ 
+ static constexpr bool DEFAULT_PROXYRANDOMIZE{true};
+ static constexpr bool DEFAULT_REST_ENABLE{false};
+diff --git a/src/init/common.cpp b/src/init/common.cpp
+index f473ee6d6654..00ef879dc113 100644
+--- a/src/init/common.cpp
++++ b/src/init/common.cpp
+@@ -20,6 +20,8 @@
+ #include <string>
+ #include <vector>
+ 
++using util::SplitString;
++
+ namespace init {
+ void AddLoggingArgs(ArgsManager& argsman)
+ {
+diff --git a/src/interfaces/node.h b/src/interfaces/node.h
+index aeb2612c0785..2bb895dd47ce 100644
+--- a/src/interfaces/node.h
++++ b/src/interfaces/node.h
+@@ -30,10 +30,10 @@ class RPCTimerInterface;
+ class UniValue;
+ class Proxy;
+ enum class SynchronizationState;
+-enum class TransactionError;
+ struct CNodeStateStats;
+ struct bilingual_str;
+ namespace node {
++enum class TransactionError;
+ struct NodeContext;
+ } // namespace node
+ namespace wallet {
+@@ -208,7 +208,7 @@ class Node
+     virtual std::optional<Coin> getUnspentOutput(const COutPoint& output) = 0;
+ 
+     //! Broadcast transaction.
+-    virtual TransactionError broadcastTransaction(CTransactionRef tx, CAmount max_tx_fee, std::string& err_string) = 0;
++    virtual node::TransactionError broadcastTransaction(CTransactionRef tx, CAmount max_tx_fee, std::string& err_string) = 0;
+ 
+     //! Get wallet loader.
+     virtual WalletLoader& walletLoader() = 0;
+diff --git a/src/interfaces/wallet.h b/src/interfaces/wallet.h
+index c41f35829d7e..f7bcca58cf08 100644
+--- a/src/interfaces/wallet.h
++++ b/src/interfaces/wallet.h
+@@ -6,13 +6,13 @@
+ #define BITCOIN_INTERFACES_WALLET_H
+ 
+ #include <addresstype.h>
++#include <common/signmessage.h>
+ #include <consensus/amount.h>
+ #include <interfaces/chain.h>
+ #include <pubkey.h>
+ #include <script/script.h>
+ #include <support/allocators/secure.h>
+ #include <util/fs.h>
+-#include <util/message.h>
+ #include <util/result.h>
+ #include <util/ui_change_type.h>
+ 
+@@ -30,9 +30,14 @@ class CFeeRate;
+ class CKey;
+ enum class FeeReason;
+ enum class OutputType;
+-enum class TransactionError;
+ struct PartiallySignedTransaction;
+ struct bilingual_str;
++namespace common {
++enum class PSBTError;
++} // namespace common
++namespace node {
++enum class TransactionError;
++} // namespace node
+ namespace wallet {
+ class CCoinControl;
+ class CWallet;
+@@ -202,7 +207,7 @@ class Wallet
+         int& num_blocks) = 0;
+ 
+     //! Fill PSBT.
+-    virtual TransactionError fillPSBT(int sighash_type,
++    virtual std::optional<common::PSBTError> fillPSBT(int sighash_type,
+         bool sign,
+         bool bip32derivs,
+         size_t* n_signed,
+diff --git a/src/logging.cpp b/src/logging.cpp
+index 578650f856ef..a9fea433be42 100644
+--- a/src/logging.cpp
++++ b/src/logging.cpp
+@@ -13,6 +13,10 @@
+ #include <map>
+ #include <optional>
+ 
++using util::Join;
++using util::RemovePrefix;
++using util::ToString;
++
+ const char * const DEFAULT_DEBUGLOGFILE = "debug.log";
+ constexpr auto MAX_USER_SETABLE_SEVERITY_LEVEL{BCLog::Level::Info};
+ 
+diff --git a/src/logging.h b/src/logging.h
+index cfef65221fd0..fe6b7051bafa 100644
+--- a/src/logging.h
++++ b/src/logging.h
+@@ -189,7 +189,7 @@ namespace BCLog {
+         /** Returns a string with the log categories in alphabetical order. */
+         std::string LogCategoriesString() const
+         {
+-            return Join(LogCategoriesList(), ", ", [&](const LogCategory& i) { return i.category; });
++            return util::Join(LogCategoriesList(), ", ", [&](const LogCategory& i) { return i.category; });
+         };
+ 
+         //! Returns a string with all user-selectable log levels.
+diff --git a/src/net_permissions.cpp b/src/net_permissions.cpp
+index b01b2f643d3f..8f0042c141f6 100644
+--- a/src/net_permissions.cpp
++++ b/src/net_permissions.cpp
+@@ -2,12 +2,14 @@
+ // Distributed under the MIT software license, see the accompanying
+ // file COPYING or http://www.opensource.org/licenses/mit-license.php.
+ 
++#include <common/messages.h>
+ #include <common/system.h>
+ #include <net_permissions.h>
+ #include <netbase.h>
+-#include <util/error.h>
+ #include <util/translation.h>
+ 
++using common::ResolveErrMsg;
++
+ const std::vector<std::string> NET_PERMISSIONS_DOC{
+     "bloomfilter (allow requesting BIP37 filtered blocks and transactions)",
+     "noban (do not ban for misbehavior; implies download)",
+diff --git a/src/netaddress.cpp b/src/netaddress.cpp
+index 74ab6dd8d87d..005346482291 100644
+--- a/src/netaddress.cpp
++++ b/src/netaddress.cpp
+@@ -20,6 +20,9 @@
+ #include <iterator>
+ #include <tuple>
+ 
++using util::ContainsNoNUL;
++using util::HasPrefix;
++
+ CNetAddr::BIP155Network CNetAddr::GetBIP155Network() const
+ {
+     switch (m_net) {
+diff --git a/src/netaddress.h b/src/netaddress.h
+index ea2d14336e40..52fecada1c91 100644
+--- a/src/netaddress.h
++++ b/src/netaddress.h
+@@ -448,7 +448,7 @@ class CNetAddr
+             // Recognize NET_INTERNAL embedded in IPv6, such addresses are not
+             // gossiped but could be coming from addrman, when unserializing from
+             // disk.
+-            if (HasPrefix(m_addr, INTERNAL_IN_IPV6_PREFIX)) {
++            if (util::HasPrefix(m_addr, INTERNAL_IN_IPV6_PREFIX)) {
+                 m_net = NET_INTERNAL;
+                 memmove(m_addr.data(), m_addr.data() + INTERNAL_IN_IPV6_PREFIX.size(),
+                         ADDR_INTERNAL_SIZE);
+@@ -456,8 +456,8 @@ class CNetAddr
+                 return;
+             }
+ 
+-            if (!HasPrefix(m_addr, IPV4_IN_IPV6_PREFIX) &&
+-                !HasPrefix(m_addr, TORV2_IN_IPV6_PREFIX)) {
++            if (!util::HasPrefix(m_addr, IPV4_IN_IPV6_PREFIX) &&
++                !util::HasPrefix(m_addr, TORV2_IN_IPV6_PREFIX)) {
+                 return;
+             }
+ 
+diff --git a/src/netbase.cpp b/src/netbase.cpp
+index e231766487f8..ff46061d3d88 100644
+--- a/src/netbase.cpp
++++ b/src/netbase.cpp
+@@ -27,6 +27,8 @@
+ #include <sys/un.h>
+ #endif
+ 
++using util::ContainsNoNUL;
++
+ // Settings
+ static GlobalMutex g_proxyinfo_mutex;
+ static Proxy proxyInfo[NET_MAX] GUARDED_BY(g_proxyinfo_mutex);
+diff --git a/src/node/interface_ui.cpp b/src/node/interface_ui.cpp
+index 9dd1e7d9cf9e..4f4d240d1b56 100644
+--- a/src/node/interface_ui.cpp
++++ b/src/node/interface_ui.cpp
+@@ -10,6 +10,8 @@
+ #include <boost/signals2/optional_last_value.hpp>
+ #include <boost/signals2/signal.hpp>
+ 
++using util::MakeUnorderedList;
++
+ CClientUIInterface uiInterface;
+ 
+ struct UISignals {
+diff --git a/src/node/interfaces.cpp b/src/node/interfaces.cpp
+index 216f44ab9e4b..19f4aaf9c487 100644
+--- a/src/node/interfaces.cpp
++++ b/src/node/interfaces.cpp
+@@ -31,6 +31,7 @@
+ #include <node/interface_ui.h>
+ #include <node/mini_miner.h>
+ #include <node/transaction.h>
++#include <node/types.h>
+ #include <policy/feerate.h>
+ #include <policy/fees.h>
+ #include <policy/policy.h>
+@@ -70,6 +71,7 @@ using interfaces::Handler;
+ using interfaces::MakeSignalHandler;
+ using interfaces::Node;
+ using interfaces::WalletLoader;
++using util::Join;
+ 
+ namespace node {
+ // All members of the classes in this namespace are intentionally public, as the
+diff --git a/src/node/kernel_notifications.cpp b/src/node/kernel_notifications.cpp
+index e326d4a1f205..1f07014ee223 100644
+--- a/src/node/kernel_notifications.cpp
++++ b/src/node/kernel_notifications.cpp
+@@ -24,6 +24,8 @@
+ #include <string>
+ #include <thread>
+ 
++using util::ReplaceAll;
++
+ static void AlertNotify(const std::string& strMessage)
+ {
+     uiInterface.NotifyAlertChanged();
+diff --git a/src/node/mempool_args.cpp b/src/node/mempool_args.cpp
+index ac26600919f7..f329affb1d8d 100644
+--- a/src/node/mempool_args.cpp
++++ b/src/node/mempool_args.cpp
+@@ -8,19 +8,20 @@
+ #include <kernel/mempool_options.h>
+ 
+ #include <common/args.h>
++#include <common/messages.h>
+ #include <consensus/amount.h>
+ #include <kernel/chainparams.h>
+ #include <logging.h>
+ #include <policy/feerate.h>
+ #include <policy/policy.h>
+ #include <tinyformat.h>
+-#include <util/error.h>
+ #include <util/moneystr.h>
+ #include <util/translation.h>
+ 
+ #include <chrono>
+ #include <memory>
+ 
++using common::AmountErrMsg;
+ using kernel::MemPoolLimits;
+ using kernel::MemPoolOptions;
+ 
+diff --git a/src/node/transaction.cpp b/src/node/transaction.cpp
+index b66a4f2f39ec..591dcd698dd4 100644
+--- a/src/node/transaction.cpp
++++ b/src/node/transaction.cpp
+@@ -9,6 +9,7 @@
+ #include <net_processing.h>
+ #include <node/blockstorage.h>
+ #include <node/context.h>
++#include <node/types.h>
+ #include <txmempool.h>
+ #include <validation.h>
+ #include <validationinterface.h>
+diff --git a/src/node/transaction.h b/src/node/transaction.h
+index 6782536aceba..5f524f4e28e8 100644
+--- a/src/node/transaction.h
++++ b/src/node/transaction.h
+@@ -5,9 +5,9 @@
+ #ifndef BITCOIN_NODE_TRANSACTION_H
+ #define BITCOIN_NODE_TRANSACTION_H
+ 
++#include <common/messages.h>
+ #include <policy/feerate.h>
+ #include <primitives/transaction.h>
+-#include <util/error.h>
+ 
+ class CBlockIndex;
+ class CTxMemPool;
+diff --git a/src/node/types.h b/src/node/types.h
+new file mode 100644
+index 000000000000..0461e85f4308
+--- /dev/null
++++ b/src/node/types.h
+@@ -0,0 +1,29 @@
++// Copyright (c) 2010-2021 The Bitcoin Core developers
++// Distributed under the MIT software license, see the accompanying
++// file COPYING or http://www.opensource.org/licenses/mit-license.php.
++
++//! @file node/types.h is a home for public enum and struct type definitions
++//! that are used by internally by node code, but also used externally by wallet
++//! or GUI code.
++//!
++//! This file is intended to define only simple types that do not have external
++//! dependencies. More complicated types should be defined in dedicated header
++//! files.
++
++#ifndef BITCOIN_NODE_TYPES_H
++#define BITCOIN_NODE_TYPES_H
++
++namespace node {
++enum class TransactionError {
++    OK, //!< No error
++    MISSING_INPUTS,
++    ALREADY_IN_CHAIN,
++    MEMPOOL_REJECTED,
++    MEMPOOL_ERROR,
++    MAX_FEE_EXCEEDED,
++    MAX_BURN_EXCEEDED,
++    INVALID_PACKAGE,
++};
++} // namespace node
++
++#endif // BITCOIN_NODE_TYPES_H
+diff --git a/src/primitives/transaction.cpp b/src/primitives/transaction.cpp
+index 25b961a66bce..fab5c4076541 100644
+--- a/src/primitives/transaction.cpp
++++ b/src/primitives/transaction.cpp
+@@ -6,12 +6,12 @@
+ #include <primitives/transaction.h>
+ 
+ #include <consensus/amount.h>
++#include <crypto/hex_base.h>
+ #include <hash.h>
+ #include <script/script.h>
+ #include <serialize.h>
+ #include <tinyformat.h>
+ #include <uint256.h>
+-#include <util/strencodings.h>
+ #include <util/transaction_identifier.h>
+ 
+ #include <algorithm>
+diff --git a/src/psbt.cpp b/src/psbt.cpp
+index b2ee3ce7a5ea..19d855e4c78b 100644
+--- a/src/psbt.cpp
++++ b/src/psbt.cpp
+@@ -4,12 +4,12 @@
+ 
+ #include <psbt.h>
+ 
++#include <node/types.h>
+ #include <policy/policy.h>
+ #include <script/signingprovider.h>
+ #include <util/check.h>
+ #include <util/strencodings.h>
+ 
+-
+ PartiallySignedTransaction::PartiallySignedTransaction(const CMutableTransaction& tx) : tx(tx)
+ {
+     inputs.resize(tx.vin.size());
+@@ -508,17 +508,17 @@ bool FinalizeAndExtractPSBT(PartiallySignedTransaction& psbtx, CMutableTransacti
+     return true;
+ }
+ 
+-TransactionError CombinePSBTs(PartiallySignedTransaction& out, const std::vector<PartiallySignedTransaction>& psbtxs)
++bool CombinePSBTs(PartiallySignedTransaction& out, const std::vector<PartiallySignedTransaction>& psbtxs)
+ {
+     out = psbtxs[0]; // Copy the first one
+ 
+     // Merge
+     for (auto it = std::next(psbtxs.begin()); it != psbtxs.end(); ++it) {
+         if (!out.Merge(*it)) {
+-            return TransactionError::PSBT_MISMATCH;
++            return false;
+         }
+     }
+-    return TransactionError::OK;
++    return true;
+ }
+ 
+ std::string PSBTRoleName(PSBTRole role) {
+diff --git a/src/psbt.h b/src/psbt.h
+index f415d21484c1..460730404639 100644
+--- a/src/psbt.h
++++ b/src/psbt.h
+@@ -17,6 +17,10 @@
+ 
+ #include <optional>
+ 
++namespace node {
++enum class TransactionError;
++} // namespace node
++
+ // Magic bytes
+ static constexpr uint8_t PSBT_MAGIC_BYTES[5] = {'p', 's', 'b', 't', 0xff};
+ 
+@@ -1263,9 +1267,9 @@ bool FinalizeAndExtractPSBT(PartiallySignedTransaction& psbtx, CMutableTransacti
+  *
+  * @param[out] out   the combined PSBT, if successful
+  * @param[in]  psbtxs the PSBTs to combine
+- * @return error (OK if we successfully combined the transactions, other error if they were not compatible)
++ * @return True if we successfully combined the transactions, false if they were not compatible
+  */
+-[[nodiscard]] TransactionError CombinePSBTs(PartiallySignedTransaction& out, const std::vector<PartiallySignedTransaction>& psbtxs);
++[[nodiscard]] bool CombinePSBTs(PartiallySignedTransaction& out, const std::vector<PartiallySignedTransaction>& psbtxs);
+ 
+ //! Decode a base64ed PSBT into a PartiallySignedTransaction
+ [[nodiscard]] bool DecodeBase64PSBT(PartiallySignedTransaction& decoded_psbt, const std::string& base64_psbt, std::string& error);
+diff --git a/src/qt/bitcoin.cpp b/src/qt/bitcoin.cpp
+index 44a858c16b32..6c5725533b84 100644
+--- a/src/qt/bitcoin.cpp
++++ b/src/qt/bitcoin.cpp
+@@ -85,6 +85,8 @@ Q_DECLARE_METATYPE(uint256)
+ Q_DECLARE_METATYPE(wallet::AddressPurpose)
+ #endif // ENABLE_WALLET
+ 
++using util::MakeUnorderedList;
++
+ static void RegisterMetaTypes()
+ {
+     // Register meta types used for QMetaObject::invokeMethod and Qt::QueuedConnection
+diff --git a/src/qt/psbtoperationsdialog.cpp b/src/qt/psbtoperationsdialog.cpp
+index 353709c7f5d2..5a4b4442f3dd 100644
+--- a/src/qt/psbtoperationsdialog.cpp
++++ b/src/qt/psbtoperationsdialog.cpp
+@@ -4,10 +4,12 @@
+ 
+ #include <qt/psbtoperationsdialog.h>
+ 
++#include <common/messages.h>
+ #include <core_io.h>
+ #include <interfaces/node.h>
+ #include <key_io.h>
+ #include <node/psbt.h>
++#include <node/types.h>
+ #include <policy/policy.h>
+ #include <qt/bitcoinunits.h>
+ #include <qt/forms/ui_psbtoperationsdialog.h>
+@@ -20,9 +22,11 @@
+ #include <iostream>
+ #include <string>
+ 
++using common::TransactionErrorString;
+ using node::AnalyzePSBT;
+ using node::DEFAULT_MAX_RAW_TX_FEE_RATE;
+ using node::PSBTAnalysis;
++using node::TransactionError;
+ 
+ PSBTOperationsDialog::PSBTOperationsDialog(
+     QWidget* parent, WalletModel* wallet_model, ClientModel* client_model) : QDialog(parent, GUIUtil::dialog_flags),
+@@ -55,10 +59,10 @@ void PSBTOperationsDialog::openWithPSBT(PartiallySignedTransaction psbtx)
+     bool complete = FinalizePSBT(psbtx); // Make sure all existing signatures are fully combined before checking for completeness.
+     if (m_wallet_model) {
+         size_t n_could_sign;
+-        TransactionError err = m_wallet_model->wallet().fillPSBT(SIGHASH_ALL, /*sign=*/false, /*bip32derivs=*/true, &n_could_sign, m_transaction_data, complete);
+-        if (err != TransactionError::OK) {
++        const auto err{m_wallet_model->wallet().fillPSBT(SIGHASH_ALL, /*sign=*/false, /*bip32derivs=*/true, &n_could_sign, m_transaction_data, complete)};
++        if (err) {
+             showStatus(tr("Failed to load transaction: %1")
+-                           .arg(QString::fromStdString(TransactionErrorString(err).translated)),
++                           .arg(QString::fromStdString(PSBTErrorString(*err).translated)),
+                        StatusLevel::ERR);
+             return;
+         }
+@@ -79,11 +83,11 @@ void PSBTOperationsDialog::signTransaction()
+ 
+     WalletModel::UnlockContext ctx(m_wallet_model->requestUnlock());
+ 
+-    TransactionError err = m_wallet_model->wallet().fillPSBT(SIGHASH_ALL, /*sign=*/true, /*bip32derivs=*/true, &n_signed, m_transaction_data, complete);
++    const auto err{m_wallet_model->wallet().fillPSBT(SIGHASH_ALL, /*sign=*/true, /*bip32derivs=*/true, &n_signed, m_transaction_data, complete)};
+ 
+-    if (err != TransactionError::OK) {
++    if (err) {
+         showStatus(tr("Failed to sign transaction: %1")
+-            .arg(QString::fromStdString(TransactionErrorString(err).translated)), StatusLevel::ERR);
++            .arg(QString::fromStdString(PSBTErrorString(*err).translated)), StatusLevel::ERR);
+         return;
+     }
+ 
+@@ -247,9 +251,9 @@ size_t PSBTOperationsDialog::couldSignInputs(const PartiallySignedTransaction &p
+ 
+     size_t n_signed;
+     bool complete;
+-    TransactionError err = m_wallet_model->wallet().fillPSBT(SIGHASH_ALL, /*sign=*/false, /*bip32derivs=*/false, &n_signed, m_transaction_data, complete);
++    const auto err{m_wallet_model->wallet().fillPSBT(SIGHASH_ALL, /*sign=*/false, /*bip32derivs=*/false, &n_signed, m_transaction_data, complete)};
+ 
+-    if (err != TransactionError::OK) {
++    if (err) {
+         return 0;
+     }
+     return n_signed;
+diff --git a/src/qt/recentrequeststablemodel.cpp b/src/qt/recentrequeststablemodel.cpp
+index 52d4e45d49f1..a8d54cdc0c67 100644
+--- a/src/qt/recentrequeststablemodel.cpp
++++ b/src/qt/recentrequeststablemodel.cpp
+@@ -20,6 +20,8 @@
+ #include <QLatin1Char>
+ #include <QLatin1String>
+ 
++using util::ToString;
++
+ RecentRequestsTableModel::RecentRequestsTableModel(WalletModel *parent) :
+     QAbstractTableModel(parent), walletModel(parent)
+ {
+diff --git a/src/qt/rpcconsole.cpp b/src/qt/rpcconsole.cpp
+index 702ca44395df..edf417a7cbfa 100644
+--- a/src/qt/rpcconsole.cpp
++++ b/src/qt/rpcconsole.cpp
+@@ -48,6 +48,8 @@
+ 
+ #include <chrono>
+ 
++using util::Join;
++
+ const int CONSOLE_HISTORY = 50;
+ const int INITIAL_TRAFFIC_GRAPH_MINS = 30;
+ const QSize FONT_RANGE(4, 40);
+diff --git a/src/qt/sendcoinsdialog.cpp b/src/qt/sendcoinsdialog.cpp
+index 0d8c0f7a636b..03173ec80ef8 100644
+--- a/src/qt/sendcoinsdialog.cpp
++++ b/src/qt/sendcoinsdialog.cpp
+@@ -20,6 +20,7 @@
+ #include <interfaces/node.h>
+ #include <key_io.h>
+ #include <node/interface_ui.h>
++#include <node/types.h>
+ #include <policy/fees.h>
+ #include <txmempool.h>
+ #include <validation.h>
+@@ -37,6 +38,7 @@
+ #include <QSettings>
+ #include <QTextDocument>
+ 
++using common::PSBTError;
+ using wallet::CCoinControl;
+ using wallet::DEFAULT_PAY_TX_FEE;
+ 
+@@ -442,26 +444,26 @@ void SendCoinsDialog::presentPSBT(PartiallySignedTransaction& psbtx)
+ }
+ 
+ bool SendCoinsDialog::signWithExternalSigner(PartiallySignedTransaction& psbtx, CMutableTransaction& mtx, bool& complete) {
+-    TransactionError err;
++    std::optional<PSBTError> err;
+     try {
+         err = model->wallet().fillPSBT(SIGHASH_ALL, /*sign=*/true, /*bip32derivs=*/true, /*n_signed=*/nullptr, psbtx, complete);
+     } catch (const std::runtime_error& e) {
+         QMessageBox::critical(nullptr, tr("Sign failed"), e.what());
+         return false;
+     }
+-    if (err == TransactionError::EXTERNAL_SIGNER_NOT_FOUND) {
++    if (err == PSBTError::EXTERNAL_SIGNER_NOT_FOUND) {
+         //: "External signer" means using devices such as hardware wallets.
+         const QString msg = tr("External signer not found");
+         QMessageBox::critical(nullptr, msg, msg);
+         return false;
+     }
+-    if (err == TransactionError::EXTERNAL_SIGNER_FAILED) {
++    if (err == PSBTError::EXTERNAL_SIGNER_FAILED) {
+         //: "External signer" means using devices such as hardware wallets.
+         const QString msg = tr("External signer failure");
+         QMessageBox::critical(nullptr, msg, msg);
+         return false;
+     }
+-    if (err != TransactionError::OK) {
++    if (err) {
+         tfm::format(std::cerr, "Failed to sign PSBT");
+         processSendCoinsReturn(WalletModel::TransactionCreationFailed);
+         return false;
+@@ -501,9 +503,9 @@ void SendCoinsDialog::sendButtonClicked([[maybe_unused]] bool checked)
+         PartiallySignedTransaction psbtx(mtx);
+         bool complete = false;
+         // Fill without signing
+-        TransactionError err = model->wallet().fillPSBT(SIGHASH_ALL, /*sign=*/false, /*bip32derivs=*/true, /*n_signed=*/nullptr, psbtx, complete);
++        const auto err{model->wallet().fillPSBT(SIGHASH_ALL, /*sign=*/false, /*bip32derivs=*/true, /*n_signed=*/nullptr, psbtx, complete)};
+         assert(!complete);
+-        assert(err == TransactionError::OK);
++        assert(!err);
+ 
+         // Copy PSBT to clipboard and offer to save
+         presentPSBT(psbtx);
+@@ -517,9 +519,9 @@ void SendCoinsDialog::sendButtonClicked([[maybe_unused]] bool checked)
+             bool complete = false;
+             // Always fill without signing first. This prevents an external signer
+             // from being called prematurely and is not expensive.
+-            TransactionError err = model->wallet().fillPSBT(SIGHASH_ALL, /*sign=*/false, /*bip32derivs=*/true, /*n_signed=*/nullptr, psbtx, complete);
++            const auto err{model->wallet().fillPSBT(SIGHASH_ALL, /*sign=*/false, /*bip32derivs=*/true, /*n_signed=*/nullptr, psbtx, complete)};
+             assert(!complete);
+-            assert(err == TransactionError::OK);
++            assert(!err);
+             send_failure = !signWithExternalSigner(psbtx, mtx, complete);
+             // Don't broadcast when user rejects it on the device or there's a failure:
+             broadcast = complete && !send_failure;
+diff --git a/src/qt/signverifymessagedialog.cpp b/src/qt/signverifymessagedialog.cpp
+index 4392d76328e7..012186ee4d0a 100644
+--- a/src/qt/signverifymessagedialog.cpp
++++ b/src/qt/signverifymessagedialog.cpp
+@@ -10,9 +10,9 @@
+ #include <qt/platformstyle.h>
+ #include <qt/walletmodel.h>
+ 
++#include <common/signmessage.h> // For MessageSign(), MessageVerify()
+ #include <config/bitcoin-config.h> // IWYU pragma: keep
+ #include <key_io.h>
+-#include <util/message.h> // For MessageSign(), MessageVerify()
+ #include <wallet/wallet.h>
+ 
+ #include <vector>
+diff --git a/src/qt/walletcontroller.cpp b/src/qt/walletcontroller.cpp
+index c7fe62f4e914..34b47c90a3b5 100644
+--- a/src/qt/walletcontroller.cpp
++++ b/src/qt/walletcontroller.cpp
+@@ -30,6 +30,7 @@
+ #include <QTimer>
+ #include <QWindow>
+ 
++using util::Join;
+ using wallet::WALLET_FLAG_BLANK_WALLET;
+ using wallet::WALLET_FLAG_DESCRIPTORS;
+ using wallet::WALLET_FLAG_DISABLE_PRIVATE_KEYS;
+diff --git a/src/qt/walletmodel.cpp b/src/qt/walletmodel.cpp
+index 87ad98a4cc33..f8ce068e1251 100644
+--- a/src/qt/walletmodel.cpp
++++ b/src/qt/walletmodel.cpp
+@@ -19,6 +19,7 @@
+ #include <interfaces/node.h>
+ #include <key_io.h>
+ #include <node/interface_ui.h>
++#include <node/types.h>
+ #include <psbt.h>
+ #include <util/translation.h>
+ #include <wallet/coincontrol.h>
+@@ -534,8 +535,8 @@ bool WalletModel::bumpFee(uint256 hash, uint256& new_hash)
+         // "Create Unsigned" clicked
+         PartiallySignedTransaction psbtx(mtx);
+         bool complete = false;
+-        const TransactionError err = wallet().fillPSBT(SIGHASH_ALL, /*sign=*/false, /*bip32derivs=*/true, nullptr, psbtx, complete);
+-        if (err != TransactionError::OK || complete) {
++        const auto err{wallet().fillPSBT(SIGHASH_ALL, /*sign=*/false, /*bip32derivs=*/true, nullptr, psbtx, complete)};
++        if (err || complete) {
+             QMessageBox::critical(nullptr, tr("Fee bump error"), tr("Can't draft transaction."));
+             return false;
+         }
+diff --git a/src/rest.cpp b/src/rest.cpp
+index 4e9d8fd2b184..d43018f5af8e 100644
+--- a/src/rest.cpp
++++ b/src/rest.cpp
+@@ -39,6 +39,7 @@
+ 
+ using node::GetTransaction;
+ using node::NodeContext;
++using util::SplitString;
+ 
+ static const size_t MAX_GETUTXOS_OUTPOINTS = 15; //allow a max of 15 outpoints to be queried at once
+ static constexpr unsigned int MAX_REST_HEADERS_RESULTS = 2000;
+diff --git a/src/rpc/blockchain.cpp b/src/rpc/blockchain.cpp
+index 3e3e91927cb8..46b0ae161fa8 100644
+--- a/src/rpc/blockchain.cpp
++++ b/src/rpc/blockchain.cpp
+@@ -61,6 +61,9 @@ using kernel::CoinStatsHashType;
+ using node::BlockManager;
+ using node::NodeContext;
+ using node::SnapshotMetadata;
++using util::Join;
++using util::MakeUnorderedList;
++using util::ToString;
+ 
+ struct CUpdatedBlock
+ {
+diff --git a/src/rpc/fees.cpp b/src/rpc/fees.cpp
+index a7cec967469e..aefe78162be3 100644
+--- a/src/rpc/fees.cpp
++++ b/src/rpc/fees.cpp
+@@ -3,6 +3,7 @@
+ // Distributed under the MIT software license, see the accompanying
+ // file COPYING or http://www.opensource.org/licenses/mit-license.php.
+ 
++#include <common/messages.h>
+ #include <core_io.h>
+ #include <node/context.h>
+ #include <policy/feerate.h>
+@@ -14,7 +15,6 @@
+ #include <rpc/util.h>
+ #include <txmempool.h>
+ #include <univalue.h>
+-#include <util/fees.h>
+ #include <validationinterface.h>
+ 
+ #include <algorithm>
+@@ -22,6 +22,9 @@
+ #include <cmath>
+ #include <string>
+ 
++using common::FeeModeFromString;
++using common::FeeModes;
++using common::InvalidEstimateModeErrorMessage;
+ using node::NodeContext;
+ 
+ static RPCHelpMan estimatesmartfee()
+diff --git a/src/rpc/mempool.cpp b/src/rpc/mempool.cpp
+index 4a0e96fd7500..fd11f6cfeb88 100644
+--- a/src/rpc/mempool.cpp
++++ b/src/rpc/mempool.cpp
+@@ -11,6 +11,7 @@
+ #include <core_io.h>
+ #include <kernel/mempool_entry.h>
+ #include <node/mempool_persist_args.h>
++#include <node/types.h>
+ #include <policy/rbf.h>
+ #include <policy/settings.h>
+ #include <primitives/transaction.h>
+@@ -32,6 +33,8 @@ using node::DEFAULT_MAX_BURN_AMOUNT;
+ using node::DEFAULT_MAX_RAW_TX_FEE_RATE;
+ using node::MempoolPath;
+ using node::NodeContext;
++using node::TransactionError;
++using util::ToString;
+ 
+ static RPCHelpMan sendrawtransaction()
+ {
+diff --git a/src/rpc/mining.cpp b/src/rpc/mining.cpp
+index 63daa3da3a13..6412fb35ecf7 100644
+--- a/src/rpc/mining.cpp
++++ b/src/rpc/mining.cpp
+@@ -47,6 +47,7 @@ using node::CBlockTemplate;
+ using node::NodeContext;
+ using node::RegenerateCommitments;
+ using node::UpdateTime;
++using util::ToString;
+ 
+ /**
+  * Return average network hashes per second based on the last 'lookup' blocks,
+diff --git a/src/rpc/net.cpp b/src/rpc/net.cpp
+index 034dbdc914f5..1cc55f891afd 100644
+--- a/src/rpc/net.cpp
++++ b/src/rpc/net.cpp
+@@ -35,6 +35,8 @@
+ #include <univalue.h>
+ 
+ using node::NodeContext;
++using util::Join;
++using util::TrimString;
+ 
+ const std::vector<std::string> CONNECTION_TYPE_DOC{
+         "outbound-full-relay (default automatic connections)",
+diff --git a/src/rpc/rawtransaction.cpp b/src/rpc/rawtransaction.cpp
+index f45c921c3c1f..75b538061df6 100644
+--- a/src/rpc/rawtransaction.cpp
++++ b/src/rpc/rawtransaction.cpp
+@@ -16,6 +16,7 @@
+ #include <node/context.h>
+ #include <node/psbt.h>
+ #include <node/transaction.h>
++#include <node/types.h>
+ #include <policy/packages.h>
+ #include <policy/policy.h>
+ #include <policy/rbf.h>
+@@ -1489,9 +1490,8 @@ static RPCHelpMan combinepsbt()
+     }
+ 
+     PartiallySignedTransaction merged_psbt;
+-    const TransactionError error = CombinePSBTs(merged_psbt, psbtxs);
+-    if (error != TransactionError::OK) {
+-        throw JSONRPCTransactionError(error);
++    if (!CombinePSBTs(merged_psbt, psbtxs)) {
++        throw JSONRPCError(RPC_INVALID_PARAMETER, "PSBTs not compatible (different transactions)");
+     }
+ 
+     DataStream ssTx{};
+diff --git a/src/rpc/server.cpp b/src/rpc/server.cpp
+index 838068bc19ac..19063fa5be97 100644
+--- a/src/rpc/server.cpp
++++ b/src/rpc/server.cpp
+@@ -27,6 +27,8 @@
+ #include <mutex>
+ #include <unordered_map>
+ 
++using util::SplitString;
++
+ static GlobalMutex g_rpc_warmup_mutex;
+ static std::atomic<bool> g_rpc_running{false};
+ static bool fRPCInWarmup GUARDED_BY(g_rpc_warmup_mutex) = true;
+diff --git a/src/rpc/signmessage.cpp b/src/rpc/signmessage.cpp
+index 9f3c24efcfb1..83462738c5b0 100644
+--- a/src/rpc/signmessage.cpp
++++ b/src/rpc/signmessage.cpp
+@@ -3,6 +3,7 @@
+ // Distributed under the MIT software license, see the accompanying
+ // file COPYING or http://www.opensource.org/licenses/mit-license.php.
+ 
++#include <common/signmessage.h>
+ #include <key.h>
+ #include <key_io.h>
+ #include <rpc/protocol.h>
+@@ -10,7 +11,6 @@
+ #include <rpc/server.h>
+ #include <rpc/util.h>
+ #include <univalue.h>
+-#include <util/message.h>
+ 
+ #include <string>
+ 
+diff --git a/src/rpc/util.cpp b/src/rpc/util.cpp
+index 9123bddff4dd..bb1aef63f4b6 100644
+--- a/src/rpc/util.cpp
++++ b/src/rpc/util.cpp
+@@ -7,9 +7,12 @@
+ #include <clientversion.h>
+ #include <core_io.h>
+ #include <common/args.h>
++#include <common/messages.h>
++#include <common/types.h>
+ #include <consensus/amount.h>
+ #include <script/interpreter.h>
+ #include <key_io.h>
++#include <node/types.h>
+ #include <outputtype.h>
+ #include <rpc/util.h>
+ #include <script/descriptor.h>
+@@ -30,6 +33,14 @@
+ #include <tuple>
+ #include <utility>
+ 
++using common::PSBTError;
++using common::PSBTErrorString;
++using common::TransactionErrorString;
++using node::TransactionError;
++using util::Join;
++using util::SplitString;
++using util::TrimString;
++
+ const std::string UNIX_EPOCH_TIME = "UNIX epoch time";
+ const std::string EXAMPLE_ADDRESS[2] = {"bc1q09vm5lfy0j5reeulh4x5752q25uqqvz34hufdl", "bc1q02ad21edsxd23d32dfgqqsz4vv4nmtfzuklhy3"};
+ 
+@@ -364,6 +375,18 @@ unsigned int ParseConfirmTarget(const UniValue& value, unsigned int max_target)
+     return unsigned_target;
+ }
+ 
++RPCErrorCode RPCErrorFromPSBTError(PSBTError err)
++{
++    switch (err) {
++        case PSBTError::UNSUPPORTED:
++            return RPC_INVALID_PARAMETER;
++        case PSBTError::SIGHASH_MISMATCH:
++            return RPC_DESERIALIZATION_ERROR;
++        default: break;
++    }
++    return RPC_TRANSACTION_ERROR;
++}
++
+ RPCErrorCode RPCErrorFromTransactionError(TransactionError terr)
+ {
+     switch (terr) {
+@@ -371,18 +394,16 @@ RPCErrorCode RPCErrorFromTransactionError(TransactionError terr)
+             return RPC_TRANSACTION_REJECTED;
+         case TransactionError::ALREADY_IN_CHAIN:
+             return RPC_TRANSACTION_ALREADY_IN_CHAIN;
+-        case TransactionError::P2P_DISABLED:
+-            return RPC_CLIENT_P2P_DISABLED;
+-        case TransactionError::INVALID_PSBT:
+-        case TransactionError::PSBT_MISMATCH:
+-            return RPC_INVALID_PARAMETER;
+-        case TransactionError::SIGHASH_MISMATCH:
+-            return RPC_DESERIALIZATION_ERROR;
+         default: break;
+     }
+     return RPC_TRANSACTION_ERROR;
+ }
+ 
++UniValue JSONRPCPSBTError(PSBTError err)
++{
++    return JSONRPCError(RPCErrorFromPSBTError(err), PSBTErrorString(err).original);
++}
++
+ UniValue JSONRPCTransactionError(TransactionError terr, const std::string& err_string)
+ {
+     if (err_string.length() > 0) {
+@@ -778,7 +799,7 @@ std::string RPCHelpMan::ToString() const
+         if (arg.m_opts.hidden) break; // Any arg that follows is also hidden
+ 
+         // Push named argument name and description
+-        sections.m_sections.emplace_back(::ToString(i + 1) + ". " + arg.GetFirstName(), arg.ToDescriptionString(/*is_named_arg=*/true));
++        sections.m_sections.emplace_back(util::ToString(i + 1) + ". " + arg.GetFirstName(), arg.ToDescriptionString(/*is_named_arg=*/true));
+         sections.m_max_pad = std::max(sections.m_max_pad, sections.m_sections.back().m_left.size());
+ 
+         // Recursively push nested args
+diff --git a/src/rpc/util.h b/src/rpc/util.h
+index 51ecaff13cef..ca6ca6007b35 100644
+--- a/src/rpc/util.h
++++ b/src/rpc/util.h
+@@ -34,9 +34,14 @@
+ class JSONRPCRequest;
+ enum ServiceFlags : uint64_t;
+ enum class OutputType;
+-enum class TransactionError;
+ struct FlatSigningProvider;
+ struct bilingual_str;
++namespace common {
++enum class PSBTError;
++} // namespace common
++namespace node {
++enum class TransactionError;
++} // namespace node
+ 
+ static constexpr bool DEFAULT_RPC_DOC_CHECK{
+ #ifdef RPC_DOC_CHECK
+@@ -127,8 +132,9 @@ int ParseSighashString(const UniValue& sighash);
+ //! Parse a confirm target option and raise an RPC error if it is invalid.
+ unsigned int ParseConfirmTarget(const UniValue& value, unsigned int max_target);
+ 
+-RPCErrorCode RPCErrorFromTransactionError(TransactionError terr);
+-UniValue JSONRPCTransactionError(TransactionError terr, const std::string& err_string = "");
++RPCErrorCode RPCErrorFromTransactionError(node::TransactionError terr);
++UniValue JSONRPCPSBTError(common::PSBTError err);
++UniValue JSONRPCTransactionError(node::TransactionError terr, const std::string& err_string = "");
+ 
+ //! Parse a JSON range specified as int64, or [int64, int64]
+ std::pair<int64_t, int64_t> ParseDescriptorRange(const UniValue& value);
+diff --git a/src/script/descriptor.cpp b/src/script/descriptor.cpp
+index a11d4dcbd5f0..0987db194c4e 100644
+--- a/src/script/descriptor.cpp
++++ b/src/script/descriptor.cpp
+@@ -8,6 +8,7 @@
+ #include <key_io.h>
+ #include <pubkey.h>
+ #include <script/miniscript.h>
++#include <script/parsing.h>
+ #include <script/script.h>
+ #include <script/signingprovider.h>
+ #include <script/solver.h>
+@@ -17,7 +18,6 @@
+ #include <span.h>
+ #include <util/bip32.h>
+ #include <util/check.h>
+-#include <util/spanparsing.h>
+ #include <util/strencodings.h>
+ #include <util/vector.h>
+ 
+@@ -27,6 +27,8 @@
+ #include <string>
+ #include <vector>
+ 
++using util::Split;
++
+ namespace {
+ 
+ ////////////////////////////////////////////////////////////////////////////
+@@ -1350,8 +1352,6 @@ enum class ParseScriptContext {
+ /** Parse a public key that excludes origin information. */
+ std::unique_ptr<PubkeyProvider> ParsePubkeyInner(uint32_t key_exp_index, const Span<const char>& sp, ParseScriptContext ctx, FlatSigningProvider& out, bool& apostrophe, std::string& error)
+ {
+-    using namespace spanparsing;
+-
+     bool permit_uncompressed = ctx == ParseScriptContext::TOP || ctx == ParseScriptContext::P2SH;
+     auto split = Split(sp, '/');
+     std::string str(split[0].begin(), split[0].end());
+@@ -1424,8 +1424,6 @@ std::unique_ptr<PubkeyProvider> ParsePubkeyInner(uint32_t key_exp_index, const S
+ /** Parse a public key including origin information (if enabled). */
+ std::unique_ptr<PubkeyProvider> ParsePubkey(uint32_t key_exp_index, const Span<const char>& sp, ParseScriptContext ctx, FlatSigningProvider& out, std::string& error)
+ {
+-    using namespace spanparsing;
+-
+     auto origin_split = Split(sp, ']');
+     if (origin_split.size() > 2) {
+         error = "Multiple ']' characters found for a single pubkey";
+@@ -1589,7 +1587,7 @@ struct KeyParser {
+ // NOLINTNEXTLINE(misc-no-recursion)
+ std::unique_ptr<DescriptorImpl> ParseScript(uint32_t& key_exp_index, Span<const char>& sp, ParseScriptContext ctx, FlatSigningProvider& out, std::string& error)
+ {
+-    using namespace spanparsing;
++    using namespace script;
+ 
+     auto expr = Expr(sp);
+     if (Func("pk", expr)) {
+@@ -2038,8 +2036,6 @@ std::unique_ptr<DescriptorImpl> InferScript(const CScript& script, ParseScriptCo
+ /** Check a descriptor checksum, and update desc to be the checksum-less part. */
+ bool CheckChecksum(Span<const char>& sp, bool require_checksum, std::string& error, std::string* out_checksum = nullptr)
+ {
+-    using namespace spanparsing;
+-
+     auto check_split = Split(sp, '#');
+     if (check_split.size() > 2) {
+         error = "Multiple '#' symbols";
+diff --git a/src/script/miniscript.h b/src/script/miniscript.h
+index c3b01aae7e95..a269709e721a 100644
+--- a/src/script/miniscript.h
++++ b/src/script/miniscript.h
+@@ -18,10 +18,10 @@
+ 
+ #include <policy/policy.h>
+ #include <primitives/transaction.h>
++#include <script/parsing.h>
+ #include <script/script.h>
+ #include <span.h>
+ #include <util/check.h>
+-#include <util/spanparsing.h>
+ #include <util/strencodings.h>
+ #include <util/string.h>
+ #include <util/vector.h>
+@@ -863,8 +863,8 @@ struct Node {
+                     if (!key_str) return {};
+                     return std::move(ret) + "pk_h(" + std::move(*key_str) + ")";
+                 }
+-                case Fragment::AFTER: return std::move(ret) + "after(" + ::ToString(node.k) + ")";
+-                case Fragment::OLDER: return std::move(ret) + "older(" + ::ToString(node.k) + ")";
++                case Fragment::AFTER: return std::move(ret) + "after(" + util::ToString(node.k) + ")";
++                case Fragment::OLDER: return std::move(ret) + "older(" + util::ToString(node.k) + ")";
+                 case Fragment::HASH256: return std::move(ret) + "hash256(" + HexStr(node.data) + ")";
+                 case Fragment::HASH160: return std::move(ret) + "hash160(" + HexStr(node.data) + ")";
+                 case Fragment::SHA256: return std::move(ret) + "sha256(" + HexStr(node.data) + ")";
+@@ -883,7 +883,7 @@ struct Node {
+                     return std::move(ret) + "andor(" + std::move(subs[0]) + "," + std::move(subs[1]) + "," + std::move(subs[2]) + ")";
+                 case Fragment::MULTI: {
+                     CHECK_NONFATAL(!is_tapscript);
+-                    auto str = std::move(ret) + "multi(" + ::ToString(node.k);
++                    auto str = std::move(ret) + "multi(" + util::ToString(node.k);
+                     for (const auto& key : node.keys) {
+                         auto key_str = ctx.ToString(key);
+                         if (!key_str) return {};
+@@ -893,7 +893,7 @@ struct Node {
+                 }
+                 case Fragment::MULTI_A: {
+                     CHECK_NONFATAL(is_tapscript);
+-                    auto str = std::move(ret) + "multi_a(" + ::ToString(node.k);
++                    auto str = std::move(ret) + "multi_a(" + util::ToString(node.k);
+                     for (const auto& key : node.keys) {
+                         auto key_str = ctx.ToString(key);
+                         if (!key_str) return {};
+@@ -902,7 +902,7 @@ struct Node {
+                     return std::move(str) + ")";
+                 }
+                 case Fragment::THRESH: {
+-                    auto str = std::move(ret) + "thresh(" + ::ToString(node.k);
++                    auto str = std::move(ret) + "thresh(" + util::ToString(node.k);
+                     for (auto& sub : subs) {
+                         str += "," + std::move(sub);
+                     }
+@@ -1764,7 +1764,7 @@ void BuildBack(const MiniscriptContext script_ctx, Fragment nt, std::vector<Node
+ template<typename Key, typename Ctx>
+ inline NodeRef<Key> Parse(Span<const char> in, const Ctx& ctx)
+ {
+-    using namespace spanparsing;
++    using namespace script;
+ 
+     // Account for the minimum script size for all parsed fragments so far. It "borrows" 1
+     // script byte from all leaf nodes, counting it instead whenever a space for a recursive
+diff --git a/src/util/spanparsing.cpp b/src/script/parsing.cpp
+similarity index 94%
+rename from src/util/spanparsing.cpp
+rename to src/script/parsing.cpp
+index c464fc2b87ab..3528ac9bfae6 100644
+--- a/src/util/spanparsing.cpp
++++ b/src/script/parsing.cpp
+@@ -2,7 +2,7 @@
+ // Distributed under the MIT software license, see the accompanying
+ // file COPYING or http://www.opensource.org/licenses/mit-license.php.
+ 
+-#include <util/spanparsing.h>
++#include <script/parsing.h>
+ 
+ #include <span.h>
+ 
+@@ -10,7 +10,7 @@
+ #include <cstddef>
+ #include <string>
+ 
+-namespace spanparsing {
++namespace script {
+ 
+ bool Const(const std::string& str, Span<const char>& sp)
+ {
+@@ -49,4 +49,4 @@ Span<const char> Expr(Span<const char>& sp)
+     return ret;
+ }
+ 
+-} // namespace spanparsing
++} // namespace script
+diff --git a/src/script/parsing.h b/src/script/parsing.h
+new file mode 100644
+index 000000000000..850faea041a0
+--- /dev/null
++++ b/src/script/parsing.h
+@@ -0,0 +1,40 @@
++// Copyright (c) 2018-2022 The Bitcoin Core developers
++// Distributed under the MIT software license, see the accompanying
++// file COPYING or http://www.opensource.org/licenses/mit-license.php.
++
++#ifndef BITCOIN_SCRIPT_PARSING_H
++#define BITCOIN_SCRIPT_PARSING_H
++
++#include <span.h>
++
++#include <string>
++
++namespace script {
++
++/** Parse a constant.
++ *
++ * If sp's initial part matches str, sp is updated to skip that part, and true is returned.
++ * Otherwise sp is unmodified and false is returned.
++ */
++bool Const(const std::string& str, Span<const char>& sp);
++
++/** Parse a function call.
++ *
++ * If sp's initial part matches str + "(", and sp ends with ")", sp is updated to be the
++ * section between the braces, and true is returned. Otherwise sp is unmodified and false
++ * is returned.
++ */
++bool Func(const std::string& str, Span<const char>& sp);
++
++/** Extract the expression that sp begins with.
++ *
++ * This function will return the initial part of sp, up to (but not including) the first
++ * comma or closing brace, skipping ones that are surrounded by braces. So for example,
++ * for "foo(bar(1),2),3" the initial part "foo(bar(1),2)" will be returned. sp will be
++ * updated to skip the initial part that is returned.
++ */
++Span<const char> Expr(Span<const char>& sp);
++
++} // namespace script
++
++#endif // BITCOIN_SCRIPT_PARSING_H
+diff --git a/src/script/script.cpp b/src/script/script.cpp
+index 80e8d26bcfb9..73ea336c4f23 100644
+--- a/src/script/script.cpp
++++ b/src/script/script.cpp
+@@ -6,10 +6,10 @@
+ #include <script/script.h>
+ 
+ #include <crypto/common.h>
++#include <crypto/hex_base.h>
+ #include <hash.h>
+ #include <uint256.h>
+ #include <util/hash_type.h>
+-#include <util/strencodings.h>
+ 
+ #include <string>
+ 
+diff --git a/src/test/addrman_tests.cpp b/src/test/addrman_tests.cpp
+index 9668a854842d..e5d25637bd49 100644
+--- a/src/test/addrman_tests.cpp
++++ b/src/test/addrman_tests.cpp
+@@ -22,6 +22,7 @@
+ 
+ using namespace std::literals;
+ using node::NodeContext;
++using util::ToString;
+ 
+ static NetGroupManager EMPTY_NETGROUPMAN{std::vector<bool>()};
+ static const bool DETERMINISTIC{true};
+diff --git a/src/test/argsman_tests.cpp b/src/test/argsman_tests.cpp
+index 340208a1c91f..5f0318e8c44c 100644
+--- a/src/test/argsman_tests.cpp
++++ b/src/test/argsman_tests.cpp
+@@ -20,6 +20,8 @@
+ 
+ #include <boost/test/unit_test.hpp>
+ 
++using util::ToString;
++
+ BOOST_FIXTURE_TEST_SUITE(argsman_tests, BasicTestingSetup)
+ 
+ BOOST_AUTO_TEST_CASE(util_datadir)
+diff --git a/src/test/blockchain_tests.cpp b/src/test/blockchain_tests.cpp
+index be515a9eac26..9b8f419290c3 100644
+--- a/src/test/blockchain_tests.cpp
++++ b/src/test/blockchain_tests.cpp
+@@ -11,6 +11,8 @@
+ 
+ #include <cstdlib>
+ 
++using util::ToString;
++
+ /* Equality between doubles is imprecise. Comparison should be done
+  * with a small threshold of tolerance, rather than exact equality.
+  */
+diff --git a/src/test/dbwrapper_tests.cpp b/src/test/dbwrapper_tests.cpp
+index 723a1ceee3e4..167e4be2880d 100644
+--- a/src/test/dbwrapper_tests.cpp
++++ b/src/test/dbwrapper_tests.cpp
+@@ -12,6 +12,8 @@
+ 
+ #include <boost/test/unit_test.hpp>
+ 
++using util::ToString;
++
+ // Test if a string consists entirely of null characters
+ static bool is_null_key(const std::vector<unsigned char>& key) {
+     bool isnull = true;
+diff --git a/src/test/descriptor_tests.cpp b/src/test/descriptor_tests.cpp
+index c779bf6f739c..e6821dd32188 100644
+--- a/src/test/descriptor_tests.cpp
++++ b/src/test/descriptor_tests.cpp
+@@ -7,6 +7,7 @@
+ #include <script/sign.h>
+ #include <test/util/setup_common.h>
+ #include <util/strencodings.h>
++#include <util/string.h>
+ 
+ #include <boost/test/unit_test.hpp>
+ 
+@@ -14,6 +15,8 @@
+ #include <string>
+ #include <vector>
+ 
++using util::Split;
++
+ namespace {
+ 
+ void CheckUnparsable(const std::string& prv, const std::string& pub, const std::string& expected_error)
+@@ -400,7 +403,6 @@ void CheckInferDescriptor(const std::string& script_hex, const std::string& expe
+         provider.pubkeys.emplace(origin_pubkey.GetID(), origin_pubkey);
+ 
+         if (!origin_str.empty()) {
+-            using namespace spanparsing;
+             KeyOriginInfo info;
+             Span<const char> origin_sp{origin_str};
+             std::vector<Span<const char>> origin_split = Split(origin_sp, "/");
+diff --git a/src/test/fuzz/base_encode_decode.cpp b/src/test/fuzz/base_encode_decode.cpp
+index d322416d348d..0cc8cb58862b 100644
+--- a/src/test/fuzz/base_encode_decode.cpp
++++ b/src/test/fuzz/base_encode_decode.cpp
+@@ -14,6 +14,9 @@
+ #include <string>
+ #include <vector>
+ 
++using util::TrimString;
++using util::TrimStringView;
++
+ FUZZ_TARGET(base_encode_decode)
+ {
+     const std::string random_encoded_string(buffer.begin(), buffer.end());
+diff --git a/src/test/fuzz/fees.cpp b/src/test/fuzz/fees.cpp
+index 38a8c6798ece..5c760be13d84 100644
+--- a/src/test/fuzz/fees.cpp
++++ b/src/test/fuzz/fees.cpp
+@@ -2,17 +2,19 @@
+ // Distributed under the MIT software license, see the accompanying
+ // file COPYING or http://www.opensource.org/licenses/mit-license.php.
+ 
++#include <common/messages.h>
+ #include <consensus/amount.h>
+ #include <policy/fees.h>
+ #include <test/fuzz/FuzzedDataProvider.h>
+ #include <test/fuzz/fuzz.h>
+ #include <test/fuzz/util.h>
+-#include <util/fees.h>
+ 
+ #include <cstdint>
+ #include <string>
+ #include <vector>
+ 
++using common::StringForFeeReason;
++
+ FUZZ_TARGET(fees)
+ {
+     FuzzedDataProvider fuzzed_data_provider(buffer.data(), buffer.size());
+diff --git a/src/test/fuzz/integer.cpp b/src/test/fuzz/integer.cpp
+index db246bb84ee3..8f1d7b6d4547 100644
+--- a/src/test/fuzz/integer.cpp
++++ b/src/test/fuzz/integer.cpp
+@@ -40,6 +40,8 @@
+ #include <set>
+ #include <vector>
+ 
++using util::ToString;
++
+ void initialize_integer()
+ {
+     SelectParams(ChainType::REGTEST);
+diff --git a/src/test/fuzz/kitchen_sink.cpp b/src/test/fuzz/kitchen_sink.cpp
+index 82f3a306c586..4468f358d93a 100644
+--- a/src/test/fuzz/kitchen_sink.cpp
++++ b/src/test/fuzz/kitchen_sink.cpp
+@@ -2,13 +2,14 @@
+ // Distributed under the MIT software license, see the accompanying
+ // file COPYING or http://www.opensource.org/licenses/mit-license.php.
+ 
++#include <common/messages.h>
+ #include <merkleblock.h>
++#include <node/types.h>
+ #include <policy/fees.h>
+ #include <rpc/util.h>
+ #include <test/fuzz/FuzzedDataProvider.h>
+ #include <test/fuzz/fuzz.h>
+ #include <test/fuzz/util.h>
+-#include <util/error.h>
+ #include <util/translation.h>
+ 
+ #include <array>
+@@ -16,17 +17,15 @@
+ #include <optional>
+ #include <vector>
+ 
++using common::TransactionErrorString;
++using node::TransactionError;
++
+ namespace {
+ constexpr TransactionError ALL_TRANSACTION_ERROR[] = {
+-    TransactionError::OK,
+     TransactionError::MISSING_INPUTS,
+     TransactionError::ALREADY_IN_CHAIN,
+-    TransactionError::P2P_DISABLED,
+     TransactionError::MEMPOOL_REJECTED,
+     TransactionError::MEMPOOL_ERROR,
+-    TransactionError::INVALID_PSBT,
+-    TransactionError::PSBT_MISMATCH,
+-    TransactionError::SIGHASH_MISMATCH,
+     TransactionError::MAX_FEE_EXCEEDED,
+ };
+ }; // namespace
+diff --git a/src/test/fuzz/locale.cpp b/src/test/fuzz/locale.cpp
+index 0f2985b50448..68db84224774 100644
+--- a/src/test/fuzz/locale.cpp
++++ b/src/test/fuzz/locale.cpp
+@@ -51,7 +51,7 @@ FUZZ_TARGET(locale)
+     int64_t parseint64_out_without_locale;
+     const bool parseint64_without_locale = ParseInt64(random_string, &parseint64_out_without_locale);
+     const int64_t random_int64 = fuzzed_data_provider.ConsumeIntegral<int64_t>();
+-    const std::string tostring_without_locale = ToString(random_int64);
++    const std::string tostring_without_locale = util::ToString(random_int64);
+     // The variable `random_int32` is no longer used, but the harness still needs to
+     // consume the same data that it did previously to not invalidate existing seeds.
+     const int32_t random_int32 = fuzzed_data_provider.ConsumeIntegral<int32_t>();
+@@ -75,7 +75,7 @@ FUZZ_TARGET(locale)
+     if (parseint64_without_locale) {
+         assert(parseint64_out_without_locale == parseint64_out_with_locale);
+     }
+-    const std::string tostring_with_locale = ToString(random_int64);
++    const std::string tostring_with_locale = util::ToString(random_int64);
+     assert(tostring_without_locale == tostring_with_locale);
+     const std::string strprintf_int_with_locale = strprintf("%d", random_int64);
+     assert(strprintf_int_without_locale == strprintf_int_with_locale);
+diff --git a/src/test/fuzz/message.cpp b/src/test/fuzz/message.cpp
+index 75baaa2754ea..6763206f720a 100644
+--- a/src/test/fuzz/message.cpp
++++ b/src/test/fuzz/message.cpp
+@@ -3,12 +3,12 @@
+ // file COPYING or http://www.opensource.org/licenses/mit-license.php.
+ 
+ #include <chainparams.h>
++#include <common/signmessage.h>
+ #include <key_io.h>
+ #include <test/fuzz/FuzzedDataProvider.h>
+ #include <test/fuzz/fuzz.h>
+ #include <test/fuzz/util.h>
+ #include <util/chaintype.h>
+-#include <util/message.h>
+ #include <util/strencodings.h>
+ 
+ #include <cassert>
+diff --git a/src/test/fuzz/rpc.cpp b/src/test/fuzz/rpc.cpp
+index 2325bf094139..4e52c1c0911a 100644
+--- a/src/test/fuzz/rpc.cpp
++++ b/src/test/fuzz/rpc.cpp
+@@ -36,6 +36,9 @@
+ #include <vector>
+ enum class ChainType;
+ 
++using util::Join;
++using util::ToString;
++
+ namespace {
+ struct RPCFuzzTestingSetup : public TestingSetup {
+     RPCFuzzTestingSetup(const ChainType chain_type, const std::vector<const char*>& extra_args) : TestingSetup{chain_type, extra_args}
+diff --git a/src/test/fuzz/script_assets_test_minimizer.cpp b/src/test/fuzz/script_assets_test_minimizer.cpp
+index 511b581f6063..5a8b599df6f1 100644
+--- a/src/test/fuzz/script_assets_test_minimizer.cpp
++++ b/src/test/fuzz/script_assets_test_minimizer.cpp
+@@ -17,6 +17,8 @@
+ #include <string>
+ #include <vector>
+ 
++using util::SplitString;
++
+ // This fuzz "test" can be used to minimize test cases for script_assets_test in
+ // src/test/script_tests.cpp. While it written as a fuzz test, and can be used as such,
+ // fuzzing the inputs is unlikely to construct useful test cases.
+diff --git a/src/test/fuzz/spanparsing.cpp b/src/test/fuzz/script_parsing.cpp
+similarity index 76%
+rename from src/test/fuzz/spanparsing.cpp
+rename to src/test/fuzz/script_parsing.cpp
+index b8996632bcad..d29a6ea90c4f 100644
+--- a/src/test/fuzz/spanparsing.cpp
++++ b/src/test/fuzz/script_parsing.cpp
+@@ -2,11 +2,14 @@
+ // Distributed under the MIT software license, see the accompanying
+ // file COPYING or http://www.opensource.org/licenses/mit-license.php.
+ 
++#include <script/parsing.h>
+ #include <test/fuzz/FuzzedDataProvider.h>
+ #include <test/fuzz/fuzz.h>
+-#include <util/spanparsing.h>
++#include <util/string.h>
+ 
+-FUZZ_TARGET(spanparsing)
++using util::Split;
++
++FUZZ_TARGET(script_parsing)
+ {
+     FuzzedDataProvider fuzzed_data_provider(buffer.data(), buffer.size());
+     const size_t query_size = fuzzed_data_provider.ConsumeIntegral<size_t>();
+@@ -15,16 +18,16 @@ FUZZ_TARGET(spanparsing)
+     const Span<const char> const_span{span_str};
+ 
+     Span<const char> mut_span = const_span;
+-    (void)spanparsing::Const(query, mut_span);
++    (void)script::Const(query, mut_span);
+ 
+     mut_span = const_span;
+-    (void)spanparsing::Func(query, mut_span);
++    (void)script::Func(query, mut_span);
+ 
+     mut_span = const_span;
+-    (void)spanparsing::Expr(mut_span);
++    (void)script::Expr(mut_span);
+ 
+     if (!query.empty()) {
+         mut_span = const_span;
+-        (void)spanparsing::Split(mut_span, query.front());
++        (void)Split(mut_span, query.front());
+     }
+ }
+diff --git a/src/test/fuzz/string.cpp b/src/test/fuzz/string.cpp
+index 631da13803ab..5b822b03f6b6 100644
+--- a/src/test/fuzz/string.cpp
++++ b/src/test/fuzz/string.cpp
+@@ -5,6 +5,7 @@
+ #include <blockfilter.h>
+ #include <clientversion.h>
+ #include <common/args.h>
++#include <common/messages.h>
+ #include <common/settings.h>
+ #include <common/system.h>
+ #include <common/url.h>
+@@ -21,8 +22,6 @@
+ #include <test/fuzz/FuzzedDataProvider.h>
+ #include <test/fuzz/fuzz.h>
+ #include <test/fuzz/util.h>
+-#include <util/error.h>
+-#include <util/fees.h>
+ #include <util/strencodings.h>
+ #include <util/string.h>
+ #include <util/translation.h>
+@@ -37,6 +36,16 @@
+ 
+ enum class FeeEstimateMode;
+ 
++using common::AmountErrMsg;
++using common::AmountHighWarn;
++using common::FeeModeFromString;
++using common::ResolveErrMsg;
++using util::ContainsNoNUL;
++using util::Join;
++using util::RemovePrefix;
++using util::SplitString;
++using util::TrimString;
++
+ FUZZ_TARGET(string)
+ {
+     FuzzedDataProvider fuzzed_data_provider(buffer.data(), buffer.size());
+diff --git a/src/test/fuzz/tx_pool.cpp b/src/test/fuzz/tx_pool.cpp
+index 85a2663cb980..b6b91445f976 100644
+--- a/src/test/fuzz/tx_pool.cpp
++++ b/src/test/fuzz/tx_pool.cpp
+@@ -23,6 +23,7 @@
+ 
+ using node::BlockAssembler;
+ using node::NodeContext;
++using util::ToString;
+ 
+ namespace {
+ 
+diff --git a/src/test/getarg_tests.cpp b/src/test/getarg_tests.cpp
+index c73b675388da..8734735fd5b0 100644
+--- a/src/test/getarg_tests.cpp
++++ b/src/test/getarg_tests.cpp
+@@ -16,6 +16,8 @@
+ 
+ #include <boost/test/unit_test.hpp>
+ 
++using util::SplitString;
++
+ BOOST_FIXTURE_TEST_SUITE(getarg_tests, BasicTestingSetup)
+ 
+ void ResetArgs(ArgsManager& local_args, const std::string& strArg)
+diff --git a/src/test/key_tests.cpp b/src/test/key_tests.cpp
+index 1ec6de78cba6..b897a0a1539b 100644
+--- a/src/test/key_tests.cpp
++++ b/src/test/key_tests.cpp
+@@ -19,6 +19,8 @@
+ 
+ #include <boost/test/unit_test.hpp>
+ 
++using util::ToString;
++
+ static const std::string strSecret1 = "5HxWvvfubhXpYYpS3tJkw6fq9jE9j18THftkZjHHfmFiWtmAbrj";
+ static const std::string strSecret2 = "5KC4ejrDjv152FGwP386VD1i2NYc5KkfSMyv1nGy1VGDxGHqVY3";
+ static const std::string strSecret1C = "Kwr371tjA9u2rFSMZjTNun2PXXP3WPZu2afRHTcta6KxEUdm1vEw";
+diff --git a/src/test/logging_tests.cpp b/src/test/logging_tests.cpp
+index 88e3ec94b7c8..cebd000df86d 100644
+--- a/src/test/logging_tests.cpp
++++ b/src/test/logging_tests.cpp
+@@ -17,6 +17,9 @@
+ 
+ #include <boost/test/unit_test.hpp>
+ 
++using util::SplitString;
++using util::TrimString;
++
+ BOOST_FIXTURE_TEST_SUITE(logging_tests, BasicTestingSetup)
+ 
+ static void ResetLogger()
+diff --git a/src/test/net_tests.cpp b/src/test/net_tests.cpp
+index b9dff9661016..46a6a33b345c 100644
+--- a/src/test/net_tests.cpp
++++ b/src/test/net_tests.cpp
+@@ -32,6 +32,7 @@
+ #include <string>
+ 
+ using namespace std::literals;
++using util::ToString;
+ 
+ BOOST_FIXTURE_TEST_SUITE(net_tests, RegTestingSetup)
+ 
+diff --git a/src/test/rpc_tests.cpp b/src/test/rpc_tests.cpp
+index 0f4c19e19760..5089f3e8e33f 100644
+--- a/src/test/rpc_tests.cpp
++++ b/src/test/rpc_tests.cpp
+@@ -17,6 +17,8 @@
+ 
+ #include <boost/test/unit_test.hpp>
+ 
++using util::SplitString;
++
+ static UniValue JSON(std::string_view json)
+ {
+     UniValue value;
+diff --git a/src/test/settings_tests.cpp b/src/test/settings_tests.cpp
+index 41190b357985..95f38fc0ce6f 100644
+--- a/src/test/settings_tests.cpp
++++ b/src/test/settings_tests.cpp
+@@ -21,6 +21,8 @@
+ #include <system_error>
+ #include <vector>
+ 
++using util::ToString;
++
+ inline bool operator==(const common::SettingsValue& a, const common::SettingsValue& b)
+ {
+     return a.write() == b.write();
+diff --git a/src/test/transaction_tests.cpp b/src/test/transaction_tests.cpp
+index a01ed67d3835..11d5a8ae5592 100644
+--- a/src/test/transaction_tests.cpp
++++ b/src/test/transaction_tests.cpp
+@@ -38,6 +38,9 @@
+ 
+ #include <univalue.h>
+ 
++using util::SplitString;
++using util::ToString;
++
+ typedef std::vector<unsigned char> valtype;
+ 
+ static CFeeRate g_dust{DUST_RELAY_TX_FEE};
+diff --git a/src/test/util_tests.cpp b/src/test/util_tests.cpp
+index 9a2add748e55..a371753adf05 100644
+--- a/src/test/util_tests.cpp
++++ b/src/test/util_tests.cpp
+@@ -3,8 +3,10 @@
+ // file COPYING or http://www.opensource.org/licenses/mit-license.php.
+ 
+ #include <clientversion.h>
++#include <common/signmessage.h> // For MessageSign(), MessageVerify(), MESSAGE_MAGIC
+ #include <hash.h> // For Hash()
+ #include <key.h>  // For CKey
++#include <script/parsing.h>
+ #include <sync.h>
+ #include <test/util/random.h>
+ #include <test/util/setup_common.h>
+@@ -12,11 +14,9 @@
+ #include <util/bitdeque.h>
+ #include <util/fs.h>
+ #include <util/fs_helpers.h>
+-#include <util/message.h> // For MessageSign(), MessageVerify(), MESSAGE_MAGIC
+ #include <util/moneystr.h>
+ #include <util/overflow.h>
+ #include <util/readwritefile.h>
+-#include <util/spanparsing.h>
+ #include <util/strencodings.h>
+ #include <util/string.h>
+ #include <util/time.h>
+@@ -45,6 +45,15 @@
+ #include <boost/test/unit_test.hpp>
+ 
+ using namespace std::literals;
++using util::Join;
++using util::RemovePrefix;
++using util::RemovePrefixView;
++using util::ReplaceAll;
++using util::Split;
++using util::SplitString;
++using util::TrimString;
++using util::TrimStringView;
++
+ static const std::string STRING_WITH_EMBEDDED_NULL_CHAR{"1"s "\0" "1"s};
+ 
+ /* defined in logging.cpp */
+@@ -1292,9 +1301,9 @@ static std::string SpanToStr(const Span<const char>& span)
+     return std::string(span.begin(), span.end());
+ }
+ 
+-BOOST_AUTO_TEST_CASE(test_spanparsing)
++BOOST_AUTO_TEST_CASE(test_script_parsing)
+ {
+-    using namespace spanparsing;
++    using namespace script;
+     std::string input;
+     Span<const char> sp;
+     bool success;
+diff --git a/src/test/util_threadnames_tests.cpp b/src/test/util_threadnames_tests.cpp
+index 174052d5fa66..efa0b2736be1 100644
+--- a/src/test/util_threadnames_tests.cpp
++++ b/src/test/util_threadnames_tests.cpp
+@@ -13,6 +13,8 @@
+ 
+ #include <boost/test/unit_test.hpp>
+ 
++using util::ToString;
++
+ BOOST_AUTO_TEST_SUITE(util_threadnames_tests)
+ 
+ const std::string TEST_THREAD_NAME_BASE = "test_thread.";
+diff --git a/src/torcontrol.cpp b/src/torcontrol.cpp
+index 442c1c4d422d..4f79644c8d98 100644
+--- a/src/torcontrol.cpp
++++ b/src/torcontrol.cpp
+@@ -42,6 +42,10 @@
+ #include <event2/thread.h>
+ #include <event2/util.h>
+ 
++using util::ReplaceAll;
++using util::SplitString;
++using util::ToString;
++
+ /** Default control ip and port */
+ const std::string DEFAULT_TOR_CONTROL = "127.0.0.1:" + ToString(DEFAULT_TOR_CONTROL_PORT);
+ /** Tor cookie size (from control-spec.txt) */
+diff --git a/src/util/error.cpp b/src/util/error.cpp
+deleted file mode 100644
+index 309877d06754..000000000000
+--- a/src/util/error.cpp
++++ /dev/null
+@@ -1,67 +0,0 @@
+-// Copyright (c) 2010-2022 The Bitcoin Core developers
+-// Distributed under the MIT software license, see the accompanying
+-// file COPYING or http://www.opensource.org/licenses/mit-license.php.
+-
+-#include <util/error.h>
+-
+-#include <tinyformat.h>
+-#include <util/translation.h>
+-
+-#include <cassert>
+-#include <string>
+-
+-bilingual_str TransactionErrorString(const TransactionError err)
+-{
+-    switch (err) {
+-        case TransactionError::OK:
+-            return Untranslated("No error");
+-        case TransactionError::MISSING_INPUTS:
+-            return Untranslated("Inputs missing or spent");
+-        case TransactionError::ALREADY_IN_CHAIN:
+-            return Untranslated("Transaction already in block chain");
+-        case TransactionError::P2P_DISABLED:
+-            return Untranslated("Peer-to-peer functionality missing or disabled");
+-        case TransactionError::MEMPOOL_REJECTED:
+-            return Untranslated("Transaction rejected by mempool");
+-        case TransactionError::MEMPOOL_ERROR:
+-            return Untranslated("Mempool internal error");
+-        case TransactionError::INVALID_PSBT:
+-            return Untranslated("PSBT is not well-formed");
+-        case TransactionError::PSBT_MISMATCH:
+-            return Untranslated("PSBTs not compatible (different transactions)");
+-        case TransactionError::SIGHASH_MISMATCH:
+-            return Untranslated("Specified sighash value does not match value stored in PSBT");
+-        case TransactionError::MAX_FEE_EXCEEDED:
+-            return Untranslated("Fee exceeds maximum configured by user (e.g. -maxtxfee, maxfeerate)");
+-        case TransactionError::MAX_BURN_EXCEEDED:
+-            return Untranslated("Unspendable output exceeds maximum configured by user (maxburnamount)");
+-        case TransactionError::EXTERNAL_SIGNER_NOT_FOUND:
+-            return Untranslated("External signer not found");
+-        case TransactionError::EXTERNAL_SIGNER_FAILED:
+-            return Untranslated("External signer failed to sign");
+-        case TransactionError::INVALID_PACKAGE:
+-            return Untranslated("Transaction rejected due to invalid package");
+-        // no default case, so the compiler can warn about missing cases
+-    }
+-    assert(false);
+-}
+-
+-bilingual_str ResolveErrMsg(const std::string& optname, const std::string& strBind)
+-{
+-    return strprintf(_("Cannot resolve -%s address: '%s'"), optname, strBind);
+-}
+-
+-bilingual_str InvalidPortErrMsg(const std::string& optname, const std::string& invalid_value)
+-{
+-    return strprintf(_("Invalid port specified in %s: '%s'"), optname, invalid_value);
+-}
+-
+-bilingual_str AmountHighWarn(const std::string& optname)
+-{
+-    return strprintf(_("%s is set very high!"), optname);
+-}
+-
+-bilingual_str AmountErrMsg(const std::string& optname, const std::string& strValue)
+-{
+-    return strprintf(_("Invalid amount for -%s=<amount>: '%s'"), optname, strValue);
+-}
+diff --git a/src/util/error.h b/src/util/error.h
+deleted file mode 100644
+index a52a8f47de47..000000000000
+--- a/src/util/error.h
++++ /dev/null
+@@ -1,49 +0,0 @@
+-// Copyright (c) 2010-2021 The Bitcoin Core developers
+-// Distributed under the MIT software license, see the accompanying
+-// file COPYING or http://www.opensource.org/licenses/mit-license.php.
+-
+-#ifndef BITCOIN_UTIL_ERROR_H
+-#define BITCOIN_UTIL_ERROR_H
+-
+-/**
+- * util/error.h is a common place for definitions of simple error types and
+- * string functions. Types and functions defined here should not require any
+- * outside dependencies.
+- *
+- * Error types defined here can be used in different parts of the
+- * codebase, to avoid the need to write boilerplate code catching and
+- * translating errors passed across wallet/node/rpc/gui code boundaries.
+- */
+-
+-#include <string>
+-
+-struct bilingual_str;
+-
+-enum class TransactionError {
+-    OK, //!< No error
+-    MISSING_INPUTS,
+-    ALREADY_IN_CHAIN,
+-    P2P_DISABLED,
+-    MEMPOOL_REJECTED,
+-    MEMPOOL_ERROR,
+-    INVALID_PSBT,
+-    PSBT_MISMATCH,
+-    SIGHASH_MISMATCH,
+-    MAX_FEE_EXCEEDED,
+-    MAX_BURN_EXCEEDED,
+-    EXTERNAL_SIGNER_NOT_FOUND,
+-    EXTERNAL_SIGNER_FAILED,
+-    INVALID_PACKAGE,
+-};
+-
+-bilingual_str TransactionErrorString(const TransactionError error);
+-
+-bilingual_str ResolveErrMsg(const std::string& optname, const std::string& strBind);
+-
+-bilingual_str InvalidPortErrMsg(const std::string& optname, const std::string& strPort);
+-
+-bilingual_str AmountHighWarn(const std::string& optname);
+-
+-bilingual_str AmountErrMsg(const std::string& optname, const std::string& strValue);
+-
+-#endif // BITCOIN_UTIL_ERROR_H
+diff --git a/src/util/fees.cpp b/src/util/fees.cpp
+deleted file mode 100644
+index 8ada02ce5429..000000000000
+--- a/src/util/fees.cpp
++++ /dev/null
+@@ -1,67 +0,0 @@
+-// Copyright (c) 2009-2010 Satoshi Nakamoto
+-// Copyright (c) 2009-2020 The Bitcoin Core developers
+-// Distributed under the MIT software license, see the accompanying
+-// file COPYING or http://www.opensource.org/licenses/mit-license.php.
+-
+-#include <util/fees.h>
+-
+-#include <policy/fees.h>
+-#include <util/strencodings.h>
+-#include <util/string.h>
+-
+-#include <map>
+-#include <string>
+-#include <vector>
+-#include <utility>
+-
+-std::string StringForFeeReason(FeeReason reason)
+-{
+-    static const std::map<FeeReason, std::string> fee_reason_strings = {
+-        {FeeReason::NONE, "None"},
+-        {FeeReason::HALF_ESTIMATE, "Half Target 60% Threshold"},
+-        {FeeReason::FULL_ESTIMATE, "Target 85% Threshold"},
+-        {FeeReason::DOUBLE_ESTIMATE, "Double Target 95% Threshold"},
+-        {FeeReason::CONSERVATIVE, "Conservative Double Target longer horizon"},
+-        {FeeReason::MEMPOOL_MIN, "Mempool Min Fee"},
+-        {FeeReason::PAYTXFEE, "PayTxFee set"},
+-        {FeeReason::FALLBACK, "Fallback fee"},
+-        {FeeReason::REQUIRED, "Minimum Required Fee"},
+-    };
+-    auto reason_string = fee_reason_strings.find(reason);
+-
+-    if (reason_string == fee_reason_strings.end()) return "Unknown";
+-
+-    return reason_string->second;
+-}
+-
+-const std::vector<std::pair<std::string, FeeEstimateMode>>& FeeModeMap()
+-{
+-    static const std::vector<std::pair<std::string, FeeEstimateMode>> FEE_MODES = {
+-        {"unset", FeeEstimateMode::UNSET},
+-        {"economical", FeeEstimateMode::ECONOMICAL},
+-        {"conservative", FeeEstimateMode::CONSERVATIVE},
+-    };
+-    return FEE_MODES;
+-}
+-
+-std::string FeeModes(const std::string& delimiter)
+-{
+-    return Join(FeeModeMap(), delimiter, [&](const std::pair<std::string, FeeEstimateMode>& i) { return i.first; });
+-}
+-
+-std::string InvalidEstimateModeErrorMessage()
+-{
+-    return "Invalid estimate_mode parameter, must be one of: \"" + FeeModes("\", \"") + "\"";
+-}
+-
+-bool FeeModeFromString(const std::string& mode_string, FeeEstimateMode& fee_estimate_mode)
+-{
+-    auto searchkey = ToUpper(mode_string);
+-    for (const auto& pair : FeeModeMap()) {
+-        if (ToUpper(pair.first) == searchkey) {
+-            fee_estimate_mode = pair.second;
+-            return true;
+-        }
+-    }
+-    return false;
+-}
+diff --git a/src/util/fees.h b/src/util/fees.h
+deleted file mode 100644
+index 10ba1e4f8573..000000000000
+--- a/src/util/fees.h
++++ /dev/null
+@@ -1,18 +0,0 @@
+-// Copyright (c) 2009-2010 Satoshi Nakamoto
+-// Copyright (c) 2009-2020 The Bitcoin Core developers
+-// Distributed under the MIT software license, see the accompanying
+-// file COPYING or http://www.opensource.org/licenses/mit-license.php.
+-#ifndef BITCOIN_UTIL_FEES_H
+-#define BITCOIN_UTIL_FEES_H
+-
+-#include <string>
+-
+-enum class FeeEstimateMode;
+-enum class FeeReason;
+-
+-bool FeeModeFromString(const std::string& mode_string, FeeEstimateMode& fee_estimate_mode);
+-std::string StringForFeeReason(FeeReason reason);
+-std::string FeeModes(const std::string& delimiter);
+-std::string InvalidEstimateModeErrorMessage();
+-
+-#endif // BITCOIN_UTIL_FEES_H
+diff --git a/src/util/moneystr.cpp b/src/util/moneystr.cpp
+index 9181329afc82..1ed3b2ac968c 100644
+--- a/src/util/moneystr.cpp
++++ b/src/util/moneystr.cpp
+@@ -13,6 +13,9 @@
+ #include <cstdint>
+ #include <optional>
+ 
++using util::ContainsNoNUL;
++using util::TrimString;
++
+ std::string FormatMoney(const CAmount n)
+ {
+     // Note: not using straight sprintf here because we do NOT want
+diff --git a/src/util/spanparsing.h b/src/util/spanparsing.h
+deleted file mode 100644
+index 765fe13acaa6..000000000000
+--- a/src/util/spanparsing.h
++++ /dev/null
+@@ -1,79 +0,0 @@
+-// Copyright (c) 2018-2022 The Bitcoin Core developers
+-// Distributed under the MIT software license, see the accompanying
+-// file COPYING or http://www.opensource.org/licenses/mit-license.php.
+-
+-#ifndef BITCOIN_UTIL_SPANPARSING_H
+-#define BITCOIN_UTIL_SPANPARSING_H
+-
+-#include <span.h>
+-
+-#include <string>
+-#include <string_view>
+-#include <vector>
+-
+-namespace spanparsing {
+-
+-/** Parse a constant.
+- *
+- * If sp's initial part matches str, sp is updated to skip that part, and true is returned.
+- * Otherwise sp is unmodified and false is returned.
+- */
+-bool Const(const std::string& str, Span<const char>& sp);
+-
+-/** Parse a function call.
+- *
+- * If sp's initial part matches str + "(", and sp ends with ")", sp is updated to be the
+- * section between the braces, and true is returned. Otherwise sp is unmodified and false
+- * is returned.
+- */
+-bool Func(const std::string& str, Span<const char>& sp);
+-
+-/** Extract the expression that sp begins with.
+- *
+- * This function will return the initial part of sp, up to (but not including) the first
+- * comma or closing brace, skipping ones that are surrounded by braces. So for example,
+- * for "foo(bar(1),2),3" the initial part "foo(bar(1),2)" will be returned. sp will be
+- * updated to skip the initial part that is returned.
+- */
+-Span<const char> Expr(Span<const char>& sp);
+-
+-/** Split a string on any char found in separators, returning a vector.
+- *
+- * If sep does not occur in sp, a singleton with the entirety of sp is returned.
+- *
+- * Note that this function does not care about braces, so splitting
+- * "foo(bar(1),2),3) on ',' will return {"foo(bar(1)", "2)", "3)"}.
+- */
+-template <typename T = Span<const char>>
+-std::vector<T> Split(const Span<const char>& sp, std::string_view separators)
+-{
+-    std::vector<T> ret;
+-    auto it = sp.begin();
+-    auto start = it;
+-    while (it != sp.end()) {
+-        if (separators.find(*it) != std::string::npos) {
+-            ret.emplace_back(start, it);
+-            start = it + 1;
+-        }
+-        ++it;
+-    }
+-    ret.emplace_back(start, it);
+-    return ret;
+-}
+-
+-/** Split a string on every instance of sep, returning a vector.
+- *
+- * If sep does not occur in sp, a singleton with the entirety of sp is returned.
+- *
+- * Note that this function does not care about braces, so splitting
+- * "foo(bar(1),2),3) on ',' will return {"foo(bar(1)", "2)", "3)"}.
+- */
+-template <typename T = Span<const char>>
+-std::vector<T> Split(const Span<const char>& sp, char sep)
+-{
+-    return Split<T>(sp, std::string_view{&sep, 1});
+-}
+-
+-} // namespace spanparsing
+-
+-#endif // BITCOIN_UTIL_SPANPARSING_H
+diff --git a/src/util/strencodings.cpp b/src/util/strencodings.cpp
+index 7b5ded2975b5..e030262a32eb 100644
+--- a/src/util/strencodings.cpp
++++ b/src/util/strencodings.cpp
+@@ -3,9 +3,11 @@
+ // Distributed under the MIT software license, see the accompanying
+ // file COPYING or http://www.opensource.org/licenses/mit-license.php.
+ 
+-#include <span.h>
+ #include <util/strencodings.h>
+ 
++#include <crypto/hex_base.h>
++#include <span.h>
++
+ #include <array>
+ #include <cassert>
+ #include <cstring>
+@@ -36,29 +38,6 @@ std::string SanitizeString(std::string_view str, int rule)
+     return result;
+ }
+ 
+-const signed char p_util_hexdigit[256] =
+-{ -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+-  -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+-  -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+-  0,1,2,3,4,5,6,7,8,9,-1,-1,-1,-1,-1,-1,
+-  -1,0xa,0xb,0xc,0xd,0xe,0xf,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+-  -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+-  -1,0xa,0xb,0xc,0xd,0xe,0xf,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+-  -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+-  -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+-  -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+-  -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+-  -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+-  -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+-  -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+-  -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+-  -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1, };
+-
+-signed char HexDigit(char c)
+-{
+-    return p_util_hexdigit[(unsigned char)c];
+-}
+-
+ bool IsHex(std::string_view str)
+ {
+     for (char c : str) {
+@@ -466,40 +445,6 @@ std::string Capitalize(std::string str)
+     return str;
+ }
+ 
+-namespace {
+-
+-using ByteAsHex = std::array<char, 2>;
+-
+-constexpr std::array<ByteAsHex, 256> CreateByteToHexMap()
+-{
+-    constexpr char hexmap[16] = {'0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f'};
+-
+-    std::array<ByteAsHex, 256> byte_to_hex{};
+-    for (size_t i = 0; i < byte_to_hex.size(); ++i) {
+-        byte_to_hex[i][0] = hexmap[i >> 4];
+-        byte_to_hex[i][1] = hexmap[i & 15];
+-    }
+-    return byte_to_hex;
+-}
+-
+-} // namespace
+-
+-std::string HexStr(const Span<const uint8_t> s)
+-{
+-    std::string rv(s.size() * 2, '\0');
+-    static constexpr auto byte_to_hex = CreateByteToHexMap();
+-    static_assert(sizeof(byte_to_hex) == 512);
+-
+-    char* it = rv.data();
+-    for (uint8_t v : s) {
+-        std::memcpy(it, byte_to_hex[v].data(), 2);
+-        it += 2;
+-    }
+-
+-    assert(it == rv.data() + rv.size());
+-    return rv;
+-}
+-
+ std::optional<uint64_t> ParseByteUnits(std::string_view str, ByteUnit default_multiplier)
+ {
+     if (str.empty()) {
+diff --git a/src/util/strencodings.h b/src/util/strencodings.h
+index 439678c24a13..e5c2d3ddf2dd 100644
+--- a/src/util/strencodings.h
++++ b/src/util/strencodings.h
+@@ -9,6 +9,7 @@
+ #ifndef BITCOIN_UTIL_STRENCODINGS_H
+ #define BITCOIN_UTIL_STRENCODINGS_H
+ 
++#include <crypto/hex_base.h> // IWYU pragma: export
+ #include <span.h>
+ #include <util/string.h>
+ 
+@@ -66,7 +67,6 @@ std::vector<Byte> ParseHex(std::string_view hex_str)
+ {
+     return TryParseHex<Byte>(hex_str).value_or(std::vector<Byte>{});
+ }
+-signed char HexDigit(char c);
+ /* Returns true if each character in str is a hex character, and has an even
+  * number of hex digits.*/
+ bool IsHex(std::string_view str);
+@@ -122,7 +122,7 @@ T LocaleIndependentAtoi(std::string_view str)
+     static_assert(std::is_integral<T>::value);
+     T result;
+     // Emulate atoi(...) handling of white space and leading +/-.
+-    std::string_view s = TrimStringView(str);
++    std::string_view s = util::TrimStringView(str);
+     if (!s.empty() && s[0] == '+') {
+         if (s.length() >= 2 && s[1] == '-') {
+             return 0;
+@@ -231,13 +231,6 @@ std::optional<T> ToIntegral(std::string_view str)
+  */
+ [[nodiscard]] bool ParseUInt64(std::string_view str, uint64_t *out);
+ 
+-/**
+- * Convert a span of bytes to a lower-case hexadecimal string.
+- */
+-std::string HexStr(const Span<const uint8_t> s);
+-inline std::string HexStr(const Span<const char> s) { return HexStr(MakeUCharSpan(s)); }
+-inline std::string HexStr(const Span<const std::byte> s) { return HexStr(MakeUCharSpan(s)); }
+-
+ /**
+  * Format a paragraph of text to a fixed width, adding spaces for
+  * indentation to any added line.
+diff --git a/src/util/string.cpp b/src/util/string.cpp
+index 3d318497458b..47c6b74d4fd5 100644
+--- a/src/util/string.cpp
++++ b/src/util/string.cpp
+@@ -7,8 +7,10 @@
+ #include <regex>
+ #include <string>
+ 
++namespace util {
+ void ReplaceAll(std::string& in_out, const std::string& search, const std::string& substitute)
+ {
+     if (search.empty()) return;
+     in_out = std::regex_replace(in_out, std::regex(search), substitute);
+ }
++} // namespace util
+diff --git a/src/util/string.h b/src/util/string.h
+index dab92942fbcb..e2e470f4ab56 100644
+--- a/src/util/string.h
++++ b/src/util/string.h
+@@ -5,7 +5,7 @@
+ #ifndef BITCOIN_UTIL_STRING_H
+ #define BITCOIN_UTIL_STRING_H
+ 
+-#include <util/spanparsing.h>
++#include <span.h>
+ 
+ #include <array>
+ #include <cstdint>
+@@ -16,16 +16,54 @@
+ #include <string_view> // IWYU pragma: export
+ #include <vector>
+ 
++namespace util {
+ void ReplaceAll(std::string& in_out, const std::string& search, const std::string& substitute);
+ 
++/** Split a string on any char found in separators, returning a vector.
++ *
++ * If sep does not occur in sp, a singleton with the entirety of sp is returned.
++ *
++ * Note that this function does not care about braces, so splitting
++ * "foo(bar(1),2),3) on ',' will return {"foo(bar(1)", "2)", "3)"}.
++ */
++template <typename T = Span<const char>>
++std::vector<T> Split(const Span<const char>& sp, std::string_view separators)
++{
++    std::vector<T> ret;
++    auto it = sp.begin();
++    auto start = it;
++    while (it != sp.end()) {
++        if (separators.find(*it) != std::string::npos) {
++            ret.emplace_back(start, it);
++            start = it + 1;
++        }
++        ++it;
++    }
++    ret.emplace_back(start, it);
++    return ret;
++}
++
++/** Split a string on every instance of sep, returning a vector.
++ *
++ * If sep does not occur in sp, a singleton with the entirety of sp is returned.
++ *
++ * Note that this function does not care about braces, so splitting
++ * "foo(bar(1),2),3) on ',' will return {"foo(bar(1)", "2)", "3)"}.
++ */
++template <typename T = Span<const char>>
++std::vector<T> Split(const Span<const char>& sp, char sep)
++{
++    return Split<T>(sp, std::string_view{&sep, 1});
++}
++
+ [[nodiscard]] inline std::vector<std::string> SplitString(std::string_view str, char sep)
+ {
+-    return spanparsing::Split<std::string>(str, sep);
++    return Split<std::string>(str, sep);
+ }
+ 
+ [[nodiscard]] inline std::vector<std::string> SplitString(std::string_view str, std::string_view separators)
+ {
+-    return spanparsing::Split<std::string>(str, separators);
++    return Split<std::string>(str, separators);
+ }
+ 
+ [[nodiscard]] inline std::string_view TrimStringView(std::string_view str, std::string_view pattern = " \f\n\r\t\v")
+@@ -125,5 +163,6 @@ template <typename T1, size_t PREFIX_LEN>
+     return obj.size() >= PREFIX_LEN &&
+            std::equal(std::begin(prefix), std::end(prefix), std::begin(obj));
+ }
++} // namespace util
+ 
+ #endif // BITCOIN_UTIL_STRING_H
+diff --git a/src/wallet/external_signer_scriptpubkeyman.cpp b/src/wallet/external_signer_scriptpubkeyman.cpp
+index b5703fa54ae3..32e9941453b0 100644
+--- a/src/wallet/external_signer_scriptpubkeyman.cpp
++++ b/src/wallet/external_signer_scriptpubkeyman.cpp
+@@ -6,6 +6,7 @@
+ #include <common/args.h>
+ #include <common/system.h>
+ #include <external_signer.h>
++#include <node/types.h>
+ #include <wallet/external_signer_scriptpubkeyman.h>
+ 
+ #include <iostream>
+@@ -17,6 +18,8 @@
+ #include <utility>
+ #include <vector>
+ 
++using common::PSBTError;
++
+ namespace wallet {
+ bool ExternalSignerScriptPubKeyMan::SetupDescriptor(WalletBatch& batch, std::unique_ptr<Descriptor> desc)
+ {
+@@ -76,7 +79,7 @@ util::Result<void> ExternalSignerScriptPubKeyMan::DisplayAddress(const CTxDestin
+ }
+ 
+ // If sign is true, transaction must previously have been filled
+-TransactionError ExternalSignerScriptPubKeyMan::FillPSBT(PartiallySignedTransaction& psbt, const PrecomputedTransactionData& txdata, int sighash_type, bool sign, bool bip32derivs, int* n_signed, bool finalize) const
++std::optional<PSBTError> ExternalSignerScriptPubKeyMan::FillPSBT(PartiallySignedTransaction& psbt, const PrecomputedTransactionData& txdata, int sighash_type, bool sign, bool bip32derivs, int* n_signed, bool finalize) const
+ {
+     if (!sign) {
+         return DescriptorScriptPubKeyMan::FillPSBT(psbt, txdata, sighash_type, false, bip32derivs, n_signed, finalize);
+@@ -88,14 +91,14 @@ TransactionError ExternalSignerScriptPubKeyMan::FillPSBT(PartiallySignedTransact
+         // TODO: for multisig wallets, we should only care if all _our_ inputs are signed
+         complete &= PSBTInputSigned(input);
+     }
+-    if (complete) return TransactionError::OK;
++    if (complete) return {};
+ 
+     std::string strFailReason;
+     if(!GetExternalSigner().SignTransaction(psbt, strFailReason)) {
+         tfm::format(std::cerr, "Failed to sign: %s\n", strFailReason);
+-        return TransactionError::EXTERNAL_SIGNER_FAILED;
++        return PSBTError::EXTERNAL_SIGNER_FAILED;
+     }
+     if (finalize) FinalizePSBT(psbt); // This won't work in a multisig setup
+-    return TransactionError::OK;
++    return {};
+ }
+ } // namespace wallet
+diff --git a/src/wallet/external_signer_scriptpubkeyman.h b/src/wallet/external_signer_scriptpubkeyman.h
+index 44286456b615..10d67d2ab471 100644
+--- a/src/wallet/external_signer_scriptpubkeyman.h
++++ b/src/wallet/external_signer_scriptpubkeyman.h
+@@ -35,7 +35,7 @@ class ExternalSignerScriptPubKeyMan : public DescriptorScriptPubKeyMan
+   */
+  util::Result<void> DisplayAddress(const CTxDestination& dest, const ExternalSigner& signer) const;
+ 
+-  TransactionError FillPSBT(PartiallySignedTransaction& psbt, const PrecomputedTransactionData& txdata, int sighash_type = 1 /* SIGHASH_ALL */, bool sign = true, bool bip32derivs = false, int* n_signed = nullptr, bool finalize = true) const override;
++  std::optional<common::PSBTError> FillPSBT(PartiallySignedTransaction& psbt, const PrecomputedTransactionData& txdata, int sighash_type = 1 /* SIGHASH_ALL */, bool sign = true, bool bip32derivs = false, int* n_signed = nullptr, bool finalize = true) const override;
+ };
+ } // namespace wallet
+ #endif // BITCOIN_WALLET_EXTERNAL_SIGNER_SCRIPTPUBKEYMAN_H
+diff --git a/src/wallet/feebumper.cpp b/src/wallet/feebumper.cpp
+index 6a8453965be7..1288d3b4180f 100644
+--- a/src/wallet/feebumper.cpp
++++ b/src/wallet/feebumper.cpp
+@@ -5,6 +5,7 @@
+ #include <common/system.h>
+ #include <consensus/validation.h>
+ #include <interfaces/chain.h>
++#include <node/types.h>
+ #include <policy/fees.h>
+ #include <policy/policy.h>
+ #include <util/moneystr.h>
+@@ -343,8 +344,8 @@ bool SignTransaction(CWallet& wallet, CMutableTransaction& mtx) {
+         // so external signers are not asked to sign more than once.
+         bool complete;
+         wallet.FillPSBT(psbtx, complete, SIGHASH_ALL, false /* sign */, true /* bip32derivs */);
+-        const TransactionError err = wallet.FillPSBT(psbtx, complete, SIGHASH_ALL, true /* sign */, false  /* bip32derivs */);
+-        if (err != TransactionError::OK) return false;
++        auto err{wallet.FillPSBT(psbtx, complete, SIGHASH_ALL, true /* sign */, false  /* bip32derivs */)};
++        if (err) return false;
+         complete = FinalizeAndExtractPSBT(psbtx, mtx);
+         return complete;
+     } else {
+diff --git a/src/wallet/interfaces.cpp b/src/wallet/interfaces.cpp
+index 0c1cae7253c7..9fab1b2ee44a 100644
+--- a/src/wallet/interfaces.cpp
++++ b/src/wallet/interfaces.cpp
+@@ -8,6 +8,7 @@
+ #include <consensus/amount.h>
+ #include <interfaces/chain.h>
+ #include <interfaces/handler.h>
++#include <node/types.h>
+ #include <policy/fees.h>
+ #include <primitives/transaction.h>
+ #include <rpc/server.h>
+@@ -34,6 +35,7 @@
+ #include <utility>
+ #include <vector>
+ 
++using common::PSBTError;
+ using interfaces::Chain;
+ using interfaces::FoundBlock;
+ using interfaces::Handler;
+@@ -389,7 +391,7 @@ class WalletImpl : public Wallet
+         }
+         return {};
+     }
+-    TransactionError fillPSBT(int sighash_type,
++    std::optional<PSBTError> fillPSBT(int sighash_type,
+         bool sign,
+         bool bip32derivs,
+         size_t* n_signed,
+diff --git a/src/wallet/load.cpp b/src/wallet/load.cpp
+index 8b78a670e499..fe35f6b223e4 100644
+--- a/src/wallet/load.cpp
++++ b/src/wallet/load.cpp
+@@ -21,6 +21,8 @@
+ 
+ #include <system_error>
+ 
++using util::Join;
++
+ namespace wallet {
+ bool VerifyWallets(WalletContext& context)
+ {
+diff --git a/src/wallet/rpc/backup.cpp b/src/wallet/rpc/backup.cpp
+index a76ae7196c94..8cddb8b09904 100644
+--- a/src/wallet/rpc/backup.cpp
++++ b/src/wallet/rpc/backup.cpp
+@@ -34,6 +34,7 @@
+ 
+ 
+ using interfaces::FoundBlock;
++using util::SplitString;
+ 
+ namespace wallet {
+ std::string static EncodeDumpString(const std::string &str) {
+diff --git a/src/wallet/rpc/signmessage.cpp b/src/wallet/rpc/signmessage.cpp
+index c9fb693482b3..edf93ecab77c 100644
+--- a/src/wallet/rpc/signmessage.cpp
++++ b/src/wallet/rpc/signmessage.cpp
+@@ -2,9 +2,9 @@
+ // Distributed under the MIT software license, see the accompanying
+ // file COPYING or http://www.opensource.org/licenses/mit-license.php.
+ 
++#include <common/signmessage.h>
+ #include <key_io.h>
+ #include <rpc/util.h>
+-#include <util/message.h>
+ #include <wallet/rpc/util.h>
+ #include <wallet/wallet.h>
+ 
+diff --git a/src/wallet/rpc/spend.cpp b/src/wallet/rpc/spend.cpp
+index 169f72c406a0..ac2a4826f05d 100644
+--- a/src/wallet/rpc/spend.cpp
++++ b/src/wallet/rpc/spend.cpp
+@@ -2,14 +2,15 @@
+ // Distributed under the MIT software license, see the accompanying
+ // file COPYING or http://www.opensource.org/licenses/mit-license.php.
+ 
++#include <common/messages.h>
+ #include <consensus/validation.h>
+ #include <core_io.h>
+ #include <key_io.h>
++#include <node/types.h>
+ #include <policy/policy.h>
+ #include <rpc/rawtransaction_util.h>
+ #include <rpc/util.h>
+ #include <script/script.h>
+-#include <util/fees.h>
+ #include <util/rbf.h>
+ #include <util/translation.h>
+ #include <util/vector.h>
+@@ -22,6 +23,12 @@
+ 
+ #include <univalue.h>
+ 
++using common::FeeModeFromString;
++using common::FeeModes;
++using common::InvalidEstimateModeErrorMessage;
++using common::StringForFeeReason;
++using common::TransactionErrorString;
++using node::TransactionError;
+ 
+ namespace wallet {
+ std::vector<CRecipient> CreateRecipients(const std::vector<std::pair<CTxDestination, CAmount>>& outputs, const std::set<int>& subtract_fee_outputs)
+@@ -97,9 +104,9 @@ static UniValue FinishTransaction(const std::shared_ptr<CWallet> pwallet, const
+     // so external signers are not asked to sign more than once.
+     bool complete;
+     pwallet->FillPSBT(psbtx, complete, SIGHASH_DEFAULT, /*sign=*/false, /*bip32derivs=*/true);
+-    const TransactionError err{pwallet->FillPSBT(psbtx, complete, SIGHASH_DEFAULT, /*sign=*/true, /*bip32derivs=*/false)};
+-    if (err != TransactionError::OK) {
+-        throw JSONRPCTransactionError(err);
++    const auto err{pwallet->FillPSBT(psbtx, complete, SIGHASH_DEFAULT, /*sign=*/true, /*bip32derivs=*/false)};
++    if (err) {
++        throw JSONRPCPSBTError(*err);
+     }
+ 
+     CMutableTransaction mtx;
+@@ -1153,8 +1160,8 @@ static RPCHelpMan bumpfee_helper(std::string method_name)
+     } else {
+         PartiallySignedTransaction psbtx(mtx);
+         bool complete = false;
+-        const TransactionError err = pwallet->FillPSBT(psbtx, complete, SIGHASH_DEFAULT, /*sign=*/false, /*bip32derivs=*/true);
+-        CHECK_NONFATAL(err == TransactionError::OK);
++        const auto err{pwallet->FillPSBT(psbtx, complete, SIGHASH_DEFAULT, /*sign=*/false, /*bip32derivs=*/true)};
++        CHECK_NONFATAL(!err);
+         CHECK_NONFATAL(!complete);
+         DataStream ssTx{};
+         ssTx << psbtx;
+@@ -1610,9 +1617,9 @@ RPCHelpMan walletprocesspsbt()
+ 
+     if (sign) EnsureWalletIsUnlocked(*pwallet);
+ 
+-    const TransactionError err{wallet.FillPSBT(psbtx, complete, nHashType, sign, bip32derivs, nullptr, finalize)};
+-    if (err != TransactionError::OK) {
+-        throw JSONRPCTransactionError(err);
++    const auto err{wallet.FillPSBT(psbtx, complete, nHashType, sign, bip32derivs, nullptr, finalize)};
++    if (err) {
++        throw JSONRPCPSBTError(*err);
+     }
+ 
+     UniValue result(UniValue::VOBJ);
+@@ -1744,9 +1751,9 @@ RPCHelpMan walletcreatefundedpsbt()
+     // Fill transaction with out data but don't sign
+     bool bip32derivs = request.params[4].isNull() ? true : request.params[4].get_bool();
+     bool complete = true;
+-    const TransactionError err{wallet.FillPSBT(psbtx, complete, 1, /*sign=*/false, /*bip32derivs=*/bip32derivs)};
+-    if (err != TransactionError::OK) {
+-        throw JSONRPCTransactionError(err);
++    const auto err{wallet.FillPSBT(psbtx, complete, 1, /*sign=*/false, /*bip32derivs=*/bip32derivs)};
++    if (err) {
++        throw JSONRPCPSBTError(*err);
+     }
+ 
+     // Serialize the PSBT
+diff --git a/src/wallet/scriptpubkeyman.cpp b/src/wallet/scriptpubkeyman.cpp
+index b42275fe4bd8..c64aff5fe25e 100644
+--- a/src/wallet/scriptpubkeyman.cpp
++++ b/src/wallet/scriptpubkeyman.cpp
+@@ -5,6 +5,7 @@
+ #include <hash.h>
+ #include <key_io.h>
+ #include <logging.h>
++#include <node/types.h>
+ #include <outputtype.h>
+ #include <script/descriptor.h>
+ #include <script/script.h>
+@@ -20,6 +21,9 @@
+ 
+ #include <optional>
+ 
++using common::PSBTError;
++using util::ToString;
++
+ namespace wallet {
+ //! Value for the first BIP 32 hardened derivation. Can be used as a bit mask and as a value. See BIP 32 for more details.
+ const uint32_t BIP32_HARDENED_KEY_LIMIT = 0x80000000;
+@@ -627,7 +631,7 @@ SigningResult LegacyScriptPubKeyMan::SignMessage(const std::string& message, con
+     return SigningResult::SIGNING_FAILED;
+ }
+ 
+-TransactionError LegacyScriptPubKeyMan::FillPSBT(PartiallySignedTransaction& psbtx, const PrecomputedTransactionData& txdata, int sighash_type, bool sign, bool bip32derivs, int* n_signed, bool finalize) const
++std::optional<PSBTError> LegacyScriptPubKeyMan::FillPSBT(PartiallySignedTransaction& psbtx, const PrecomputedTransactionData& txdata, int sighash_type, bool sign, bool bip32derivs, int* n_signed, bool finalize) const
+ {
+     if (n_signed) {
+         *n_signed = 0;
+@@ -642,13 +646,13 @@ TransactionError LegacyScriptPubKeyMan::FillPSBT(PartiallySignedTransaction& psb
+ 
+         // Get the Sighash type
+         if (sign && input.sighash_type != std::nullopt && *input.sighash_type != sighash_type) {
+-            return TransactionError::SIGHASH_MISMATCH;
++            return PSBTError::SIGHASH_MISMATCH;
+         }
+ 
+         // Check non_witness_utxo has specified prevout
+         if (input.non_witness_utxo) {
+             if (txin.prevout.n >= input.non_witness_utxo->vout.size()) {
+-                return TransactionError::MISSING_INPUTS;
++                return PSBTError::MISSING_INPUTS;
+             }
+         } else if (input.witness_utxo.IsNull()) {
+             // There's no UTXO so we can just skip this now
+@@ -670,7 +674,7 @@ TransactionError LegacyScriptPubKeyMan::FillPSBT(PartiallySignedTransaction& psb
+         UpdatePSBTOutput(HidingSigningProvider(this, true, !bip32derivs), psbtx, i);
+     }
+ 
+-    return TransactionError::OK;
++    return {};
+ }
+ 
+ std::unique_ptr<CKeyMetadata> LegacyScriptPubKeyMan::GetMetadata(const CTxDestination& dest) const
+@@ -2485,7 +2489,7 @@ SigningResult DescriptorScriptPubKeyMan::SignMessage(const std::string& message,
+     return SigningResult::OK;
+ }
+ 
+-TransactionError DescriptorScriptPubKeyMan::FillPSBT(PartiallySignedTransaction& psbtx, const PrecomputedTransactionData& txdata, int sighash_type, bool sign, bool bip32derivs, int* n_signed, bool finalize) const
++std::optional<PSBTError> DescriptorScriptPubKeyMan::FillPSBT(PartiallySignedTransaction& psbtx, const PrecomputedTransactionData& txdata, int sighash_type, bool sign, bool bip32derivs, int* n_signed, bool finalize) const
+ {
+     if (n_signed) {
+         *n_signed = 0;
+@@ -2500,7 +2504,7 @@ TransactionError DescriptorScriptPubKeyMan::FillPSBT(PartiallySignedTransaction&
+ 
+         // Get the Sighash type
+         if (sign && input.sighash_type != std::nullopt && *input.sighash_type != sighash_type) {
+-            return TransactionError::SIGHASH_MISMATCH;
++            return PSBTError::SIGHASH_MISMATCH;
+         }
+ 
+         // Get the scriptPubKey to know which SigningProvider to use
+@@ -2509,7 +2513,7 @@ TransactionError DescriptorScriptPubKeyMan::FillPSBT(PartiallySignedTransaction&
+             script = input.witness_utxo.scriptPubKey;
+         } else if (input.non_witness_utxo) {
+             if (txin.prevout.n >= input.non_witness_utxo->vout.size()) {
+-                return TransactionError::MISSING_INPUTS;
++                return PSBTError::MISSING_INPUTS;
+             }
+             script = input.non_witness_utxo->vout[txin.prevout.n].scriptPubKey;
+         } else {
+@@ -2580,7 +2584,7 @@ TransactionError DescriptorScriptPubKeyMan::FillPSBT(PartiallySignedTransaction&
+         UpdatePSBTOutput(HidingSigningProvider(keys.get(), /*hide_secret=*/true, /*hide_origin=*/!bip32derivs), psbtx, i);
+     }
+ 
+-    return TransactionError::OK;
++    return {};
+ }
+ 
+ std::unique_ptr<CKeyMetadata> DescriptorScriptPubKeyMan::GetMetadata(const CTxDestination& dest) const
+diff --git a/src/wallet/scriptpubkeyman.h b/src/wallet/scriptpubkeyman.h
+index 2c1ab8d44ae4..4d9f7bb1face 100644
+--- a/src/wallet/scriptpubkeyman.h
++++ b/src/wallet/scriptpubkeyman.h
+@@ -6,13 +6,15 @@
+ #define BITCOIN_WALLET_SCRIPTPUBKEYMAN_H
+ 
+ #include <addresstype.h>
++#include <common/messages.h>
++#include <common/signmessage.h>
++#include <common/types.h>
+ #include <logging.h>
++#include <node/types.h>
+ #include <psbt.h>
+ #include <script/descriptor.h>
+ #include <script/script.h>
+ #include <script/signingprovider.h>
+-#include <util/error.h>
+-#include <util/message.h>
+ #include <util/result.h>
+ #include <util/time.h>
+ #include <wallet/crypter.h>
+@@ -243,7 +245,7 @@ class ScriptPubKeyMan
+     /** Sign a message with the given script */
+     virtual SigningResult SignMessage(const std::string& message, const PKHash& pkhash, std::string& str_sig) const { return SigningResult::SIGNING_FAILED; };
+     /** Adds script and derivation path information to a PSBT, and optionally signs it. */
+-    virtual TransactionError FillPSBT(PartiallySignedTransaction& psbt, const PrecomputedTransactionData& txdata, int sighash_type = SIGHASH_DEFAULT, bool sign = true, bool bip32derivs = false, int* n_signed = nullptr, bool finalize = true) const { return TransactionError::INVALID_PSBT; }
++    virtual std::optional<common::PSBTError> FillPSBT(PartiallySignedTransaction& psbt, const PrecomputedTransactionData& txdata, int sighash_type = SIGHASH_DEFAULT, bool sign = true, bool bip32derivs = false, int* n_signed = nullptr, bool finalize = true) const { return common::PSBTError::UNSUPPORTED; }
+ 
+     virtual uint256 GetID() const { return uint256(); }
+ 
+@@ -421,7 +423,7 @@ class LegacyScriptPubKeyMan : public ScriptPubKeyMan, public FillableSigningProv
+ 
+     bool SignTransaction(CMutableTransaction& tx, const std::map<COutPoint, Coin>& coins, int sighash, std::map<int, bilingual_str>& input_errors) const override;
+     SigningResult SignMessage(const std::string& message, const PKHash& pkhash, std::string& str_sig) const override;
+-    TransactionError FillPSBT(PartiallySignedTransaction& psbt, const PrecomputedTransactionData& txdata, int sighash_type = SIGHASH_DEFAULT, bool sign = true, bool bip32derivs = false, int* n_signed = nullptr, bool finalize = true) const override;
++    std::optional<common::PSBTError> FillPSBT(PartiallySignedTransaction& psbt, const PrecomputedTransactionData& txdata, int sighash_type = SIGHASH_DEFAULT, bool sign = true, bool bip32derivs = false, int* n_signed = nullptr, bool finalize = true) const override;
+ 
+     uint256 GetID() const override;
+ 
+@@ -651,7 +653,7 @@ class DescriptorScriptPubKeyMan : public ScriptPubKeyMan
+ 
+     bool SignTransaction(CMutableTransaction& tx, const std::map<COutPoint, Coin>& coins, int sighash, std::map<int, bilingual_str>& input_errors) const override;
+     SigningResult SignMessage(const std::string& message, const PKHash& pkhash, std::string& str_sig) const override;
+-    TransactionError FillPSBT(PartiallySignedTransaction& psbt, const PrecomputedTransactionData& txdata, int sighash_type = SIGHASH_DEFAULT, bool sign = true, bool bip32derivs = false, int* n_signed = nullptr, bool finalize = true) const override;
++    std::optional<common::PSBTError> FillPSBT(PartiallySignedTransaction& psbt, const PrecomputedTransactionData& txdata, int sighash_type = SIGHASH_DEFAULT, bool sign = true, bool bip32derivs = false, int* n_signed = nullptr, bool finalize = true) const override;
+ 
+     uint256 GetID() const override;
+ 
+diff --git a/src/wallet/spend.cpp b/src/wallet/spend.cpp
+index 7b86ad388dbc..4cbcfdb60f0c 100644
+--- a/src/wallet/spend.cpp
++++ b/src/wallet/spend.cpp
+@@ -4,10 +4,12 @@
+ 
+ #include <algorithm>
+ #include <common/args.h>
++#include <common/messages.h>
+ #include <common/system.h>
+ #include <consensus/amount.h>
+ #include <consensus/validation.h>
+ #include <interfaces/chain.h>
++#include <node/types.h>
+ #include <numeric>
+ #include <policy/policy.h>
+ #include <primitives/transaction.h>
+@@ -15,7 +17,6 @@
+ #include <script/signingprovider.h>
+ #include <script/solver.h>
+ #include <util/check.h>
+-#include <util/fees.h>
+ #include <util/moneystr.h>
+ #include <util/rbf.h>
+ #include <util/trace.h>
+@@ -29,7 +30,10 @@
+ 
+ #include <cmath>
+ 
++using common::StringForFeeReason;
++using common::TransactionErrorString;
+ using interfaces::FoundBlock;
++using node::TransactionError;
+ 
+ namespace wallet {
+ static constexpr size_t OUTPUT_GROUP_MAX_ENTRIES{100};
+diff --git a/src/wallet/test/psbt_wallet_tests.cpp b/src/wallet/test/psbt_wallet_tests.cpp
+index 9f533bf6edc3..b5a3b22c5446 100644
+--- a/src/wallet/test/psbt_wallet_tests.cpp
++++ b/src/wallet/test/psbt_wallet_tests.cpp
+@@ -3,6 +3,7 @@
+ // file COPYING or http://www.opensource.org/licenses/mit-license.php.
+ 
+ #include <key_io.h>
++#include <node/types.h>
+ #include <util/bip32.h>
+ #include <util/strencodings.h>
+ #include <wallet/wallet.h>
+@@ -60,7 +61,7 @@ BOOST_AUTO_TEST_CASE(psbt_updater_test)
+ 
+     // Fill transaction with our data
+     bool complete = true;
+-    BOOST_REQUIRE_EQUAL(TransactionError::OK, m_wallet.FillPSBT(psbtx, complete, SIGHASH_ALL, false, true));
++    BOOST_REQUIRE(!m_wallet.FillPSBT(psbtx, complete, SIGHASH_ALL, false, true));
+ 
+     // Get the final tx
+     DataStream ssTx{};
+@@ -73,7 +74,7 @@ BOOST_AUTO_TEST_CASE(psbt_updater_test)
+ 
+     // Try to sign the mutated input
+     SignatureData sigdata;
+-    BOOST_CHECK(m_wallet.FillPSBT(psbtx, complete, SIGHASH_ALL, true, true) != TransactionError::OK);
++    BOOST_CHECK(m_wallet.FillPSBT(psbtx, complete, SIGHASH_ALL, true, true));
+ }
+ 
+ BOOST_AUTO_TEST_CASE(parse_hd_keypath)
+diff --git a/src/wallet/transaction.h b/src/wallet/transaction.h
+index 9c27574103bd..9079f6dd82a6 100644
+--- a/src/wallet/transaction.h
++++ b/src/wallet/transaction.h
+@@ -273,7 +273,7 @@ class CWalletTx
+ 
+         mapValueCopy["fromaccount"] = "";
+         if (nOrderPos != -1) {
+-            mapValueCopy["n"] = ToString(nOrderPos);
++            mapValueCopy["n"] = util::ToString(nOrderPos);
+         }
+         if (nTimeSmart) {
+             mapValueCopy["timesmart"] = strprintf("%u", nTimeSmart);
+diff --git a/src/wallet/types.h b/src/wallet/types.h
+index 6198f1ae3307..7e3b2caeb196 100644
+--- a/src/wallet/types.h
++++ b/src/wallet/types.h
+@@ -3,12 +3,13 @@
+ // Distributed under the MIT software license, see the accompanying
+ // file COPYING or http://www.opensource.org/licenses/mit-license.php.
+ 
+-//! @file Public type definitions that are used inside and outside of the wallet
+-//! (e.g. by src/wallet and src/interfaces and src/qt code).
++//! @file wallet/types.h is a home for public enum and struct type definitions
++//! that are used by internally by wallet code, but also used externally by node
++//! or GUI code.
+ //!
+-//! File is home for simple enum and struct definitions that don't deserve
+-//! separate header files. More complicated wallet public types like
+-//! CCoinControl that are used externally can have separate headers.
++//! This file is intended to define only simple types that do not have external
++//! dependencies. More complicated public wallet types like CCoinControl should
++//! be defined in dedicated header files.
+ 
+ #ifndef BITCOIN_WALLET_TYPES_H
+ #define BITCOIN_WALLET_TYPES_H
+diff --git a/src/wallet/wallet.cpp b/src/wallet/wallet.cpp
+index 8a79cf730bb4..85cd67dab9fb 100644
+--- a/src/wallet/wallet.cpp
++++ b/src/wallet/wallet.cpp
+@@ -11,7 +11,9 @@
+ #include <chain.h>
+ #include <coins.h>
+ #include <common/args.h>
++#include <common/messages.h>
+ #include <common/settings.h>
++#include <common/signmessage.h>
+ #include <common/system.h>
+ #include <consensus/amount.h>
+ #include <consensus/consensus.h>
+@@ -25,6 +27,7 @@
+ #include <key.h>
+ #include <key_io.h>
+ #include <logging.h>
++#include <node/types.h>
+ #include <outputtype.h>
+ #include <policy/feerate.h>
+ #include <primitives/block.h>
+@@ -49,10 +52,8 @@
+ #include <uint256.h>
+ #include <univalue.h>
+ #include <util/check.h>
+-#include <util/error.h>
+ #include <util/fs.h>
+ #include <util/fs_helpers.h>
+-#include <util/message.h>
+ #include <util/moneystr.h>
+ #include <util/result.h>
+ #include <util/string.h>
+@@ -81,7 +82,12 @@
+ 
+ struct KeyOriginInfo;
+ 
++using common::AmountErrMsg;
++using common::AmountHighWarn;
++using common::PSBTError;
+ using interfaces::FoundBlock;
++using util::ReplaceAll;
++using util::ToString;
+ 
+ namespace wallet {
+ 
+@@ -2172,7 +2178,7 @@ bool CWallet::SignTransaction(CMutableTransaction& tx, const std::map<COutPoint,
+     return false;
+ }
+ 
+-TransactionError CWallet::FillPSBT(PartiallySignedTransaction& psbtx, bool& complete, int sighash_type, bool sign, bool bip32derivs, size_t * n_signed, bool finalize) const
++std::optional<PSBTError> CWallet::FillPSBT(PartiallySignedTransaction& psbtx, bool& complete, int sighash_type, bool sign, bool bip32derivs, size_t * n_signed, bool finalize) const
+ {
+     if (n_signed) {
+         *n_signed = 0;
+@@ -2205,9 +2211,9 @@ TransactionError CWallet::FillPSBT(PartiallySignedTransaction& psbtx, bool& comp
+     // Fill in information from ScriptPubKeyMans
+     for (ScriptPubKeyMan* spk_man : GetAllScriptPubKeyMans()) {
+         int n_signed_this_spkm = 0;
+-        TransactionError res = spk_man->FillPSBT(psbtx, txdata, sighash_type, sign, bip32derivs, &n_signed_this_spkm, finalize);
+-        if (res != TransactionError::OK) {
+-            return res;
++        const auto error{spk_man->FillPSBT(psbtx, txdata, sighash_type, sign, bip32derivs, &n_signed_this_spkm, finalize)};
++        if (error) {
++            return error;
+         }
+ 
+         if (n_signed) {
+@@ -2223,7 +2229,7 @@ TransactionError CWallet::FillPSBT(PartiallySignedTransaction& psbtx, bool& comp
+         complete &= PSBTInputSigned(input);
+     }
+ 
+-    return TransactionError::OK;
++    return {};
+ }
+ 
+ SigningResult CWallet::SignMessage(const std::string& message, const PKHash& pkhash, std::string& str_sig) const
+diff --git a/src/wallet/wallet.h b/src/wallet/wallet.h
+index 6a998fa39834..5bc888462f3a 100644
+--- a/src/wallet/wallet.h
++++ b/src/wallet/wallet.h
+@@ -58,7 +58,9 @@ class Coin;
+ class SigningProvider;
+ enum class MemPoolRemovalReason;
+ enum class SigningResult;
+-enum class TransactionError;
++namespace common {
++enum class PSBTError;
++} // namespace common
+ namespace interfaces {
+ class Wallet;
+ }
+@@ -659,7 +661,7 @@ class CWallet final : public WalletStorage, public interfaces::Chain::Notificati
+      * @param[in] finalize whether to create the final scriptSig or scriptWitness if possible
+      * return error
+      */
+-    TransactionError FillPSBT(PartiallySignedTransaction& psbtx,
++    std::optional<common::PSBTError> FillPSBT(PartiallySignedTransaction& psbtx,
+                   bool& complete,
+                   int sighash_type = SIGHASH_DEFAULT,
+                   bool sign = true,

@@ -1,0 +1,1567 @@
+diff --git a/contrib/hyperscan/regex_engines/test/integration_test.cc b/contrib/hyperscan/regex_engines/test/integration_test.cc
+index c2773bf7629ad..0745bd80d59a1 100644
+--- a/contrib/hyperscan/regex_engines/test/integration_test.cc
++++ b/contrib/hyperscan/regex_engines/test/integration_test.cc
+@@ -37,7 +37,7 @@ TEST_P(HyperscanRegexEngineIntegrationTest, Hyperscan) {
+   envoy::type::matcher::v3::RegexMatcher matcher;
+   *matcher.mutable_regex() = "^/asdf/.+";
+ 
+-  EXPECT_NO_THROW(Envoy::Regex::Utility::parseRegex(matcher));
++  EXPECT_NO_THROW(Envoy::Regex::Utility::parseRegex(matcher, test_server_->server().regexEngine()));
+ };
+ 
+ } // namespace Hyperscan
+diff --git a/source/common/common/regex.h b/source/common/common/regex.h
+index e64fcf90f2ece..c728d6d9cc29b 100644
+--- a/source/common/common/regex.h
++++ b/source/common/common/regex.h
+@@ -58,8 +58,6 @@ class GoogleReEngineFactory : public EngineFactory {
+ 
+ DECLARE_FACTORY(GoogleReEngineFactory);
+ 
+-using EngineSingleton = InjectableSingleton<Engine>;
+-
+ enum class Type { Re2, StdRegex };
+ 
+ /**
+@@ -67,19 +65,6 @@ enum class Type { Re2, StdRegex };
+  */
+ class Utility {
+ public:
+-  /**
+-   * Construct a compiled regex matcher from a match config.
+-   */
+-  template <class RegexMatcherType>
+-  static CompiledMatcherPtr parseRegex(const RegexMatcherType& matcher) {
+-    // Fallback deprecated engine type in regex matcher.
+-    if (matcher.has_google_re2()) {
+-      return std::make_unique<CompiledGoogleReMatcher>(matcher);
+-    }
+-
+-    return EngineSingleton::get().matcher(matcher.regex());
+-  }
+-
+   template <class RegexMatcherType>
+   static CompiledMatcherPtr parseRegex(const RegexMatcherType& matcher, Engine& engine) {
+     // Fallback deprecated engine type in regex matcher.
+diff --git a/source/common/http/async_client_impl.cc b/source/common/http/async_client_impl.cc
+index dd1e777032e7b..6c11aa691a593 100644
+--- a/source/common/http/async_client_impl.cc
++++ b/source/common/http/async_client_impl.cc
+@@ -102,8 +102,8 @@ AsyncStreamImpl::AsyncStreamImpl(AsyncClientImpl& parent, AsyncClient::StreamCal
+       retry_policy_(createRetryPolicy(parent, options, parent_.factory_context_)),
+       route_(std::make_shared<NullRouteImpl>(
+           parent_.cluster_->name(),
+-          retry_policy_ != nullptr ? *retry_policy_ : *options.parsed_retry_policy, options.timeout,
+-          options.hash_policy)),
++          retry_policy_ != nullptr ? *retry_policy_ : *options.parsed_retry_policy,
++          parent_.factory_context_.regexEngine(), options.timeout, options.hash_policy)),
+       account_(options.account_), buffer_limit_(options.buffer_limit_),
+       send_xff_(options.send_xff) {
+   stream_info_.dynamicMetadata().MergeFrom(options.metadata);
+diff --git a/source/common/http/hash_policy.cc b/source/common/http/hash_policy.cc
+index d107a33e6172a..3d8094147a596 100644
+--- a/source/common/http/hash_policy.cc
++++ b/source/common/http/hash_policy.cc
+@@ -28,11 +28,11 @@ class HashMethodImplBase : public HashPolicyImpl::HashMethod {
+ class HeaderHashMethod : public HashMethodImplBase {
+ public:
+   HeaderHashMethod(const envoy::config::route::v3::RouteAction::HashPolicy::Header& header,
+-                   bool terminal)
++                   bool terminal, Regex::Engine& regex_engine)
+       : HashMethodImplBase(terminal), header_name_(header.header_name()) {
+     if (header.has_regex_rewrite()) {
+       const auto& rewrite_spec = header.regex_rewrite();
+-      regex_rewrite_ = Regex::Utility::parseRegex(rewrite_spec.pattern());
++      regex_rewrite_ = Regex::Utility::parseRegex(rewrite_spec.pattern(), regex_engine);
+       regex_rewrite_substitution_ = rewrite_spec.substitution();
+     }
+   }
+@@ -176,14 +176,15 @@ class FilterStateHashMethod : public HashMethodImplBase {
+ };
+ 
+ HashPolicyImpl::HashPolicyImpl(
+-    absl::Span<const envoy::config::route::v3::RouteAction::HashPolicy* const> hash_policies) {
++    absl::Span<const envoy::config::route::v3::RouteAction::HashPolicy* const> hash_policies,
++    Regex::Engine& regex_engine) {
+ 
+   hash_impls_.reserve(hash_policies.size());
+   for (auto* hash_policy : hash_policies) {
+     switch (hash_policy->policy_specifier_case()) {
+     case envoy::config::route::v3::RouteAction::HashPolicy::PolicySpecifierCase::kHeader:
+       hash_impls_.emplace_back(
+-          new HeaderHashMethod(hash_policy->header(), hash_policy->terminal()));
++          new HeaderHashMethod(hash_policy->header(), hash_policy->terminal(), regex_engine));
+       break;
+     case envoy::config::route::v3::RouteAction::HashPolicy::PolicySpecifierCase::kCookie: {
+       absl::optional<std::chrono::seconds> ttl;
+diff --git a/source/common/http/hash_policy.h b/source/common/http/hash_policy.h
+index 20425a0f4d469..a3240bb6fc8f3 100644
+--- a/source/common/http/hash_policy.h
++++ b/source/common/http/hash_policy.h
+@@ -5,6 +5,11 @@
+ #include "envoy/stream_info/filter_state.h"
+ 
+ namespace Envoy {
++
++namespace Regex {
++class Engine;
++}
++
+ namespace Http {
+ 
+ /**
+@@ -13,7 +18,8 @@ namespace Http {
+ class HashPolicyImpl : public HashPolicy {
+ public:
+   explicit HashPolicyImpl(
+-      absl::Span<const envoy::config::route::v3::RouteAction::HashPolicy* const> hash_policy);
++      absl::Span<const envoy::config::route::v3::RouteAction::HashPolicy* const> hash_policy,
++      Regex::Engine& regex_engine);
+ 
+   // Http::HashPolicy
+   absl::optional<uint64_t>
+diff --git a/source/common/http/header_utility.cc b/source/common/http/header_utility.cc
+index 886511043d554..93d682efaa0fd 100644
+--- a/source/common/http/header_utility.cc
++++ b/source/common/http/header_utility.cc
+@@ -56,7 +56,7 @@ HeaderUtility::HeaderData::HeaderData(const envoy::config::route::v3::HeaderMatc
+     break;
+   case envoy::config::route::v3::HeaderMatcher::HeaderMatchSpecifierCase::kSafeRegexMatch:
+     header_match_type_ = HeaderMatchType::Regex;
+-    regex_ = Regex::Utility::parseRegex(config.safe_regex_match());
++    regex_ = Regex::Utility::parseRegex(config.safe_regex_match(), factory_context.regexEngine());
+     break;
+   case envoy::config::route::v3::HeaderMatcher::HeaderMatchSpecifierCase::kRangeMatch:
+     header_match_type_ = HeaderMatchType::Range;
+diff --git a/source/common/http/null_route_impl.h b/source/common/http/null_route_impl.h
+index d9c8f2a6fe408..d699611b53de6 100644
+--- a/source/common/http/null_route_impl.h
++++ b/source/common/http/null_route_impl.h
+@@ -91,10 +91,10 @@ struct RouteEntryImpl : public Router::RouteEntry {
+       const std::string& cluster_name, const absl::optional<std::chrono::milliseconds>& timeout,
+       const Protobuf::RepeatedPtrField<envoy::config::route::v3::RouteAction::HashPolicy>&
+           hash_policy,
+-      const Router::RetryPolicy& retry_policy)
++      const Router::RetryPolicy& retry_policy, Regex::Engine& regex_engine)
+       : retry_policy_(retry_policy), cluster_name_(cluster_name), timeout_(timeout) {
+     if (!hash_policy.empty()) {
+-      hash_policy_ = std::make_unique<HashPolicyImpl>(hash_policy);
++      hash_policy_ = std::make_unique<HashPolicyImpl>(hash_policy, regex_engine);
+     }
+   }
+ 
+@@ -212,10 +212,11 @@ struct RouteEntryImpl : public Router::RouteEntry {
+ 
+ struct NullRouteImpl : public Router::Route {
+   NullRouteImpl(const std::string cluster_name, const Router::RetryPolicy& retry_policy,
++                Regex::Engine& regex_engine,
+                 const absl::optional<std::chrono::milliseconds>& timeout = {},
+                 const Protobuf::RepeatedPtrField<envoy::config::route::v3::RouteAction::HashPolicy>&
+                     hash_policy = {})
+-      : route_entry_(cluster_name, timeout, hash_policy, retry_policy) {}
++      : route_entry_(cluster_name, timeout, hash_policy, retry_policy, regex_engine) {}
+ 
+   // Router::Route
+   const Router::DirectResponseEntry* directResponseEntry() const override { return nullptr; }
+diff --git a/source/common/router/config_impl.cc b/source/common/router/config_impl.cc
+index 5cb2c4ef15786..2223c16ea651d 100644
+--- a/source/common/router/config_impl.cc
++++ b/source/common/router/config_impl.cc
+@@ -204,7 +204,7 @@ getClusterSpecifierPluginByTheProto(const envoy::config::route::v3::ClusterSpeci
+ }
+ 
+ ::Envoy::Http::Utility::RedirectConfig
+-createRedirectConfig(const envoy::config::route::v3::Route& route) {
++createRedirectConfig(const envoy::config::route::v3::Route& route, Regex::Engine& regex_engine) {
+   ::Envoy::Http::Utility::RedirectConfig redirect_config{
+       route.redirect().scheme_redirect(),
+       route.redirect().host_redirect(),
+@@ -214,7 +214,7 @@ createRedirectConfig(const envoy::config::route::v3::Route& route) {
+       route.redirect().prefix_rewrite(),
+       route.redirect().has_regex_rewrite() ? route.redirect().regex_rewrite().substitution() : "",
+       route.redirect().has_regex_rewrite()
+-          ? Regex::Utility::parseRegex(route.redirect().regex_rewrite().pattern())
++          ? Regex::Utility::parseRegex(route.redirect().regex_rewrite().pattern(), regex_engine)
+           : nullptr,
+       route.redirect().path_redirect().find('?') != absl::string_view::npos,
+       route.redirect().https_redirect(),
+@@ -501,7 +501,8 @@ RouteEntryImplBase::RouteEntryImplBase(const CommonVirtualHostSharedPtr& vhost,
+                                     : absl::nullopt),
+       host_rewrite_path_regex_(
+           route.route().has_host_rewrite_path_regex()
+-              ? Regex::Utility::parseRegex(route.route().host_rewrite_path_regex().pattern())
++              ? Regex::Utility::parseRegex(route.route().host_rewrite_path_regex().pattern(),
++                                           factory_context.regexEngine())
+               : nullptr),
+       host_rewrite_path_regex_substitution_(
+           route.route().has_host_rewrite_path_regex()
+@@ -513,7 +514,7 @@ RouteEntryImplBase::RouteEntryImplBase(const CommonVirtualHostSharedPtr& vhost,
+       runtime_(loadRuntimeData(route.match())),
+       redirect_config_(route.has_redirect()
+                            ? std::make_unique<::Envoy::Http::Utility::RedirectConfig>(
+-                                 createRedirectConfig(route))
++                                 createRedirectConfig(route, factory_context.regexEngine()))
+                            : nullptr),
+       hedge_policy_(buildHedgePolicy(vhost->hedgePolicy(), route.route())),
+       retry_policy_(
+@@ -626,7 +627,8 @@ RouteEntryImplBase::RouteEntryImplBase(const CommonVirtualHostSharedPtr& vhost,
+   }
+ 
+   if (!route.route().hash_policy().empty()) {
+-    hash_policy_ = std::make_unique<Http::HashPolicyImpl>(route.route().hash_policy());
++    hash_policy_ = std::make_unique<Http::HashPolicyImpl>(route.route().hash_policy(),
++                                                          factory_context.regexEngine());
+   }
+ 
+   if (route.match().has_tls_context()) {
+@@ -703,7 +705,8 @@ RouteEntryImplBase::RouteEntryImplBase(const CommonVirtualHostSharedPtr& vhost,
+ 
+   if (route.route().has_regex_rewrite()) {
+     auto rewrite_spec = route.route().regex_rewrite();
+-    regex_rewrite_ = Regex::Utility::parseRegex(rewrite_spec.pattern());
++    regex_rewrite_ =
++        Regex::Utility::parseRegex(rewrite_spec.pattern(), factory_context.regexEngine());
+     regex_rewrite_substitution_ = rewrite_spec.substitution();
+   }
+ 
+diff --git a/source/extensions/filters/common/mutation_rules/mutation_rules.cc b/source/extensions/filters/common/mutation_rules/mutation_rules.cc
+index 7391e0f461cb9..bc66e5d23fac0 100644
+--- a/source/extensions/filters/common/mutation_rules/mutation_rules.cc
++++ b/source/extensions/filters/common/mutation_rules/mutation_rules.cc
+@@ -35,13 +35,14 @@ class ExtraRoutingHeaders {
+   absl::flat_hash_set<LowerCaseString> headers_;
+ };
+ 
+-Checker::Checker(const envoy::config::common::mutation_rules::v3::HeaderMutationRules& rules)
++Checker::Checker(const envoy::config::common::mutation_rules::v3::HeaderMutationRules& rules,
++                 Regex::Engine& regex_engine)
+     : rules_(rules) {
+   if (rules.has_allow_expression()) {
+-    allow_expression_ = Regex::Utility::parseRegex(rules.allow_expression());
++    allow_expression_ = Regex::Utility::parseRegex(rules.allow_expression(), regex_engine);
+   }
+   if (rules.has_disallow_expression()) {
+-    disallow_expression_ = Regex::Utility::parseRegex(rules.disallow_expression());
++    disallow_expression_ = Regex::Utility::parseRegex(rules.disallow_expression(), regex_engine);
+   }
+ }
+ 
+diff --git a/source/extensions/filters/common/mutation_rules/mutation_rules.h b/source/extensions/filters/common/mutation_rules/mutation_rules.h
+index 4cdcd6e6aa619..4cba9fb4345f9 100644
+--- a/source/extensions/filters/common/mutation_rules/mutation_rules.h
++++ b/source/extensions/filters/common/mutation_rules/mutation_rules.h
+@@ -31,7 +31,8 @@ class ExtraRoutingHeaders;
+ // the mutation rules expressed in the *HeaderMutationRules* proto.
+ class Checker {
+ public:
+-  explicit Checker(const envoy::config::common::mutation_rules::v3::HeaderMutationRules& rules);
++  explicit Checker(const envoy::config::common::mutation_rules::v3::HeaderMutationRules& rules,
++                   Regex::Engine& regex_engine);
+   // Return whether the current rules allow the named header to be modified or removed.
+   // The header name in question can include HTTP headers or internal headers
+   // that start with ":". The result will specify whether the attempt should
+diff --git a/source/extensions/filters/http/ext_proc/ext_proc.cc b/source/extensions/filters/http/ext_proc/ext_proc.cc
+index f2fe47e90070d..55a15f1b01010 100644
+--- a/source/extensions/filters/http/ext_proc/ext_proc.cc
++++ b/source/extensions/filters/http/ext_proc/ext_proc.cc
+@@ -154,11 +154,11 @@ void mergeHeaderValuesField(
+ // set of rules for that purpose.
+ class ImmediateMutationChecker {
+ public:
+-  ImmediateMutationChecker() {
++  ImmediateMutationChecker(Regex::Engine& regex_engine) {
+     HeaderMutationRules rules;
+     rules.mutable_allow_all_routing()->set_value(true);
+     rules.mutable_allow_envoy()->set_value(true);
+-    rule_checker_ = std::make_unique<Checker>(rules);
++    rule_checker_ = std::make_unique<Checker>(rules, regex_engine);
+   }
+ 
+   const Checker& checker() const { return *rule_checker_; }
+@@ -167,10 +167,6 @@ class ImmediateMutationChecker {
+   std::unique_ptr<Checker> rule_checker_;
+ };
+ 
+-const ImmediateMutationChecker& immediateResponseChecker() {
+-  CONSTRUCT_ON_FIRST_USE(ImmediateMutationChecker);
+-}
+-
+ ProcessingMode allDisabledMode() {
+   ProcessingMode pm;
+   pm.set_request_header_mode(ProcessingMode::SKIP);
+@@ -1069,9 +1065,9 @@ void Filter::sendImmediateResponse(const ImmediateResponse& response) {
+                                                          config().mutationChecker(),
+                                                          stats_.rejected_header_mutations_);
+       } else {
+-        mut_status = MutationUtils::applyHeaderMutations(response.headers(), headers, false,
+-                                                         immediateResponseChecker().checker(),
+-                                                         stats_.rejected_header_mutations_);
++        mut_status = MutationUtils::applyHeaderMutations(
++            response.headers(), headers, false, config().immediateMutationChecker().checker(),
++            stats_.rejected_header_mutations_);
+       }
+       if (!mut_status.ok()) {
+         ENVOY_LOG_EVERY_POW_2(error, "Immediate response mutations failed with {}",
+diff --git a/source/extensions/filters/http/ext_proc/ext_proc.h b/source/extensions/filters/http/ext_proc/ext_proc.h
+index 45fb789b6d7b0..e06c7edeae359 100644
+--- a/source/extensions/filters/http/ext_proc/ext_proc.h
++++ b/source/extensions/filters/http/ext_proc/ext_proc.h
+@@ -122,6 +122,27 @@ class ExtProcLoggingInfo : public Envoy::StreamInfo::FilterState::Object {
+   Upstream::HostDescriptionConstSharedPtr upstream_host_;
+ };
+ 
++// Changes to headers are normally tested against the MutationRules supplied
++// with configuration. When writing an immediate response message, however,
++// we want to support a more liberal set of rules so that filters can create
++// custom error messages, and we want to prevent the MutationRules in the
++// configuration from making that impossible. This is a fixed, permissive
++// set of rules for that purpose.
++class ImmediateMutationChecker {
++public:
++  ImmediateMutationChecker(Regex::Engine& regex_engine) {
++    envoy::config::common::mutation_rules::v3::HeaderMutationRules rules;
++    rules.mutable_allow_all_routing()->set_value(true);
++    rules.mutable_allow_envoy()->set_value(true);
++    rule_checker_ = std::make_unique<Filters::Common::MutationRules::Checker>(rules, regex_engine);
++  }
++
++  const Filters::Common::MutationRules::Checker& checker() const { return *rule_checker_; }
++
++private:
++  std::unique_ptr<Filters::Common::MutationRules::Checker> rule_checker_;
++};
++
+ class FilterConfig {
+ public:
+   FilterConfig(const envoy::extensions::filters::http::ext_proc::v3::ExternalProcessor& config,
+@@ -134,7 +155,8 @@ class FilterConfig {
+         disable_clear_route_cache_(config.disable_clear_route_cache()),
+         message_timeout_(message_timeout), max_message_timeout_ms_(max_message_timeout_ms),
+         stats_(generateStats(stats_prefix, config.stat_prefix(), scope)),
+-        processing_mode_(config.processing_mode()), mutation_checker_(config.mutation_rules()),
++        processing_mode_(config.processing_mode()),
++        mutation_checker_(config.mutation_rules(), context.regexEngine()),
+         filter_metadata_(config.filter_metadata()),
+         allow_mode_override_(config.allow_mode_override()),
+         disable_immediate_response_(config.disable_immediate_response()),
+@@ -151,7 +173,8 @@ class FilterConfig {
+             config.metadata_options().receiving_namespaces().untyped().begin(),
+             config.metadata_options().receiving_namespaces().untyped().end()),
+         expression_manager_(builder, context.localInfo(), config.request_attributes(),
+-                            config.response_attributes()) {}
++                            config.response_attributes()),
++        immediate_mutation_checker_(context.regexEngine()) {}
+ 
+   bool failureModeAllow() const { return failure_mode_allow_; }
+ 
+@@ -195,6 +218,10 @@ class FilterConfig {
+     return untyped_receiving_namespaces_;
+   }
+ 
++  const ImmediateMutationChecker& immediateMutationChecker() const {
++    return immediate_mutation_checker_;
++  }
++
+ private:
+   ExtProcFilterStats generateStats(const std::string& prefix,
+                                    const std::string& filter_stats_prefix, Stats::Scope& scope) {
+@@ -225,6 +252,8 @@ class FilterConfig {
+   const std::vector<std::string> untyped_receiving_namespaces_;
+ 
+   const ExpressionManager expression_manager_;
++
++  const ImmediateMutationChecker immediate_mutation_checker_;
+ };
+ 
+ using FilterConfigSharedPtr = std::shared_ptr<FilterConfig>;
+diff --git a/source/extensions/filters/http/header_to_metadata/config.cc b/source/extensions/filters/http/header_to_metadata/config.cc
+index 1412e662fbce6..a37f8bd558a23 100644
+--- a/source/extensions/filters/http/header_to_metadata/config.cc
++++ b/source/extensions/filters/http/header_to_metadata/config.cc
+@@ -16,8 +16,9 @@ namespace HeaderToMetadataFilter {
+ 
+ Http::FilterFactoryCb HeaderToMetadataConfig::createFilterFactoryFromProtoTyped(
+     const envoy::extensions::filters::http::header_to_metadata::v3::Config& proto_config,
+-    const std::string&, Server::Configuration::FactoryContext&) {
+-  ConfigSharedPtr filter_config(std::make_shared<Config>(proto_config));
++    const std::string&, Server::Configuration::FactoryContext& context) {
++  ConfigSharedPtr filter_config(
++      std::make_shared<Config>(proto_config, context.serverFactoryContext().regexEngine()));
+ 
+   return [filter_config](Http::FilterChainFactoryCallbacks& callbacks) -> void {
+     callbacks.addStreamFilter(
+@@ -28,8 +29,8 @@ Http::FilterFactoryCb HeaderToMetadataConfig::createFilterFactoryFromProtoTyped(
+ Router::RouteSpecificFilterConfigConstSharedPtr
+ HeaderToMetadataConfig::createRouteSpecificFilterConfigTyped(
+     const envoy::extensions::filters::http::header_to_metadata::v3::Config& config,
+-    Server::Configuration::ServerFactoryContext&, ProtobufMessage::ValidationVisitor&) {
+-  return std::make_shared<const Config>(config, true);
++    Server::Configuration::ServerFactoryContext& context, ProtobufMessage::ValidationVisitor&) {
++  return std::make_shared<const Config>(config, context.regexEngine(), true);
+ }
+ 
+ /**
+diff --git a/source/extensions/filters/http/header_to_metadata/header_to_metadata_filter.cc b/source/extensions/filters/http/header_to_metadata/header_to_metadata_filter.cc
+index b5030d4c89934..20fd82df09e74 100644
+--- a/source/extensions/filters/http/header_to_metadata/header_to_metadata_filter.cc
++++ b/source/extensions/filters/http/header_to_metadata/header_to_metadata_filter.cc
+@@ -40,7 +40,7 @@ absl::optional<std::string> CookieValueSelector::extract(Http::HeaderMap& map) c
+   return absl::nullopt;
+ }
+ 
+-Rule::Rule(const ProtoRule& rule) : rule_(rule) {
++Rule::Rule(const ProtoRule& rule, Regex::Engine& regex_engine) : rule_(rule) {
+   // Ensure only one of header and cookie is specified.
+   // TODO(radha13): remove this once we are on v4 and these fields are folded into a oneof.
+   if (!rule.cookie().empty() && !rule.header().empty()) {
+@@ -83,15 +83,15 @@ Rule::Rule(const ProtoRule& rule) : rule_(rule) {
+ 
+   if (rule.on_header_present().has_regex_value_rewrite()) {
+     const auto& rewrite_spec = rule.on_header_present().regex_value_rewrite();
+-    regex_rewrite_ = Regex::Utility::parseRegex(rewrite_spec.pattern());
++    regex_rewrite_ = Regex::Utility::parseRegex(rewrite_spec.pattern(), regex_engine);
+     regex_rewrite_substitution_ = rewrite_spec.substitution();
+   }
+ }
+ 
+ Config::Config(const envoy::extensions::filters::http::header_to_metadata::v3::Config config,
+-               const bool per_route) {
+-  request_set_ = Config::configToVector(config.request_rules(), request_rules_);
+-  response_set_ = Config::configToVector(config.response_rules(), response_rules_);
++               Regex::Engine& regex_engine, const bool per_route) {
++  request_set_ = Config::configToVector(config.request_rules(), request_rules_, regex_engine);
++  response_set_ = Config::configToVector(config.response_rules(), response_rules_, regex_engine);
+ 
+   // Note: empty configs are fine for the global config, which would be the case for enabling
+   //       the filter globally without rules and then applying them at the virtual host or
+@@ -103,15 +103,15 @@ Config::Config(const envoy::extensions::filters::http::header_to_metadata::v3::C
+   }
+ }
+ 
+-bool Config::configToVector(const ProtobufRepeatedRule& proto_rules,
+-                            HeaderToMetadataRules& vector) {
++bool Config::configToVector(const ProtobufRepeatedRule& proto_rules, HeaderToMetadataRules& vector,
++                            Regex::Engine& regex_engine) {
+   if (proto_rules.empty()) {
+     ENVOY_LOG(debug, "no rules provided");
+     return false;
+   }
+ 
+   for (const auto& entry : proto_rules) {
+-    vector.emplace_back(entry);
++    vector.emplace_back(entry, regex_engine);
+   }
+ 
+   return true;
+diff --git a/source/extensions/filters/http/header_to_metadata/header_to_metadata_filter.h b/source/extensions/filters/http/header_to_metadata/header_to_metadata_filter.h
+index a93714e1ee80c..dc6b40a63f707 100644
+--- a/source/extensions/filters/http/header_to_metadata/header_to_metadata_filter.h
++++ b/source/extensions/filters/http/header_to_metadata/header_to_metadata_filter.h
+@@ -70,7 +70,7 @@ class CookieValueSelector : public ValueSelector {
+ 
+ class Rule {
+ public:
+-  Rule(const ProtoRule& rule);
++  Rule(const ProtoRule& rule, Regex::Engine& regex_engine);
+   const ProtoRule& rule() const { return rule_; }
+   const Regex::CompiledMatcherPtr& regexRewrite() const { return regex_rewrite_; }
+   const std::string& regexSubstitution() const { return regex_rewrite_substitution_; }
+@@ -95,7 +95,7 @@ class Config : public ::Envoy::Router::RouteSpecificFilterConfig,
+                public Logger::Loggable<Logger::Id::config> {
+ public:
+   Config(const envoy::extensions::filters::http::header_to_metadata::v3::Config config,
+-         bool per_route = false);
++         Regex::Engine& regex_engine, bool per_route = false);
+ 
+   const HeaderToMetadataRules& requestRules() const { return request_rules_; }
+   const HeaderToMetadataRules& responseRules() const { return response_rules_; }
+@@ -115,7 +115,7 @@ class Config : public ::Envoy::Router::RouteSpecificFilterConfig,
+    *  @return true if any configuration data was added to the vector, false otherwise. Can be used
+    *          to validate whether the configuration was empty.
+    */
+-  static bool configToVector(const ProtobufRepeatedRule&, HeaderToMetadataRules&);
++  static bool configToVector(const ProtobufRepeatedRule&, HeaderToMetadataRules&, Regex::Engine&);
+ 
+   const std::string& decideNamespace(const std::string& nspace) const;
+ 
+diff --git a/source/extensions/filters/http/json_to_metadata/config.cc b/source/extensions/filters/http/json_to_metadata/config.cc
+index 3b9af089b073a..27cb568620229 100644
+--- a/source/extensions/filters/http/json_to_metadata/config.cc
++++ b/source/extensions/filters/http/json_to_metadata/config.cc
+@@ -16,8 +16,8 @@ JsonToMetadataConfig::JsonToMetadataConfig() : FactoryBase("envoy.filters.http.j
+ Http::FilterFactoryCb JsonToMetadataConfig::createFilterFactoryFromProtoTyped(
+     const envoy::extensions::filters::http::json_to_metadata::v3::JsonToMetadata& proto_config,
+     const std::string&, Server::Configuration::FactoryContext& context) {
+-  std::shared_ptr<FilterConfig> config =
+-      std::make_shared<FilterConfig>(proto_config, context.scope());
++  std::shared_ptr<FilterConfig> config = std::make_shared<FilterConfig>(
++      proto_config, context.scope(), context.serverFactoryContext().regexEngine());
+ 
+   return [config](Http::FilterChainFactoryCallbacks& callbacks) -> void {
+     callbacks.addStreamFilter(std::make_shared<Filter>(config));
+diff --git a/source/extensions/filters/http/json_to_metadata/filter.cc b/source/extensions/filters/http/json_to_metadata/filter.cc
+index fe24b2a622d1d..6d0bb33841a9b 100644
+--- a/source/extensions/filters/http/json_to_metadata/filter.cc
++++ b/source/extensions/filters/http/json_to_metadata/filter.cc
+@@ -74,10 +74,12 @@ absl::flat_hash_set<std::string> generateAllowContentTypes(
+ }
+ 
+ Regex::CompiledMatcherPtr generateAllowContentTypeRegexs(
+-    const envoy::type::matcher::v3::RegexMatcher& proto_allow_content_types_regex) {
++    const envoy::type::matcher::v3::RegexMatcher& proto_allow_content_types_regex,
++    Regex::Engine& regex_engine) {
+ 
+   Regex::CompiledMatcherPtr allow_content_types_regex;
+-  allow_content_types_regex = Regex::Utility::parseRegex(proto_allow_content_types_regex);
++  allow_content_types_regex =
++      Regex::Utility::parseRegex(proto_allow_content_types_regex, regex_engine);
+ 
+   return allow_content_types_regex;
+ }
+@@ -106,7 +108,7 @@ Rule::Rule(const ProtoRule& rule) : rule_(rule) {
+ 
+ FilterConfig::FilterConfig(
+     const envoy::extensions::filters::http::json_to_metadata::v3::JsonToMetadata& proto_config,
+-    Stats::Scope& scope)
++    Stats::Scope& scope, Regex::Engine& regex_engine)
+     : rqstats_{ALL_JSON_TO_METADATA_FILTER_STATS(
+           POOL_COUNTER_PREFIX(scope, "json_to_metadata.rq"))},
+       respstats_{
+@@ -122,12 +124,12 @@ FilterConfig::FilterConfig(
+       request_allow_content_types_regex_(
+           proto_config.request_rules().has_allow_content_types_regex()
+               ? generateAllowContentTypeRegexs(
+-                    proto_config.request_rules().allow_content_types_regex())
++                    proto_config.request_rules().allow_content_types_regex(), regex_engine)
+               : nullptr),
+       response_allow_content_types_regex_(
+           proto_config.response_rules().has_allow_content_types_regex()
+               ? generateAllowContentTypeRegexs(
+-                    proto_config.response_rules().allow_content_types_regex())
++                    proto_config.response_rules().allow_content_types_regex(), regex_engine)
+               : nullptr) {
+   if (request_rules_.empty() && response_rules_.empty()) {
+     throw EnvoyException("json_to_metadata_filter: Per filter configs must at least specify "
+diff --git a/source/extensions/filters/http/json_to_metadata/filter.h b/source/extensions/filters/http/json_to_metadata/filter.h
+index b7a50e5356e6c..55062f6c3571a 100644
+--- a/source/extensions/filters/http/json_to_metadata/filter.h
++++ b/source/extensions/filters/http/json_to_metadata/filter.h
+@@ -60,7 +60,7 @@ class FilterConfig {
+ public:
+   FilterConfig(
+       const envoy::extensions::filters::http::json_to_metadata::v3::JsonToMetadata& proto_config,
+-      Stats::Scope& scope);
++      Stats::Scope& scope, Regex::Engine& regex_engine);
+ 
+   JsonToMetadataStats& rqstats() { return rqstats_; }
+   JsonToMetadataStats& respstats() { return respstats_; }
+diff --git a/source/extensions/filters/network/thrift_proxy/filters/header_to_metadata/config.cc b/source/extensions/filters/network/thrift_proxy/filters/header_to_metadata/config.cc
+index f7fde92031706..12c67e5fc40bf 100644
+--- a/source/extensions/filters/network/thrift_proxy/filters/header_to_metadata/config.cc
++++ b/source/extensions/filters/network/thrift_proxy/filters/header_to_metadata/config.cc
+@@ -15,8 +15,9 @@ ThriftProxy::ThriftFilters::FilterFactoryCb
+ HeaderToMetadataFilterConfig::createFilterFactoryFromProtoTyped(
+     const envoy::extensions::filters::network::thrift_proxy::filters::header_to_metadata::v3::
+         HeaderToMetadata& proto_config,
+-    const std::string&, Server::Configuration::FactoryContext&) {
+-  ConfigSharedPtr filter_config(std::make_shared<Config>(proto_config));
++    const std::string&, Server::Configuration::FactoryContext& context) {
++  ConfigSharedPtr filter_config(
++      std::make_shared<Config>(proto_config, context.serverFactoryContext().regexEngine()));
+   return
+       [filter_config](ThriftProxy::ThriftFilters::FilterChainFactoryCallbacks& callbacks) -> void {
+         callbacks.addDecoderFilter(std::make_shared<HeaderToMetadataFilter>(filter_config));
+diff --git a/source/extensions/filters/network/thrift_proxy/filters/header_to_metadata/header_to_metadata_filter.cc b/source/extensions/filters/network/thrift_proxy/filters/header_to_metadata/header_to_metadata_filter.cc
+index 686547a795ec0..25dea82307f19 100644
+--- a/source/extensions/filters/network/thrift_proxy/filters/header_to_metadata/header_to_metadata_filter.cc
++++ b/source/extensions/filters/network/thrift_proxy/filters/header_to_metadata/header_to_metadata_filter.cc
+@@ -26,7 +26,7 @@ absl::optional<std::string> HeaderValueSelector::extract(Http::HeaderMap& map) c
+   return value;
+ }
+ 
+-Rule::Rule(const ProtoRule& rule) : rule_(rule) {
++Rule::Rule(const ProtoRule& rule, Regex::Engine& regex_engine) : rule_(rule) {
+   selector_ =
+       std::make_shared<HeaderValueSelector>(Http::LowerCaseString(rule.header()), rule.remove());
+ 
+@@ -44,15 +44,16 @@ Rule::Rule(const ProtoRule& rule) : rule_(rule) {
+ 
+   if (rule.has_on_present() && rule.on_present().has_regex_value_rewrite()) {
+     const auto& rewrite_spec = rule.on_present().regex_value_rewrite();
+-    regex_rewrite_ = Regex::Utility::parseRegex(rewrite_spec.pattern());
++    regex_rewrite_ = Regex::Utility::parseRegex(rewrite_spec.pattern(), regex_engine);
+     regex_rewrite_substitution_ = rewrite_spec.substitution();
+   }
+ }
+ 
+ Config::Config(const envoy::extensions::filters::network::thrift_proxy::filters::
+-                   header_to_metadata::v3::HeaderToMetadata& config) {
++                   header_to_metadata::v3::HeaderToMetadata& config,
++               Regex::Engine& regex_engine) {
+   for (const auto& entry : config.request_rules()) {
+-    request_rules_.emplace_back(entry);
++    request_rules_.emplace_back(entry, regex_engine);
+   }
+ }
+ 
+diff --git a/source/extensions/filters/network/thrift_proxy/filters/header_to_metadata/header_to_metadata_filter.h b/source/extensions/filters/network/thrift_proxy/filters/header_to_metadata/header_to_metadata_filter.h
+index 3578943d52fbd..1f5f3ac66fb2c 100644
+--- a/source/extensions/filters/network/thrift_proxy/filters/header_to_metadata/header_to_metadata_filter.h
++++ b/source/extensions/filters/network/thrift_proxy/filters/header_to_metadata/header_to_metadata_filter.h
+@@ -42,7 +42,7 @@ class HeaderValueSelector {
+ 
+ class Rule {
+ public:
+-  Rule(const ProtoRule& rule);
++  Rule(const ProtoRule& rule, Regex::Engine& regex_engine);
+   const ProtoRule& rule() const { return rule_; }
+   const Regex::CompiledMatcherPtr& regexRewrite() const { return regex_rewrite_; }
+   const std::string& regexSubstitution() const { return regex_rewrite_substitution_; }
+@@ -61,7 +61,8 @@ const uint32_t MAX_HEADER_VALUE_LEN = 8 * 1024;
+ class Config {
+ public:
+   Config(const envoy::extensions::filters::network::thrift_proxy::filters::header_to_metadata::v3::
+-             HeaderToMetadata& config);
++             HeaderToMetadata& config,
++         Regex::Engine& regex_engine);
+   const HeaderToMetadataRules& requestRules() const { return request_rules_; }
+ 
+ private:
+diff --git a/source/extensions/filters/network/thrift_proxy/filters/payload_to_metadata/config.cc b/source/extensions/filters/network/thrift_proxy/filters/payload_to_metadata/config.cc
+index cf211bef9e5bd..b5c5dc6d1e6ca 100644
+--- a/source/extensions/filters/network/thrift_proxy/filters/payload_to_metadata/config.cc
++++ b/source/extensions/filters/network/thrift_proxy/filters/payload_to_metadata/config.cc
+@@ -15,8 +15,9 @@ ThriftProxy::ThriftFilters::FilterFactoryCb
+ PayloadToMetadataFilterConfig::createFilterFactoryFromProtoTyped(
+     const envoy::extensions::filters::network::thrift_proxy::filters::payload_to_metadata::v3::
+         PayloadToMetadata& proto_config,
+-    const std::string&, Server::Configuration::FactoryContext&) {
+-  ConfigSharedPtr filter_config(std::make_shared<Config>(proto_config));
++    const std::string&, Server::Configuration::FactoryContext& context) {
++  ConfigSharedPtr filter_config(
++      std::make_shared<Config>(proto_config, context.serverFactoryContext().regexEngine()));
+   return
+       [filter_config](ThriftProxy::ThriftFilters::FilterChainFactoryCallbacks& callbacks) -> void {
+         callbacks.addDecoderFilter(std::make_shared<PayloadToMetadataFilter>(filter_config));
+diff --git a/source/extensions/filters/network/thrift_proxy/filters/payload_to_metadata/payload_to_metadata_filter.cc b/source/extensions/filters/network/thrift_proxy/filters/payload_to_metadata/payload_to_metadata_filter.cc
+index bb22658d10a12..8b8fbbb21fa1f 100644
+--- a/source/extensions/filters/network/thrift_proxy/filters/payload_to_metadata/payload_to_metadata_filter.cc
++++ b/source/extensions/filters/network/thrift_proxy/filters/payload_to_metadata/payload_to_metadata_filter.cc
+@@ -20,15 +20,17 @@ using FieldSelector = envoy::extensions::filters::network::thrift_proxy::filters
+     payload_to_metadata::v3::PayloadToMetadata::FieldSelector;
+ 
+ Config::Config(const envoy::extensions::filters::network::thrift_proxy::filters::
+-                   payload_to_metadata::v3::PayloadToMetadata& config) {
++                   payload_to_metadata::v3::PayloadToMetadata& config,
++               Regex::Engine& regex_engine) {
+   trie_root_ = std::make_shared<Trie>();
+   request_rules_.reserve(config.request_rules().size());
+   for (const auto& entry : config.request_rules()) {
+-    request_rules_.emplace_back(entry, static_cast<uint16_t>(request_rules_.size()), trie_root_);
++    request_rules_.emplace_back(entry, static_cast<uint16_t>(request_rules_.size()), trie_root_,
++                                regex_engine);
+   }
+ }
+ 
+-Rule::Rule(const ProtoRule& rule, uint16_t rule_id, TrieSharedPtr root)
++Rule::Rule(const ProtoRule& rule, uint16_t rule_id, TrieSharedPtr root, Regex::Engine& regex_engine)
+     : rule_(rule), rule_id_(rule_id) {
+   if (!rule_.has_on_present() && !rule_.has_on_missing()) {
+     throw EnvoyException("payload to metadata filter: neither `on_present` nor `on_missing` set");
+@@ -41,7 +43,7 @@ Rule::Rule(const ProtoRule& rule, uint16_t rule_id, TrieSharedPtr root)
+ 
+   if (rule_.has_on_present() && rule_.on_present().has_regex_value_rewrite()) {
+     const auto& rewrite_spec = rule_.on_present().regex_value_rewrite();
+-    regex_rewrite_ = Regex::Utility::parseRegex(rewrite_spec.pattern());
++    regex_rewrite_ = Regex::Utility::parseRegex(rewrite_spec.pattern(), regex_engine);
+     regex_rewrite_substitution_ = rewrite_spec.substitution();
+   }
+ 
+diff --git a/source/extensions/filters/network/thrift_proxy/filters/payload_to_metadata/payload_to_metadata_filter.h b/source/extensions/filters/network/thrift_proxy/filters/payload_to_metadata/payload_to_metadata_filter.h
+index ffd39ab87d74d..ee5532bb22169 100644
+--- a/source/extensions/filters/network/thrift_proxy/filters/payload_to_metadata/payload_to_metadata_filter.h
++++ b/source/extensions/filters/network/thrift_proxy/filters/payload_to_metadata/payload_to_metadata_filter.h
+@@ -32,7 +32,7 @@ using TrieSharedPtr = std::shared_ptr<Trie>;
+ 
+ class Rule {
+ public:
+-  Rule(const ProtoRule& rule, uint16_t rule_id, TrieSharedPtr root);
++  Rule(const ProtoRule& rule, uint16_t rule_id, TrieSharedPtr root, Regex::Engine& regex_engine);
+   const ProtoRule& rule() const { return rule_; }
+   const Regex::CompiledMatcherPtr& regexRewrite() const { return regex_rewrite_; }
+   const std::string& regexSubstitution() const { return regex_rewrite_substitution_; }
+@@ -66,7 +66,8 @@ struct Trie {
+ class Config {
+ public:
+   Config(const envoy::extensions::filters::network::thrift_proxy::filters::payload_to_metadata::v3::
+-             PayloadToMetadata& config);
++             PayloadToMetadata& config,
++         Regex::Engine& regex_engine);
+   const PayloadToMetadataRules& requestRules() const { return request_rules_; }
+   TrieSharedPtr trieRoot() const { return trie_root_; };
+ 
+diff --git a/source/server/admin/config_dump_handler.cc b/source/server/admin/config_dump_handler.cc
+index 6fefdc692ea9c..8cf59bad6620c 100644
+--- a/source/server/admin/config_dump_handler.cc
++++ b/source/server/admin/config_dump_handler.cc
+@@ -125,7 +125,7 @@ bool shouldIncludeEdsInDump(const Http::Utility::QueryParamsMulti& params) {
+ }
+ 
+ absl::StatusOr<Matchers::StringMatcherPtr>
+-buildNameMatcher(const Http::Utility::QueryParamsMulti& params) {
++buildNameMatcher(const Http::Utility::QueryParamsMulti& params, Regex::Engine& engine) {
+   const auto name_regex = params.getFirstValue("name_regex");
+   if (!name_regex.has_value() || name_regex->empty()) {
+     return std::make_unique<Matchers::UniversalStringMatcher>();
+@@ -134,7 +134,7 @@ buildNameMatcher(const Http::Utility::QueryParamsMulti& params) {
+   *matcher.mutable_google_re2() = envoy::type::matcher::v3::RegexMatcher::GoogleRE2();
+   matcher.set_regex(*name_regex);
+   TRY_ASSERT_MAIN_THREAD
+-  return Regex::Utility::parseRegex(matcher);
++  return Regex::Utility::parseRegex(matcher, engine);
+   END_TRY
+   catch (EnvoyException& e) {
+     return absl::InvalidArgumentError(
+@@ -154,7 +154,8 @@ Http::Code ConfigDumpHandler::handlerConfigDump(Http::ResponseHeaderMap& respons
+   const auto resource = query_params.getFirstValue("resource");
+   const auto mask = query_params.getFirstValue("mask");
+   const bool include_eds = shouldIncludeEdsInDump(query_params);
+-  const absl::StatusOr<Matchers::StringMatcherPtr> name_matcher = buildNameMatcher(query_params);
++  const absl::StatusOr<Matchers::StringMatcherPtr> name_matcher =
++      buildNameMatcher(query_params, server_.regexEngine());
+   if (!name_matcher.ok()) {
+     response.add(name_matcher.status().ToString());
+     response_headers.setReferenceContentType(Http::Headers::get().ContentTypeValues.Text);
+diff --git a/source/server/regex_engine.cc b/source/server/regex_engine.cc
+index 859f9d1e30c7e..50b568e0386cc 100644
+--- a/source/server/regex_engine.cc
++++ b/source/server/regex_engine.cc
+@@ -20,9 +20,6 @@ Regex::EnginePtr createRegexEngine(const envoy::config::bootstrap::v3::Bootstrap
+   } else {
+     regex_engine = std::make_shared<Regex::GoogleReEngine>();
+   }
+-  Regex::EngineSingleton::clear();
+-  Regex::EngineSingleton::initialize(regex_engine.get());
+-
+   return regex_engine;
+ }
+ 
+diff --git a/test/common/access_log/access_log_impl_test.cc b/test/common/access_log/access_log_impl_test.cc
+index 93784c157e8e7..9a96dc9c34a72 100644
+--- a/test/common/access_log/access_log_impl_test.cc
++++ b/test/common/access_log/access_log_impl_test.cc
+@@ -48,9 +48,7 @@ envoy::config::accesslog::v3::AccessLog parseAccessLogFromV3Yaml(const std::stri
+ 
+ class AccessLogImplTest : public Event::TestUsingSimulatedTime, public testing::Test {
+ public:
+-  AccessLogImplTest()
+-      : stream_info_(time_source_), file_(new MockAccessLogFile()),
+-        engine_(std::make_unique<Regex::GoogleReEngine>()) {
++  AccessLogImplTest() : stream_info_(time_source_), file_(new MockAccessLogFile()) {
+     ON_CALL(context_.server_factory_context_, runtime()).WillByDefault(ReturnRef(runtime_));
+     ON_CALL(context_.server_factory_context_, accessLogManager())
+         .WillByDefault(ReturnRef(log_manager_));
+@@ -73,7 +71,6 @@ class AccessLogImplTest : public Event::TestUsingSimulatedTime, public testing::
+   TestStreamInfo stream_info_;
+   std::shared_ptr<MockAccessLogFile> file_;
+   StringViewSaver output_;
+-  ScopedInjectableLoader<Regex::Engine> engine_;
+ 
+   NiceMock<Runtime::MockLoader> runtime_;
+   NiceMock<Envoy::AccessLog::MockAccessLogManager> log_manager_;
+diff --git a/test/common/common/regex_test.cc b/test/common/common/regex_test.cc
+index b44e67008a93d..cef510f732abb 100644
+--- a/test/common/common/regex_test.cc
++++ b/test/common/common/regex_test.cc
+@@ -14,12 +14,12 @@ namespace Regex {
+ namespace {
+ 
+ TEST(Utility, ParseRegex) {
+-  ScopedInjectableLoader<Regex::Engine> engine(std::make_unique<Regex::GoogleReEngine>());
++  Regex::GoogleReEngine engine;
+   {
+     envoy::type::matcher::v3::RegexMatcher matcher;
+     matcher.mutable_google_re2();
+     matcher.set_regex("(+invalid)");
+-    EXPECT_THROW_WITH_MESSAGE(Utility::parseRegex(matcher), EnvoyException,
++    EXPECT_THROW_WITH_MESSAGE(Utility::parseRegex(matcher, engine), EnvoyException,
+                               "no argument for repetition operator: +");
+   }
+ 
+@@ -28,7 +28,7 @@ TEST(Utility, ParseRegex) {
+     envoy::type::matcher::v3::RegexMatcher matcher;
+     matcher.mutable_google_re2();
+     matcher.set_regex("/asdf/.*");
+-    const auto compiled_matcher = Utility::parseRegex(matcher);
++    const auto compiled_matcher = Utility::parseRegex(matcher, engine);
+     const std::string long_string = "/asdf/" + std::string(50 * 1024, 'a');
+     EXPECT_TRUE(compiled_matcher->match(long_string));
+   }
+@@ -38,7 +38,7 @@ TEST(Utility, ParseRegex) {
+     envoy::type::matcher::v3::RegexMatcher matcher;
+     matcher.mutable_google_re2();
+     matcher.set_regex("/status/200(/.*)?$");
+-    const auto compiled_matcher = Utility::parseRegex(matcher);
++    const auto compiled_matcher = Utility::parseRegex(matcher, engine);
+     EXPECT_TRUE(compiled_matcher->match("/status/200"));
+     EXPECT_TRUE(compiled_matcher->match("/status/200/"));
+     EXPECT_TRUE(compiled_matcher->match("/status/200/foo"));
+@@ -51,7 +51,7 @@ TEST(Utility, ParseRegex) {
+     envoy::type::matcher::v3::RegexMatcher matcher;
+     matcher.set_regex("/asdf/.*");
+     matcher.mutable_google_re2();
+-    EXPECT_NO_THROW(Utility::parseRegex(matcher));
++    EXPECT_NO_THROW(Utility::parseRegex(matcher, engine));
+   }
+ 
+   // Positive case to ensure matcher can be created by config without google_re2 field.
+@@ -59,7 +59,7 @@ TEST(Utility, ParseRegex) {
+     TestScopedRuntime scoped_runtime;
+     envoy::type::matcher::v3::RegexMatcher matcher;
+     matcher.set_regex("/asdf/.*");
+-    EXPECT_NO_THROW(Utility::parseRegex(matcher));
++    EXPECT_NO_THROW(Utility::parseRegex(matcher, engine));
+   }
+ 
+   // Verify max program size with the deprecated field codepath plus runtime.
+@@ -71,10 +71,10 @@ TEST(Utility, ParseRegex) {
+     matcher.set_regex("/asdf/.*");
+     matcher.mutable_google_re2()->mutable_max_program_size()->set_value(1);
+ #ifndef GTEST_USES_SIMPLE_RE
+-    EXPECT_THROW_WITH_REGEX(Utility::parseRegex(matcher), EnvoyException,
++    EXPECT_THROW_WITH_REGEX(Utility::parseRegex(matcher, engine), EnvoyException,
+                             "RE2 program size of [0-9]+ > max program size of 1\\.");
+ #else
+-    EXPECT_THROW_WITH_REGEX(Utility::parseRegex(matcher), EnvoyException,
++    EXPECT_THROW_WITH_REGEX(Utility::parseRegex(matcher, engine), EnvoyException,
+                             "RE2 program size of \\d+ > max program size of 1\\.");
+ #endif
+   }
+@@ -88,11 +88,11 @@ TEST(Utility, ParseRegex) {
+     matcher.mutable_google_re2();
+ #ifndef GTEST_USES_SIMPLE_RE
+     EXPECT_THROW_WITH_REGEX(
+-        Utility::parseRegex(matcher), EnvoyException,
++        Utility::parseRegex(matcher, engine), EnvoyException,
+         "RE2 program size of [0-9]+ > max program size of 1 set for the error level threshold\\.");
+ #else
+     EXPECT_THROW_WITH_REGEX(
+-        Utility::parseRegex(matcher), EnvoyException,
++        Utility::parseRegex(matcher, engine), EnvoyException,
+         "RE2 program size of \\d+ > max program size of 1 set for the error level threshold\\.");
+ #endif
+   }
+@@ -105,12 +105,12 @@ TEST(Utility, ParseRegex) {
+         "/asdf/.*/asdf/.*/asdf/.*/asdf/.*/asdf/.*/asdf/.*/asdf/.*/asdf/.*/asdf/.*/asdf/.*");
+     matcher.mutable_google_re2();
+ #ifndef GTEST_USES_SIMPLE_RE
+-    EXPECT_THROW_WITH_REGEX(Utility::parseRegex(matcher), EnvoyException,
++    EXPECT_THROW_WITH_REGEX(Utility::parseRegex(matcher, engine), EnvoyException,
+                             "RE2 program size of [0-9]+ > max program size of 100 set for the "
+                             "error level threshold\\.");
+ #else
+     EXPECT_THROW_WITH_REGEX(
+-        Utility::parseRegex(matcher), EnvoyException,
++        Utility::parseRegex(matcher, engine), EnvoyException,
+         "RE2 program size of \\d+ > max program size of 100 set for the error level threshold\\.");
+ #endif
+   }
+@@ -122,9 +122,9 @@ TEST(Utility, ParseRegex) {
+     envoy::type::matcher::v3::RegexMatcher matcher;
+     matcher.set_regex("/asdf/.*");
+     matcher.mutable_google_re2();
+-    EXPECT_NO_THROW(Utility::parseRegex(matcher));
++    EXPECT_NO_THROW(Utility::parseRegex(matcher, engine));
+     EXPECT_LOG_CONTAINS("warn", "> max program size of 1 set for the warn level threshold",
+-                        Utility::parseRegex(matcher));
++                        Utility::parseRegex(matcher, engine));
+   }
+ 
+   // Verify that no check is performed if the warn level max program size is not set by runtime.
+@@ -133,8 +133,8 @@ TEST(Utility, ParseRegex) {
+     envoy::type::matcher::v3::RegexMatcher matcher;
+     matcher.set_regex("/asdf/.*");
+     matcher.mutable_google_re2();
+-    EXPECT_NO_THROW(Utility::parseRegex(matcher));
+-    EXPECT_LOG_NOT_CONTAINS("warn", "> max program size", Utility::parseRegex(matcher));
++    EXPECT_NO_THROW(Utility::parseRegex(matcher, engine));
++    EXPECT_LOG_NOT_CONTAINS("warn", "> max program size", Utility::parseRegex(matcher, engine));
+   }
+ }
+ 
+diff --git a/test/common/http/async_client_impl_test.cc b/test/common/http/async_client_impl_test.cc
+index efc466f27ef07..5f52b2980876e 100644
+--- a/test/common/http/async_client_impl_test.cc
++++ b/test/common/http/async_client_impl_test.cc
+@@ -1963,8 +1963,9 @@ TEST_F(AsyncClientImplTest, DumpState) {
+ class AsyncClientImplUnitTest : public AsyncClientImplTest {
+ public:
+   Router::RetryPolicyImpl retry_policy_;
++  Regex::GoogleReEngine regex_engine_;
+   std::unique_ptr<NullRouteImpl> route_impl_{new NullRouteImpl(
+-      client_.cluster_->name(), retry_policy_, absl::nullopt,
++      client_.cluster_->name(), retry_policy_, regex_engine_, absl::nullopt,
+       Protobuf::RepeatedPtrField<envoy::config::route::v3::RouteAction::HashPolicy>())};
+   std::unique_ptr<Http::AsyncStreamImpl> stream_{
+       new Http::AsyncStreamImpl(client_, stream_callbacks_, AsyncClient::StreamOptions())};
+diff --git a/test/common/router/config_impl_test.cc b/test/common/router/config_impl_test.cc
+index 22a22de713e02..bbc63cb1b34d3 100644
+--- a/test/common/router/config_impl_test.cc
++++ b/test/common/router/config_impl_test.cc
+@@ -166,8 +166,7 @@ parseRouteConfigurationFromYaml(const std::string& yaml) {
+ 
+ class ConfigImplTestBase {
+ protected:
+-  ConfigImplTestBase()
+-      : api_(Api::createApiForTest()), engine_(std::make_unique<Regex::GoogleReEngine>()) {
++  ConfigImplTestBase() : api_(Api::createApiForTest()) {
+     ON_CALL(factory_context_, api()).WillByDefault(ReturnRef(*api_));
+   }
+ 
+@@ -342,7 +341,6 @@ most_specific_header_mutations_wins: {0}
+   Api::ApiPtr api_;
+   NiceMock<Server::Configuration::MockServerFactoryContext> factory_context_;
+   Event::SimulatedTimeSystem test_time_;
+-  ScopedInjectableLoader<Regex::Engine> engine_;
+ };
+ 
+ class RouteMatcherTest : public testing::Test,
+diff --git a/test/common/router/route_fuzz_test.cc b/test/common/router/route_fuzz_test.cc
+index b4488b50ef7d5..af7fa112d5f62 100644
+--- a/test/common/router/route_fuzz_test.cc
++++ b/test/common/router/route_fuzz_test.cc
+@@ -139,7 +139,6 @@ bool validateConfig(const test::common::router::RouteTestCase& input) {
+ DEFINE_PROTO_FUZZER(const test::common::router::RouteTestCase& input) {
+   static NiceMock<Envoy::StreamInfo::MockStreamInfo> stream_info;
+   static NiceMock<Server::Configuration::MockServerFactoryContext> factory_context;
+-  static ScopedInjectableLoader<Regex::Engine> engine(std::make_unique<Regex::GoogleReEngine>());
+ 
+   try {
+     if (!validateConfig(input)) {
+diff --git a/test/common/upstream/health_checker_impl_test.cc b/test/common/upstream/health_checker_impl_test.cc
+index 71a4a7602da80..660407fd0338d 100644
+--- a/test/common/upstream/health_checker_impl_test.cc
++++ b/test/common/upstream/health_checker_impl_test.cc
+@@ -155,7 +155,7 @@ class HttpHealthCheckerImplTest : public Event::TestUsingSimulatedTime,
+       absl::node_hash_map<std::string,
+                           const envoy::config::endpoint::v3::Endpoint::HealthCheckConfig>;
+ 
+-  HttpHealthCheckerImplTest() : engine_(std::make_unique<Regex::GoogleReEngine>()) {}
++  HttpHealthCheckerImplTest() = default;
+ 
+   void allocHealthChecker(const std::string& yaml) {
+     health_checker_ = std::make_shared<TestHttpHealthCheckerImpl>(
+@@ -875,7 +875,6 @@ class HttpHealthCheckerImplTest : public Event::TestUsingSimulatedTime,
+   std::list<uint32_t> connection_index_{};
+   std::list<uint32_t> codec_index_{};
+   const HostWithHealthCheckMap health_checker_map_{};
+-  ScopedInjectableLoader<Regex::Engine> engine_;
+ };
+ 
+ TEST_F(HttpHealthCheckerImplTest, Success) {
+diff --git a/test/config_test/config_test.cc b/test/config_test/config_test.cc
+index 78b7969328fc1..bf12f5417c774 100644
+--- a/test/config_test/config_test.cc
++++ b/test/config_test/config_test.cc
+@@ -222,10 +222,6 @@ void testMerge() {
+ }
+ 
+ uint32_t run(const std::string& directory) {
+-  // In the default startup process, we will inject regex engine before initializing config.
+-  // While in the ConfigTest, these kind of bootstrap injections will not take place, so we must
+-  // register regex engine in advance.
+-  ScopedInjectableLoader<Regex::Engine> engine(std::make_unique<Regex::GoogleReEngine>());
+   uint32_t num_tested = 0;
+   Api::ApiPtr api = Api::createApiForTest();
+   for (const std::string& filename : TestUtility::listFiles(directory, false)) {
+diff --git a/test/extensions/filters/common/mutation_rules/mutation_rules_test.cc b/test/extensions/filters/common/mutation_rules/mutation_rules_test.cc
+index 099b8dedcdb0c..c5aa2944ad60d 100644
+--- a/test/extensions/filters/common/mutation_rules/mutation_rules_test.cc
++++ b/test/extensions/filters/common/mutation_rules/mutation_rules_test.cc
+@@ -26,12 +26,15 @@ struct MutationTestCase {
+   CheckResult special_result;
+ };
+ 
+-using EmptyRulesTest = testing::TestWithParam<MutationTestCase>;
++class EmptyRulesTest : public testing::TestWithParam<MutationTestCase> {
++public:
++  Regex::GoogleReEngine regex_engine_;
++};
+ 
+ TEST_P(EmptyRulesTest, TestDefaultConfig) {
+   const auto& test_case = GetParam();
+   HeaderMutationRules rules;
+-  Checker checker(rules);
++  Checker checker(rules, regex_engine_);
+   EXPECT_EQ(
+       checker.check(test_case.op, LowerCaseString(test_case.header_name), test_case.header_value),
+       test_case.default_result);
+@@ -41,7 +44,7 @@ TEST_P(EmptyRulesTest, TestDisallowAll) {
+   const auto& test_case = GetParam();
+   HeaderMutationRules rules;
+   rules.mutable_disallow_all()->set_value(true);
+-  Checker checker(rules);
++  Checker checker(rules, regex_engine_);
+   // With this config, no headers are allowed
+   EXPECT_EQ(
+       checker.check(test_case.op, LowerCaseString(test_case.header_name), test_case.header_value),
+@@ -53,7 +56,7 @@ TEST_P(EmptyRulesTest, TestDisallowAllAndFail) {
+   HeaderMutationRules rules;
+   rules.mutable_disallow_all()->set_value(true);
+   rules.mutable_disallow_is_error()->set_value(true);
+-  Checker checker(rules);
++  Checker checker(rules, regex_engine_);
+   // With this config, no headers are allowed
+   EXPECT_EQ(
+       checker.check(test_case.op, LowerCaseString(test_case.header_name), test_case.header_value),
+@@ -64,7 +67,7 @@ TEST_P(EmptyRulesTest, TestAllowRouting) {
+   const auto& test_case = GetParam();
+   HeaderMutationRules rules;
+   rules.mutable_allow_all_routing()->set_value(true);
+-  Checker checker(rules);
++  Checker checker(rules, regex_engine_);
+   EXPECT_EQ(
+       checker.check(test_case.op, LowerCaseString(test_case.header_name), test_case.header_value),
+       test_case.allow_routing_result);
+@@ -74,7 +77,7 @@ TEST_P(EmptyRulesTest, TestNoSystem) {
+   const auto& test_case = GetParam();
+   HeaderMutationRules rules;
+   rules.mutable_disallow_system()->set_value(true);
+-  Checker checker(rules);
++  Checker checker(rules, regex_engine_);
+   EXPECT_EQ(
+       checker.check(test_case.op, LowerCaseString(test_case.header_name), test_case.header_value),
+       test_case.no_system_result);
+@@ -84,7 +87,7 @@ TEST_P(EmptyRulesTest, TestAllowEnvoy) {
+   const auto& test_case = GetParam();
+   HeaderMutationRules rules;
+   rules.mutable_allow_envoy()->set_value(true);
+-  Checker checker(rules);
++  Checker checker(rules, regex_engine_);
+   EXPECT_EQ(
+       checker.check(test_case.op, LowerCaseString(test_case.header_name), test_case.header_value),
+       test_case.allow_envoy_result);
+@@ -97,7 +100,7 @@ TEST_P(EmptyRulesTest, TestSpecial) {
+   rules.mutable_disallow_expression()->set_regex("^x-special-one$");
+   rules.mutable_allow_expression()->mutable_google_re2();
+   rules.mutable_allow_expression()->set_regex("^x-special-two$");
+-  Checker checker(rules);
++  Checker checker(rules, regex_engine_);
+   EXPECT_EQ(
+       checker.check(test_case.op, LowerCaseString(test_case.header_name), test_case.header_value),
+       test_case.special_result);
+diff --git a/test/extensions/filters/http/ext_authz/ext_authz_fuzz_test.cc b/test/extensions/filters/http/ext_authz/ext_authz_fuzz_test.cc
+index 9b121b4e6626b..dd78fc896fe5a 100644
+--- a/test/extensions/filters/http/ext_authz/ext_authz_fuzz_test.cc
++++ b/test/extensions/filters/http/ext_authz/ext_authz_fuzz_test.cc
+@@ -85,7 +85,6 @@ DEFINE_PROTO_FUZZER(const envoy::extensions::filters::http::ext_authz::ExtAuthzT
+ 
+   static StatelessFuzzerMocks mocks;
+   NiceMock<Stats::MockIsolatedStatsStore> stats_store;
+-  static ScopedInjectableLoader<Regex::Engine> engine(std::make_unique<Regex::GoogleReEngine>());
+ 
+   // Prepare filter.
+   const envoy::extensions::filters::http::ext_authz::v3::ExtAuthz proto_config = input.config();
+diff --git a/test/extensions/filters/http/ext_proc/mutation_utils_test.cc b/test/extensions/filters/http/ext_proc/mutation_utils_test.cc
+index 4c4dc44bb1b16..c3876ce962337 100644
+--- a/test/extensions/filters/http/ext_proc/mutation_utils_test.cc
++++ b/test/extensions/filters/http/ext_proc/mutation_utils_test.cc
+@@ -23,7 +23,12 @@ using envoy::service::ext_proc::v3::BodyMutation;
+ using Filters::Common::MutationRules::Checker;
+ using Http::LowerCaseString;
+ 
+-TEST(MutationUtils, TestBuildHeaders) {
++class MutationUtilsTest : public ::testing::Test {
++public:
++  Regex::GoogleReEngine regex_engine_;
++};
++
++TEST_F(MutationUtilsTest, TestBuildHeaders) {
+   Http::TestRequestHeaderMapImpl headers{
+       {":method", "GET"},
+       {":path", "/foo/the/bar?size=123"},
+@@ -50,7 +55,7 @@ TEST(MutationUtils, TestBuildHeaders) {
+   EXPECT_THAT(proto_headers, HeaderProtosEqual(expected));
+ }
+ 
+-TEST(MutationUtils, TestApplyMutations) {
++TEST_F(MutationUtilsTest, TestApplyMutations) {
+   TestScopedRuntime scoped_runtime;
+   scoped_runtime.mergeValues({{"envoy.reloadable_features.send_header_raw_value", "false"}});
+   Http::TestRequestHeaderMapImpl headers{
+@@ -133,7 +138,7 @@ TEST(MutationUtils, TestApplyMutations) {
+   s->mutable_header()->set_value("100");
+ 
+   // Use the default mutation rules
+-  Checker checker(HeaderMutationRules::default_instance());
++  Checker checker(HeaderMutationRules::default_instance(), regex_engine_);
+   Envoy::Stats::MockCounter rejections;
+   EXPECT_CALL(rejections, inc()).Times(10);
+   // There were 10 attempts to change un-changeable headers above.
+@@ -159,7 +164,7 @@ TEST(MutationUtils, TestApplyMutations) {
+   EXPECT_THAT(&headers, HeaderMapEqualIgnoreOrder(&expected_headers));
+ }
+ 
+-TEST(MutationUtils, TestNonAppendableHeaders) {
++TEST_F(MutationUtilsTest, TestNonAppendableHeaders) {
+   TestScopedRuntime scoped_runtime;
+   scoped_runtime.mergeValues({{"envoy.reloadable_features.send_header_raw_value", "false"}});
+   Http::TestRequestHeaderMapImpl headers;
+@@ -183,7 +188,7 @@ TEST(MutationUtils, TestNonAppendableHeaders) {
+   s->mutable_header()->set_value("401");
+ 
+   // Use the default mutation rules
+-  Checker checker(HeaderMutationRules::default_instance());
++  Checker checker(HeaderMutationRules::default_instance(), regex_engine_);
+   // There were two invalid attempts above.
+   Envoy::Stats::MockCounter rejections;
+   EXPECT_CALL(rejections, inc()).Times(2);
+@@ -197,14 +202,14 @@ TEST(MutationUtils, TestNonAppendableHeaders) {
+   EXPECT_THAT(&headers, HeaderMapEqualIgnoreOrder(&expected_headers));
+ }
+ 
+-TEST(MutationUtils, TestSetHeaderWithInvalidCharacter) {
++TEST_F(MutationUtilsTest, TestSetHeaderWithInvalidCharacter) {
+   TestScopedRuntime scoped_runtime;
+   scoped_runtime.mergeValues({{"envoy.reloadable_features.send_header_raw_value", "false"}});
+   Http::TestRequestHeaderMapImpl headers{
+       {":method", "GET"},
+       {"host", "localhost:1000"},
+   };
+-  Checker checker(HeaderMutationRules::default_instance());
++  Checker checker(HeaderMutationRules::default_instance(), regex_engine_);
+   Envoy::Stats::MockCounter rejections;
+   envoy::service::ext_proc::v3::HeaderMutation mutation;
+   auto* s = mutation.add_set_headers();
+@@ -225,7 +230,7 @@ TEST(MutationUtils, TestSetHeaderWithInvalidCharacter) {
+       MutationUtils::applyHeaderMutations(mutation, headers, false, checker, rejections).ok());
+ }
+ 
+-TEST(MutationUtils, TestSetHeaderWithContentLength) {
++TEST_F(MutationUtilsTest, TestSetHeaderWithContentLength) {
+   TestScopedRuntime scoped_runtime;
+   scoped_runtime.mergeValues({{"envoy.reloadable_features.send_header_raw_value", "false"}});
+   Http::TestRequestHeaderMapImpl headers{
+@@ -235,7 +240,7 @@ TEST(MutationUtils, TestSetHeaderWithContentLength) {
+       {"host", "localhost:1000"},
+   };
+   // Use the default mutation rules
+-  Checker checker(HeaderMutationRules::default_instance());
++  Checker checker(HeaderMutationRules::default_instance(), regex_engine_);
+   Envoy::Stats::MockCounter rejections;
+   envoy::service::ext_proc::v3::HeaderMutation mutation;
+   auto* s = mutation.add_set_headers();
+@@ -256,14 +261,14 @@ TEST(MutationUtils, TestSetHeaderWithContentLength) {
+   EXPECT_EQ(headers.getContentLengthValue(), "10");
+ }
+ 
+-TEST(MutationUtils, TestRemoveHeaderWithInvalidCharacter) {
++TEST_F(MutationUtilsTest, TestRemoveHeaderWithInvalidCharacter) {
+   Http::TestRequestHeaderMapImpl headers{
+       {":method", "GET"},
+       {"host", "localhost:1000"},
+   };
+   envoy::service::ext_proc::v3::HeaderMutation mutation;
+   mutation.add_remove_headers("host\n");
+-  Checker checker(HeaderMutationRules::default_instance());
++  Checker checker(HeaderMutationRules::default_instance(), regex_engine_);
+   Envoy::Stats::MockCounter rejections;
+   EXPECT_CALL(rejections, inc());
+   EXPECT_FALSE(
+@@ -271,7 +276,7 @@ TEST(MutationUtils, TestRemoveHeaderWithInvalidCharacter) {
+ }
+ 
+ // Ensure that we actually replace the body
+-TEST(MutationUtils, TestBodyMutationReplace) {
++TEST_F(MutationUtilsTest, TestBodyMutationReplace) {
+   Buffer::OwnedImpl buf;
+   TestUtility::feedBufferWithRandomCharacters(buf, 100);
+   BodyMutation mut;
+@@ -282,7 +287,7 @@ TEST(MutationUtils, TestBodyMutationReplace) {
+ 
+ // If an empty string is included in the "body" field, we should
+ // replace the body with nothing
+-TEST(MutationUtils, TestBodyMutationReplaceEmpty) {
++TEST_F(MutationUtilsTest, TestBodyMutationReplaceEmpty) {
+   Buffer::OwnedImpl buf;
+   TestUtility::feedBufferWithRandomCharacters(buf, 100);
+   BodyMutation mut;
+@@ -292,7 +297,7 @@ TEST(MutationUtils, TestBodyMutationReplaceEmpty) {
+ }
+ 
+ // Clear the buffer if the "clear_buffer" flag is set
+-TEST(MutationUtils, TestBodyMutationClearYes) {
++TEST_F(MutationUtilsTest, TestBodyMutationClearYes) {
+   Buffer::OwnedImpl buf;
+   TestUtility::feedBufferWithRandomCharacters(buf, 100);
+   BodyMutation mut;
+@@ -303,7 +308,7 @@ TEST(MutationUtils, TestBodyMutationClearYes) {
+ 
+ // Don't clear the buffer if the "clear_buffer" flag is set to false,
+ // which is weird, but possible
+-TEST(MutationUtils, TestBodyMutationClearNo) {
++TEST_F(MutationUtilsTest, TestBodyMutationClearNo) {
+   Buffer::OwnedImpl buf;
+   TestUtility::feedBufferWithRandomCharacters(buf, 100);
+   Buffer::OwnedImpl bufCopy;
+@@ -316,7 +321,7 @@ TEST(MutationUtils, TestBodyMutationClearNo) {
+ 
+ // Nothing should happen if we don't set the proto oneof,
+ // which is weird, but possible
+-TEST(MutationUtils, TestBodyMutationNothing) {
++TEST_F(MutationUtilsTest, TestBodyMutationNothing) {
+   Buffer::OwnedImpl buf;
+   TestUtility::feedBufferWithRandomCharacters(buf, 100);
+   Buffer::OwnedImpl bufCopy;
+@@ -326,7 +331,7 @@ TEST(MutationUtils, TestBodyMutationNothing) {
+   EXPECT_TRUE(TestUtility::buffersEqual(buf, bufCopy));
+ }
+ 
+-TEST(MutationUtils, TestAllowHeadersExactCaseSensitive) {
++TEST_F(MutationUtilsTest, TestAllowHeadersExactCaseSensitive) {
+   Http::TestRequestHeaderMapImpl headers{
+       {":method", "GET"},
+       {":path", "/foo/the/bar?size=123"},
+@@ -354,7 +359,7 @@ TEST(MutationUtils, TestAllowHeadersExactCaseSensitive) {
+   EXPECT_THAT(proto_headers, HeaderProtosEqual(expected));
+ }
+ 
+-TEST(MutationUtils, TestAllowHeadersExactIgnoreCase) {
++TEST_F(MutationUtilsTest, TestAllowHeadersExactIgnoreCase) {
+   Http::TestRequestHeaderMapImpl headers{
+       {":method", "GET"},
+       {":path", "/foo/the/bar?size=123"},
+@@ -381,7 +386,7 @@ TEST(MutationUtils, TestAllowHeadersExactIgnoreCase) {
+   EXPECT_THAT(proto_headers, HeaderProtosEqual(expected));
+ }
+ 
+-TEST(MutationUtils, TestBothAllowAndDisallowHeadersSet) {
++TEST_F(MutationUtilsTest, TestBothAllowAndDisallowHeadersSet) {
+   Http::TestRequestHeaderMapImpl headers{
+       {":method", "GET"},
+       {":path", "/foo/the/bar?size=123"},
+@@ -417,7 +422,7 @@ TEST(MutationUtils, TestBothAllowAndDisallowHeadersSet) {
+   EXPECT_THAT(proto_headers, HeaderProtosEqual(expected));
+ }
+ 
+-TEST(MutationUtils, TestDisallowHeaderSetNotAllowHeader) {
++TEST_F(MutationUtilsTest, TestDisallowHeaderSetNotAllowHeader) {
+   Http::TestRequestHeaderMapImpl headers{
+       {":method", "GET"},
+       {":path", "/foo/the/bar?size=123"},
+diff --git a/test/extensions/filters/http/ext_proc/unit_test_fuzz/ext_proc_unit_test_fuzz.cc b/test/extensions/filters/http/ext_proc/unit_test_fuzz/ext_proc_unit_test_fuzz.cc
+index 2675fda20eeac..151ce2c09e522 100644
+--- a/test/extensions/filters/http/ext_proc/unit_test_fuzz/ext_proc_unit_test_fuzz.cc
++++ b/test/extensions/filters/http/ext_proc/unit_test_fuzz/ext_proc_unit_test_fuzz.cc
+@@ -77,11 +77,6 @@ DEFINE_PROTO_FUZZER(
+       input.config();
+   ExternalProcessing::FilterConfigSharedPtr config;
+ 
+-  // Create regex engine which is used by regex matcher code.
+-  Regex::EnginePtr regex_engine = std::make_shared<Regex::GoogleReEngine>();
+-  Regex::EngineSingleton::clear();
+-  Regex::EngineSingleton::initialize(regex_engine.get());
+-
+   try {
+     config = std::make_shared<ExternalProcessing::FilterConfig>(
+         proto_config, std::chrono::milliseconds(200), 200, *stats_store.rootScope(), "",
+diff --git a/test/extensions/filters/http/header_to_metadata/header_to_metadata_filter_test.cc b/test/extensions/filters/http/header_to_metadata/header_to_metadata_filter_test.cc
+index 5b16b93a6adda..d79af6c739a08 100644
+--- a/test/extensions/filters/http/header_to_metadata/header_to_metadata_filter_test.cc
++++ b/test/extensions/filters/http/header_to_metadata/header_to_metadata_filter_test.cc
+@@ -72,7 +72,7 @@ class HeaderToMetadataTest : public testing::Test {
+   void initializeFilter(const std::string& yaml) {
+     envoy::extensions::filters::http::header_to_metadata::v3::Config config;
+     TestUtility::loadFromYaml(yaml, config);
+-    config_ = std::make_shared<Config>(config);
++    config_ = std::make_shared<Config>(config, regex_engine_);
+     filter_ = std::make_shared<HeaderToMetadataFilter>(config_);
+     filter_->setDecoderFilterCallbacks(decoder_callbacks_);
+     filter_->setEncoderFilterCallbacks(encoder_callbacks_);
+@@ -80,6 +80,7 @@ class HeaderToMetadataTest : public testing::Test {
+ 
+   const Config* getConfig() { return filter_->getConfig(); }
+ 
++  Regex::GoogleReEngine regex_engine_;
+   ConfigSharedPtr config_;
+   std::shared_ptr<HeaderToMetadataFilter> filter_;
+   NiceMock<Http::MockStreamDecoderFilterCallbacks> decoder_callbacks_;
+@@ -134,7 +135,7 @@ TEST_F(HeaderToMetadataTest, PerRouteOverride) {
+   // Setup per route config.
+   envoy::extensions::filters::http::header_to_metadata::v3::Config config_proto;
+   TestUtility::loadFromYaml(request_config_yaml, config_proto);
+-  Config per_route_config(config_proto, true);
++  Config per_route_config(config_proto, regex_engine_, true);
+   EXPECT_CALL(*decoder_callbacks_.route_, mostSpecificPerFilterConfig(_))
+       .WillOnce(Return(&per_route_config));
+ 
+@@ -159,7 +160,7 @@ TEST_F(HeaderToMetadataTest, ConfigIsCached) {
+   // Setup per route config.
+   envoy::extensions::filters::http::header_to_metadata::v3::Config config_proto;
+   TestUtility::loadFromYaml(request_config_yaml, config_proto);
+-  Config per_route_config(config_proto, true);
++  Config per_route_config(config_proto, regex_engine_, true);
+   EXPECT_CALL(*decoder_callbacks_.route_, mostSpecificPerFilterConfig(_))
+       .WillOnce(Return(&per_route_config));
+ 
+@@ -454,7 +455,7 @@ TEST_F(HeaderToMetadataTest, RejectInvalidRule) {
+ 
+ TEST_F(HeaderToMetadataTest, PerRouteEmtpyRules) {
+   envoy::extensions::filters::http::header_to_metadata::v3::Config config_proto;
+-  EXPECT_THROW(std::make_shared<Config>(config_proto, true), EnvoyException);
++  EXPECT_THROW(std::make_shared<Config>(config_proto, regex_engine_, true), EnvoyException);
+ }
+ 
+ /**
+diff --git a/test/extensions/filters/http/json_to_metadata/filter_test.cc b/test/extensions/filters/http/json_to_metadata/filter_test.cc
+index 87a90f95c24a9..c6b977ba4b851 100644
+--- a/test/extensions/filters/http/json_to_metadata/filter_test.cc
++++ b/test/extensions/filters/http/json_to_metadata/filter_test.cc
+@@ -87,7 +87,7 @@ class FilterTest : public testing::Test {
+   void initializeFilter(const std::string& yaml) {
+     envoy::extensions::filters::http::json_to_metadata::v3::JsonToMetadata config;
+     TestUtility::loadFromYaml(yaml, config);
+-    config_ = std::make_shared<FilterConfig>(config, *scope_.rootScope());
++    config_ = std::make_shared<FilterConfig>(config, *scope_.rootScope(), regex_engine_);
+     filter_ = std::make_shared<Filter>(config_);
+     filter_->setDecoderFilterCallbacks(decoder_callbacks_);
+     filter_->setEncoderFilterCallbacks(encoder_callbacks_);
+@@ -131,6 +131,7 @@ class FilterTest : public testing::Test {
+     EXPECT_EQ(expected_result, filter_->encodeData(buffer_, end_stream));
+   }
+ 
++  Regex::GoogleReEngine regex_engine_;
+   NiceMock<Stats::MockIsolatedStatsStore> scope_;
+   NiceMock<Http::MockStreamDecoderFilterCallbacks> decoder_callbacks_;
+   NiceMock<Http::MockStreamEncoderFilterCallbacks> encoder_callbacks_;
+diff --git a/test/extensions/filters/http/jwt_authn/authenticator_test.cc b/test/extensions/filters/http/jwt_authn/authenticator_test.cc
+index 7adbf27588e06..40a2b1117efc3 100644
+--- a/test/extensions/filters/http/jwt_authn/authenticator_test.cc
++++ b/test/extensions/filters/http/jwt_authn/authenticator_test.cc
+@@ -104,7 +104,6 @@ class AuthenticatorTest : public testing::Test {
+ 
+ // Test authenticator constraints for subjects
+ TEST_F(AuthenticatorTest, TestSubject) {
+-  ScopedInjectableLoader<Regex::Engine> engine(std::make_unique<Regex::GoogleReEngine>());
+   TestUtility::loadFromYaml(SubjectConfig, proto_config_);
+ 
+   {
+diff --git a/test/extensions/filters/http/jwt_authn/jwks_cache_test.cc b/test/extensions/filters/http/jwt_authn/jwks_cache_test.cc
+index b1da3485a5f6d..0b77867363744 100644
+--- a/test/extensions/filters/http/jwt_authn/jwks_cache_test.cc
++++ b/test/extensions/filters/http/jwt_authn/jwks_cache_test.cc
+@@ -185,7 +185,6 @@ TEST_F(JwksCacheTest, TestAudiences) {
+ 
+ // Test subject constraints for JwtProvider
+ TEST_F(JwksCacheTest, TestSubjects) {
+-  ScopedInjectableLoader<Regex::Engine> engine(std::make_unique<Regex::GoogleReEngine>());
+   setupCache(SubjectConfig);
+ 
+   {
+@@ -225,7 +224,6 @@ TEST_F(JwksCacheTest, TestSubjects) {
+ 
+ // Test lifetime constraints for JwtProvider
+ TEST_F(JwksCacheTest, TestLifetime) {
+-  ScopedInjectableLoader<Regex::Engine> engine(std::make_unique<Regex::GoogleReEngine>());
+   setupCache(ExpirationConfig);
+ 
+   {
+diff --git a/test/extensions/filters/http/jwt_authn/jwt_authn_fuzz_test.cc b/test/extensions/filters/http/jwt_authn/jwt_authn_fuzz_test.cc
+index 926fbaacdd467..60d7b7ad5b4d0 100644
+--- a/test/extensions/filters/http/jwt_authn/jwt_authn_fuzz_test.cc
++++ b/test/extensions/filters/http/jwt_authn/jwt_authn_fuzz_test.cc
+@@ -71,9 +71,6 @@ class MockPerRouteConfig {
+ };
+ 
+ DEFINE_PROTO_FUZZER(const JwtAuthnFuzzInput& input) {
+-  // Regex matcher requires this engine init.
+-  ScopedInjectableLoader<Regex::Engine> engine(std::make_unique<Regex::GoogleReEngine>());
+-
+   try {
+     TestUtility::validate(input);
+   } catch (const EnvoyException& e) {
+diff --git a/test/extensions/filters/network/dubbo_proxy/conn_manager_test.cc b/test/extensions/filters/network/dubbo_proxy/conn_manager_test.cc
+index 917a0e404bde2..88c3ab12197eb 100644
+--- a/test/extensions/filters/network/dubbo_proxy/conn_manager_test.cc
++++ b/test/extensions/filters/network/dubbo_proxy/conn_manager_test.cc
+@@ -117,9 +117,7 @@ class TestConfigImpl : public ConfigImpl {
+ 
+ class ConnectionManagerTest : public testing::Test {
+ public:
+-  ConnectionManagerTest()
+-      : stats_(DubboFilterStats::generateStats("test.", *store_.rootScope())),
+-        engine_(std::make_unique<Regex::GoogleReEngine>()) {
++  ConnectionManagerTest() : stats_(DubboFilterStats::generateStats("test.", *store_.rootScope())) {
+ 
+     route_config_provider_manager_ = std::make_unique<Router::RouteConfigProviderManagerImpl>(
+         factory_context_.server_factory_context_.admin_);
+@@ -333,7 +331,6 @@ class ConnectionManagerTest : public testing::Test {
+   std::unique_ptr<ConnectionManager> conn_manager_;
+   MockSerializer* custom_serializer_{};
+   MockProtocol* custom_protocol_{};
+-  ScopedInjectableLoader<Regex::Engine> engine_;
+ };
+ 
+ TEST_F(ConnectionManagerTest, OnDataHandlesRequestTwoWay) {
+diff --git a/test/extensions/filters/network/dubbo_proxy/route_matcher_test.cc b/test/extensions/filters/network/dubbo_proxy/route_matcher_test.cc
+index df851cb03930c..f9c6460fa6db7 100644
+--- a/test/extensions/filters/network/dubbo_proxy/route_matcher_test.cc
++++ b/test/extensions/filters/network/dubbo_proxy/route_matcher_test.cc
+@@ -163,7 +163,6 @@ interface: "com.test.*"
+ }
+ 
+ TEST(DubboRouteMatcherTest, RouteByServiceNameWithAnyMethod) {
+-  ScopedInjectableLoader<Regex::Engine> engine(std::make_unique<Regex::GoogleReEngine>());
+   {
+     const std::string yaml = R"EOF(
+ name: local_route
+@@ -428,7 +427,6 @@ interface: org.apache.dubbo.demo.DemoService
+ }
+ 
+ TEST(DubboRouteMatcherTest, RouteByMethodWithRegexMatch) {
+-  ScopedInjectableLoader<Regex::Engine> engine(std::make_unique<Regex::GoogleReEngine>());
+   const std::string yaml = R"EOF(
+ name: local_route
+ interface: org.apache.dubbo.demo.DemoService
+diff --git a/test/extensions/filters/network/thrift_proxy/filters/header_to_metadata/header_to_metadata_filter_test.cc b/test/extensions/filters/network/thrift_proxy/filters/header_to_metadata/header_to_metadata_filter_test.cc
+index 1d0b1b0b718ae..29214e232c045 100644
+--- a/test/extensions/filters/network/thrift_proxy/filters/header_to_metadata/header_to_metadata_filter_test.cc
++++ b/test/extensions/filters/network/thrift_proxy/filters/header_to_metadata/header_to_metadata_filter_test.cc
+@@ -55,11 +55,12 @@ class HeaderToMetadataTest : public testing::Test {
+     envoy::extensions::filters::network::thrift_proxy::filters::header_to_metadata::v3::
+         HeaderToMetadata proto_config;
+     TestUtility::loadFromYaml(yaml, proto_config);
+-    const auto& filter_config = std::make_shared<Config>(proto_config);
++    const auto& filter_config = std::make_shared<Config>(proto_config, regex_engine_);
+     filter_ = std::make_shared<HeaderToMetadataFilter>(filter_config);
+     filter_->setDecoderFilterCallbacks(decoder_callbacks_);
+   }
+ 
++  Regex::GoogleReEngine regex_engine_;
+   NiceMock<ThriftProxy::ThriftFilters::MockDecoderFilterCallbacks> decoder_callbacks_;
+   NiceMock<Envoy::StreamInfo::MockStreamInfo> req_info_;
+   std::shared_ptr<HeaderToMetadataFilter> filter_;
+diff --git a/test/extensions/filters/network/thrift_proxy/filters/payload_to_metadata/payload_to_metadata_filter_test.cc b/test/extensions/filters/network/thrift_proxy/filters/payload_to_metadata/payload_to_metadata_filter_test.cc
+index b1adb0cc9a490..54ddca99d2d18 100644
+--- a/test/extensions/filters/network/thrift_proxy/filters/payload_to_metadata/payload_to_metadata_filter_test.cc
++++ b/test/extensions/filters/network/thrift_proxy/filters/payload_to_metadata/payload_to_metadata_filter_test.cc
+@@ -52,7 +52,7 @@ class PayloadToMetadataTest : public testing::Test,
+     envoy::extensions::filters::network::thrift_proxy::filters::payload_to_metadata::v3::
+         PayloadToMetadata proto_config;
+     TestUtility::loadFromYaml(yaml, proto_config);
+-    const auto& filter_config = std::make_shared<Config>(proto_config);
++    const auto& filter_config = std::make_shared<Config>(proto_config, regex_engine_);
+     if (malform_simulate) {
+       filter_config->trie_root_ = nullptr;
+     }
+@@ -268,6 +268,7 @@ class PayloadToMetadataTest : public testing::Test,
+     decoder->onData(buffer, underflow);
+   }
+ 
++  Regex::GoogleReEngine regex_engine_;
+   NiceMock<ThriftProxy::ThriftFilters::MockDecoderFilterCallbacks> decoder_callbacks_;
+   NiceMock<Envoy::StreamInfo::MockStreamInfo> req_info_;
+   std::shared_ptr<PayloadToMetadataFilter> filter_;
+diff --git a/test/extensions/filters/network/thrift_proxy/route_matcher_test.cc b/test/extensions/filters/network/thrift_proxy/route_matcher_test.cc
+index 2d89005bc9586..92d944aca0539 100644
+--- a/test/extensions/filters/network/thrift_proxy/route_matcher_test.cc
++++ b/test/extensions/filters/network/thrift_proxy/route_matcher_test.cc
+@@ -22,7 +22,7 @@ namespace {
+ 
+ class ThriftRouteMatcherTest : public testing::Test {
+ public:
+-  ThriftRouteMatcherTest() : engine_(std::make_unique<Regex::GoogleReEngine>()) {}
++  ThriftRouteMatcherTest() = default;
+ 
+ protected:
+   RouteMatcher createMatcher(
+@@ -38,8 +38,6 @@ class ThriftRouteMatcherTest : public testing::Test {
+   NiceMock<Server::Configuration::MockServerFactoryContext> context_;
+ 
+ private:
+-  ScopedInjectableLoader<Regex::Engine> engine_;
+-
+   envoy::extensions::filters::network::thrift_proxy::v3::RouteConfiguration
+   parseRouteConfigurationFromV3Yaml(const std::string& yaml) {
+     envoy::extensions::filters::network::thrift_proxy::v3::RouteConfiguration route_config;
+diff --git a/test/extensions/http/early_header_mutation/header_mutation/config_test.cc b/test/extensions/http/early_header_mutation/header_mutation/config_test.cc
+index 120a5f3bcddd7..4812abc5fb8e7 100644
+--- a/test/extensions/http/early_header_mutation/header_mutation/config_test.cc
++++ b/test/extensions/http/early_header_mutation/header_mutation/config_test.cc
+@@ -19,8 +19,6 @@ using ProtoHeaderMutation =
+     envoy::extensions::http::early_header_mutation::header_mutation::v3::HeaderMutation;
+ 
+ TEST(FactoryTest, FactoryTest) {
+-  ScopedInjectableLoader<Regex::Engine> engine{std::make_unique<Regex::GoogleReEngine>()};
+-
+   testing::NiceMock<Server::Configuration::MockFactoryContext> context;
+ 
+   auto* factory = Registry::FactoryRegistry<Envoy::Http::EarlyHeaderMutationFactory>::getFactory(
+diff --git a/test/extensions/http/early_header_mutation/header_mutation/header_mutation_integration_test.cc b/test/extensions/http/early_header_mutation/header_mutation/header_mutation_integration_test.cc
+index 8392cc07b1868..a2714078db35c 100644
+--- a/test/extensions/http/early_header_mutation/header_mutation/header_mutation_integration_test.cc
++++ b/test/extensions/http/early_header_mutation/header_mutation/header_mutation_integration_test.cc
+@@ -47,8 +47,6 @@ class HeaderMutationIntegrationTest : public testing::TestWithParam<Network::Add
+ 
+     HttpIntegrationTest::initialize();
+   }
+-
+-  ScopedInjectableLoader<Regex::Engine> engine_{std::make_unique<Regex::GoogleReEngine>()};
+ };
+ 
+ INSTANTIATE_TEST_SUITE_P(IpVersions, HeaderMutationIntegrationTest,
+diff --git a/test/integration/regex_engine_integration_test.cc b/test/integration/regex_engine_integration_test.cc
+index 181b6b17baa5a..91e92e5657eb9 100644
+--- a/test/integration/regex_engine_integration_test.cc
++++ b/test/integration/regex_engine_integration_test.cc
+@@ -44,7 +44,7 @@ TEST_P(RegexEngineIntegrationTest, GoogleRE2) {
+   envoy::type::matcher::v3::RegexMatcher matcher;
+   *matcher.mutable_regex() = ".*";
+ 
+-  EXPECT_NO_THROW(Regex::Utility::parseRegex(matcher));
++  EXPECT_NO_THROW(Regex::Utility::parseRegex(matcher, test_server_->server().regexEngine()));
+ };
+ 
+ } // namespace
+diff --git a/test/tools/router_check/router_check.cc b/test/tools/router_check/router_check.cc
+index b7ca69c878469..5ef66a7569dc9 100644
+--- a/test/tools/router_check/router_check.cc
++++ b/test/tools/router_check/router_check.cc
+@@ -23,8 +23,6 @@ bool hasFailures(
+ 
+ int main(int argc, char* argv[]) {
+   Envoy::Options options(argc, argv);
+-  Envoy::ScopedInjectableLoader<Envoy::Regex::Engine> engine(
+-      std::make_unique<Envoy::Regex::GoogleReEngine>());
+ 
+   const bool enforce_coverage = options.failUnder() != 0.0;
+   // We need this to ensure WSAStartup is called on Windows
+diff --git a/test/tools/router_check/test/router_test.cc b/test/tools/router_check/test/router_test.cc
+index 9040a0b674df2..4905ed78cca8c 100644
+--- a/test/tools/router_check/test/router_test.cc
++++ b/test/tools/router_check/test/router_test.cc
+@@ -14,7 +14,6 @@ namespace {
+ constexpr char kDir[] = "test/tools/router_check/test/config/";
+ 
+ TEST(RouterCheckTest, RouterCheckTestRoutesSuccessTest) {
+-  ScopedInjectableLoader<Regex::Engine> engine(std::make_unique<Regex::GoogleReEngine>());
+   const std::string config_filename_ =
+       TestEnvironment::runfilesPath(absl::StrCat(kDir, "TestRoutes.yaml"));
+   const std::string tests_filename_ =
+@@ -30,7 +29,6 @@ TEST(RouterCheckTest, RouterCheckTestRoutesSuccessTest) {
+ }
+ 
+ TEST(RouterCheckTest, RouterCheckTestRoutesSuccessShowOnlyFailuresTest) {
+-  ScopedInjectableLoader<Regex::Engine> engine(std::make_unique<Regex::GoogleReEngine>());
+   const std::string config_filename_ =
+       TestEnvironment::runfilesPath(absl::StrCat(kDir, "TestRoutes.yaml"));
+   const std::string tests_filename_ =
+@@ -43,7 +41,6 @@ TEST(RouterCheckTest, RouterCheckTestRoutesSuccessShowOnlyFailuresTest) {
+ }
+ 
+ TEST(RouterCheckTest, RouterCheckTestRoutesFailuresTest) {
+-  ScopedInjectableLoader<Regex::Engine> engine(std::make_unique<Regex::GoogleReEngine>());
+   const std::string config_filename_ =
+       TestEnvironment::runfilesPath(absl::StrCat(kDir, "TestRoutes.yaml"));
+   const std::string tests_filename_ =

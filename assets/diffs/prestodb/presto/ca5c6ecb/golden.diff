@@ -1,0 +1,3723 @@
+diff --git a/presto-hive/src/main/java/com/facebook/presto/hive/BytesHiveRecordCursor.java b/presto-hive/src/main/java/com/facebook/presto/hive/BytesHiveRecordCursor.java
+index 5d4f288526383..1640c63bc020d 100644
+--- a/presto-hive/src/main/java/com/facebook/presto/hive/BytesHiveRecordCursor.java
++++ b/presto-hive/src/main/java/com/facebook/presto/hive/BytesHiveRecordCursor.java
+@@ -53,11 +53,11 @@ class BytesHiveRecordCursor<K>
+     private final long totalBytes;
+     private long completedBytes;
+ 
+-    public BytesHiveRecordCursor(RecordReader<K, BytesRefArrayWritable> recordReader, long totalBytes, Properties chunkSchema, List<HivePartitionKey> partitionKeys, List<HiveColumnHandle> columns)
++    public BytesHiveRecordCursor(RecordReader<K, BytesRefArrayWritable> recordReader, long totalBytes, Properties splitSchema, List<HivePartitionKey> partitionKeys, List<HiveColumnHandle> columns)
+     {
+         Preconditions.checkNotNull(recordReader, "recordReader is null");
+         Preconditions.checkArgument(totalBytes >= 0, "totalBytes is negative");
+-        Preconditions.checkNotNull(chunkSchema, "chunkSchema is null");
++        Preconditions.checkNotNull(splitSchema, "splitSchema is null");
+         Preconditions.checkNotNull(partitionKeys, "partitionKeys is null");
+         Preconditions.checkNotNull(columns, "columns is null");
+         Preconditions.checkArgument(!columns.isEmpty(), "columns is empty");
+@@ -83,7 +83,7 @@ public BytesHiveRecordCursor(RecordReader<K, BytesRefArrayWritable> recordReader
+ 
+         // initialize data columns
+         try {
+-            Deserializer deserializer = MetaStoreUtils.getDeserializer(null, chunkSchema);
++            Deserializer deserializer = MetaStoreUtils.getDeserializer(null, splitSchema);
+             StructObjectInspector rowInspector = (StructObjectInspector) deserializer.getObjectInspector();
+ 
+             for (int i = 0; i < columns.size(); i++) {
+diff --git a/presto-hive/src/main/java/com/facebook/presto/hive/GenericHiveRecordCursor.java b/presto-hive/src/main/java/com/facebook/presto/hive/GenericHiveRecordCursor.java
+index 4cf03d0d628b8..1a796e1705803 100644
+--- a/presto-hive/src/main/java/com/facebook/presto/hive/GenericHiveRecordCursor.java
++++ b/presto-hive/src/main/java/com/facebook/presto/hive/GenericHiveRecordCursor.java
+@@ -55,11 +55,11 @@ class GenericHiveRecordCursor<K, V extends Writable>
+     private final long totalBytes;
+     private long completedBytes;
+ 
+-    public GenericHiveRecordCursor(RecordReader<K, V> recordReader, long totalBytes, Properties chunkSchema, List<HivePartitionKey> partitionKeys, List<HiveColumnHandle> columns)
++    public GenericHiveRecordCursor(RecordReader<K, V> recordReader, long totalBytes, Properties splitSchema, List<HivePartitionKey> partitionKeys, List<HiveColumnHandle> columns)
+     {
+         Preconditions.checkNotNull(recordReader, "recordReader is null");
+         Preconditions.checkArgument(totalBytes >= 0, "totalBytes is negative");
+-        Preconditions.checkNotNull(chunkSchema, "chunkSchema is null");
++        Preconditions.checkNotNull(splitSchema, "splitSchema is null");
+         Preconditions.checkNotNull(partitionKeys, "partitionKeys is null");
+         Preconditions.checkNotNull(columns, "columns is null");
+         Preconditions.checkArgument(!columns.isEmpty(), "columns is empty");
+@@ -70,7 +70,7 @@ public GenericHiveRecordCursor(RecordReader<K, V> recordReader, long totalBytes,
+         this.value = recordReader.createValue();
+ 
+         try {
+-            this.deserializer = MetaStoreUtils.getDeserializer(null, chunkSchema);
++            this.deserializer = MetaStoreUtils.getDeserializer(null, splitSchema);
+             this.rowInspector = (StructObjectInspector) deserializer.getObjectInspector();
+         }
+         catch (Exception e) {
+diff --git a/presto-hive/src/main/java/com/facebook/presto/hive/HiveChunkEncoder.java b/presto-hive/src/main/java/com/facebook/presto/hive/HiveChunkEncoder.java
+deleted file mode 100644
+index 34a38f0be25df..0000000000000
+--- a/presto-hive/src/main/java/com/facebook/presto/hive/HiveChunkEncoder.java
++++ /dev/null
+@@ -1,31 +0,0 @@
+-package com.facebook.presto.hive;
+-
+-import com.google.common.base.Preconditions;
+-import com.google.inject.Inject;
+-import io.airlift.json.JsonCodec;
+-
+-import javax.annotation.concurrent.ThreadSafe;
+-
+-import static com.google.common.base.Charsets.UTF_8;
+-
+-@ThreadSafe
+-class HiveChunkEncoder
+-{
+-    private final JsonCodec<HivePartitionChunk> partitionChunkCodec;
+-
+-    @Inject
+-    HiveChunkEncoder(JsonCodec<HivePartitionChunk> partitionChunkCodec)
+-    {
+-        this.partitionChunkCodec = Preconditions.checkNotNull(partitionChunkCodec, "partitionChunkCodec is null");
+-    }
+-
+-    byte[] serialize(HivePartitionChunk chunk)
+-    {
+-        return partitionChunkCodec.toJson(chunk).getBytes(UTF_8);
+-    }
+-
+-    HivePartitionChunk deserialize(byte[] bytes)
+-    {
+-        return partitionChunkCodec.fromJson(new String(bytes, UTF_8));
+-    }
+-}
+diff --git a/presto-hive/src/main/java/com/facebook/presto/hive/HiveClient.java b/presto-hive/src/main/java/com/facebook/presto/hive/HiveClient.java
+index 6d0a5031157bd..dd20433b94b01 100644
+--- a/presto-hive/src/main/java/com/facebook/presto/hive/HiveClient.java
++++ b/presto-hive/src/main/java/com/facebook/presto/hive/HiveClient.java
+@@ -6,14 +6,15 @@
+ import com.facebook.presto.hive.util.SuspendingExecutor;
+ import com.facebook.presto.spi.ColumnHandle;
+ import com.facebook.presto.spi.ColumnMetadata;
++import com.facebook.presto.spi.HostAddress;
+ import com.facebook.presto.spi.ImportClient;
+ import com.facebook.presto.spi.Partition;
+-import com.facebook.presto.spi.PartitionChunk;
+ import com.facebook.presto.spi.RecordSet;
+ import com.facebook.presto.spi.SchemaNotFoundException;
+ import com.facebook.presto.spi.SchemaTableMetadata;
+ import com.facebook.presto.spi.SchemaTableName;
+ import com.facebook.presto.spi.SchemaTablePrefix;
++import com.facebook.presto.spi.Split;
+ import com.facebook.presto.spi.TableHandle;
+ import com.facebook.presto.spi.TableNotFoundException;
+ import com.google.common.base.Function;
+@@ -59,8 +60,6 @@
+ import java.io.IOException;
+ import java.lang.reflect.InvocationTargetException;
+ import java.lang.reflect.Method;
+-import java.net.InetAddress;
+-import java.net.UnknownHostException;
+ import java.util.ArrayList;
+ import java.util.Collections;
+ import java.util.Iterator;
+@@ -82,7 +81,7 @@
+ import static com.facebook.presto.hive.HiveColumnHandle.columnMetadataGetter;
+ import static com.facebook.presto.hive.HiveColumnHandle.hiveColumnHandle;
+ import static com.facebook.presto.hive.HivePartition.UNPARTITIONED_ID;
+-import static com.facebook.presto.hive.HivePartitionChunk.makeLastChunk;
++import static com.facebook.presto.hive.HiveSplit.markAsLastSplit;
+ import static com.facebook.presto.hive.HiveType.getHiveType;
+ import static com.facebook.presto.hive.HiveUtil.convertNativeHiveType;
+ import static com.facebook.presto.hive.HiveUtil.getInputFormat;
+@@ -91,7 +90,6 @@
+ import static com.google.common.base.Preconditions.checkNotNull;
+ import static com.google.common.base.Preconditions.checkState;
+ import static com.google.common.collect.Iterables.concat;
+-import static com.google.common.collect.Iterables.partition;
+ import static com.google.common.collect.Iterables.transform;
+ 
+ @SuppressWarnings("deprecation")
+@@ -103,32 +101,29 @@ public class HiveClient
+     private static final Logger log = Logger.get(HiveClient.class);
+ 
+     private final String clientId;
+-    private final long maxChunkBytes;
+-    private final int maxOutstandingChunks;
+-    private final int maxChunkIteratorThreads;
++    private final long maxSplitBytes;
++    private final int maxOutstandingSplits;
++    private final int maxSplitIteratorThreads;
+     private final int partitionBatchSize;
+-    private final HiveChunkEncoder hiveChunkEncoder;
+     private final CachingHiveMetastore metastore;
+     private final HdfsEnvironment hdfsEnvironment;
+     private final ExecutorService executor;
+ 
+     public HiveClient(
+             String clientId,
+-            long maxChunkBytes,
+-            int maxOutstandingChunks,
+-            int maxChunkIteratorThreads,
++            long maxSplitBytes,
++            int maxOutstandingSplits,
++            int maxSplitIteratorThreads,
+             int partitionBatchSize,
+-            HiveChunkEncoder hiveChunkEncoder,
+             CachingHiveMetastore metastore,
+             HdfsEnvironment hdfsEnvironment,
+             ExecutorService executor)
+     {
+         this.clientId = checkNotNull(clientId, "clientId is null");
+-        this.maxChunkBytes = maxChunkBytes;
+-        this.maxOutstandingChunks = maxOutstandingChunks;
+-        this.maxChunkIteratorThreads = maxChunkIteratorThreads;
++        this.maxSplitBytes = maxSplitBytes;
++        this.maxOutstandingSplits = maxOutstandingSplits;
++        this.maxSplitIteratorThreads = maxSplitIteratorThreads;
+         this.partitionBatchSize = partitionBatchSize;
+-        this.hiveChunkEncoder = checkNotNull(hiveChunkEncoder, "hiveChunkEncoder is null");
+         this.metastore = checkNotNull(metastore, "metastore is null");
+         this.hdfsEnvironment = checkNotNull(hdfsEnvironment, "hdfsEnvironment is null");
+         this.executor = checkNotNull(executor, "executor is null");
+@@ -350,7 +345,7 @@ public List<Partition> getPartitions(TableHandle tableHandle, Map<ColumnHandle,
+     }
+ 
+     @Override
+-    public Iterable<PartitionChunk> getPartitionChunks(List<Partition> partitions)
++    public Iterable<Split> getPartitionSplits(List<Partition> partitions)
+     {
+         checkNotNull(partitions, "partitions is null");
+ 
+@@ -380,7 +375,7 @@ public String apply(Partition input)
+             throw new TableNotFoundException(tableName);
+         }
+ 
+-        return new PartitionChunkIterable(clientId, table, partitionNames, hivePartitions, maxChunkBytes, maxOutstandingChunks, maxChunkIteratorThreads, hdfsEnvironment, executor, partitionBatchSize);
++        return new HiveSplitIterable(clientId, table, partitionNames, hivePartitions, maxSplitBytes, maxOutstandingSplits, maxSplitIteratorThreads, hdfsEnvironment, executor, partitionBatchSize);
+     }
+ 
+     private Iterable<org.apache.hadoop.hive.metastore.api.Partition> getPartitions(final SchemaTableName tableName, final List<String> partitionNames)
+@@ -426,23 +421,14 @@ public List<org.apache.hadoop.hive.metastore.api.Partition> apply(List<String> p
+     }
+ 
+     @Override
+-    public RecordSet getRecords(PartitionChunk partitionChunk, List<? extends ColumnHandle> columns)
++    public RecordSet getRecords(Split split, List<? extends ColumnHandle> columns)
+     {
+-        checkArgument(partitionChunk instanceof HivePartitionChunk,
+-                "expected instance of %s: %s", HivePartitionChunk.class, partitionChunk.getClass());
+-        assert partitionChunk instanceof HivePartitionChunk; // IDEA-60343
++        checkArgument(split instanceof HiveSplit,
++                "expected instance of %s: %s", HiveSplit.class, split.getClass());
++        assert split instanceof HiveSplit; // IDEA-60343
+ 
+         List<HiveColumnHandle> hiveColumns = ImmutableList.copyOf(transform(columns, hiveColumnHandle()));
+-        return new HiveRecordSet(hdfsEnvironment, (HivePartitionChunk) partitionChunk, hiveColumns);
+-    }
+-
+-    @Override
+-    public byte[] serializePartitionChunk(PartitionChunk partitionChunk)
+-    {
+-        checkArgument(partitionChunk instanceof HivePartitionChunk,
+-                "expected instance of %s: %s", HivePartitionChunk.class, partitionChunk.getClass());
+-        assert partitionChunk instanceof HivePartitionChunk; // IDEA-60343
+-        return hiveChunkEncoder.serialize((HivePartitionChunk) partitionChunk);
++        return new HiveRecordSet(hdfsEnvironment, (HiveSplit) split, hiveColumns);
+     }
+ 
+     @Override
+@@ -457,6 +443,12 @@ public boolean canHandle(ColumnHandle columnHandle)
+         return columnHandle instanceof HiveColumnHandle && ((HiveColumnHandle) columnHandle).getClientId().equals(clientId);
+     }
+ 
++    @Override
++    public boolean canHandle(Split split)
++    {
++        return split instanceof HiveSplit && ((HiveSplit) split).getClientId().equals(clientId);
++    }
++
+     @Override
+     public Class<? extends TableHandle> getTableHandleClass()
+     {
+@@ -470,9 +462,9 @@ public Class<? extends ColumnHandle> getColumnHandleClass()
+     }
+ 
+     @Override
+-    public PartitionChunk deserializePartitionChunk(byte[] bytes)
++    public Class<? extends Split> getSplitClass()
+     {
+-        return hiveChunkEncoder.deserialize(bytes);
++        return HiveSplit.class;
+     }
+ 
+     @Override
+@@ -483,25 +475,19 @@ public String toString()
+                 .toString();
+     }
+ 
+-    private static class PartitionChunkIterable
+-            implements Iterable<PartitionChunk>
++    private static class HiveSplitIterable
++            implements Iterable<Split>
+     {
+-        private static final PartitionChunk FINISHED_MARKER = new PartitionChunk()
++        private static final Split FINISHED_MARKER = new Split()
+         {
+             @Override
+-            public String getPartitionName()
+-            {
+-                throw new UnsupportedOperationException();
+-            }
+-
+-            @Override
+-            public long getLength()
++            public boolean isRemotelyAccessible()
+             {
+                 throw new UnsupportedOperationException();
+             }
+ 
+             @Override
+-            public List<InetAddress> getHosts()
++            public List<HostAddress> getAddresses()
+             {
+                 throw new UnsupportedOperationException();
+             }
+@@ -511,32 +497,26 @@ public Object getInfo()
+             {
+                 throw new UnsupportedOperationException();
+             }
+-
+-            @Override
+-            public boolean isLastChunk()
+-            {
+-                throw new UnsupportedOperationException();
+-            }
+         };
+ 
+         private final String clientId;
+         private final Table table;
+         private final Iterable<String> partitionNames;
+         private final Iterable<org.apache.hadoop.hive.metastore.api.Partition> partitions;
+-        private final long maxChunkBytes;
+-        private final int maxOutstandingChunks;
++        private final long maxSplitBytes;
++        private final int maxOutstandingSplits;
+         private final int maxThreads;
+         private final HdfsEnvironment hdfsEnvironment;
+         private final ExecutorService executor;
+         private final ClassLoader classLoader;
+         private final int partitionBatchSize;
+ 
+-        private PartitionChunkIterable(String clientId,
++        private HiveSplitIterable(String clientId,
+                 Table table,
+                 Iterable<String> partitionNames,
+                 Iterable<org.apache.hadoop.hive.metastore.api.Partition> partitions,
+-                long maxChunkBytes,
+-                int maxOutstandingChunks,
++                long maxSplitBytes,
++                int maxOutstandingSplits,
+                 int maxThreads,
+                 HdfsEnvironment hdfsEnvironment,
+                 ExecutorService executor,
+@@ -547,8 +527,8 @@ private PartitionChunkIterable(String clientId,
+             this.partitionNames = partitionNames;
+             this.partitions = partitions;
+             this.partitionBatchSize = partitionBatchSize;
+-            this.maxChunkBytes = maxChunkBytes;
+-            this.maxOutstandingChunks = maxOutstandingChunks;
++            this.maxSplitBytes = maxSplitBytes;
++            this.maxOutstandingSplits = maxOutstandingSplits;
+             this.maxThreads = maxThreads;
+             this.hdfsEnvironment = hdfsEnvironment;
+             this.executor = executor;
+@@ -556,25 +536,25 @@ private PartitionChunkIterable(String clientId,
+         }
+ 
+         @Override
+-        public Iterator<PartitionChunk> iterator()
++        public Iterator<Split> iterator()
+         {
+             // Each iterator has its own bounded executor and can be independently suspended
+             final SuspendingExecutor suspendingExecutor = new SuspendingExecutor(new BoundedExecutor(executor, maxThreads));
+-            final PartitionChunkQueue partitionChunkQueue = new PartitionChunkQueue(maxOutstandingChunks, suspendingExecutor);
++            final HiveSplitQueue hiveSplitQueue = new HiveSplitQueue(maxOutstandingSplits, suspendingExecutor);
+             executor.submit(new Callable<Void>()
+             {
+                 @Override
+                 public Void call()
+                         throws Exception
+                 {
+-                    loadPartitionChunks(partitionChunkQueue, suspendingExecutor);
++                    loadPartitionSplits(hiveSplitQueue, suspendingExecutor);
+                     return null;
+                 }
+             });
+-            return partitionChunkQueue;
++            return hiveSplitQueue;
+         }
+ 
+-        private void loadPartitionChunks(final PartitionChunkQueue partitionChunkQueue, final SuspendingExecutor suspendingExecutor)
++        private void loadPartitionSplits(final HiveSplitQueue hiveSplitQueue, final SuspendingExecutor suspendingExecutor)
+                 throws InterruptedException
+         {
+             final Semaphore semaphore = new Semaphore(partitionBatchSize);
+@@ -592,7 +572,7 @@ private void loadPartitionChunks(final PartitionChunkQueue partitionChunkQueue,
+                     Path partitionPath = hdfsEnvironment.getFileSystemWrapper().wrap(new Path(getPartitionLocation(table, partition)));
+ 
+                     final FileSystem fs = partitionPath.getFileSystem(hdfsEnvironment.getConfiguration());
+-                    final PartitionChunkPoisoner chunkPoisoner = new PartitionChunkPoisoner(partitionChunkQueue);
++                    final LastSplitMarkingQueue markerQueue = new LastSplitMarkingQueue(hiveSplitQueue);
+ 
+                     if (inputFormat instanceof SymlinkTextInputFormat) {
+                         JobConf jobConf = new JobConf(hdfsEnvironment.getConfiguration());
+@@ -603,7 +583,8 @@ private void loadPartitionChunks(final PartitionChunkQueue partitionChunkQueue,
+ 
+                             // get the filesystem for the target path -- it may be a different hdfs instance
+                             FileSystem targetFilesystem = split.getPath().getFileSystem(hdfsEnvironment.getConfiguration());
+-                            chunkPoisoner.writeChunks(createHivePartitionChunks(partitionName, targetFilesystem.getFileStatus(split.getPath()),
++                            markerQueue.addToQueue(createHiveSplits(partitionName,
++                                    targetFilesystem.getFileStatus(split.getPath()),
+                                     split.getStart(),
+                                     split.getLength(),
+                                     schema,
+@@ -611,7 +592,7 @@ private void loadPartitionChunks(final PartitionChunkQueue partitionChunkQueue,
+                                     targetFilesystem,
+                                     false));
+                         }
+-                        chunkPoisoner.finish();
++                        markerQueue.finish();
+                         continue;
+                     }
+ 
+@@ -625,10 +606,10 @@ public void process(FileStatus file)
+                                         file.getPath().getFileSystem(hdfsEnvironment.getConfiguration()),
+                                         file.getPath());
+ 
+-                                chunkPoisoner.writeChunks(createHivePartitionChunks(partitionName, file, 0, file.getLen(), schema, partitionKeys, fs, splittable));
++                                markerQueue.addToQueue(createHiveSplits(partitionName, file, 0, file.getLen(), schema, partitionKeys, fs, splittable));
+                             }
+                             catch (IOException e) {
+-                                partitionChunkQueue.fail(e);
++                                hiveSplitQueue.fail(e);
+                             }
+                         }
+                     });
+@@ -639,14 +620,14 @@ public void process(FileStatus file)
+                         @Override
+                         public void onSuccess(Void result)
+                         {
+-                            chunkPoisoner.finish();
++                            markerQueue.finish();
+                             semaphore.release();
+                         }
+ 
+                         @Override
+                         public void onFailure(Throwable t)
+                         {
+-                            chunkPoisoner.finish();
++                            markerQueue.finish();
+                             semaphore.release();
+                         }
+                     });
+@@ -659,23 +640,23 @@ public void onFailure(Throwable t)
+                     @Override
+                     public void onSuccess(List<Void> result)
+                     {
+-                        partitionChunkQueue.finished();
++                        hiveSplitQueue.finished();
+                     }
+ 
+                     @Override
+                     public void onFailure(Throwable t)
+                     {
+-                        partitionChunkQueue.fail(t);
++                        hiveSplitQueue.fail(t);
+                     }
+                 });
+             }
+             catch (Throwable e) {
+-                partitionChunkQueue.fail(e);
++                hiveSplitQueue.fail(e);
+                 Throwables.propagateIfInstanceOf(e, Error.class);
+             }
+         }
+ 
+-        private List<HivePartitionChunk> createHivePartitionChunks(
++        private List<HiveSplit> createHiveSplits(
+                 String partitionName,
+                 FileStatus file,
+                 long start,
+@@ -688,73 +669,70 @@ private List<HivePartitionChunk> createHivePartitionChunks(
+         {
+             BlockLocation[] fileBlockLocations = fs.getFileBlockLocations(file, start, length);
+ 
+-            ImmutableList.Builder<HivePartitionChunk> builder = ImmutableList.builder();
++            ImmutableList.Builder<HiveSplit> builder = ImmutableList.builder();
+             if (splittable) {
+                 for (BlockLocation blockLocation : fileBlockLocations) {
+-                    builder.add(new HivePartitionChunk(clientId,
++                    builder.add(new HiveSplit(clientId,
+                             partitionName,
+                             false,
+-                            file.getPath(),
++                            file.getPath().toString(),
+                             blockLocation.getOffset(),
+                             blockLocation.getLength(),
+                             schema,
+                             partitionKeys,
+-                            toInetAddress(blockLocation.getHosts())));
++                            toHostAddress(blockLocation.getHosts())));
+                 }
+             } else {
+                 // not splittable, use the hosts from the first block
+-                builder.add(new HivePartitionChunk(clientId,
++                builder.add(new HiveSplit(clientId,
+                         partitionName,
+                         false,
+-                        file.getPath(),
++                        file.getPath().toString(),
+                         start,
+                         length,
+                         schema,
+                         partitionKeys,
+-                        toInetAddress(fileBlockLocations[0].getHosts())));
++                        toHostAddress(fileBlockLocations[0].getHosts())));
+             }
+             return builder.build();
+         }
+ 
+-        private List<InetAddress> toInetAddress(String[] hosts)
++        private List<HostAddress> toHostAddress(String[] hosts)
+         {
+-            ImmutableList.Builder<InetAddress> builder = ImmutableList.builder();
++            ImmutableList.Builder<HostAddress> builder = ImmutableList.builder();
+             for (String host : hosts) {
+-                try {
+-                    builder.add(InetAddress.getByName(host));
+-                }
+-                catch (UnknownHostException e) {
+-                }
++                builder.add(HostAddress.fromString(host));
+             }
+             return builder.build();
+         }
+ 
+         /**
+-         * Holds onto the last seen partition chunk for a given partition and
+-         * will "poison" it with an end marker when a partition is finished.
++         * Buffers a single split for a given partition and when the queue
++         * is finished, tags the final split so a reader of the stream can
++         * know when
+          */
+         @ThreadSafe
+-        private static class PartitionChunkPoisoner
++        private static class LastSplitMarkingQueue
+         {
+-            private final PartitionChunkQueue partitionChunkQueue;
++            private final HiveSplitQueue hiveSplitQueue;
+ 
+-            private final AtomicReference<HivePartitionChunk> chunkHolder = new AtomicReference<>();
++            private final AtomicReference<HiveSplit> bufferedSplit = new AtomicReference<>();
+             private final AtomicBoolean done = new AtomicBoolean();
+ 
+-            private PartitionChunkPoisoner(PartitionChunkQueue partitionChunkQueue)
++            private LastSplitMarkingQueue(HiveSplitQueue hiveSplitQueue)
+             {
+-                this.partitionChunkQueue = checkNotNull(partitionChunkQueue, "partitionChunkQueue is null");
++                this.hiveSplitQueue = checkNotNull(hiveSplitQueue, "split is null");
+             }
+ 
+-            public synchronized void writeChunks(Iterable<HivePartitionChunk> chunks)
++            public synchronized void addToQueue(Iterable<HiveSplit> splits)
+             {
+-                checkNotNull(chunks, "chunks is null");
++                checkNotNull(splits, "splits is null");
+                 checkState(!done.get(), "already done");
+ 
+-                for (HivePartitionChunk chunk : chunks) {
+-                    HivePartitionChunk previousChunk = chunkHolder.getAndSet(chunk);
+-                    if (previousChunk != null) {
+-                        partitionChunkQueue.addToQueue(previousChunk);
++                for (HiveSplit split : splits) {
++                    HiveSplit previousSplit = bufferedSplit.getAndSet(split);
++                    if (previousSplit != null) {
++                        hiveSplitQueue.addToQueue(previousSplit);
+                     }
+                 }
+             }
+@@ -762,32 +740,32 @@ public synchronized void writeChunks(Iterable<HivePartitionChunk> chunks)
+             private synchronized void finish()
+             {
+                 checkState(!done.getAndSet(true), "already done");
+-                HivePartitionChunk finalChunk = chunkHolder.getAndSet(null);
+-                if (finalChunk != null) {
+-                    partitionChunkQueue.addToQueue(makeLastChunk(finalChunk));
++                HiveSplit finalSplit = bufferedSplit.getAndSet(null);
++                if (finalSplit != null) {
++                    hiveSplitQueue.addToQueue(markAsLastSplit(finalSplit));
+                 }
+             }
+         }
+ 
+-        private static class PartitionChunkQueue
+-                extends AbstractIterator<PartitionChunk>
++        private static class HiveSplitQueue
++                extends AbstractIterator<Split>
+         {
+-            private final BlockingQueue<PartitionChunk> queue = new LinkedBlockingQueue<>();
+-            private final AtomicInteger outstandingChunkCount = new AtomicInteger();
++            private final BlockingQueue<Split> queue = new LinkedBlockingQueue<>();
++            private final AtomicInteger outstandingSplitCount = new AtomicInteger();
+             private final AtomicReference<Throwable> throwable = new AtomicReference<>();
+-            private final int maxOutstandingChunks;
++            private final int maxOutstandingSplits;
+             private final SuspendingExecutor suspendingExecutor;
+ 
+-            private PartitionChunkQueue(int maxOutstandingChunks, SuspendingExecutor suspendingExecutor)
++            private HiveSplitQueue(int maxOutstandingSplits, SuspendingExecutor suspendingExecutor)
+             {
+-                this.maxOutstandingChunks = maxOutstandingChunks;
++                this.maxOutstandingSplits = maxOutstandingSplits;
+                 this.suspendingExecutor = suspendingExecutor;
+             }
+ 
+-            private void addToQueue(PartitionChunk chunk)
++            private void addToQueue(Split split)
+             {
+-                queue.add(chunk);
+-                if (outstandingChunkCount.incrementAndGet() == maxOutstandingChunks) {
++                queue.add(split);
++                if (outstandingSplitCount.incrementAndGet() == maxOutstandingSplits) {
+                     suspendingExecutor.suspend();
+                 }
+             }
+@@ -804,20 +782,21 @@ private void fail(Throwable e)
+             }
+ 
+             @Override
+-            protected PartitionChunk computeNext()
++            protected Split computeNext()
+             {
+                 try {
+-                    PartitionChunk chunk = queue.take();
+-                    if (chunk == FINISHED_MARKER) {
++                    Split split = queue.take();
++                    if (split == FINISHED_MARKER) {
+                         if (throwable.get() != null) {
+                             throw Throwables.propagate(throwable.get());
+                         }
++
+                         return endOfData();
+                     }
+-                    if (outstandingChunkCount.getAndDecrement() == maxOutstandingChunks) {
++                    if (outstandingSplitCount.getAndDecrement() == maxOutstandingSplits) {
+                         suspendingExecutor.resume();
+                     }
+-                    return chunk;
++                    return split;
+                 }
+                 catch (InterruptedException e) {
+                     Thread.currentThread().interrupt();
+diff --git a/presto-hive/src/main/java/com/facebook/presto/hive/HiveClientConfig.java b/presto-hive/src/main/java/com/facebook/presto/hive/HiveClientConfig.java
+index 2f4d136a8d142..09597af79d4c9 100644
+--- a/presto-hive/src/main/java/com/facebook/presto/hive/HiveClientConfig.java
++++ b/presto-hive/src/main/java/com/facebook/presto/hive/HiveClientConfig.java
+@@ -5,6 +5,7 @@
+ 
+ import com.google.common.net.HostAndPort;
+ import io.airlift.configuration.Config;
++import io.airlift.configuration.LegacyConfig;
+ import io.airlift.units.DataSize;
+ import io.airlift.units.DataSize.Unit;
+ import io.airlift.units.Duration;
+@@ -17,9 +18,9 @@
+ 
+ public class HiveClientConfig
+ {
+-    private DataSize maxChunkSize = new DataSize(1, Unit.GIGABYTE);
+-    private int maxOutstandingChunks = 10_000;
+-    private int maxChunkIteratorThreads = 50;
++    private DataSize maxSplitSize = new DataSize(1, Unit.GIGABYTE);
++    private int maxOutstandingSplits = 10_000;
++    private int maxSplitIteratorThreads = 50;
+     private int partitionBatchSize = 500;
+     private Duration metastoreCacheTtl = new Duration(1, TimeUnit.HOURS);
+     private HostAndPort metastoreSocksProxy;
+@@ -39,41 +40,44 @@ public class HiveClientConfig
+     private int slowStreamPercentile = 5;
+ 
+     @NotNull
+-    public DataSize getMaxChunkSize()
++    public DataSize getMaxSplitSize()
+     {
+-        return maxChunkSize;
++        return maxSplitSize;
+     }
+ 
+-    @Config("hive.max-chunk-size")
+-    public HiveClientConfig setMaxChunkSize(DataSize maxChunkSize)
++    @Config("hive.max-split-size")
++    @LegacyConfig("hive.max-chunk-size")
++    public HiveClientConfig setMaxSplitSize(DataSize maxSplitSize)
+     {
+-        this.maxChunkSize = maxChunkSize;
++        this.maxSplitSize = maxSplitSize;
+         return this;
+     }
+ 
+     @Min(1)
+-    public int getMaxOutstandingChunks()
++    public int getMaxOutstandingSplits()
+     {
+-        return maxOutstandingChunks;
++        return maxOutstandingSplits;
+     }
+ 
+-    @Config("hive.max-outstanding-chunks")
+-    public HiveClientConfig setMaxOutstandingChunks(int maxOutstandingChunks)
++    @Config("hive.max-outstanding-splits")
++    @LegacyConfig("hive.max-outstanding-chunks")
++    public HiveClientConfig setMaxOutstandingSplits(int maxOutstandingSplits)
+     {
+-        this.maxOutstandingChunks = maxOutstandingChunks;
++        this.maxOutstandingSplits = maxOutstandingSplits;
+         return this;
+     }
+ 
+     @Min(1)
+-    public int getMaxChunkIteratorThreads()
++    public int getMaxSplitIteratorThreads()
+     {
+-        return maxChunkIteratorThreads;
++        return maxSplitIteratorThreads;
+     }
+ 
+-    @Config("hive.max-chunk-iterator-threads")
+-    public HiveClientConfig setMaxChunkIteratorThreads(int maxChunkIteratorThreads)
++    @Config("hive.max-split-iterator-threads")
++    @LegacyConfig("hive.max-chunk-iterator-threads")
++    public HiveClientConfig setMaxSplitIteratorThreads(int maxSplitIteratorThreads)
+     {
+-        this.maxChunkIteratorThreads = maxChunkIteratorThreads;
++        this.maxSplitIteratorThreads = maxSplitIteratorThreads;
+         return this;
+     }
+ 
+diff --git a/presto-hive/src/main/java/com/facebook/presto/hive/HiveClientFactory.java b/presto-hive/src/main/java/com/facebook/presto/hive/HiveClientFactory.java
+index 1ab3616593c8d..40a5c3f401f8e 100644
+--- a/presto-hive/src/main/java/com/facebook/presto/hive/HiveClientFactory.java
++++ b/presto-hive/src/main/java/com/facebook/presto/hive/HiveClientFactory.java
+@@ -18,11 +18,10 @@
+ @ThreadSafe
+ public class HiveClientFactory
+ {
+-    private final DataSize maxChunkSize;
+-    private final int maxOutstandingChunks;
+-    private final int maxChunkIteratorThreads;
++    private final DataSize maxSplitSize;
++    private final int maxOutstandingSplits;
++    private final int masSplitIteratorThreads;
+     private final int partitionBatchSize;
+-    private final HiveChunkEncoder hiveChunkEncoder;
+     private final HdfsEnvironment hdfsEnvironment;
+     private final LoadingCache<HiveCluster, CachingHiveMetastore> metastores;
+     private final ExecutorService executorService = Executors.newCachedThreadPool(
+@@ -31,21 +30,16 @@ public class HiveClientFactory
+                     .build());
+ 
+     @Inject
+-    public HiveClientFactory(
+-            HiveClientConfig hiveClientConfig,
+-            HiveChunkEncoder hiveChunkEncoder,
+-            HdfsEnvironment hdfsEnvironment)
++    public HiveClientFactory(HiveClientConfig hiveClientConfig,  HdfsEnvironment hdfsEnvironment)
+     {
+         checkNotNull(hiveClientConfig, "hiveClientConfig is null");
+-        checkNotNull(hiveChunkEncoder, "hiveChunkEncoder is null");
+         checkNotNull(hdfsEnvironment, "hdfsEnvironment is null");
+ 
+-        maxChunkSize = hiveClientConfig.getMaxChunkSize();
+-        maxOutstandingChunks = hiveClientConfig.getMaxOutstandingChunks();
+-        maxChunkIteratorThreads = hiveClientConfig.getMaxChunkIteratorThreads();
++        maxSplitSize = hiveClientConfig.getMaxSplitSize();
++        maxOutstandingSplits = hiveClientConfig.getMaxOutstandingSplits();
++        masSplitIteratorThreads = hiveClientConfig.getMaxSplitIteratorThreads();
+         partitionBatchSize = hiveClientConfig.getPartitionBatchSize();
+ 
+-        this.hiveChunkEncoder = hiveChunkEncoder;
+         this.hdfsEnvironment = hdfsEnvironment;
+ 
+         final Duration metastoreCacheTtl = hiveClientConfig.getMetastoreCacheTtl();
+@@ -72,11 +66,10 @@ public HiveClient get(String clientId, HiveCluster hiveCluster)
+     {
+         CachingHiveMetastore metastore = metastores.getUnchecked(hiveCluster);
+         return new HiveClient(clientId,
+-                maxChunkSize.toBytes(),
+-                maxOutstandingChunks,
+-                maxChunkIteratorThreads,
++                maxSplitSize.toBytes(),
++                maxOutstandingSplits,
++                masSplitIteratorThreads,
+                 partitionBatchSize,
+-                hiveChunkEncoder,
+                 metastore,
+                 hdfsEnvironment,
+                 executorService);
+diff --git a/presto-hive/src/main/java/com/facebook/presto/hive/HiveClientModule.java b/presto-hive/src/main/java/com/facebook/presto/hive/HiveClientModule.java
+index e441dfeb4704a..0435adc17f39f 100644
+--- a/presto-hive/src/main/java/com/facebook/presto/hive/HiveClientModule.java
++++ b/presto-hive/src/main/java/com/facebook/presto/hive/HiveClientModule.java
+@@ -3,17 +3,13 @@
+  */
+ package com.facebook.presto.hive;
+ 
+-import com.fasterxml.jackson.databind.ser.std.ToStringSerializer;
+ import com.google.inject.Binder;
+ import com.google.inject.Module;
+ import com.google.inject.Scopes;
+-import org.apache.hadoop.fs.Path;
+ import org.weakref.jmx.guice.ExportBinder;
+ 
+ import static io.airlift.configuration.ConfigurationModule.bindConfig;
+ import static io.airlift.discovery.client.DiscoveryBinder.discoveryBinder;
+-import static io.airlift.json.JsonBinder.jsonBinder;
+-import static io.airlift.json.JsonCodecBinder.jsonCodecBinder;
+ 
+ public class HiveClientModule
+         implements Module
+@@ -32,14 +28,9 @@ public void configure(Binder binder)
+         binder.bind(DiscoveryLocatedHiveCluster.class).in(Scopes.SINGLETON);
+         binder.bind(HiveCluster.class).to(DiscoveryLocatedHiveCluster.class).in(Scopes.SINGLETON);
+         bindConfig(binder).to(HiveClientConfig.class);
+-        binder.bind(HiveChunkEncoder.class).in(Scopes.SINGLETON);
+         binder.bind(HiveMetastoreClientFactory.class).in(Scopes.SINGLETON);
+         discoveryBinder(binder).bindSelector("hive-metastore");
+ 
+-        jsonBinder(binder).addSerializerBinding(Path.class).toInstance(ToStringSerializer.instance);
+-        jsonBinder(binder).addDeserializerBinding(Path.class).toInstance(PathJsonDeserializer.INSTANCE);
+-        jsonCodecBinder(binder).bindJsonCodec(HivePartitionChunk.class);
+-
+         ExportBinder.newExporter(binder)
+                 .export(SlowDatanodeSwitcher.class)
+                 .withGeneratedName();
+diff --git a/presto-hive/src/main/java/com/facebook/presto/hive/HivePartitionKey.java b/presto-hive/src/main/java/com/facebook/presto/hive/HivePartitionKey.java
+index 36504acb5ba82..64bc27d9b1051 100644
+--- a/presto-hive/src/main/java/com/facebook/presto/hive/HivePartitionKey.java
++++ b/presto-hive/src/main/java/com/facebook/presto/hive/HivePartitionKey.java
+@@ -56,6 +56,27 @@ public String toString()
+                 .toString();
+     }
+ 
++    @Override
++    public int hashCode()
++    {
++        return Objects.hashCode(name, hiveType, value);
++    }
++
++    @Override
++    public boolean equals(Object obj)
++    {
++        if (this == obj) {
++            return true;
++        }
++        if (obj == null || getClass() != obj.getClass()) {
++            return false;
++        }
++        final HivePartitionKey other = (HivePartitionKey) obj;
++        return Objects.equal(this.name, other.name) &&
++                Objects.equal(this.hiveType, other.hiveType) &&
++                Objects.equal(this.value, other.value);
++    }
++
+     public static Function<HivePartitionKey, String> nameGetter()
+     {
+         return new Function<HivePartitionKey, String>() {
+diff --git a/presto-hive/src/main/java/com/facebook/presto/hive/HiveRecordSet.java b/presto-hive/src/main/java/com/facebook/presto/hive/HiveRecordSet.java
+index 029fb4c1d9ae0..3817de511c549 100644
+--- a/presto-hive/src/main/java/com/facebook/presto/hive/HiveRecordSet.java
++++ b/presto-hive/src/main/java/com/facebook/presto/hive/HiveRecordSet.java
+@@ -47,15 +47,15 @@ public class HiveRecordSet
+     }
+ 
+     private final HdfsEnvironment hdfsEnvironment;
+-    private final HivePartitionChunk chunk;
++    private final HiveSplit split;
+     private final List<HiveColumnHandle> columns;
+     private final List<ColumnType> columnTypes;
+     private final ArrayList<Integer> readHiveColumnIndexes;
+ 
+-    public HiveRecordSet(HdfsEnvironment hdfsEnvironment, HivePartitionChunk chunk, List<HiveColumnHandle> columns)
++    public HiveRecordSet(HdfsEnvironment hdfsEnvironment, HiveSplit split, List<HiveColumnHandle> columns)
+     {
+         this.hdfsEnvironment = Preconditions.checkNotNull(hdfsEnvironment, "hdfsEnvironment is null");
+-        this.chunk = chunk;
++        this.split = split;
+         this.columns = columns;
+         this.columnTypes = ImmutableList.copyOf(Iterables.transform(columns, nativeTypeGetter()));
+ 
+@@ -64,7 +64,7 @@ public HiveRecordSet(HdfsEnvironment hdfsEnvironment, HivePartitionChunk chunk,
+         if (readColumns.isEmpty()) {
+             // for count(*) queries we will have "no" columns we want to read, but since hive doesn't
+             // support no columns (it will read all columns instead), we must choose a single column
+-            HiveColumnHandle primitiveColumn = getFirstPrimitiveColumn(chunk.getClientId(), chunk.getSchema());
++            HiveColumnHandle primitiveColumn = getFirstPrimitiveColumn(split.getClientId(), split.getSchema());
+             readColumns = ImmutableList.of(primitiveColumn);
+         }
+         readHiveColumnIndexes = new ArrayList<>(transform(readColumns, hiveColumnIndexGetter()));
+@@ -81,7 +81,7 @@ public RecordCursor cursor()
+     {
+         try {
+             // Clone schema since we modify it below
+-            Properties schema = (Properties) chunk.getSchema().clone();
++            Properties schema = (Properties) split.getSchema().clone();
+ 
+             // We are handling parsing directly since the hive code is slow
+             // In order to do this, remove column types entry so that hive treats all columns as type "string"
+@@ -96,19 +96,19 @@ public RecordCursor cursor()
+             // Tell hive the columns we would like to read, this lets hive optimize reading column oriented files
+             ColumnProjectionUtils.setReadColumnIDs(configuration, readHiveColumnIndexes);
+ 
+-            RecordReader<?, ?> recordReader = createRecordReader(chunk);
++            RecordReader<?, ?> recordReader = createRecordReader(configuration, split);
+             if (recordReader.createValue() instanceof BytesRefArrayWritable) {
+                 return new BytesHiveRecordCursor<>((RecordReader<?, BytesRefArrayWritable>) recordReader,
+-                        chunk.getLength(),
+-                        chunk.getSchema(),
+-                        chunk.getPartitionKeys(),
++                        split.getLength(),
++                        split.getSchema(),
++                        split.getPartitionKeys(),
+                         columns);
+             }
+             else {
+                 return new GenericHiveRecordCursor<>((RecordReader<?, ? extends Writable>) recordReader,
+-                        chunk.getLength(),
+-                        chunk.getSchema(),
+-                        chunk.getPartitionKeys(),
++                        split.getLength(),
++                        split.getSchema(),
++                        split.getPartitionKeys(),
+                         columns);
+             }
+         }
+@@ -140,27 +140,17 @@ private static HiveColumnHandle getFirstPrimitiveColumn(String clientId, Propert
+         throw new IllegalStateException("Table doesn't have any PRIMITIVE columns");
+     }
+ 
+-    private RecordReader<?, ?> createRecordReader(HivePartitionChunk chunk)
++    private static RecordReader<?, ?> createRecordReader(Configuration configuration, HiveSplit split)
+     {
+-        InputFormat inputFormat = getInputFormat(hdfsEnvironment.getConfiguration(), chunk.getSchema(), true);
+-        // Make sure Path object used and returned by split is properly wrapped
+-        final Path wrappedPath = hdfsEnvironment.getFileSystemWrapper().wrap(chunk.getPath());
+-        FileSplit split = new FileSplit(wrappedPath, chunk.getStart(), chunk.getLength(), (String[]) null) {
+-            @Override
+-            public Path getPath()
+-            {
+-                // Override FileSplit getPath to bypass their memory optimizing step
+-                return wrappedPath;
+-            }
+-        };
+-        JobConf jobConf = new JobConf(hdfsEnvironment.getConfiguration());
++        InputFormat inputFormat = getInputFormat(configuration, split.getSchema(), true);
++        FileSplit fileSplit = new FileSplit(new Path(split.getPath()), split.getStart(), split.getLength(), (String[]) null);
++        JobConf jobConf = new JobConf(configuration);
+ 
+         try {
+-            return inputFormat.getRecordReader(split, jobConf, Reporter.NULL);
++            return inputFormat.getRecordReader(fileSplit, jobConf, Reporter.NULL);
+         }
+         catch (IOException e) {
+-            throw new RuntimeException("Unable to create record reader for input format " + getInputFormatName(chunk.getSchema()), e);
++            throw new RuntimeException("Unable to create record reader for input format " + getInputFormatName(split.getSchema()), e);
+         }
+     }
+-
+ }
+diff --git a/presto-hive/src/main/java/com/facebook/presto/hive/HivePartitionChunk.java b/presto-hive/src/main/java/com/facebook/presto/hive/HiveSplit.java
+similarity index 61%
+rename from presto-hive/src/main/java/com/facebook/presto/hive/HivePartitionChunk.java
+rename to presto-hive/src/main/java/com/facebook/presto/hive/HiveSplit.java
+index d844bd7974aa0..4254b91e146d2 100644
+--- a/presto-hive/src/main/java/com/facebook/presto/hive/HivePartitionChunk.java
++++ b/presto-hive/src/main/java/com/facebook/presto/hive/HiveSplit.java
+@@ -1,81 +1,62 @@
+ package com.facebook.presto.hive;
+ 
+-import com.facebook.presto.spi.PartitionChunk;
++import com.facebook.presto.spi.HostAddress;
++import com.facebook.presto.spi.PartitionedSplit;
+ import com.fasterxml.jackson.annotation.JsonCreator;
+ import com.fasterxml.jackson.annotation.JsonProperty;
+ import com.google.common.base.Objects;
+ import com.google.common.collect.ImmutableList;
+ import com.google.common.collect.ImmutableMap;
+-import org.apache.hadoop.fs.Path;
+ 
+-import java.net.InetAddress;
+ import java.util.List;
+ import java.util.Properties;
+ 
+ import static com.google.common.base.Preconditions.checkArgument;
+ import static com.google.common.base.Preconditions.checkNotNull;
+ 
+-public class HivePartitionChunk
+-    implements PartitionChunk
++public class HiveSplit
++    implements PartitionedSplit
+ {
+     private final String clientId;
+-    private final String partitionName;
+-    private final boolean lastChunk;
+-    private final Path path;
++    private final String partitionId;
++    private final boolean lastSplit;
++    private final String path;
+     private final long start;
+     private final long length;
+     private final Properties schema;
+     private final List<HivePartitionKey> partitionKeys;
+-    private final List<InetAddress> hosts;
+-
+-    public static HivePartitionChunk makeLastChunk(HivePartitionChunk chunk)
+-    {
+-        if (chunk.isLastChunk()) {
+-            return chunk;
+-        }
+-        else {
+-            return new HivePartitionChunk(chunk.getClientId(),
+-                    chunk.getPartitionName(),
+-                    true,
+-                    chunk.getPath(),
+-                    chunk.getStart(),
+-                    chunk.getLength(),
+-                    chunk.getSchema(),
+-                    chunk.getPartitionKeys(),
+-                    chunk.getHosts());
+-        }
+-    }
++    private final List<HostAddress> addresses;
+ 
+     @JsonCreator
+-    public HivePartitionChunk(
++    public HiveSplit(
+             @JsonProperty("clientId") String clientId,
+-            @JsonProperty("partitionName") String partitionName,
+-            @JsonProperty("lastChunk") boolean lastChunk,
+-            @JsonProperty("path") Path path,
++            @JsonProperty("partitionId") String partitionId,
++            @JsonProperty("lastSplit") boolean lastSplit,
++            @JsonProperty("path") String path,
+             @JsonProperty("start") long start,
+             @JsonProperty("length") long length,
+             @JsonProperty("schema") Properties schema,
+             @JsonProperty("partitionKeys") List<HivePartitionKey> partitionKeys,
+-            @JsonProperty("hosts") List<InetAddress> hosts)
++            @JsonProperty("addresses") List<HostAddress> addresses)
+     {
+         checkNotNull(clientId, "clientId is null");
+         checkArgument(start >= 0, "start must be positive");
+         checkArgument(length >= 0, "length must be positive");
+-        checkNotNull(partitionName, "partitionName is null");
++        checkNotNull(partitionId, "partitionName is null");
+         checkNotNull(path, "path is null");
+         checkNotNull(schema, "schema is null");
+         checkNotNull(partitionKeys, "partitionKeys is null");
+-        checkNotNull(hosts, "hosts is null");
++        checkNotNull(addresses, "addresses is null");
+ 
+         this.clientId = clientId;
+-        this.partitionName = partitionName;
+-        this.lastChunk = lastChunk;
++        this.partitionId = partitionId;
++        this.lastSplit = lastSplit;
+         this.path = path;
+         this.start = start;
+         this.length = length;
+         this.schema = schema;
+         this.partitionKeys = ImmutableList.copyOf(partitionKeys);
+-        this.hosts = ImmutableList.copyOf(hosts);
++        this.addresses = ImmutableList.copyOf(addresses);
+     }
+ 
+     @JsonProperty
+@@ -85,19 +66,21 @@ public String getClientId()
+     }
+ 
+     @JsonProperty
+-    public String getPartitionName()
++    @Override
++    public String getPartitionId()
+     {
+-        return partitionName;
++        return partitionId;
+     }
+ 
+     @JsonProperty
+-    public boolean isLastChunk()
++    @Override
++    public boolean isLastSplit()
+     {
+-        return lastChunk;
++        return lastSplit;
+     }
+ 
+     @JsonProperty
+-    public Path getPath()
++    public String getPath()
+     {
+         return path;
+     }
+@@ -108,7 +91,6 @@ public long getStart()
+         return start;
+     }
+ 
+-    @Override
+     @JsonProperty
+     public long getLength()
+     {
+@@ -128,9 +110,16 @@ public List<HivePartitionKey> getPartitionKeys()
+     }
+ 
+     @JsonProperty
+-    public List<InetAddress> getHosts()
++    @Override
++    public List<HostAddress> getAddresses()
+     {
+-        return hosts;
++        return addresses;
++    }
++
++    @Override
++    public boolean isRemotelyAccessible()
++    {
++        return true;
+     }
+ 
+     @Override
+@@ -140,7 +129,7 @@ public Object getInfo()
+                 .put("path", path.toString())
+                 .put("start", start)
+                 .put("length", length)
+-                .put("hosts", hosts)
++                .put("hosts", addresses)
+                 .build();
+     }
+ 
+@@ -153,4 +142,21 @@ public String toString()
+                 .addValue(length)
+                 .toString();
+     }
++
++    public static HiveSplit markAsLastSplit(HiveSplit split)
++    {
++        if (split.isLastSplit()) {
++            return split;
++        }
++
++        return new HiveSplit(split.getClientId(),
++                split.getPartitionId(),
++                true,
++                split.getPath(),
++                split.getStart(),
++                split.getLength(),
++                split.getSchema(),
++                split.getPartitionKeys(),
++                split.getAddresses());
++    }
+ }
+diff --git a/presto-hive/src/main/java/com/facebook/presto/hive/PathJsonDeserializer.java b/presto-hive/src/main/java/com/facebook/presto/hive/PathJsonDeserializer.java
+deleted file mode 100644
+index c22354298bb76..0000000000000
+--- a/presto-hive/src/main/java/com/facebook/presto/hive/PathJsonDeserializer.java
++++ /dev/null
+@@ -1,28 +0,0 @@
+-/*
+- * Copyright 2004-present Facebook. All Rights Reserved.
+- */
+-package com.facebook.presto.hive;
+-
+-import com.fasterxml.jackson.databind.DeserializationContext;
+-import com.fasterxml.jackson.databind.deser.std.FromStringDeserializer;
+-import org.apache.hadoop.fs.Path;
+-
+-import java.io.IOException;
+-
+-public class PathJsonDeserializer
+-        extends FromStringDeserializer<Path>
+-{
+-    public static final PathJsonDeserializer INSTANCE = new PathJsonDeserializer();
+-
+-    public PathJsonDeserializer()
+-    {
+-        super(Path.class);
+-    }
+-
+-    @Override
+-    protected Path _deserialize(String value, DeserializationContext ctxt)
+-            throws IOException
+-    {
+-        return new Path(value);
+-    }
+-}
+diff --git a/presto-hive/src/test/java/com/facebook/presto/hive/AbstractTestHiveClient.java b/presto-hive/src/test/java/com/facebook/presto/hive/AbstractTestHiveClient.java
+index ace28d282dbf1..7abd60ff3417c 100644
+--- a/presto-hive/src/test/java/com/facebook/presto/hive/AbstractTestHiveClient.java
++++ b/presto-hive/src/test/java/com/facebook/presto/hive/AbstractTestHiveClient.java
+@@ -5,26 +5,20 @@
+ import com.facebook.presto.spi.ColumnType;
+ import com.facebook.presto.spi.ImportClient;
+ import com.facebook.presto.spi.Partition;
+-import com.facebook.presto.spi.PartitionChunk;
+ import com.facebook.presto.spi.RecordCursor;
+ import com.facebook.presto.spi.RecordSet;
+ import com.facebook.presto.spi.SchemaNotFoundException;
+ import com.facebook.presto.spi.SchemaTableMetadata;
+ import com.facebook.presto.spi.SchemaTableName;
++import com.facebook.presto.spi.Split;
+ import com.facebook.presto.spi.TableHandle;
+ import com.facebook.presto.spi.TableNotFoundException;
+-import com.fasterxml.jackson.databind.JsonDeserializer;
+-import com.fasterxml.jackson.databind.JsonSerializer;
+-import com.fasterxml.jackson.databind.ser.std.ToStringSerializer;
+ import com.google.common.base.Charsets;
+ import com.google.common.base.Function;
+ import com.google.common.collect.ImmutableList;
+ import com.google.common.collect.ImmutableMap;
+ import com.google.common.collect.ImmutableSet;
+ import com.google.common.collect.Iterables;
+-import io.airlift.json.JsonCodecFactory;
+-import io.airlift.json.ObjectMapperProvider;
+-import org.apache.hadoop.fs.Path;
+ import org.testng.annotations.Test;
+ 
+ import java.util.Collections;
+@@ -187,41 +181,41 @@ public void testGetTableSchemaException()
+     }
+ 
+     @Test
+-    public void testGetPartitionChunksBatch()
++    public void testGetPartitionSplitsBatch()
+             throws Exception
+     {
+         TableHandle tableHandle = client.getTableHandle(TABLE);
+         List<Partition> partitions = client.getPartitions(tableHandle, ImmutableMap.<ColumnHandle, Object>of());
+-        Iterable<PartitionChunk> iterator = client.getPartitionChunks(partitions);
++        Iterable<Split> iterator = client.getPartitionSplits(partitions);
+ 
+-        List<PartitionChunk> chunks = ImmutableList.copyOf(iterator);
+-        assertEquals(chunks.size(), 3);
++        List<Split> splits = ImmutableList.copyOf(iterator);
++        assertEquals(splits.size(), 3);
+     }
+ 
+     @Test
+-    public void testGetPartitionChunksBatchUnpartitioned()
++    public void testGetPartitionSplitsBatchUnpartitioned()
+             throws Exception
+     {
+         TableHandle tableHandle = client.getTableHandle(TABLE_UNPARTITIONED);
+         List<Partition> partitions = client.getPartitions(tableHandle, ImmutableMap.<ColumnHandle, Object>of());
+-        Iterable<PartitionChunk> iterator = client.getPartitionChunks(partitions);
++        Iterable<Split> iterator = client.getPartitionSplits(partitions);
+ 
+-        List<PartitionChunk> chunks = ImmutableList.copyOf(iterator);
+-        assertEquals(chunks.size(), 1);
++        List<Split> splits = ImmutableList.copyOf(iterator);
++        assertEquals(splits.size(), 1);
+     }
+ 
+     @Test(expectedExceptions = TableNotFoundException.class)
+-    public void testGetPartitionChunksBatchInvalidTable()
++    public void testGetPartitionSplitsBatchInvalidTable()
+             throws Exception
+     {
+-        client.getPartitionChunks(ImmutableList.of(INVALID_PARTITION));
++        client.getPartitionSplits(ImmutableList.of(INVALID_PARTITION));
+     }
+ 
+     @Test
+-    public void testGetPartitionChunksEmpty()
++    public void testGetPartitionSplitsEmpty()
+             throws Exception
+     {
+-        Iterable<PartitionChunk> iterator = client.getPartitionChunks(ImmutableList.<Partition>of());
++        Iterable<Split> iterator = client.getPartitionSplits(ImmutableList.<Partition>of());
+         // fetch full list
+         ImmutableList.copyOf(iterator);
+     }
+@@ -236,15 +230,12 @@ public void testGetRecords()
+         Map<String, Integer> columnIndex = indexColumns(columnHandles);
+ 
+         List<Partition> partitions = client.getPartitions(tableHandle, ImmutableMap.<ColumnHandle, Object>of());
+-        List<PartitionChunk> partitionChunks = ImmutableList.copyOf(client.getPartitionChunks(partitions));
+-        assertEquals(partitionChunks.size(), PARTITIONS.size());
+-        for (PartitionChunk partitionChunk : partitionChunks) {
+-            HivePartitionChunk chunk = (HivePartitionChunk) partitionChunk;
++        List<Split> splits = ImmutableList.copyOf(client.getPartitionSplits(partitions));
++        assertEquals(splits.size(), PARTITIONS.size());
++        for (Split split : splits) {
++            HiveSplit hiveSplit = (HiveSplit) split;
+ 
+-            byte[] bytes = client.serializePartitionChunk(chunk);
+-            chunk = (HivePartitionChunk) client.deserializePartitionChunk(bytes);
+-
+-            List<HivePartitionKey> partitionKeys = chunk.getPartitionKeys();
++            List<HivePartitionKey> partitionKeys = hiveSplit.getPartitionKeys();
+             String ds = partitionKeys.get(0).getValue();
+             String fileType = partitionKeys.get(1).getValue();
+             long dummy = Long.parseLong(partitionKeys.get(2).getValue());
+@@ -253,8 +244,8 @@ public void testGetRecords()
+ 
+             long rowNumber = 0;
+             long completedBytes = 0;
+-            try (RecordCursor cursor = client.getRecords(chunk, columnHandles).cursor()) {
+-                assertEquals(cursor.getTotalBytes(), chunk.getLength());
++            try (RecordCursor cursor = client.getRecords(hiveSplit, columnHandles).cursor()) {
++                assertEquals(cursor.getTotalBytes(), hiveSplit.getLength());
+ 
+                 while (cursor.advanceNextPosition()) {
+                     try {
+@@ -324,11 +315,11 @@ public void testGetRecords()
+ 
+                     long newCompletedBytes = cursor.getCompletedBytes();
+                     assertTrue(newCompletedBytes >= completedBytes);
+-                    assertTrue(newCompletedBytes <= chunk.getLength());
++                    assertTrue(newCompletedBytes <= hiveSplit.getLength());
+                     completedBytes = newCompletedBytes;
+                 }
+             }
+-            assertTrue(completedBytes <= chunk.getLength());
++            assertTrue(completedBytes <= hiveSplit.getLength());
+             assertEquals(rowNumber, 100);
+         }
+     }
+@@ -342,15 +333,12 @@ public void testGetPartialRecords()
+         Map<String, Integer> columnIndex = indexColumns(columnHandles);
+ 
+         List<Partition> partitions = client.getPartitions(tableHandle, ImmutableMap.<ColumnHandle, Object>of());
+-        List<PartitionChunk> partitionChunks = ImmutableList.copyOf(client.getPartitionChunks(partitions));
+-        assertEquals(partitionChunks.size(), PARTITIONS.size());
+-        for (PartitionChunk partitionChunk : partitionChunks) {
+-            HivePartitionChunk chunk = (HivePartitionChunk) partitionChunk;
+-
+-            byte[] bytes = client.serializePartitionChunk(chunk);
+-            chunk = (HivePartitionChunk) client.deserializePartitionChunk(bytes);
++        List<Split> splits = ImmutableList.copyOf(client.getPartitionSplits(partitions));
++        assertEquals(splits.size(), PARTITIONS.size());
++        for (Split split : splits) {
++            HiveSplit hiveSplit = (HiveSplit) split;
+ 
+-            List<HivePartitionKey> partitionKeys = chunk.getPartitionKeys();
++            List<HivePartitionKey> partitionKeys = hiveSplit.getPartitionKeys();
+             String ds = partitionKeys.get(0).getValue();
+             String fileType = partitionKeys.get(1).getValue();
+             long dummy = Long.parseLong(partitionKeys.get(2).getValue());
+@@ -358,7 +346,7 @@ public void testGetPartialRecords()
+             long baseValue = getBaseValueForFileType(fileType);
+ 
+             long rowNumber = 0;
+-            try (RecordCursor cursor = client.getRecords(chunk, columnHandles).cursor()) {
++            try (RecordCursor cursor = client.getRecords(hiveSplit, columnHandles).cursor()) {
+                 while (cursor.advanceNextPosition()) {
+                     rowNumber++;
+ 
+@@ -381,20 +369,17 @@ public void testGetRecordsUnpartitioned()
+         Map<String, Integer> columnIndex = indexColumns(columnHandles);
+ 
+         List<Partition> partitions = client.getPartitions(tableHandle, ImmutableMap.<ColumnHandle, Object>of());
+-        List<PartitionChunk> partitionChunks = ImmutableList.copyOf(client.getPartitionChunks(partitions));
+-        assertEquals(partitionChunks.size(), 1);
+-
+-        for (PartitionChunk partitionChunk : partitionChunks) {
+-            HivePartitionChunk chunk = (HivePartitionChunk) partitionChunk;
++        List<Split> splits = ImmutableList.copyOf(client.getPartitionSplits(partitions));
++        assertEquals(splits.size(), 1);
+ 
+-            byte[] bytes = client.serializePartitionChunk(chunk);
+-            chunk = (HivePartitionChunk) client.deserializePartitionChunk(bytes);
++        for (Split split : splits) {
++            HiveSplit hiveSplit = (HiveSplit) split;
+ 
+-            assertEquals(chunk.getPartitionKeys(), ImmutableList.of());
++            assertEquals(hiveSplit.getPartitionKeys(), ImmutableList.of());
+ 
+             long rowNumber = 0;
+-            try (RecordCursor cursor = client.getRecords(chunk, columnHandles).cursor()) {
+-                assertEquals(cursor.getTotalBytes(), chunk.getLength());
++            try (RecordCursor cursor = client.getRecords(split, columnHandles).cursor()) {
++                assertEquals(cursor.getTotalBytes(), hiveSplit.getLength());
+ 
+                 while (cursor.advanceNextPosition()) {
+                     rowNumber++;
+@@ -419,8 +404,8 @@ public void testGetRecordsInvalidColumn()
+     {
+         TableHandle table = client.getTableHandle(TABLE_UNPARTITIONED);
+         List<Partition> partitions = client.getPartitions(table, ImmutableMap.<ColumnHandle, Object>of());
+-        PartitionChunk partitionChunk = Iterables.getFirst(client.getPartitionChunks(partitions), null);
+-        RecordSet recordSet = client.getRecords(partitionChunk, ImmutableList.of(INVALID_COLUMN_HANDLE));
++        Split split = Iterables.getFirst(client.getPartitionSplits(partitions), null);
++        RecordSet recordSet = client.getRecords(split, ImmutableList.of(INVALID_COLUMN_HANDLE));
+         recordSet.cursor();
+     }
+ 
+@@ -491,14 +476,6 @@ private static ImmutableMap<String, Integer> indexColumns(List<ColumnHandle> col
+         return index.build();
+     }
+ 
+-    protected HiveChunkEncoder getHiveChunkEncoder()
+-    {
+-        ObjectMapperProvider objectMapperProvider = new ObjectMapperProvider();
+-        objectMapperProvider.setJsonDeserializers(ImmutableMap.<Class<?>, JsonDeserializer<?>>of(Path.class, PathJsonDeserializer.INSTANCE));
+-        objectMapperProvider.setJsonSerializers(ImmutableMap.<Class<?>, JsonSerializer<?>>of(Path.class, ToStringSerializer.instance));
+-        return new HiveChunkEncoder(new JsonCodecFactory(objectMapperProvider).jsonCodec(HivePartitionChunk.class));
+-    }
+-
+     private static Function<ColumnMetadata, String> columnNameGetter()
+     {
+         return new Function<ColumnMetadata, String>()
+diff --git a/presto-hive/src/test/java/com/facebook/presto/hive/HiveImportClientFactoryTest.java b/presto-hive/src/test/java/com/facebook/presto/hive/HiveImportClientFactoryTest.java
+index 1f616e94fc9a7..bf6fb0634ddd3 100644
+--- a/presto-hive/src/test/java/com/facebook/presto/hive/HiveImportClientFactoryTest.java
++++ b/presto-hive/src/test/java/com/facebook/presto/hive/HiveImportClientFactoryTest.java
+@@ -3,16 +3,8 @@
+  */
+ package com.facebook.presto.hive;
+ 
+-import com.fasterxml.jackson.databind.JsonDeserializer;
+-import com.fasterxml.jackson.databind.JsonSerializer;
+-import com.fasterxml.jackson.databind.ser.std.ToStringSerializer;
+-import com.google.common.collect.ImmutableMap;
+ import io.airlift.discovery.client.ServiceSelector;
+ import io.airlift.discovery.client.testing.StaticServiceSelector;
+-import io.airlift.json.JsonCodec;
+-import io.airlift.json.JsonCodecFactory;
+-import io.airlift.json.ObjectMapperProvider;
+-import org.apache.hadoop.fs.Path;
+ import org.testng.annotations.Test;
+ 
+ import static io.airlift.discovery.client.ServiceDescriptor.serviceDescriptor;
+@@ -31,17 +23,9 @@ public void testGetClient()
+                 serviceDescriptor("hive-metastore").addProperty("thrift", "missing-port").build(),
+                 serviceDescriptor("hive-metastore").build());
+ 
+-        HiveClientFactory hiveClientFactory = new HiveClientFactory(new HiveClientConfig(), new HiveChunkEncoder(getHivePartitionChunkCodec()), new HdfsEnvironment());
++        HiveClientFactory hiveClientFactory = new HiveClientFactory(new HiveClientConfig(), new HdfsEnvironment());
+         DiscoveryLocatedHiveCluster hiveCluster = new DiscoveryLocatedHiveCluster(selector, new HiveMetastoreClientFactory(new HiveClientConfig()));
+         HiveImportClientFactory factory = new HiveImportClientFactory(hiveCluster, hiveClientFactory);
+         assertInstanceOf(factory.createClient("hive"), HiveClient.class);
+     }
+-
+-    protected JsonCodec<HivePartitionChunk> getHivePartitionChunkCodec()
+-    {
+-        ObjectMapperProvider objectMapperProvider = new ObjectMapperProvider();
+-        objectMapperProvider.setJsonDeserializers(ImmutableMap.<Class<?>, JsonDeserializer<?>>of(Path.class, PathJsonDeserializer.INSTANCE));
+-        objectMapperProvider.setJsonSerializers(ImmutableMap.<Class<?>, JsonSerializer<?>>of(Path.class, ToStringSerializer.instance));
+-        return new JsonCodecFactory(objectMapperProvider).jsonCodec(HivePartitionChunk.class);
+-    }
+ }
+diff --git a/presto-hive/src/test/java/com/facebook/presto/hive/TestHiveClient.java b/presto-hive/src/test/java/com/facebook/presto/hive/TestHiveClient.java
+index 4df3535592ecb..6f7fbd5a95f6b 100644
+--- a/presto-hive/src/test/java/com/facebook/presto/hive/TestHiveClient.java
++++ b/presto-hive/src/test/java/com/facebook/presto/hive/TestHiveClient.java
+@@ -30,7 +30,6 @@ public void setup(String host, int port)
+                 100,
+                 50,
+                 500,
+-                getHiveChunkEncoder(),
+                 new CachingHiveMetastore(new TestingHiveCluster(host, port), Duration.valueOf("1m")),
+                 new HdfsEnvironment(new HdfsConfiguration(), fileSystemWrapper),
+                 MoreExecutors.sameThreadExecutor());
+diff --git a/presto-hive/src/test/java/com/facebook/presto/hive/TestHiveClientFactory.java b/presto-hive/src/test/java/com/facebook/presto/hive/TestHiveClientFactory.java
+index 352c767eecd61..1a9c315bfa80d 100644
+--- a/presto-hive/src/test/java/com/facebook/presto/hive/TestHiveClientFactory.java
++++ b/presto-hive/src/test/java/com/facebook/presto/hive/TestHiveClientFactory.java
+@@ -1,6 +1,5 @@
+ package com.facebook.presto.hive;
+ 
+-import io.airlift.json.JsonCodecFactory;
+ import org.testng.Assert;
+ import org.testng.annotations.Test;
+ 
+@@ -12,7 +11,6 @@ public void testClusterSelection()
+     {
+         HiveClientFactory hiveClientFactory = new HiveClientFactory(
+                 new HiveClientConfig(),
+-                new HiveChunkEncoder(new JsonCodecFactory().jsonCodec(HivePartitionChunk.class)),
+                 new HdfsEnvironment());
+ 
+         // Two distinct Hive clusters
+diff --git a/presto-hive/src/test/java/com/facebook/presto/hive/TestHiveClientChunkIteratorBackPressure.java b/presto-hive/src/test/java/com/facebook/presto/hive/TestHiveClientSplitIteratorBackPressure.java
+similarity index 83%
+rename from presto-hive/src/test/java/com/facebook/presto/hive/TestHiveClientChunkIteratorBackPressure.java
+rename to presto-hive/src/test/java/com/facebook/presto/hive/TestHiveClientSplitIteratorBackPressure.java
+index 72bfa1d584f89..3d363f0b8fe52 100644
+--- a/presto-hive/src/test/java/com/facebook/presto/hive/TestHiveClientChunkIteratorBackPressure.java
++++ b/presto-hive/src/test/java/com/facebook/presto/hive/TestHiveClientSplitIteratorBackPressure.java
+@@ -5,7 +5,7 @@
+ import org.testng.annotations.BeforeMethod;
+ import org.testng.annotations.Parameters;
+ 
+-public class TestHiveClientChunkIteratorBackPressure
++public class TestHiveClientSplitIteratorBackPressure
+     extends AbstractTestHiveClient
+ {
+     @Parameters({"hiveMetastoreHost", "hiveMetastorePort"})
+@@ -13,14 +13,13 @@ public class TestHiveClientChunkIteratorBackPressure
+     public void setup(String host, int port)
+             throws Exception
+     {
+-        // Restrict the outstanding chunks to 1 and only use 2 threads per iterator
++        // Restrict the outstanding splits to 1 and only use 2 threads per iterator
+         this.client = new HiveClient(
+                 "hive",
+                 1024 * 1024 * 1024 /* 1 GB */,
+                 1,
+                 2,
+                 500,
+-                getHiveChunkEncoder(),
+                 new CachingHiveMetastore(new TestingHiveCluster(host, port), Duration.valueOf("1m")),
+                 new HdfsEnvironment(),
+                 MoreExecutors.sameThreadExecutor());
+diff --git a/presto-hive/src/test/java/com/facebook/presto/hive/TestHiveColumnHandle.java b/presto-hive/src/test/java/com/facebook/presto/hive/TestHiveColumnHandle.java
+new file mode 100644
+index 0000000000000..48041c32afb28
+--- /dev/null
++++ b/presto-hive/src/test/java/com/facebook/presto/hive/TestHiveColumnHandle.java
+@@ -0,0 +1,27 @@
++package com.facebook.presto.hive;
++
++import io.airlift.json.JsonCodec;
++import org.testng.annotations.Test;
++
++import static org.testng.Assert.assertEquals;
++
++public class TestHiveColumnHandle
++{
++    private final JsonCodec<HiveColumnHandle> codec = JsonCodec.jsonCodec(HiveColumnHandle.class);
++
++    @Test
++    public void testRoundTrip()
++    {
++        HiveColumnHandle expected = new HiveColumnHandle("client", "name", 42, HiveType.FLOAT, 88, true);
++
++        String json = codec.toJson(expected);
++        HiveColumnHandle actual = codec.fromJson(json);
++
++        assertEquals(actual.getClientId(), expected.getClientId());
++        assertEquals(actual.getName(), expected.getName());
++        assertEquals(actual.getOrdinalPosition(), expected.getOrdinalPosition());
++        assertEquals(actual.getHiveType(), expected.getHiveType());
++        assertEquals(actual.getHiveColumnIndex(), expected.getHiveColumnIndex());
++        assertEquals(actual.isPartitionKey(), expected.isPartitionKey());
++    }
++}
+diff --git a/presto-hive/src/test/java/com/facebook/presto/hive/TestHiveSplit.java b/presto-hive/src/test/java/com/facebook/presto/hive/TestHiveSplit.java
+new file mode 100644
+index 0000000000000..eda8a6afc1a90
+--- /dev/null
++++ b/presto-hive/src/test/java/com/facebook/presto/hive/TestHiveSplit.java
+@@ -0,0 +1,40 @@
++package com.facebook.presto.hive;
++
++import com.facebook.presto.spi.HostAddress;
++import com.google.common.collect.ImmutableList;
++import io.airlift.json.JsonCodec;
++import org.testng.annotations.Test;
++
++import java.util.Properties;
++
++import static org.testng.Assert.assertEquals;
++
++public class TestHiveSplit
++{
++    private final JsonCodec<HiveSplit> codec = JsonCodec.jsonCodec(HiveSplit.class);
++
++    @Test
++    public void testJsonRoundTrip()
++    {
++        Properties schema = new Properties();
++        schema.put("foo", "bar");
++        schema.put("bar", "baz");
++
++        ImmutableList<HivePartitionKey> partitionKeys = ImmutableList.of(new HivePartitionKey("a", HiveType.STRING, "apple"), new HivePartitionKey("b", HiveType.LONG, "42"));
++        ImmutableList<HostAddress> addresses = ImmutableList.of(HostAddress.fromParts("127.0.0.1", 44), HostAddress.fromParts("127.0.0.1", 45));
++        HiveSplit expected = new HiveSplit("clientId", "partitionId", true, "path", 42, 88, schema, partitionKeys, addresses);
++
++        String json = codec.toJson(expected);
++        HiveSplit actual = codec.fromJson(json);
++
++        assertEquals(actual.getClientId(), expected.getClientId());
++        assertEquals(actual.getPartitionId(), expected.getPartitionId());
++        assertEquals(actual.isLastSplit(), expected.isLastSplit());
++        assertEquals(actual.getPath(), expected.getPath());
++        assertEquals(actual.getStart(), expected.getStart());
++        assertEquals(actual.getLength(), expected.getLength());
++        assertEquals(actual.getSchema(), expected.getSchema());
++        assertEquals(actual.getPartitionKeys(), expected.getPartitionKeys());
++        assertEquals(actual.getAddresses(), expected.getAddresses());
++    }
++}
+diff --git a/presto-hive/src/test/java/com/facebook/presto/hive/TestHiveTableHandle.java b/presto-hive/src/test/java/com/facebook/presto/hive/TestHiveTableHandle.java
+new file mode 100644
+index 0000000000000..d42b67aeec341
+--- /dev/null
++++ b/presto-hive/src/test/java/com/facebook/presto/hive/TestHiveTableHandle.java
+@@ -0,0 +1,23 @@
++package com.facebook.presto.hive;
++
++import com.facebook.presto.spi.SchemaTableName;
++import io.airlift.json.JsonCodec;
++import org.testng.annotations.Test;
++
++import static org.testng.Assert.assertEquals;
++
++public class TestHiveTableHandle {
++    private final JsonCodec<HiveTableHandle> codec = JsonCodec.jsonCodec(HiveTableHandle.class);
++
++    @Test
++    public void testRoundTrip()
++    {
++        HiveTableHandle expected = new HiveTableHandle("client", new SchemaTableName("schema", "table"));
++
++        String json = codec.toJson(expected);
++        HiveTableHandle actual = codec.fromJson(json);
++
++        assertEquals(actual.getClientId(), expected.getClientId());
++        assertEquals(actual.getTableName(), expected.getTableName());
++    }
++}
+diff --git a/presto-hive/src/test/java/com/facebook/presto/split/TestHiveClientConfig.java b/presto-hive/src/test/java/com/facebook/presto/split/TestHiveClientConfig.java
+index 3a436c9bd9091..7e2d05bd307e4 100644
+--- a/presto-hive/src/test/java/com/facebook/presto/split/TestHiveClientConfig.java
++++ b/presto-hive/src/test/java/com/facebook/presto/split/TestHiveClientConfig.java
+@@ -21,9 +21,9 @@ public class TestHiveClientConfig
+     public void testDefaults()
+     {
+         ConfigAssertions.assertRecordedDefaults(ConfigAssertions.recordDefaults(HiveClientConfig.class)
+-                .setMaxChunkSize(new DataSize(1, Unit.GIGABYTE))
+-                .setMaxOutstandingChunks(10_000)
+-                .setMaxChunkIteratorThreads(50)
++                .setMaxSplitSize(new DataSize(1, Unit.GIGABYTE))
++                .setMaxOutstandingSplits(10_000)
++                .setMaxSplitIteratorThreads(50)
+                 .setMetastoreCacheTtl(new Duration(1, TimeUnit.HOURS))
+                 .setMetastoreSocksProxy(null)
+                 .setMetastoreTimeout(new Duration(10, TimeUnit.SECONDS))
+@@ -45,9 +45,9 @@ public void testDefaults()
+     public void testExplicitPropertyMappings()
+     {
+         Map<String, String> properties = new ImmutableMap.Builder<String, String>()
+-                .put("hive.max-chunk-size", "256MB")
+-                .put("hive.max-outstanding-chunks", "10")
+-                .put("hive.max-chunk-iterator-threads", "2")
++                .put("hive.max-split-size", "256MB")
++                .put("hive.max-outstanding-splits", "10")
++                .put("hive.max-split-iterator-threads", "2")
+                 .put("hive.metastore-cache-ttl", "2h")
+                 .put("hive.metastore.thrift.client.socks-proxy", "localhost:1080")
+                 .put("hive.metastore-timeout", "20s")
+@@ -66,9 +66,9 @@ public void testExplicitPropertyMappings()
+                 .build();
+ 
+         HiveClientConfig expected = new HiveClientConfig()
+-                .setMaxChunkSize(new DataSize(256, Unit.MEGABYTE))
+-                .setMaxOutstandingChunks(10)
+-                .setMaxChunkIteratorThreads(2)
++                .setMaxSplitSize(new DataSize(256, Unit.MEGABYTE))
++                .setMaxOutstandingSplits(10)
++                .setMaxSplitIteratorThreads(2)
+                 .setMetastoreCacheTtl(new Duration(2, TimeUnit.HOURS))
+                 .setMetastoreSocksProxy(HostAndPort.fromParts("localhost", 1080))
+                 .setMetastoreTimeout(new Duration(20, TimeUnit.SECONDS))
+@@ -87,4 +87,22 @@ public void testExplicitPropertyMappings()
+ 
+         ConfigAssertions.assertFullMapping(properties, expected);
+     }
++
++    @Test
++    public void testDeprecatedProperties()
++    {
++        Map<String, String> currentProperties = new ImmutableMap.Builder<String, String>()
++                .put("hive.max-split-size", "256MB")
++                .put("hive.max-outstanding-splits", "10")
++                .put("hive.max-split-iterator-threads", "2")
++                .build();
++
++        Map<String, String> oldProperties = new ImmutableMap.Builder<String, String>()
++                .put("hive.max-chunk-size", "256MB")
++                .put("hive.max-outstanding-chunks", "10")
++                .put("hive.max-chunk-iterator-threads", "2")
++                .build();
++
++        ConfigAssertions.assertDeprecatedEquivalence(HiveClientConfig.class, currentProperties, oldProperties);
++    }
+ }
+diff --git a/presto-main/src/main/java/com/facebook/presto/ScheduledSplit.java b/presto-main/src/main/java/com/facebook/presto/ScheduledSplit.java
+index 695147a33195b..f60b63e7cd084 100644
+--- a/presto-main/src/main/java/com/facebook/presto/ScheduledSplit.java
++++ b/presto-main/src/main/java/com/facebook/presto/ScheduledSplit.java
+@@ -3,7 +3,7 @@
+  */
+ package com.facebook.presto;
+ 
+-import com.facebook.presto.split.Split;
++import com.facebook.presto.spi.Split;
+ import com.fasterxml.jackson.annotation.JsonCreator;
+ import com.fasterxml.jackson.annotation.JsonProperty;
+ import com.google.common.base.Objects;
+diff --git a/presto-main/src/main/java/com/facebook/presto/connector/ConnectorManager.java b/presto-main/src/main/java/com/facebook/presto/connector/ConnectorManager.java
+index c535ad45db561..f62d49d599e7f 100644
+--- a/presto-main/src/main/java/com/facebook/presto/connector/ConnectorManager.java
++++ b/presto-main/src/main/java/com/facebook/presto/connector/ConnectorManager.java
+@@ -1,14 +1,18 @@
+ package com.facebook.presto.connector;
+ 
++import com.facebook.presto.metadata.CollocatedSplitHandleResolver;
+ import com.facebook.presto.metadata.ConnectorMetadata;
+-import com.facebook.presto.metadata.ImportHandleResolver;
+ import com.facebook.presto.metadata.HandleResolver;
++import com.facebook.presto.metadata.ImportHandleResolver;
+ import com.facebook.presto.metadata.ImportMetadata;
+ import com.facebook.presto.metadata.InternalHandleResolver;
+ import com.facebook.presto.metadata.MetadataManager;
+ import com.facebook.presto.metadata.NativeHandleResolver;
++import com.facebook.presto.metadata.RemoteSplitHandleResolver;
+ import com.facebook.presto.spi.ImportClient;
++import com.facebook.presto.split.DataStreamManager;
+ import com.facebook.presto.split.ImportClientManager;
++import com.facebook.presto.split.ImportDataStreamProvider;
+ import com.facebook.presto.split.ImportSplitManager;
+ import com.facebook.presto.split.SplitManager;
+ import com.facebook.presto.tpch.TpchHandleResolver;
+@@ -18,14 +22,20 @@ public class ConnectorManager
+ {
+     private final MetadataManager metadataManager;
+     private final SplitManager splitManager;
++    private final DataStreamManager dataStreamManager;
+     private final ImportClientManager importClientManager;
+     private final HandleResolver handleResolver;
+ 
+     @Inject
+-    public ConnectorManager(MetadataManager metadataManager, SplitManager splitManager, ImportClientManager importClientManager, HandleResolver handleResolver)
++    public ConnectorManager(MetadataManager metadataManager,
++            SplitManager splitManager,
++            DataStreamManager dataStreamManager,
++            ImportClientManager importClientManager,
++            HandleResolver handleResolver)
+     {
+         this.metadataManager = metadataManager;
+         this.splitManager = splitManager;
++        this.dataStreamManager = dataStreamManager;
+         this.importClientManager = importClientManager;
+         this.handleResolver = handleResolver;
+ 
+@@ -33,6 +43,8 @@ public ConnectorManager(MetadataManager metadataManager, SplitManager splitManag
+         handleResolver.addHandleResolver("native", new NativeHandleResolver());
+         handleResolver.addHandleResolver("tpch", new TpchHandleResolver());
+         handleResolver.addHandleResolver("internal", new InternalHandleResolver());
++        handleResolver.addHandleResolver("remote", new RemoteSplitHandleResolver());
++        handleResolver.addHandleResolver("collocated", new CollocatedSplitHandleResolver());
+     }
+ 
+     public void initialize()
+@@ -52,6 +64,7 @@ public void createConnection(String catalogName, String connectorName)
+         ConnectorMetadata connectorMetadata = new ImportMetadata(client);
+         metadataManager.addConnectorMetadata(catalogName, connectorMetadata);
+         splitManager.addConnectorSplitManager(new ImportSplitManager(dataSourceName, client));
++        dataStreamManager.addConnectorDataStreamProvider(new ImportDataStreamProvider(client));
+         handleResolver.addHandleResolver(clientId, new ImportHandleResolver(client));
+     }
+ }
+diff --git a/presto-main/src/main/java/com/facebook/presto/execution/DataSource.java b/presto-main/src/main/java/com/facebook/presto/execution/DataSource.java
+index 4a26e370cef77..dd0f17025731d 100644
+--- a/presto-main/src/main/java/com/facebook/presto/execution/DataSource.java
++++ b/presto-main/src/main/java/com/facebook/presto/execution/DataSource.java
+@@ -1,6 +1,6 @@
+ package com.facebook.presto.execution;
+ 
+-import com.facebook.presto.split.Split;
++import com.facebook.presto.spi.Split;
+ import com.google.common.base.Objects;
+ 
+ import javax.annotation.Nullable;
+diff --git a/presto-main/src/main/java/com/facebook/presto/execution/NodeScheduler.java b/presto-main/src/main/java/com/facebook/presto/execution/NodeScheduler.java
+index 4d5b83f8c7848..5779a71021661 100644
+--- a/presto-main/src/main/java/com/facebook/presto/execution/NodeScheduler.java
++++ b/presto-main/src/main/java/com/facebook/presto/execution/NodeScheduler.java
+@@ -1,9 +1,9 @@
+ package com.facebook.presto.execution;
+ 
+-import com.facebook.presto.metadata.HostAddress;
++import com.facebook.presto.spi.HostAddress;
+ import com.facebook.presto.metadata.Node;
+ import com.facebook.presto.metadata.NodeManager;
+-import com.facebook.presto.split.Split;
++import com.facebook.presto.spi.Split;
+ import com.google.common.base.Preconditions;
+ import com.google.common.base.Supplier;
+ import com.google.common.base.Suppliers;
+diff --git a/presto-main/src/main/java/com/facebook/presto/execution/RemoteTask.java b/presto-main/src/main/java/com/facebook/presto/execution/RemoteTask.java
+index 65066a4f2be70..815cd8cf037e1 100644
+--- a/presto-main/src/main/java/com/facebook/presto/execution/RemoteTask.java
++++ b/presto-main/src/main/java/com/facebook/presto/execution/RemoteTask.java
+@@ -3,7 +3,7 @@
+  */
+ package com.facebook.presto.execution;
+ 
+-import com.facebook.presto.split.Split;
++import com.facebook.presto.spi.Split;
+ import com.facebook.presto.sql.planner.plan.PlanNodeId;
+ import com.google.common.collect.Multimap;
+ import com.google.common.util.concurrent.ListenableFuture;
+diff --git a/presto-main/src/main/java/com/facebook/presto/execution/RemoteTaskFactory.java b/presto-main/src/main/java/com/facebook/presto/execution/RemoteTaskFactory.java
+index 4d6626087f5f1..d9c5197644034 100644
+--- a/presto-main/src/main/java/com/facebook/presto/execution/RemoteTaskFactory.java
++++ b/presto-main/src/main/java/com/facebook/presto/execution/RemoteTaskFactory.java
+@@ -4,7 +4,7 @@
+ package com.facebook.presto.execution;
+ 
+ import com.facebook.presto.metadata.Node;
+-import com.facebook.presto.split.Split;
++import com.facebook.presto.spi.Split;
+ import com.facebook.presto.sql.analyzer.Session;
+ import com.facebook.presto.sql.planner.OutputReceiver;
+ import com.facebook.presto.sql.planner.PlanFragment;
+diff --git a/presto-main/src/main/java/com/facebook/presto/execution/SqlStageExecution.java b/presto-main/src/main/java/com/facebook/presto/execution/SqlStageExecution.java
+index 51ad8861e72b1..52bc560f06dc9 100644
+--- a/presto-main/src/main/java/com/facebook/presto/execution/SqlStageExecution.java
++++ b/presto-main/src/main/java/com/facebook/presto/execution/SqlStageExecution.java
+@@ -5,7 +5,7 @@
+ 
+ import com.facebook.presto.execution.NodeScheduler.NodeSelector;
+ import com.facebook.presto.metadata.Node;
+-import com.facebook.presto.split.Split;
++import com.facebook.presto.spi.Split;
+ import com.facebook.presto.sql.analyzer.Session;
+ import com.facebook.presto.sql.planner.OutputReceiver;
+ import com.facebook.presto.sql.planner.PlanFragment;
+diff --git a/presto-main/src/main/java/com/facebook/presto/execution/SqlTaskExecution.java b/presto-main/src/main/java/com/facebook/presto/execution/SqlTaskExecution.java
+index fb21893bbc1c4..23078b5ada54a 100644
+--- a/presto-main/src/main/java/com/facebook/presto/execution/SqlTaskExecution.java
++++ b/presto-main/src/main/java/com/facebook/presto/execution/SqlTaskExecution.java
+@@ -18,7 +18,7 @@
+ import com.facebook.presto.operator.SourceOperator;
+ import com.facebook.presto.split.CollocatedSplit;
+ import com.facebook.presto.split.DataStreamProvider;
+-import com.facebook.presto.split.Split;
++import com.facebook.presto.spi.Split;
+ import com.facebook.presto.sql.analyzer.Session;
+ import com.facebook.presto.sql.planner.LocalExecutionPlanner;
+ import com.facebook.presto.sql.planner.LocalExecutionPlanner.LocalExecutionPlan;
+diff --git a/presto-main/src/main/java/com/facebook/presto/ingest/SerializedPartitionChunk.java b/presto-main/src/main/java/com/facebook/presto/ingest/SerializedPartitionChunk.java
+deleted file mode 100644
+index 93b2ae4c462fb..0000000000000
+--- a/presto-main/src/main/java/com/facebook/presto/ingest/SerializedPartitionChunk.java
++++ /dev/null
+@@ -1,38 +0,0 @@
+-package com.facebook.presto.ingest;
+-
+-import com.facebook.presto.spi.ImportClient;
+-import com.facebook.presto.spi.PartitionChunk;
+-import com.fasterxml.jackson.annotation.JsonCreator;
+-import com.fasterxml.jackson.annotation.JsonValue;
+-
+-import javax.annotation.concurrent.Immutable;
+-
+-import static com.google.common.base.Preconditions.checkNotNull;
+-
+-@Immutable
+-public class SerializedPartitionChunk
+-{
+-    private final byte[] bytes;
+-
+-    @JsonCreator
+-    public SerializedPartitionChunk(byte[] bytes)
+-    {
+-        this.bytes = checkNotNull(bytes, "bytes is null");
+-    }
+-
+-    @JsonValue
+-    public byte[] getBytes()
+-    {
+-        return bytes;
+-    }
+-
+-    public PartitionChunk deserialize(ImportClient client)
+-    {
+-        return client.deserializePartitionChunk(bytes);
+-    }
+-
+-    public static SerializedPartitionChunk create(ImportClient client, PartitionChunk chunk)
+-    {
+-        return new SerializedPartitionChunk(client.serializePartitionChunk(chunk));
+-    }
+-}
+diff --git a/presto-main/src/main/java/com/facebook/presto/metadata/CollocatedSplitHandleResolver.java b/presto-main/src/main/java/com/facebook/presto/metadata/CollocatedSplitHandleResolver.java
+new file mode 100644
+index 0000000000000..06d9aeb5ef02c
+--- /dev/null
++++ b/presto-main/src/main/java/com/facebook/presto/metadata/CollocatedSplitHandleResolver.java
+@@ -0,0 +1,46 @@
++package com.facebook.presto.metadata;
++
++import com.facebook.presto.spi.ColumnHandle;
++import com.facebook.presto.spi.Split;
++import com.facebook.presto.spi.TableHandle;
++import com.facebook.presto.split.CollocatedSplit;
++
++public class CollocatedSplitHandleResolver
++        implements ConnectorHandleResolver
++{
++    @Override
++    public boolean canHandle(TableHandle tableHandle)
++    {
++        return false;
++    }
++
++    @Override
++    public boolean canHandle(ColumnHandle columnHandle)
++    {
++        return false;
++    }
++
++    @Override
++    public boolean canHandle(Split split)
++    {
++        return split instanceof CollocatedSplit;
++    }
++
++    @Override
++    public Class<? extends TableHandle> getTableHandleClass()
++    {
++        throw new UnsupportedOperationException();
++    }
++
++    @Override
++    public Class<? extends ColumnHandle> getColumnHandleClass()
++    {
++        throw new UnsupportedOperationException();
++    }
++
++    @Override
++    public Class<? extends Split> getSplitClass()
++    {
++        return CollocatedSplit.class;
++    }
++}
+diff --git a/presto-main/src/main/java/com/facebook/presto/metadata/ColumnHandleJacksonModule.java b/presto-main/src/main/java/com/facebook/presto/metadata/ColumnHandleJacksonModule.java
+index 39d411b20822f..23a1498c81f5f 100644
+--- a/presto-main/src/main/java/com/facebook/presto/metadata/ColumnHandleJacksonModule.java
++++ b/presto-main/src/main/java/com/facebook/presto/metadata/ColumnHandleJacksonModule.java
+@@ -10,7 +10,7 @@ public class ColumnHandleJacksonModule
+         extends AbstractTypedJacksonModule<ColumnHandle>
+ {
+     @Inject
+-    private ColumnHandleJacksonModule(HandleResolver handleResolver)
++    public ColumnHandleJacksonModule(HandleResolver handleResolver)
+     {
+         super(ColumnHandle.class, "type", new ColumnHandleJsonTypeIdResolver(handleResolver));
+     }
+diff --git a/presto-main/src/main/java/com/facebook/presto/metadata/ConnectorHandleResolver.java b/presto-main/src/main/java/com/facebook/presto/metadata/ConnectorHandleResolver.java
+index 89b4059185ed6..c7c228bb36b74 100644
+--- a/presto-main/src/main/java/com/facebook/presto/metadata/ConnectorHandleResolver.java
++++ b/presto-main/src/main/java/com/facebook/presto/metadata/ConnectorHandleResolver.java
+@@ -2,6 +2,7 @@
+ 
+ import com.facebook.presto.spi.ColumnHandle;
+ import com.facebook.presto.spi.TableHandle;
++import com.facebook.presto.spi.Split;
+ 
+ public interface ConnectorHandleResolver
+ {
+@@ -9,7 +10,11 @@ public interface ConnectorHandleResolver
+ 
+     boolean canHandle(ColumnHandle columnHandle);
+ 
++    boolean canHandle(Split split);
++
+     Class<? extends TableHandle> getTableHandleClass();
+ 
+     Class<? extends ColumnHandle> getColumnHandleClass();
++
++    Class<? extends Split> getSplitClass();
+ }
+diff --git a/presto-main/src/main/java/com/facebook/presto/metadata/HandleJsonModule.java b/presto-main/src/main/java/com/facebook/presto/metadata/HandleJsonModule.java
+index 6f5a031bad383..891726e27a6d2 100644
+--- a/presto-main/src/main/java/com/facebook/presto/metadata/HandleJsonModule.java
++++ b/presto-main/src/main/java/com/facebook/presto/metadata/HandleJsonModule.java
+@@ -12,5 +12,6 @@ public void configure(Binder binder)
+     {
+         jsonBinder(binder).addModuleBinding().to(TableHandleJacksonModule.class);
+         jsonBinder(binder).addModuleBinding().to(ColumnHandleJacksonModule.class);
++        jsonBinder(binder).addModuleBinding().to(SplitJacksonModule.class);
+     }
+ }
+diff --git a/presto-main/src/main/java/com/facebook/presto/metadata/HandleResolver.java b/presto-main/src/main/java/com/facebook/presto/metadata/HandleResolver.java
+index d21163588af92..420da1f4bbc4f 100644
+--- a/presto-main/src/main/java/com/facebook/presto/metadata/HandleResolver.java
++++ b/presto-main/src/main/java/com/facebook/presto/metadata/HandleResolver.java
+@@ -2,6 +2,7 @@
+ 
+ import com.facebook.presto.spi.ColumnHandle;
+ import com.facebook.presto.spi.TableHandle;
++import com.facebook.presto.spi.Split;
+ 
+ import java.util.Map.Entry;
+ import java.util.concurrent.ConcurrentHashMap;
+@@ -39,6 +40,16 @@ public String getId(ColumnHandle columnHandle)
+         throw new IllegalArgumentException("No connector for column handle: " + columnHandle);
+     }
+ 
++    public String getId(Split split)
++    {
++        for (Entry<String, ConnectorHandleResolver> entry : handleIdResolvers.entrySet()) {
++            if (entry.getValue().canHandle(split)) {
++                return entry.getKey();
++            }
++        }
++        throw new IllegalArgumentException("No connector for split: " + split);
++    }
++
+     public Class<? extends TableHandle> getTableHandleClass(String id)
+     {
+         return handleIdResolvers.get(id).getTableHandleClass();
+@@ -48,4 +59,9 @@ public Class<? extends ColumnHandle> getColumnHandleClass(String id)
+     {
+         return handleIdResolvers.get(id).getColumnHandleClass();
+     }
++
++    public Class<? extends Split> getSplitClass(String id)
++    {
++        return handleIdResolvers.get(id).getSplitClass();
++    }
+ }
+diff --git a/presto-main/src/main/java/com/facebook/presto/metadata/ImportHandleResolver.java b/presto-main/src/main/java/com/facebook/presto/metadata/ImportHandleResolver.java
+index d12a4c49770ef..c8781af07860e 100644
+--- a/presto-main/src/main/java/com/facebook/presto/metadata/ImportHandleResolver.java
++++ b/presto-main/src/main/java/com/facebook/presto/metadata/ImportHandleResolver.java
+@@ -3,6 +3,7 @@
+ import com.facebook.presto.spi.ColumnHandle;
+ import com.facebook.presto.spi.ImportClient;
+ import com.facebook.presto.spi.TableHandle;
++import com.facebook.presto.spi.Split;
+ 
+ import static com.google.common.base.Preconditions.checkNotNull;
+ 
+@@ -28,6 +29,12 @@ public boolean canHandle(ColumnHandle tableHandle)
+         return importClient.canHandle(tableHandle);
+     }
+ 
++    @Override
++    public boolean canHandle(Split split)
++    {
++        return importClient.canHandle(split);
++    }
++
+     @Override
+     public Class<? extends TableHandle> getTableHandleClass()
+     {
+@@ -39,4 +46,10 @@ public Class<? extends ColumnHandle> getColumnHandleClass()
+     {
+         return importClient.getColumnHandleClass();
+     }
++
++    @Override
++    public Class<? extends Split> getSplitClass()
++    {
++        return importClient.getSplitClass();
++    }
+ }
+diff --git a/presto-main/src/main/java/com/facebook/presto/metadata/InternalHandleResolver.java b/presto-main/src/main/java/com/facebook/presto/metadata/InternalHandleResolver.java
+index 82c072a8a3337..57d0cb918422e 100644
+--- a/presto-main/src/main/java/com/facebook/presto/metadata/InternalHandleResolver.java
++++ b/presto-main/src/main/java/com/facebook/presto/metadata/InternalHandleResolver.java
+@@ -2,6 +2,8 @@
+ 
+ import com.facebook.presto.spi.ColumnHandle;
+ import com.facebook.presto.spi.TableHandle;
++import com.facebook.presto.split.InternalSplit;
++import com.facebook.presto.spi.Split;
+ 
+ public class InternalHandleResolver
+         implements ConnectorHandleResolver
+@@ -18,6 +20,12 @@ public boolean canHandle(ColumnHandle columnHandle)
+         return columnHandle instanceof InternalColumnHandle;
+     }
+ 
++    @Override
++    public boolean canHandle(Split split)
++    {
++        return split instanceof InternalSplit;
++    }
++
+     @Override
+     public Class<? extends TableHandle> getTableHandleClass()
+     {
+@@ -29,4 +37,10 @@ public Class<? extends ColumnHandle> getColumnHandleClass()
+     {
+         return InternalColumnHandle.class;
+     }
++
++    @Override
++    public Class<? extends Split> getSplitClass()
++    {
++        return InternalSplit.class;
++    }
+ }
+diff --git a/presto-main/src/main/java/com/facebook/presto/metadata/NativeHandleResolver.java b/presto-main/src/main/java/com/facebook/presto/metadata/NativeHandleResolver.java
+index 95e23c8526e28..3c4eaf0e88742 100644
+--- a/presto-main/src/main/java/com/facebook/presto/metadata/NativeHandleResolver.java
++++ b/presto-main/src/main/java/com/facebook/presto/metadata/NativeHandleResolver.java
+@@ -2,6 +2,8 @@
+ 
+ import com.facebook.presto.spi.ColumnHandle;
+ import com.facebook.presto.spi.TableHandle;
++import com.facebook.presto.split.NativeSplit;
++import com.facebook.presto.spi.Split;
+ 
+ public class NativeHandleResolver
+         implements ConnectorHandleResolver
+@@ -18,6 +20,12 @@ public boolean canHandle(ColumnHandle columnHandle)
+         return columnHandle instanceof NativeColumnHandle;
+     }
+ 
++    @Override
++    public boolean canHandle(Split split)
++    {
++        return split instanceof NativeSplit;
++    }
++
+     @Override
+     public Class<? extends TableHandle> getTableHandleClass()
+     {
+@@ -29,4 +37,10 @@ public Class<? extends ColumnHandle> getColumnHandleClass()
+     {
+         return NativeColumnHandle.class;
+     }
++
++    @Override
++    public Class<? extends Split> getSplitClass()
++    {
++        return NativeSplit.class;
++    }
+ }
+diff --git a/presto-main/src/main/java/com/facebook/presto/metadata/Node.java b/presto-main/src/main/java/com/facebook/presto/metadata/Node.java
+index c2bd0a73dccee..117b2732fa046 100644
+--- a/presto-main/src/main/java/com/facebook/presto/metadata/Node.java
++++ b/presto-main/src/main/java/com/facebook/presto/metadata/Node.java
+@@ -1,5 +1,6 @@
+ package com.facebook.presto.metadata;
+ 
++import com.facebook.presto.spi.HostAddress;
+ import com.google.common.base.Function;
+ import com.google.common.base.Objects;
+ 
+diff --git a/presto-main/src/main/java/com/facebook/presto/metadata/RemoteSplitHandleResolver.java b/presto-main/src/main/java/com/facebook/presto/metadata/RemoteSplitHandleResolver.java
+new file mode 100644
+index 0000000000000..34381e118fde8
+--- /dev/null
++++ b/presto-main/src/main/java/com/facebook/presto/metadata/RemoteSplitHandleResolver.java
+@@ -0,0 +1,46 @@
++package com.facebook.presto.metadata;
++
++import com.facebook.presto.spi.ColumnHandle;
++import com.facebook.presto.spi.Split;
++import com.facebook.presto.spi.TableHandle;
++import com.facebook.presto.split.RemoteSplit;
++
++public class RemoteSplitHandleResolver
++        implements ConnectorHandleResolver
++{
++    @Override
++    public boolean canHandle(TableHandle tableHandle)
++    {
++        return false;
++    }
++
++    @Override
++    public boolean canHandle(ColumnHandle columnHandle)
++    {
++        return false;
++    }
++
++    @Override
++    public boolean canHandle(Split split)
++    {
++        return split instanceof RemoteSplit;
++    }
++
++    @Override
++    public Class<? extends TableHandle> getTableHandleClass()
++    {
++        throw new UnsupportedOperationException();
++    }
++
++    @Override
++    public Class<? extends ColumnHandle> getColumnHandleClass()
++    {
++        throw new UnsupportedOperationException();
++    }
++
++    @Override
++    public Class<? extends Split> getSplitClass()
++    {
++        return RemoteSplit.class;
++    }
++}
+diff --git a/presto-main/src/main/java/com/facebook/presto/metadata/ShardManager.java b/presto-main/src/main/java/com/facebook/presto/metadata/ShardManager.java
+index bc5894d5c961a..3c682b41a0e5f 100644
+--- a/presto-main/src/main/java/com/facebook/presto/metadata/ShardManager.java
++++ b/presto-main/src/main/java/com/facebook/presto/metadata/ShardManager.java
+@@ -2,6 +2,7 @@
+ 
+ import com.facebook.presto.spi.TableHandle;
+ import com.google.common.base.Optional;
++import com.facebook.presto.spi.Split;
+ import com.google.common.collect.Multimap;
+ 
+ import javax.annotation.Nullable;
+diff --git a/presto-main/src/main/java/com/facebook/presto/metadata/SplitJacksonModule.java b/presto-main/src/main/java/com/facebook/presto/metadata/SplitJacksonModule.java
+new file mode 100644
+index 0000000000000..e34462a4b249b
+--- /dev/null
++++ b/presto-main/src/main/java/com/facebook/presto/metadata/SplitJacksonModule.java
+@@ -0,0 +1,40 @@
++package com.facebook.presto.metadata;
++
++import com.facebook.presto.spi.Split;
++
++import javax.inject.Inject;
++
++import static com.google.common.base.Preconditions.checkNotNull;
++
++public class SplitJacksonModule
++        extends AbstractTypedJacksonModule<Split>
++{
++    @Inject
++    public SplitJacksonModule(HandleResolver handleResolver)
++    {
++        super(Split.class, "type", new SplitJsonTypeIdResolver(handleResolver));
++    }
++
++    private static class SplitJsonTypeIdResolver
++            implements JsonTypeIdResolver<Split>
++    {
++        private final HandleResolver handleResolver;
++
++        private SplitJsonTypeIdResolver(HandleResolver HandleResolver)
++        {
++            this.handleResolver = checkNotNull(HandleResolver, "handleIdResolvers is null");
++        }
++
++        @Override
++        public String getId(Split split)
++        {
++            return handleResolver.getId(split);
++        }
++
++        @Override
++        public Class<? extends Split> getType(String id)
++        {
++            return handleResolver.getSplitClass(id);
++        }
++    }
++}
+diff --git a/presto-main/src/main/java/com/facebook/presto/metadata/TableHandleJacksonModule.java b/presto-main/src/main/java/com/facebook/presto/metadata/TableHandleJacksonModule.java
+index 00a985cf18d8e..b9473aa11e5ad 100644
+--- a/presto-main/src/main/java/com/facebook/presto/metadata/TableHandleJacksonModule.java
++++ b/presto-main/src/main/java/com/facebook/presto/metadata/TableHandleJacksonModule.java
+@@ -10,7 +10,7 @@ public class TableHandleJacksonModule
+         extends AbstractTypedJacksonModule<TableHandle>
+ {
+     @Inject
+-    private TableHandleJacksonModule(HandleResolver handleResolver)
++    public TableHandleJacksonModule(HandleResolver handleResolver)
+     {
+         super(TableHandle.class, "type", new TableHandleJsonTypeIdResolver(handleResolver));
+     }
+diff --git a/presto-main/src/main/java/com/facebook/presto/operator/ExchangeOperator.java b/presto-main/src/main/java/com/facebook/presto/operator/ExchangeOperator.java
+index 3255eee9d64d9..e4271963b75b3 100644
+--- a/presto-main/src/main/java/com/facebook/presto/operator/ExchangeOperator.java
++++ b/presto-main/src/main/java/com/facebook/presto/operator/ExchangeOperator.java
+@@ -3,9 +3,8 @@
+  */
+ package com.facebook.presto.operator;
+ 
+-import com.facebook.presto.metadata.DataSourceType;
++import com.facebook.presto.spi.Split;
+ import com.facebook.presto.split.RemoteSplit;
+-import com.facebook.presto.split.Split;
+ import com.facebook.presto.tuple.TupleInfo;
+ import com.google.common.base.Preconditions;
+ import com.google.common.base.Throwables;
+@@ -64,7 +63,7 @@ public ExchangeOperator(AsyncHttpClient httpClient,
+     public synchronized void addSplit(Split split)
+     {
+         Preconditions.checkNotNull(split, "split is null");
+-        Preconditions.checkArgument(split.getDataSourceType() == DataSourceType.REMOTE, "split is not a remote split");
++        Preconditions.checkArgument(split instanceof RemoteSplit, "split is not a remote split");
+         Preconditions.checkState(!noMoreLocations.get(), "No more splits already set");
+         URI location = ((RemoteSplit) split).getLocation();
+         locations.add(location);
+diff --git a/presto-main/src/main/java/com/facebook/presto/operator/SourceOperator.java b/presto-main/src/main/java/com/facebook/presto/operator/SourceOperator.java
+index f0720345339e9..c262b69137f2c 100644
+--- a/presto-main/src/main/java/com/facebook/presto/operator/SourceOperator.java
++++ b/presto-main/src/main/java/com/facebook/presto/operator/SourceOperator.java
+@@ -3,7 +3,7 @@
+  */
+ package com.facebook.presto.operator;
+ 
+-import com.facebook.presto.split.Split;
++import com.facebook.presto.spi.Split;
+ 
+ public interface SourceOperator
+         extends Operator
+diff --git a/presto-main/src/main/java/com/facebook/presto/operator/TableScanOperator.java b/presto-main/src/main/java/com/facebook/presto/operator/TableScanOperator.java
+index ae5fc69264c58..829663ba44121 100644
+--- a/presto-main/src/main/java/com/facebook/presto/operator/TableScanOperator.java
++++ b/presto-main/src/main/java/com/facebook/presto/operator/TableScanOperator.java
+@@ -5,7 +5,7 @@
+ 
+ import com.facebook.presto.spi.ColumnHandle;
+ import com.facebook.presto.split.DataStreamProvider;
+-import com.facebook.presto.split.Split;
++import com.facebook.presto.spi.Split;
+ import com.facebook.presto.tuple.TupleInfo;
+ import com.google.common.base.Preconditions;
+ import com.google.common.collect.ImmutableList;
+diff --git a/presto-main/src/main/java/com/facebook/presto/operator/TableWriterOperator.java b/presto-main/src/main/java/com/facebook/presto/operator/TableWriterOperator.java
+index bb9b5bf60ad80..c63c2398e7389 100644
+--- a/presto-main/src/main/java/com/facebook/presto/operator/TableWriterOperator.java
++++ b/presto-main/src/main/java/com/facebook/presto/operator/TableWriterOperator.java
+@@ -3,11 +3,10 @@
+ import com.facebook.presto.block.Block;
+ import com.facebook.presto.block.BlockBuilder;
+ import com.facebook.presto.metadata.ColumnFileHandle;
+-import com.facebook.presto.metadata.DataSourceType;
+ import com.facebook.presto.metadata.LocalStorageManager;
+ import com.facebook.presto.spi.ColumnHandle;
++import com.facebook.presto.spi.Split;
+ import com.facebook.presto.split.NativeSplit;
+-import com.facebook.presto.split.Split;
+ import com.facebook.presto.tuple.TupleInfo;
+ import com.google.common.base.Throwables;
+ import com.google.common.collect.ImmutableList;
+@@ -54,7 +53,7 @@ public TableWriterOperator(LocalStorageManager storageManager,
+     public void addSplit(Split split)
+     {
+         checkNotNull(split, "split is null");
+-        checkState(split.getDataSourceType() == DataSourceType.NATIVE, "Non-native split added!");
++        checkState(split instanceof NativeSplit, "Non-native split added!");
+         checkState(input.get() == null, "Shard Id %s was already set!", input.get());
+         input.set((NativeSplit) split);
+     }
+diff --git a/presto-main/src/main/java/com/facebook/presto/split/CollocatedSplit.java b/presto-main/src/main/java/com/facebook/presto/split/CollocatedSplit.java
+index 351ee59b169dc..aa75974e85f82 100644
+--- a/presto-main/src/main/java/com/facebook/presto/split/CollocatedSplit.java
++++ b/presto-main/src/main/java/com/facebook/presto/split/CollocatedSplit.java
+@@ -1,7 +1,7 @@
+ package com.facebook.presto.split;
+ 
+-import com.facebook.presto.metadata.DataSourceType;
+-import com.facebook.presto.metadata.HostAddress;
++import com.facebook.presto.spi.HostAddress;
++import com.facebook.presto.spi.Split;
+ import com.facebook.presto.sql.planner.plan.PlanNodeId;
+ import com.fasterxml.jackson.annotation.JsonCreator;
+ import com.fasterxml.jackson.annotation.JsonProperty;
+@@ -47,12 +47,6 @@ public List<HostAddress> getAddresses()
+         return addresses;
+     }
+ 
+-    @Override
+-    public DataSourceType getDataSourceType()
+-    {
+-        return DataSourceType.COLLOCATED;
+-    }
+-
+     @Override
+     public Object getInfo()
+     {
+diff --git a/presto-main/src/main/java/com/facebook/presto/split/ConnectorDataStreamProvider.java b/presto-main/src/main/java/com/facebook/presto/split/ConnectorDataStreamProvider.java
+new file mode 100644
+index 0000000000000..2a38ff6d9295c
+--- /dev/null
++++ b/presto-main/src/main/java/com/facebook/presto/split/ConnectorDataStreamProvider.java
+@@ -0,0 +1,14 @@
++package com.facebook.presto.split;
++
++import com.facebook.presto.operator.Operator;
++import com.facebook.presto.spi.ColumnHandle;
++import com.facebook.presto.spi.Split;
++
++import java.util.List;
++
++public interface ConnectorDataStreamProvider
++{
++    boolean canHandle(Split split);
++
++    Operator createDataStream(Split split, List<ColumnHandle> columns);
++}
+diff --git a/presto-main/src/main/java/com/facebook/presto/split/DataStreamManager.java b/presto-main/src/main/java/com/facebook/presto/split/DataStreamManager.java
+index f3314b6c95ce0..b7fc02a84884d 100644
+--- a/presto-main/src/main/java/com/facebook/presto/split/DataStreamManager.java
++++ b/presto-main/src/main/java/com/facebook/presto/split/DataStreamManager.java
+@@ -1,57 +1,38 @@
+ package com.facebook.presto.split;
+ 
+-import com.facebook.presto.spi.ColumnHandle;
+-import com.facebook.presto.metadata.DataSourceType;
+ import com.facebook.presto.operator.Operator;
+-import com.facebook.presto.tpch.TpchDataStreamProvider;
+-import com.google.common.collect.ImmutableMap;
+-import com.google.inject.Inject;
++import com.facebook.presto.spi.ColumnHandle;
++import com.facebook.presto.spi.Split;
++import com.google.common.collect.ImmutableSet;
++import com.google.common.collect.Sets;
+ 
++import javax.inject.Inject;
+ import java.util.List;
+-import java.util.Map;
++import java.util.Set;
++import java.util.concurrent.ConcurrentHashMap;
+ 
+ import static com.google.common.base.Preconditions.checkArgument;
+ import static com.google.common.base.Preconditions.checkNotNull;
+ 
+ public class DataStreamManager
+-    implements DataStreamProvider
++        implements DataStreamProvider
+ {
+-    private Map<DataSourceType, DataStreamProvider> dataStreamProviderMap;
++    private final Set<ConnectorDataStreamProvider> dataStreamProviders = Sets.newSetFromMap(new ConcurrentHashMap<ConnectorDataStreamProvider, Boolean>());
+ 
+-    @Inject
+-    public DataStreamManager(
+-            NativeDataStreamProvider nativeProvider,
+-            InternalDataStreamProvider internalProvider,
+-            ImportDataStreamProvider importProvider)
++    public DataStreamManager(ConnectorDataStreamProvider... dataStreamProviders)
+     {
+-        checkNotNull(nativeProvider, "nativeProvider is null");
+-        checkNotNull(internalProvider, "internalProvider is null");
+-        checkNotNull(importProvider, "importProvider is null");
+-
+-        dataStreamProviderMap = ImmutableMap.<DataSourceType, DataStreamProvider>builder()
+-                .put(DataSourceType.NATIVE, nativeProvider)
+-                .put(DataSourceType.INTERNAL, internalProvider)
+-                .put(DataSourceType.IMPORT, importProvider)
+-                .build();
++        this(ImmutableSet.copyOf(dataStreamProviders));
+     }
+ 
+-    // only used in TestDistributedQueries to get the Tpch stuff in.
+-    @Inject(optional = true)
+-    public synchronized void addTpchDataStreamProvider(TpchDataStreamProvider tpchDataStreamProvider)
++    @Inject
++    public DataStreamManager(Set<ConnectorDataStreamProvider> dataStreamProviders)
+     {
+-        ImmutableMap.Builder<DataSourceType, DataStreamProvider> builder = ImmutableMap.builder();
+-        builder.putAll(dataStreamProviderMap);
+-        builder.put(DataSourceType.TPCH, tpchDataStreamProvider);
+-        this.dataStreamProviderMap = builder.build();
++        this.dataStreamProviders.addAll(dataStreamProviders);
+     }
+ 
+-    private DataStreamProvider lookup(DataSourceType dataSourceType)
++    public void addConnectorDataStreamProvider(ConnectorDataStreamProvider connectorDataStreamProvider)
+     {
+-        checkNotNull(dataSourceType, "dataSourceHandle is null");
+-
+-        DataStreamProvider dataStreamProvider = dataStreamProviderMap.get(dataSourceType);
+-        checkArgument(dataStreamProvider != null, "dataStreamProvider does not exist: %s", dataSourceType);
+-        return dataStreamProvider;
++        dataStreamProviders.add(connectorDataStreamProvider);
+     }
+ 
+     @Override
+@@ -61,6 +42,17 @@ public Operator createDataStream(Split split, List<ColumnHandle> columns)
+         checkNotNull(columns, "columns is null");
+         checkArgument(!columns.isEmpty(), "no columns specified");
+ 
+-        return lookup(split.getDataSourceType()).createDataStream(split, columns);
++        return getDataStreamProvider(split).createDataStream(split, columns);
+     }
++
++    private ConnectorDataStreamProvider getDataStreamProvider(Split split)
++    {
++        for (ConnectorDataStreamProvider dataStreamProvider : dataStreamProviders) {
++            if (dataStreamProvider.canHandle(split)) {
++                return dataStreamProvider;
++            }
++        }
++        throw new IllegalArgumentException("No data stream provider for " + split);
++    }
++
+ }
+diff --git a/presto-main/src/main/java/com/facebook/presto/split/DataStreamProvider.java b/presto-main/src/main/java/com/facebook/presto/split/DataStreamProvider.java
+index 0d594438720f0..e8ecb1c2a12c0 100644
+--- a/presto-main/src/main/java/com/facebook/presto/split/DataStreamProvider.java
++++ b/presto-main/src/main/java/com/facebook/presto/split/DataStreamProvider.java
+@@ -2,6 +2,7 @@
+ 
+ import com.facebook.presto.spi.ColumnHandle;
+ import com.facebook.presto.operator.Operator;
++import com.facebook.presto.spi.Split;
+ 
+ import java.util.List;
+ 
+diff --git a/presto-main/src/main/java/com/facebook/presto/split/ImportDataStreamProvider.java b/presto-main/src/main/java/com/facebook/presto/split/ImportDataStreamProvider.java
+index 3dc54a20bb2cd..226537d9ecafe 100644
+--- a/presto-main/src/main/java/com/facebook/presto/split/ImportDataStreamProvider.java
++++ b/presto-main/src/main/java/com/facebook/presto/split/ImportDataStreamProvider.java
+@@ -4,38 +4,36 @@
+ import com.facebook.presto.operator.Operator;
+ import com.facebook.presto.spi.ColumnHandle;
+ import com.facebook.presto.spi.ImportClient;
+-import com.facebook.presto.spi.PartitionChunk;
+-import com.google.inject.Inject;
++import com.facebook.presto.spi.Split;
+ 
++import javax.inject.Inject;
+ import java.util.List;
+ 
+-import static com.google.common.base.Preconditions.checkArgument;
+ import static com.google.common.base.Preconditions.checkNotNull;
+ 
+ public class ImportDataStreamProvider
+-        implements DataStreamProvider
++        implements ConnectorDataStreamProvider
+ {
+-    private final ImportClientManager importClientManager;
++    private final ImportClient importClient;
+ 
+     @Inject
+-    public ImportDataStreamProvider(ImportClientManager importClientManager)
++    public ImportDataStreamProvider(ImportClient importClient)
+     {
+-        this.importClientManager = checkNotNull(importClientManager, "importClientFactory is null");
++        this.importClient = checkNotNull(importClient, "importClient is null");
++    }
++
++    @Override
++    public boolean canHandle(Split split)
++    {
++        return importClient.canHandle(split);
+     }
+ 
+     @Override
+     public Operator createDataStream(Split split, List<ColumnHandle> columns)
+     {
+         checkNotNull(split, "split is null");
+-        checkArgument(split instanceof ImportSplit, "Split must be of type ImportSplit, not %s", split.getClass().getName());
+-        assert split instanceof ImportSplit; // // IDEA-60343
+         checkNotNull(columns, "columns is null");
+-        checkArgument(!columns.isEmpty(), "must provide at least one column");
+-
+-        ImportSplit importSplit = (ImportSplit) split;
+-        ImportClient client = importClientManager.getClient(importSplit.getSourceName());
+ 
+-        PartitionChunk partitionChunk = client.deserializePartitionChunk(importSplit.getSerializedChunk().getBytes());
+-        return new RecordProjectOperator(client.getRecords(partitionChunk, columns));
++        return new RecordProjectOperator(importClient.getRecords(split, columns));
+     }
+ }
+diff --git a/presto-main/src/main/java/com/facebook/presto/split/ImportSplit.java b/presto-main/src/main/java/com/facebook/presto/split/ImportSplit.java
+deleted file mode 100644
+index 39a55f29fe212..0000000000000
+--- a/presto-main/src/main/java/com/facebook/presto/split/ImportSplit.java
++++ /dev/null
+@@ -1,104 +0,0 @@
+-package com.facebook.presto.split;
+-
+-import com.facebook.presto.ingest.SerializedPartitionChunk;
+-import com.facebook.presto.metadata.DataSourceType;
+-import com.facebook.presto.metadata.HostAddress;
+-import com.fasterxml.jackson.annotation.JsonCreator;
+-import com.fasterxml.jackson.annotation.JsonProperty;
+-import com.google.common.base.Objects;
+-import com.google.common.collect.ImmutableList;
+-
+-import java.util.List;
+-
+-import static com.google.common.base.Preconditions.checkArgument;
+-import static com.google.common.base.Preconditions.checkNotNull;
+-
+-public class ImportSplit
+-        implements PartitionedSplit
+-{
+-    private final String sourceName;
+-    private final String partition;
+-    private final boolean lastSplit;
+-    private final SerializedPartitionChunk serializedChunk;
+-    private final List<HostAddress> addresses;
+-    private final Object info;
+-
+-    @JsonCreator
+-    public ImportSplit(@JsonProperty("sourceName") String sourceName,
+-            @JsonProperty("partition") String partition,
+-            @JsonProperty("lastSplit") boolean lastSplit,
+-            @JsonProperty("serializedChunk") SerializedPartitionChunk serializedChunk,
+-            @JsonProperty("addresses") List<HostAddress> addresses,
+-            @JsonProperty("info") Object info)
+-    {
+-        this.sourceName = checkNotNull(sourceName, "sourceName is null");
+-        this.partition = checkNotNull(partition, "partition is null");
+-        this.serializedChunk = checkNotNull(serializedChunk, "serializedChunk is null");
+-
+-        checkNotNull(addresses, "hosts is null");
+-        checkArgument(!addresses.isEmpty(), "hosts is empty");
+-        this.addresses = ImmutableList.copyOf(addresses);
+-
+-        this.info = checkNotNull(info, "info is null");
+-
+-        this.lastSplit = lastSplit;
+-    }
+-
+-    @Override
+-    public boolean isRemotelyAccessible()
+-    {
+-        return true;
+-    }
+-
+-    @Override
+-    public DataSourceType getDataSourceType()
+-    {
+-        return DataSourceType.IMPORT;
+-    }
+-
+-    @JsonProperty
+-    public String getSourceName()
+-    {
+-        return sourceName;
+-    }
+-
+-    @JsonProperty
+-    public String getPartition()
+-    {
+-        return partition;
+-    }
+-
+-    @JsonProperty
+-    public boolean isLastSplit()
+-    {
+-        return lastSplit;
+-    }
+-
+-    @JsonProperty
+-    public SerializedPartitionChunk getSerializedChunk()
+-    {
+-        return serializedChunk;
+-    }
+-
+-    @JsonProperty
+-    public List<HostAddress> getAddresses()
+-    {
+-        return addresses;
+-    }
+-
+-    @JsonProperty
+-    public Object getInfo()
+-    {
+-        return info;
+-    }
+-
+-    @Override
+-    public String toString()
+-    {
+-        return Objects.toStringHelper(this)
+-                .add("sourceName", sourceName)
+-                .add("partition", partition)
+-                .add("lastSplit", lastSplit)
+-                .toString();
+-    }
+-}
+diff --git a/presto-main/src/main/java/com/facebook/presto/split/ImportSplitManager.java b/presto-main/src/main/java/com/facebook/presto/split/ImportSplitManager.java
+index 5d6dccb5e8b57..104827da02e4e 100644
+--- a/presto-main/src/main/java/com/facebook/presto/split/ImportSplitManager.java
++++ b/presto-main/src/main/java/com/facebook/presto/split/ImportSplitManager.java
+@@ -1,25 +1,19 @@
+ package com.facebook.presto.split;
+ 
+ import com.facebook.presto.execution.DataSource;
+-import com.facebook.presto.ingest.SerializedPartitionChunk;
+-import com.facebook.presto.metadata.HostAddress;
+ import com.facebook.presto.spi.ColumnHandle;
+ import com.facebook.presto.spi.ImportClient;
+ import com.facebook.presto.spi.NotFoundException;
+ import com.facebook.presto.spi.Partition;
+-import com.facebook.presto.spi.PartitionChunk;
++import com.facebook.presto.spi.Split;
+ import com.facebook.presto.spi.TableHandle;
+-import com.google.common.base.Function;
+-import com.google.common.collect.ImmutableList;
+ 
+-import java.net.InetAddress;
+ import java.util.List;
+ import java.util.Map;
+ import java.util.concurrent.Callable;
+ 
+ import static com.facebook.presto.util.RetryDriver.retry;
+ import static com.google.common.base.Preconditions.checkNotNull;
+-import static com.google.common.collect.Iterables.transform;
+ 
+ public class ImportSplitManager
+         implements ConnectorSplitManager
+@@ -60,43 +54,19 @@ public List<Partition> call()
+     @Override
+     public DataSource getPartitionSplits(final List<Partition> partitions)
+     {
+-        Iterable<PartitionChunk> partitionChunks = retry()
++        Iterable<Split> splits = retry()
+                 .stopOn(NotFoundException.class)
+                 .stopOnIllegalExceptions()
+-                .runUnchecked(new Callable<Iterable<PartitionChunk>>()
++                .runUnchecked(new Callable<Iterable<Split>>()
+                 {
+                     @Override
+-                    public Iterable<PartitionChunk> call()
++                    public Iterable<Split> call()
+                             throws Exception
+                     {
+                         // todo remap partitions
+-                        return importClient.getPartitionChunks(partitions);
++                        return importClient.getPartitionSplits(partitions);
+                     }
+                 });
+-        return new DataSource(dataSourceName, transform(partitionChunks, new Function<PartitionChunk, Split>()
+-        {
+-            @Override
+-            public Split apply(PartitionChunk chunk)
+-            {
+-                return new ImportSplit(dataSourceName,
+-                        chunk.getPartitionName(),
+-                        chunk.isLastChunk(),
+-                        SerializedPartitionChunk.create(importClient, chunk),
+-                        toAddresses(chunk.getHosts()),
+-                        chunk.getInfo());
+-            }
+-        }));
+-    }
+-
+-    private List<HostAddress> toAddresses(List<InetAddress> inetAddresses)
+-    {
+-        return ImmutableList.copyOf(transform(inetAddresses, new Function<InetAddress, HostAddress>()
+-        {
+-            @Override
+-            public HostAddress apply(InetAddress input)
+-            {
+-                return HostAddress.fromString(input.getHostAddress());
+-            }
+-        }));
++        return new DataSource(dataSourceName, splits);
+     }
+ }
+diff --git a/presto-main/src/main/java/com/facebook/presto/split/InternalDataStreamProvider.java b/presto-main/src/main/java/com/facebook/presto/split/InternalDataStreamProvider.java
+index 5c0cf79241968..90e42698b6951 100644
+--- a/presto-main/src/main/java/com/facebook/presto/split/InternalDataStreamProvider.java
++++ b/presto-main/src/main/java/com/facebook/presto/split/InternalDataStreamProvider.java
+@@ -10,6 +10,7 @@
+ import com.facebook.presto.operator.AlignmentOperator;
+ import com.facebook.presto.operator.Operator;
+ import com.facebook.presto.spi.ColumnHandle;
++import com.facebook.presto.spi.Split;
+ import com.google.common.collect.ImmutableList;
+ 
+ import javax.inject.Inject;
+@@ -23,7 +24,7 @@
+ import static java.lang.String.format;
+ 
+ public class InternalDataStreamProvider
+-        implements DataStreamProvider
++        implements ConnectorDataStreamProvider
+ {
+     private final InformationSchemaData informationSchemaData;
+     private final SystemTables systemTables;
+@@ -35,6 +36,12 @@ public InternalDataStreamProvider(InformationSchemaData informationSchemaData, S
+         this.systemTables = checkNotNull(systemTables, "systemTables is null");
+     }
+ 
++    @Override
++    public boolean canHandle(Split split)
++    {
++        return split instanceof InternalSplit;
++    }
++
+     @Override
+     public Operator createDataStream(Split split, List<ColumnHandle> columns)
+     {
+diff --git a/presto-main/src/main/java/com/facebook/presto/split/InternalSplit.java b/presto-main/src/main/java/com/facebook/presto/split/InternalSplit.java
+index cf20941af9848..a6519655fb843 100644
+--- a/presto-main/src/main/java/com/facebook/presto/split/InternalSplit.java
++++ b/presto-main/src/main/java/com/facebook/presto/split/InternalSplit.java
+@@ -1,9 +1,9 @@
+ package com.facebook.presto.split;
+ 
+-import com.facebook.presto.metadata.DataSourceType;
+-import com.facebook.presto.metadata.HostAddress;
++import com.facebook.presto.spi.HostAddress;
+ import com.facebook.presto.metadata.InternalColumnHandle;
+ import com.facebook.presto.metadata.InternalTableHandle;
++import com.facebook.presto.spi.Split;
+ import com.fasterxml.jackson.annotation.JsonCreator;
+ import com.fasterxml.jackson.annotation.JsonProperty;
+ import com.fasterxml.jackson.core.JsonGenerator;
+@@ -51,12 +51,6 @@ public boolean isRemotelyAccessible()
+         return false;
+     }
+ 
+-    @Override
+-    public DataSourceType getDataSourceType()
+-    {
+-        return DataSourceType.INTERNAL;
+-    }
+-
+     @Override
+     @JsonProperty
+     public List<HostAddress> getAddresses()
+diff --git a/presto-main/src/main/java/com/facebook/presto/split/InternalSplitManager.java b/presto-main/src/main/java/com/facebook/presto/split/InternalSplitManager.java
+index e21498ed2cf81..91b2f90f6bcb8 100644
+--- a/presto-main/src/main/java/com/facebook/presto/split/InternalSplitManager.java
++++ b/presto-main/src/main/java/com/facebook/presto/split/InternalSplitManager.java
+@@ -1,13 +1,14 @@
+ package com.facebook.presto.split;
+ 
+ import com.facebook.presto.execution.DataSource;
+-import com.facebook.presto.metadata.HostAddress;
++import com.facebook.presto.spi.HostAddress;
+ import com.facebook.presto.metadata.InternalColumnHandle;
+ import com.facebook.presto.metadata.InternalTableHandle;
+ import com.facebook.presto.metadata.Node;
+ import com.facebook.presto.metadata.NodeManager;
+ import com.facebook.presto.spi.ColumnHandle;
+ import com.facebook.presto.spi.Partition;
++import com.facebook.presto.spi.Split;
+ import com.facebook.presto.spi.TableHandle;
+ import com.google.common.base.Objects;
+ import com.google.common.base.Optional;
+diff --git a/presto-main/src/main/java/com/facebook/presto/split/NativeDataStreamProvider.java b/presto-main/src/main/java/com/facebook/presto/split/NativeDataStreamProvider.java
+index 248449a875f1b..bfbedcbc219ba 100644
+--- a/presto-main/src/main/java/com/facebook/presto/split/NativeDataStreamProvider.java
++++ b/presto-main/src/main/java/com/facebook/presto/split/NativeDataStreamProvider.java
+@@ -6,6 +6,7 @@
+ import com.facebook.presto.spi.ColumnHandle;
+ import com.facebook.presto.operator.AlignmentOperator;
+ import com.facebook.presto.operator.Operator;
++import com.facebook.presto.spi.Split;
+ import com.google.common.collect.ImmutableList;
+ import com.google.inject.Inject;
+ 
+@@ -15,7 +16,7 @@
+ import static com.google.common.base.Preconditions.checkNotNull;
+ 
+ public class NativeDataStreamProvider
+-        implements DataStreamProvider
++        implements ConnectorDataStreamProvider
+ {
+     private final LocalStorageManager storageManager;
+ 
+@@ -25,6 +26,12 @@ public NativeDataStreamProvider(LocalStorageManager storageManager)
+         this.storageManager = checkNotNull(storageManager, "storageManager is null");
+     }
+ 
++    @Override
++    public boolean canHandle(Split split)
++    {
++        return split instanceof NativeSplit;
++    }
++
+     @Override
+     public Operator createDataStream(Split split, List<ColumnHandle> columns)
+     {
+diff --git a/presto-main/src/main/java/com/facebook/presto/split/NativeSplit.java b/presto-main/src/main/java/com/facebook/presto/split/NativeSplit.java
+index a94c32a0119f9..d003ebd0f4d03 100644
+--- a/presto-main/src/main/java/com/facebook/presto/split/NativeSplit.java
++++ b/presto-main/src/main/java/com/facebook/presto/split/NativeSplit.java
+@@ -1,7 +1,7 @@
+ package com.facebook.presto.split;
+ 
+-import com.facebook.presto.metadata.DataSourceType;
+-import com.facebook.presto.metadata.HostAddress;
++import com.facebook.presto.spi.HostAddress;
++import com.facebook.presto.spi.Split;
+ import com.fasterxml.jackson.annotation.JsonCreator;
+ import com.fasterxml.jackson.annotation.JsonProperty;
+ import com.google.common.base.Objects;
+@@ -29,12 +29,6 @@ public NativeSplit(@JsonProperty("shardId") long shardId, @JsonProperty("address
+         this.addresses = ImmutableList.copyOf(addresses);
+     }
+ 
+-    @Override
+-    public DataSourceType getDataSourceType()
+-    {
+-        return DataSourceType.NATIVE;
+-    }
+-
+     @Override
+     @JsonProperty
+     public boolean isRemotelyAccessible()
+diff --git a/presto-main/src/main/java/com/facebook/presto/split/NativeSplitManager.java b/presto-main/src/main/java/com/facebook/presto/split/NativeSplitManager.java
+index 6accd6aee6cf4..2a9683ddb2a64 100644
+--- a/presto-main/src/main/java/com/facebook/presto/split/NativeSplitManager.java
++++ b/presto-main/src/main/java/com/facebook/presto/split/NativeSplitManager.java
+@@ -1,13 +1,14 @@
+ package com.facebook.presto.split;
+ 
+ import com.facebook.presto.execution.DataSource;
+-import com.facebook.presto.metadata.HostAddress;
++import com.facebook.presto.spi.ColumnHandle;
++import com.facebook.presto.spi.HostAddress;
+ import com.facebook.presto.metadata.NativeTableHandle;
+ import com.facebook.presto.metadata.Node;
+ import com.facebook.presto.metadata.NodeManager;
+ import com.facebook.presto.metadata.ShardManager;
+-import com.facebook.presto.spi.ColumnHandle;
+ import com.facebook.presto.spi.Partition;
++import com.facebook.presto.spi.Split;
+ import com.facebook.presto.spi.TableHandle;
+ import com.google.common.base.Objects;
+ import com.google.common.collect.ImmutableList;
+diff --git a/presto-main/src/main/java/com/facebook/presto/split/PartitionedSplit.java b/presto-main/src/main/java/com/facebook/presto/split/PartitionedSplit.java
+deleted file mode 100644
+index 3d73dd3401ce0..0000000000000
+--- a/presto-main/src/main/java/com/facebook/presto/split/PartitionedSplit.java
++++ /dev/null
+@@ -1,9 +0,0 @@
+-package com.facebook.presto.split;
+-
+-public interface PartitionedSplit
+-    extends Split
+-{
+-    String getPartition();
+-
+-    boolean isLastSplit();
+-}
+diff --git a/presto-main/src/main/java/com/facebook/presto/split/RemoteSplit.java b/presto-main/src/main/java/com/facebook/presto/split/RemoteSplit.java
+index a6c5f53357cc5..72a050efd513f 100644
+--- a/presto-main/src/main/java/com/facebook/presto/split/RemoteSplit.java
++++ b/presto-main/src/main/java/com/facebook/presto/split/RemoteSplit.java
+@@ -3,8 +3,8 @@
+  */
+ package com.facebook.presto.split;
+ 
+-import com.facebook.presto.metadata.DataSourceType;
+-import com.facebook.presto.metadata.HostAddress;
++import com.facebook.presto.spi.HostAddress;
++import com.facebook.presto.spi.Split;
+ import com.facebook.presto.tuple.TupleInfo;
+ import com.fasterxml.jackson.annotation.JsonCreator;
+ import com.fasterxml.jackson.annotation.JsonProperty;
+@@ -33,12 +33,6 @@ public RemoteSplit(
+         this.tupleInfos = ImmutableList.copyOf(tupleInfos);
+     }
+ 
+-    @Override
+-    public DataSourceType getDataSourceType()
+-    {
+-        return DataSourceType.REMOTE;
+-    }
+-
+     @JsonProperty
+     public URI getLocation()
+     {
+diff --git a/presto-main/src/main/java/com/facebook/presto/split/Split.java b/presto-main/src/main/java/com/facebook/presto/split/Split.java
+deleted file mode 100644
+index b58c8e98e3019..0000000000000
+--- a/presto-main/src/main/java/com/facebook/presto/split/Split.java
++++ /dev/null
+@@ -1,31 +0,0 @@
+-package com.facebook.presto.split;
+-
+-import com.facebook.presto.metadata.DataSourceType;
+-import com.facebook.presto.tpch.TpchSplit;
+-import com.facebook.presto.metadata.HostAddress;
+-import com.fasterxml.jackson.annotation.JsonSubTypes;
+-import com.fasterxml.jackson.annotation.JsonTypeInfo;
+-
+-import java.util.List;
+-
+-@JsonTypeInfo(
+-        use = JsonTypeInfo.Id.NAME,
+-        include = JsonTypeInfo.As.PROPERTY,
+-        property = "type")
+-@JsonSubTypes({
+-        @JsonSubTypes.Type(value = NativeSplit.class, name = "native"),
+-        @JsonSubTypes.Type(value = InternalSplit.class, name = "internal"),
+-        @JsonSubTypes.Type(value = ImportSplit.class, name = "import"),
+-        @JsonSubTypes.Type(value = RemoteSplit.class, name = "remote"),
+-        @JsonSubTypes.Type(value = TpchSplit.class, name = "tpch"),
+-        @JsonSubTypes.Type(value = CollocatedSplit.class, name = "collocated")})
+-public interface Split
+-{
+-    DataSourceType getDataSourceType();
+-
+-    boolean isRemotelyAccessible();
+-
+-    List<HostAddress> getAddresses();
+-
+-    Object getInfo();
+-}
+diff --git a/presto-main/src/main/java/com/facebook/presto/sql/planner/DistributedExecutionPlanner.java b/presto-main/src/main/java/com/facebook/presto/sql/planner/DistributedExecutionPlanner.java
+index 692cc1a9e39f8..ad9accc8664ac 100644
+--- a/presto-main/src/main/java/com/facebook/presto/sql/planner/DistributedExecutionPlanner.java
++++ b/presto-main/src/main/java/com/facebook/presto/sql/planner/DistributedExecutionPlanner.java
+@@ -3,7 +3,7 @@
+ import com.facebook.presto.execution.DataSource;
+ import com.facebook.presto.metadata.ShardManager;
+ import com.facebook.presto.spi.Partition;
+-import com.facebook.presto.split.Split;
++import com.facebook.presto.spi.Split;
+ import com.facebook.presto.split.SplitManager;
+ import com.facebook.presto.sql.ExpressionUtils;
+ import com.facebook.presto.sql.analyzer.Session;
+diff --git a/presto-main/src/main/java/com/facebook/presto/sql/planner/TableWriter.java b/presto-main/src/main/java/com/facebook/presto/sql/planner/TableWriter.java
+index c476888099c15..b9ff92766cb98 100644
+--- a/presto-main/src/main/java/com/facebook/presto/sql/planner/TableWriter.java
++++ b/presto-main/src/main/java/com/facebook/presto/sql/planner/TableWriter.java
+@@ -3,10 +3,10 @@
+ import com.facebook.presto.metadata.ShardManager;
+ import com.facebook.presto.operator.TableWriterResult;
+ import com.facebook.presto.spi.Partition;
++import com.facebook.presto.spi.Split;
+ import com.facebook.presto.split.CollocatedSplit;
+ import com.facebook.presto.split.NativeSplit;
+-import com.facebook.presto.split.PartitionedSplit;
+-import com.facebook.presto.split.Split;
++import com.facebook.presto.spi.PartitionedSplit;
+ import com.facebook.presto.sql.planner.plan.PlanNodeId;
+ import com.facebook.presto.sql.planner.plan.TableWriterNode;
+ import com.google.common.base.Predicate;
+@@ -210,7 +210,7 @@ protected Split computeNext()
+                 boolean lastSplit = false;
+                 if (sourceSplit instanceof PartitionedSplit) {
+                     PartitionedSplit partitionedSplit = (PartitionedSplit) sourceSplit;
+-                    partition = partitionedSplit.getPartition();
++                    partition = partitionedSplit.getPartitionId();
+                     lastSplit = partitionedSplit.isLastSplit();
+                 }
+ 
+diff --git a/presto-main/src/main/java/com/facebook/presto/tpch/TpchDataStreamProvider.java b/presto-main/src/main/java/com/facebook/presto/tpch/TpchDataStreamProvider.java
+index 64203ab6c1a28..b14445ac8541b 100644
+--- a/presto-main/src/main/java/com/facebook/presto/tpch/TpchDataStreamProvider.java
++++ b/presto-main/src/main/java/com/facebook/presto/tpch/TpchDataStreamProvider.java
+@@ -1,30 +1,38 @@
+ package com.facebook.presto.tpch;
+ 
+ import com.facebook.presto.block.BlockIterable;
+-import com.facebook.presto.spi.ColumnHandle;
+ import com.facebook.presto.operator.AlignmentOperator;
+ import com.facebook.presto.operator.Operator;
+ import com.facebook.presto.serde.BlocksFileEncoding;
+-import com.facebook.presto.split.DataStreamProvider;
+-import com.facebook.presto.split.Split;
++import com.facebook.presto.spi.ColumnHandle;
++import com.facebook.presto.spi.Split;
++import com.facebook.presto.split.ConnectorDataStreamProvider;
+ import com.google.common.base.Preconditions;
+ import com.google.common.collect.ImmutableList;
+ 
++import javax.inject.Inject;
+ import java.util.List;
+ 
+ import static com.google.common.base.Preconditions.checkArgument;
+ import static com.google.common.base.Preconditions.checkNotNull;
+ 
+ public class TpchDataStreamProvider
+-    implements DataStreamProvider
++    implements ConnectorDataStreamProvider
+ {
+     private final TpchBlocksProvider tpchBlocksProvider;
+ 
++    @Inject
+     public TpchDataStreamProvider(TpchBlocksProvider tpchBlocksProvider)
+     {
+         this.tpchBlocksProvider = Preconditions.checkNotNull(tpchBlocksProvider, "tpchBlocksProvider is null");
+     }
+ 
++    @Override
++    public boolean canHandle(Split split)
++    {
++        return split instanceof TpchSplit;
++    }
++
+     @Override
+     public Operator createDataStream(Split split, List<ColumnHandle> columns)
+     {
+diff --git a/presto-main/src/main/java/com/facebook/presto/tpch/TpchHandleResolver.java b/presto-main/src/main/java/com/facebook/presto/tpch/TpchHandleResolver.java
+index 2c7ceede86b6b..612f7cd1c9e74 100644
+--- a/presto-main/src/main/java/com/facebook/presto/tpch/TpchHandleResolver.java
++++ b/presto-main/src/main/java/com/facebook/presto/tpch/TpchHandleResolver.java
+@@ -3,6 +3,7 @@
+ import com.facebook.presto.metadata.ConnectorHandleResolver;
+ import com.facebook.presto.spi.ColumnHandle;
+ import com.facebook.presto.spi.TableHandle;
++import com.facebook.presto.spi.Split;
+ 
+ public class TpchHandleResolver
+         implements ConnectorHandleResolver
+@@ -19,6 +20,12 @@ public boolean canHandle(ColumnHandle columnHandle)
+         return columnHandle instanceof TpchColumnHandle;
+     }
+ 
++    @Override
++    public boolean canHandle(Split split)
++    {
++        return split instanceof TpchSplit;
++    }
++
+     @Override
+     public Class<? extends TableHandle> getTableHandleClass()
+     {
+@@ -30,4 +37,10 @@ public Class<? extends ColumnHandle> getColumnHandleClass()
+     {
+         return TpchColumnHandle.class;
+     }
++
++    @Override
++    public Class<? extends Split> getSplitClass()
++    {
++        return TpchSplit.class;
++    }
+ }
+diff --git a/presto-main/src/main/java/com/facebook/presto/tpch/TpchSplit.java b/presto-main/src/main/java/com/facebook/presto/tpch/TpchSplit.java
+index 392ca712f36e1..bdee0ae3aa06f 100644
+--- a/presto-main/src/main/java/com/facebook/presto/tpch/TpchSplit.java
++++ b/presto-main/src/main/java/com/facebook/presto/tpch/TpchSplit.java
+@@ -1,8 +1,7 @@
+ package com.facebook.presto.tpch;
+ 
+-import com.facebook.presto.metadata.DataSourceType;
+-import com.facebook.presto.metadata.HostAddress;
+-import com.facebook.presto.split.PartitionedSplit;
++import com.facebook.presto.spi.PartitionedSplit;
++import com.facebook.presto.spi.HostAddress;
+ import com.fasterxml.jackson.annotation.JsonCreator;
+ import com.fasterxml.jackson.annotation.JsonProperty;
+ import com.google.common.annotations.VisibleForTesting;
+@@ -48,12 +47,6 @@ public TpchSplit(TpchTableHandle tableHandle)
+         this(tableHandle, 0, 1, ImmutableList.<HostAddress>of());
+     }
+ 
+-    @Override
+-    public DataSourceType getDataSourceType()
+-    {
+-        return DataSourceType.TPCH;
+-    }
+-
+     @JsonProperty
+     public TpchTableHandle getTableHandle()
+     {
+@@ -73,7 +66,7 @@ public int getPartNumber()
+     }
+ 
+     @Override
+-    public String getPartition()
++    public String getPartitionId()
+     {
+         return partition;
+     }
+diff --git a/presto-main/src/main/java/com/facebook/presto/tpch/TpchSplitManager.java b/presto-main/src/main/java/com/facebook/presto/tpch/TpchSplitManager.java
+index b9dc36e692dea..54ba04846d553 100644
+--- a/presto-main/src/main/java/com/facebook/presto/tpch/TpchSplitManager.java
++++ b/presto-main/src/main/java/com/facebook/presto/tpch/TpchSplitManager.java
+@@ -5,9 +5,9 @@
+ import com.facebook.presto.metadata.NodeManager;
+ import com.facebook.presto.spi.ColumnHandle;
+ import com.facebook.presto.spi.Partition;
++import com.facebook.presto.spi.Split;
+ import com.facebook.presto.spi.TableHandle;
+ import com.facebook.presto.split.ConnectorSplitManager;
+-import com.facebook.presto.split.Split;
+ import com.google.common.base.Objects;
+ import com.google.common.collect.ImmutableList;
+ import com.google.common.collect.ImmutableMap;
+diff --git a/presto-main/src/test/java/com/facebook/presto/TestLocalQueries.java b/presto-main/src/test/java/com/facebook/presto/TestLocalQueries.java
+index e8175a6276737..c73d3dc5d04e9 100644
+--- a/presto-main/src/test/java/com/facebook/presto/TestLocalQueries.java
++++ b/presto-main/src/test/java/com/facebook/presto/TestLocalQueries.java
+@@ -1,6 +1,7 @@
+ package com.facebook.presto;
+ 
+ import com.facebook.presto.metadata.MockLocalStorageManager;
++import com.facebook.presto.split.DataStreamManager;
+ import com.facebook.presto.split.DataStreamProvider;
+ import com.facebook.presto.sql.analyzer.Session;
+ import com.facebook.presto.tpch.TpchDataStreamProvider;
+@@ -25,7 +26,7 @@ protected void setUpQueryFramework(String catalog, String schema)
+         this.schema = schema;
+ 
+         TestingTpchBlocksProvider tpchBlocksProvider = new TestingTpchBlocksProvider();
+-        dataStreamProvider = new TpchDataStreamProvider(tpchBlocksProvider);
++        dataStreamProvider = new DataStreamManager(new TpchDataStreamProvider(tpchBlocksProvider));
+     }
+ 
+     @Override
+diff --git a/presto-main/src/test/java/com/facebook/presto/benchmark/AbstractSqlBenchmark.java b/presto-main/src/test/java/com/facebook/presto/benchmark/AbstractSqlBenchmark.java
+index ee18a75f98cf9..652d38b106fed 100644
+--- a/presto-main/src/test/java/com/facebook/presto/benchmark/AbstractSqlBenchmark.java
++++ b/presto-main/src/test/java/com/facebook/presto/benchmark/AbstractSqlBenchmark.java
+@@ -8,6 +8,7 @@
+ import com.facebook.presto.operator.SourceHashProviderFactory;
+ import com.facebook.presto.operator.SourceOperator;
+ import com.facebook.presto.sql.analyzer.Analysis;
++import com.facebook.presto.split.DataStreamManager;
+ import com.facebook.presto.sql.analyzer.Analyzer;
+ import com.facebook.presto.sql.analyzer.Session;
+ import com.facebook.presto.sql.analyzer.Type;
+@@ -87,7 +88,7 @@ protected Operator createBenchmarkedOperator(TpchBlocksProvider provider)
+                 new OperatorStats(),
+                 new SourceHashProviderFactory(maxOperatorMemoryUsage),
+                 maxOperatorMemoryUsage,
+-                new TpchDataStreamProvider(provider),
++                new DataStreamManager(new TpchDataStreamProvider(provider)),
+                 MockLocalStorageManager.createMockLocalStorageManager(),
+                 null);
+ 
+diff --git a/presto-main/src/test/java/com/facebook/presto/split/TestImportClientFactory.java b/presto-main/src/test/java/com/facebook/presto/split/TestImportClientFactory.java
+index 6db1b44f7b89e..e6f5a0c34687a 100644
+--- a/presto-main/src/test/java/com/facebook/presto/split/TestImportClientFactory.java
++++ b/presto-main/src/test/java/com/facebook/presto/split/TestImportClientFactory.java
+@@ -5,11 +5,11 @@
+ import com.facebook.presto.spi.ImportClient;
+ import com.facebook.presto.spi.ImportClientFactory;
+ import com.facebook.presto.spi.Partition;
+-import com.facebook.presto.spi.PartitionChunk;
+ import com.facebook.presto.spi.SchemaTableMetadata;
+ import com.facebook.presto.spi.RecordSet;
+ import com.facebook.presto.spi.SchemaTableName;
+ import com.facebook.presto.spi.SchemaTablePrefix;
++import com.facebook.presto.spi.Split;
+ import com.facebook.presto.spi.TableHandle;
+ import com.google.common.collect.ImmutableMap;
+ import org.testng.annotations.Test;
+@@ -108,49 +108,49 @@ public List<Partition> getPartitions(TableHandle table, Map<ColumnHandle, Object
+                 }
+ 
+                 @Override
+-                public Iterable<PartitionChunk> getPartitionChunks(List<Partition> partitions)
++                public Iterable<Split> getPartitionSplits(List<Partition> partitions)
+                 {
+                     throw new UnsupportedOperationException();
+                 }
+ 
+                 @Override
+-                public RecordSet getRecords(PartitionChunk partitionChunk, List<? extends ColumnHandle> columns)
++                public RecordSet getRecords(Split split, List<? extends ColumnHandle> columns)
+                 {
+                     throw new UnsupportedOperationException();
+                 }
+ 
+                 @Override
+-                public byte[] serializePartitionChunk(PartitionChunk partitionChunk)
++                public boolean canHandle(TableHandle tableHandle)
+                 {
+                     throw new UnsupportedOperationException();
+                 }
+ 
+                 @Override
+-                public PartitionChunk deserializePartitionChunk(byte[] bytes)
++                public boolean canHandle(ColumnHandle tableHandle)
+                 {
+                     throw new UnsupportedOperationException();
+                 }
+ 
+                 @Override
+-                public boolean canHandle(TableHandle tableHandle)
++                public boolean canHandle(Split split)
+                 {
+                     throw new UnsupportedOperationException();
+                 }
+ 
+                 @Override
+-                public boolean canHandle(ColumnHandle tableHandle)
++                public Class<? extends TableHandle> getTableHandleClass()
+                 {
+                     throw new UnsupportedOperationException();
+                 }
+ 
+                 @Override
+-                public Class<? extends TableHandle> getTableHandleClass()
++                public Class<? extends ColumnHandle> getColumnHandleClass()
+                 {
+                     throw new UnsupportedOperationException();
+                 }
+ 
+                 @Override
+-                public Class<? extends ColumnHandle> getColumnHandleClass()
++                public Class<? extends Split> getSplitClass()
+                 {
+                     throw new UnsupportedOperationException();
+                 }
+diff --git a/presto-main/src/test/java/com/facebook/presto/split/TestInternalSplit.java b/presto-main/src/test/java/com/facebook/presto/split/TestInternalSplit.java
+index ceb2cc9cdfd11..4f9f6e66dbc6c 100644
+--- a/presto-main/src/test/java/com/facebook/presto/split/TestInternalSplit.java
++++ b/presto-main/src/test/java/com/facebook/presto/split/TestInternalSplit.java
+@@ -1,6 +1,6 @@
+ package com.facebook.presto.split;
+ 
+-import com.facebook.presto.metadata.HostAddress;
++import com.facebook.presto.spi.HostAddress;
+ import com.facebook.presto.metadata.InternalColumnHandle;
+ import com.facebook.presto.metadata.InternalTableHandle;
+ import com.facebook.presto.metadata.QualifiedTableName;
+diff --git a/presto-main/src/test/java/com/facebook/presto/util/LocalQueryRunner.java b/presto-main/src/test/java/com/facebook/presto/util/LocalQueryRunner.java
+index bb890abefb3c3..a7d88506013b4 100644
+--- a/presto-main/src/test/java/com/facebook/presto/util/LocalQueryRunner.java
++++ b/presto-main/src/test/java/com/facebook/presto/util/LocalQueryRunner.java
+@@ -2,7 +2,6 @@
+ 
+ import com.facebook.presto.importer.MockPeriodicImportManager;
+ import com.facebook.presto.metadata.DualTable;
+-import com.facebook.presto.metadata.HostAddress;
+ import com.facebook.presto.metadata.InternalColumnHandle;
+ import com.facebook.presto.metadata.InternalTable;
+ import com.facebook.presto.metadata.InternalTableHandle;
+@@ -17,10 +16,12 @@
+ import com.facebook.presto.operator.SourceHashProviderFactory;
+ import com.facebook.presto.operator.SourceOperator;
+ import com.facebook.presto.spi.ColumnHandle;
++import com.facebook.presto.spi.HostAddress;
++import com.facebook.presto.spi.Split;
+ import com.facebook.presto.spi.TableHandle;
++import com.facebook.presto.split.DataStreamManager;
+ import com.facebook.presto.split.DataStreamProvider;
+ import com.facebook.presto.split.InternalSplit;
+-import com.facebook.presto.split.Split;
+ import com.facebook.presto.sql.analyzer.Analysis;
+ import com.facebook.presto.sql.analyzer.Analyzer;
+ import com.facebook.presto.sql.analyzer.Session;
+@@ -134,7 +135,7 @@ public static LocalQueryRunner createTpchLocalQueryRunner()
+     {
+         TestingTpchBlocksProvider tpchBlocksProvider = new TestingTpchBlocksProvider();
+ 
+-        DataStreamProvider dataProvider = new TpchDataStreamProvider(tpchBlocksProvider);
++        DataStreamProvider dataProvider = new DataStreamManager(new TpchDataStreamProvider(tpchBlocksProvider));
+         Session session = new Session(null, TpchMetadata.TPCH_CATALOG_NAME, TpchMetadata.TPCH_SCHEMA_NAME);
+ 
+         return new LocalQueryRunner(dataProvider, TpchMetadata.createTpchMetadata(), MockLocalStorageManager.createMockLocalStorageManager(), session);
+diff --git a/presto-main/src/test/java/com/facebook/presto/util/TestingTpchBlocksProvider.java b/presto-main/src/test/java/com/facebook/presto/util/TestingTpchBlocksProvider.java
+index 4ad85f8eb5d8b..9fcdc215e012b 100644
+--- a/presto-main/src/test/java/com/facebook/presto/util/TestingTpchBlocksProvider.java
++++ b/presto-main/src/test/java/com/facebook/presto/util/TestingTpchBlocksProvider.java
+@@ -22,6 +22,7 @@
+ import com.google.common.io.Resources;
+ import io.airlift.units.DataSize;
+ 
++import javax.inject.Inject;
+ import java.io.IOException;
+ import java.io.InputStreamReader;
+ import java.net.URL;
+@@ -40,6 +41,7 @@ public class TestingTpchBlocksProvider
+ {
+     private final Map<String, RecordSet> data;
+ 
++    @Inject
+     public TestingTpchBlocksProvider()
+     {
+         this(ImmutableMap.of(
+diff --git a/presto-server/src/main/java/com/facebook/presto/server/ClassLoaderSafeImportClient.java b/presto-server/src/main/java/com/facebook/presto/server/ClassLoaderSafeImportClient.java
+index 88cb1673bc7fe..af1f398311658 100644
+--- a/presto-server/src/main/java/com/facebook/presto/server/ClassLoaderSafeImportClient.java
++++ b/presto-server/src/main/java/com/facebook/presto/server/ClassLoaderSafeImportClient.java
+@@ -7,11 +7,11 @@
+ import com.facebook.presto.spi.ColumnMetadata;
+ import com.facebook.presto.spi.ImportClient;
+ import com.facebook.presto.spi.Partition;
+-import com.facebook.presto.spi.PartitionChunk;
+ import com.facebook.presto.spi.SchemaTableMetadata;
+ import com.facebook.presto.spi.RecordSet;
+ import com.facebook.presto.spi.SchemaTableName;
+ import com.facebook.presto.spi.SchemaTablePrefix;
++import com.facebook.presto.spi.Split;
+ import com.facebook.presto.spi.TableHandle;
+ import com.google.common.base.Preconditions;
+ 
+@@ -114,66 +114,66 @@ public List<Partition> getPartitions(TableHandle table, Map<ColumnHandle, Object
+     }
+ 
+     @Override
+-    public Iterable<PartitionChunk> getPartitionChunks(List<Partition> partitions)
++    public Iterable<Split> getPartitionSplits(List<Partition> partitions)
+     {
+         try (ThreadContextClassLoader threadContextClassLoader = new ThreadContextClassLoader(classLoader)) {
+-            return delegate.getPartitionChunks(partitions);
++            return delegate.getPartitionSplits(partitions);
+         }
+     }
+ 
+     @Override
+-    public RecordSet getRecords(PartitionChunk partitionChunk, List<? extends ColumnHandle> columns)
++    public RecordSet getRecords(Split split, List<? extends ColumnHandle> columns)
+     {
+         try (ThreadContextClassLoader threadContextClassLoader = new ThreadContextClassLoader(classLoader)) {
+-            return delegate.getRecords(partitionChunk, columns);
++            return delegate.getRecords(split, columns);
+         }
+     }
+ 
+     @Override
+-    public byte[] serializePartitionChunk(PartitionChunk partitionChunk)
++    public boolean canHandle(TableHandle tableHandle)
+     {
+         try (ThreadContextClassLoader threadContextClassLoader = new ThreadContextClassLoader(classLoader)) {
+-            return delegate.serializePartitionChunk(partitionChunk);
++            return delegate.canHandle(tableHandle);
+         }
+     }
+ 
+     @Override
+-    public PartitionChunk deserializePartitionChunk(byte[] bytes)
++    public boolean canHandle(ColumnHandle columnHandle)
+     {
+         try (ThreadContextClassLoader threadContextClassLoader = new ThreadContextClassLoader(classLoader)) {
+-            return delegate.deserializePartitionChunk(bytes);
++            return delegate.canHandle(columnHandle);
+         }
+     }
+ 
+     @Override
+-    public boolean canHandle(TableHandle tableHandle)
++    public boolean canHandle(Split split)
+     {
+         try (ThreadContextClassLoader threadContextClassLoader = new ThreadContextClassLoader(classLoader)) {
+-            return delegate.canHandle(tableHandle);
++            return delegate.canHandle(split);
+         }
+     }
+ 
+     @Override
+-    public boolean canHandle(ColumnHandle columnHandle)
++    public Class<? extends ColumnHandle> getColumnHandleClass()
+     {
+         try (ThreadContextClassLoader threadContextClassLoader = new ThreadContextClassLoader(classLoader)) {
+-            return delegate.canHandle(columnHandle);
++            return delegate.getColumnHandleClass();
+         }
+     }
+ 
+     @Override
+-    public Class<? extends ColumnHandle> getColumnHandleClass()
++    public Class<? extends TableHandle> getTableHandleClass()
+     {
+         try (ThreadContextClassLoader threadContextClassLoader = new ThreadContextClassLoader(classLoader)) {
+-            return delegate.getColumnHandleClass();
++            return delegate.getTableHandleClass();
+         }
+     }
+ 
+     @Override
+-    public Class<? extends TableHandle> getTableHandleClass()
++    public Class<? extends Split> getSplitClass()
+     {
+         try (ThreadContextClassLoader threadContextClassLoader = new ThreadContextClassLoader(classLoader)) {
+-            return delegate.getTableHandleClass();
++            return delegate.getSplitClass();
+         }
+     }
+ }
+diff --git a/presto-server/src/main/java/com/facebook/presto/server/HttpRemoteTask.java b/presto-server/src/main/java/com/facebook/presto/server/HttpRemoteTask.java
+index 6c2aa3aceb6c9..d895d6b4bbc06 100644
+--- a/presto-server/src/main/java/com/facebook/presto/server/HttpRemoteTask.java
++++ b/presto-server/src/main/java/com/facebook/presto/server/HttpRemoteTask.java
+@@ -18,7 +18,7 @@
+ import com.facebook.presto.metadata.Node;
+ import com.facebook.presto.operator.OperatorStats.SplitExecutionStats;
+ import com.facebook.presto.split.RemoteSplit;
+-import com.facebook.presto.split.Split;
++import com.facebook.presto.spi.Split;
+ import com.facebook.presto.sql.analyzer.Session;
+ import com.facebook.presto.sql.planner.OutputReceiver;
+ import com.facebook.presto.sql.planner.PlanFragment;
+diff --git a/presto-server/src/main/java/com/facebook/presto/server/HttpRemoteTaskFactory.java b/presto-server/src/main/java/com/facebook/presto/server/HttpRemoteTaskFactory.java
+index ea2ae0a394c7e..6b8775ba6b588 100644
+--- a/presto-server/src/main/java/com/facebook/presto/server/HttpRemoteTaskFactory.java
++++ b/presto-server/src/main/java/com/facebook/presto/server/HttpRemoteTaskFactory.java
+@@ -11,7 +11,7 @@
+ import com.facebook.presto.execution.TaskInfo;
+ import com.facebook.presto.metadata.Node;
+ import com.facebook.presto.operator.ForScheduler;
+-import com.facebook.presto.split.Split;
++import com.facebook.presto.spi.Split;
+ import com.facebook.presto.sql.analyzer.Session;
+ import com.facebook.presto.sql.planner.OutputReceiver;
+ import com.facebook.presto.sql.planner.PlanFragment;
+diff --git a/presto-server/src/main/java/com/facebook/presto/server/ServerMainModule.java b/presto-server/src/main/java/com/facebook/presto/server/ServerMainModule.java
+index ae21b6cc22c7e..d6629144fde8f 100644
+--- a/presto-server/src/main/java/com/facebook/presto/server/ServerMainModule.java
++++ b/presto-server/src/main/java/com/facebook/presto/server/ServerMainModule.java
+@@ -5,10 +5,6 @@
+ 
+ import com.facebook.presto.client.QueryResults;
+ import com.facebook.presto.connector.ConnectorManager;
+-import com.facebook.presto.metadata.HandleResolver;
+-import com.facebook.presto.split.ConnectorSplitManager;
+-import com.facebook.presto.split.InternalSplitManager;
+-import com.facebook.presto.split.NativeSplitManager;
+ import com.facebook.presto.event.query.QueryCompletionEvent;
+ import com.facebook.presto.event.query.QueryCreatedEvent;
+ import com.facebook.presto.event.query.QueryMonitor;
+@@ -52,6 +48,7 @@
+ import com.facebook.presto.metadata.ForShardManager;
+ import com.facebook.presto.metadata.ForStorageManager;
+ import com.facebook.presto.metadata.HandleJsonModule;
++import com.facebook.presto.metadata.HandleResolver;
+ import com.facebook.presto.metadata.InformationSchemaData;
+ import com.facebook.presto.metadata.InformationSchemaMetadata;
+ import com.facebook.presto.metadata.InternalSchemaMetadata;
+@@ -67,13 +64,16 @@
+ import com.facebook.presto.operator.ForExchange;
+ import com.facebook.presto.operator.ForScheduler;
+ import com.facebook.presto.spi.ImportClientFactory;
++import com.facebook.presto.spi.Split;
++import com.facebook.presto.split.ConnectorDataStreamProvider;
++import com.facebook.presto.split.ConnectorSplitManager;
+ import com.facebook.presto.split.DataStreamManager;
+ import com.facebook.presto.split.DataStreamProvider;
+ import com.facebook.presto.split.ImportClientManager;
+-import com.facebook.presto.split.ImportDataStreamProvider;
+ import com.facebook.presto.split.InternalDataStreamProvider;
++import com.facebook.presto.split.InternalSplitManager;
+ import com.facebook.presto.split.NativeDataStreamProvider;
+-import com.facebook.presto.split.Split;
++import com.facebook.presto.split.NativeSplitManager;
+ import com.facebook.presto.split.SplitManager;
+ import com.facebook.presto.sql.planner.PlanOptimizersFactory;
+ import com.facebook.presto.sql.planner.optimizations.PlanOptimizer;
+@@ -159,9 +159,9 @@ protected void configure()
+ 
+         bindConfig(binder).to(DatabaseLocalStorageManagerConfig.class);
+         binder.bind(LocalStorageManager.class).to(DatabaseLocalStorageManager.class).in(Scopes.SINGLETON);
++        binder.bind(DataStreamManager.class).in(Scopes.SINGLETON);
+         binder.bind(DataStreamProvider.class).to(DataStreamManager.class).in(Scopes.SINGLETON);
+-        binder.bind(NativeDataStreamProvider.class).in(Scopes.SINGLETON);
+-        binder.bind(ImportDataStreamProvider.class).in(Scopes.SINGLETON);
++        Multibinder<ConnectorDataStreamProvider> connectorDataStreamProviderBinder = Multibinder.newSetBinder(binder, ConnectorDataStreamProvider.class);
+ 
+         binder.bind(MetadataResource.class).in(Scopes.SINGLETON);
+         binder.bind(MetadataManager.class).in(Scopes.SINGLETON);
+@@ -180,10 +180,11 @@ protected void configure()
+         // native
+         connectorMetadataBinder.addBinding("default").to(NativeMetadata.class).in(Scopes.SINGLETON);
+         connectorSplitManagerMapBinder.addBinding().to(NativeSplitManager.class).in(Scopes.SINGLETON);
++        connectorDataStreamProviderBinder.addBinding().to(NativeDataStreamProvider.class).in(Scopes.SINGLETON);
+ 
+         // system tables (e.g., Dual, information_schema, and sys)
+         binder.bind(SystemTables.class).in(Scopes.SINGLETON);
+-        binder.bind(InternalDataStreamProvider.class).in(Scopes.SINGLETON);
++        connectorDataStreamProviderBinder.addBinding().to(InternalDataStreamProvider.class).in(Scopes.SINGLETON);
+         binder.bind(InformationSchemaData.class).in(Scopes.SINGLETON);
+ 
+         // import
+diff --git a/presto-server/src/test/java/com/facebook/presto/server/TestDistributedQueries.java b/presto-server/src/test/java/com/facebook/presto/server/TestDistributedQueries.java
+index 7c50a9ac5f1b1..39d30a5d71670 100644
+--- a/presto-server/src/test/java/com/facebook/presto/server/TestDistributedQueries.java
++++ b/presto-server/src/test/java/com/facebook/presto/server/TestDistributedQueries.java
+@@ -11,6 +11,7 @@
+ import com.facebook.presto.client.StatementClient;
+ import com.facebook.presto.failureDetector.FailureDetectorModule;
+ import com.facebook.presto.guice.TestingJmxModule;
++import com.facebook.presto.metadata.CollocatedSplitHandleResolver;
+ import com.facebook.presto.metadata.ConnectorMetadata;
+ import com.facebook.presto.metadata.HandleJsonModule;
+ import com.facebook.presto.metadata.HandleResolver;
+@@ -20,12 +21,15 @@
+ import com.facebook.presto.metadata.NodeManager;
+ import com.facebook.presto.metadata.QualifiedTableName;
+ import com.facebook.presto.metadata.QualifiedTablePrefix;
++import com.facebook.presto.split.ConnectorDataStreamProvider;
+ import com.facebook.presto.split.ConnectorSplitManager;
++import com.facebook.presto.metadata.RemoteSplitHandleResolver;
+ import com.facebook.presto.sql.tree.Expression;
+ import com.facebook.presto.sql.tree.FunctionCall;
+ import com.facebook.presto.sql.tree.Serialization.ExpressionDeserializer;
+ import com.facebook.presto.sql.tree.Serialization.ExpressionSerializer;
+ import com.facebook.presto.sql.tree.Serialization.FunctionCallDeserializer;
++import com.facebook.presto.tpch.TpchBlocksProvider;
+ import com.facebook.presto.tpch.TpchDataStreamProvider;
+ import com.facebook.presto.tpch.TpchHandleResolver;
+ import com.facebook.presto.tpch.TpchMetadata;
+@@ -400,10 +404,10 @@ public PrestoTestingServer(URI discoveryUri)
+                         @Override
+                         public void configure(Binder binder)
+                         {
+-                            TestingTpchBlocksProvider tpchBlocksProvider = new TestingTpchBlocksProvider();
+-                            binder.bind(TpchDataStreamProvider.class).toInstance(new TpchDataStreamProvider(tpchBlocksProvider));
+                             newMapBinder(binder, String.class, ConnectorMetadata.class).addBinding("tpch").to(TpchMetadata.class);
+                             newSetBinder(binder, ConnectorSplitManager.class).addBinding().to(TpchSplitManager.class).in(Scopes.SINGLETON);
++                            binder.bind(TpchBlocksProvider.class).to(TestingTpchBlocksProvider.class).in(Scopes.SINGLETON);
++                            newSetBinder(binder, ConnectorDataStreamProvider.class).addBinding().to(TpchDataStreamProvider.class).in(Scopes.SINGLETON);
+                         }
+                     });
+ 
+@@ -567,6 +571,8 @@ public void configure(Binder binder)
+         handleResolver.addHandleResolver("native", new NativeHandleResolver());
+         handleResolver.addHandleResolver("tpch", new TpchHandleResolver());
+         handleResolver.addHandleResolver("internal", new InternalHandleResolver());
++        handleResolver.addHandleResolver("remote", new RemoteSplitHandleResolver());
++        handleResolver.addHandleResolver("collocated", new CollocatedSplitHandleResolver());
+ 
+         return injector.getInstance(JsonCodecFactory.class);
+     }
+diff --git a/presto-server/src/test/java/com/facebook/presto/server/TestingPrestoServer.java b/presto-server/src/test/java/com/facebook/presto/server/TestingPrestoServer.java
+index 665cb4e78331f..e701d4cab9554 100644
+--- a/presto-server/src/test/java/com/facebook/presto/server/TestingPrestoServer.java
++++ b/presto-server/src/test/java/com/facebook/presto/server/TestingPrestoServer.java
+@@ -2,8 +2,14 @@
+ 
+ import com.facebook.presto.failureDetector.FailureDetectorModule;
+ import com.facebook.presto.guice.TestingJmxModule;
++import com.facebook.presto.metadata.ConnectorMetadata;
+ import com.facebook.presto.metadata.NodeManager;
++import com.facebook.presto.split.ConnectorDataStreamProvider;
++import com.facebook.presto.split.ConnectorSplitManager;
++import com.facebook.presto.tpch.TpchBlocksProvider;
+ import com.facebook.presto.tpch.TpchDataStreamProvider;
++import com.facebook.presto.tpch.TpchMetadata;
++import com.facebook.presto.tpch.TpchSplitManager;
+ import com.facebook.presto.util.TestingTpchBlocksProvider;
+ import com.google.common.base.Throwables;
+ import com.google.common.collect.ImmutableMap;
+@@ -11,6 +17,7 @@
+ import com.google.inject.Binder;
+ import com.google.inject.Injector;
+ import com.google.inject.Module;
++import com.google.inject.Scopes;
+ import io.airlift.bootstrap.Bootstrap;
+ import io.airlift.bootstrap.LifeCycleManager;
+ import io.airlift.discovery.client.Announcer;
+@@ -30,6 +37,9 @@
+ import java.net.URI;
+ import java.util.Map;
+ 
++import static com.google.inject.multibindings.MapBinder.newMapBinder;
++import static com.google.inject.multibindings.Multibinder.newSetBinder;
++
+ public class TestingPrestoServer
+         implements Closeable
+ {
+@@ -64,8 +74,10 @@ public TestingPrestoServer()
+                     @Override
+                     public void configure(Binder binder)
+                     {
+-                        TestingTpchBlocksProvider tpchBlocksProvider = new TestingTpchBlocksProvider();
+-                        binder.bind(TpchDataStreamProvider.class).toInstance(new TpchDataStreamProvider(tpchBlocksProvider));
++                        newMapBinder(binder, String.class, ConnectorMetadata.class).addBinding("tpch").to(TpchMetadata.class);
++                        newSetBinder(binder, ConnectorSplitManager.class).addBinding().to(TpchSplitManager.class).in(Scopes.SINGLETON);
++                        binder.bind(TpchBlocksProvider.class).to(TestingTpchBlocksProvider.class).in(Scopes.SINGLETON);
++                        newSetBinder(binder, ConnectorDataStreamProvider.class).addBinding().to(TpchDataStreamProvider.class).in(Scopes.SINGLETON);
+                     }
+                 });
+ 
+diff --git a/presto-main/src/main/java/com/facebook/presto/metadata/HostAddress.java b/presto-spi/src/main/java/com/facebook/presto/spi/HostAddress.java
+similarity index 99%
+rename from presto-main/src/main/java/com/facebook/presto/metadata/HostAddress.java
+rename to presto-spi/src/main/java/com/facebook/presto/spi/HostAddress.java
+index 51b70da77888a..f2bedecc21a98 100644
+--- a/presto-main/src/main/java/com/facebook/presto/metadata/HostAddress.java
++++ b/presto-spi/src/main/java/com/facebook/presto/spi/HostAddress.java
+@@ -1,4 +1,4 @@
+-package com.facebook.presto.metadata;
++package com.facebook.presto.spi;
+ 
+ import com.fasterxml.jackson.annotation.JsonCreator;
+ import com.fasterxml.jackson.annotation.JsonValue;
+diff --git a/presto-spi/src/main/java/com/facebook/presto/spi/ImportClient.java b/presto-spi/src/main/java/com/facebook/presto/spi/ImportClient.java
+index f4ea5e48555bb..8ed45b1a73251 100644
+--- a/presto-spi/src/main/java/com/facebook/presto/spi/ImportClient.java
++++ b/presto-spi/src/main/java/com/facebook/presto/spi/ImportClient.java
+@@ -25,19 +25,19 @@ public interface ImportClient
+ 
+     List<Partition> getPartitions(TableHandle table, Map<ColumnHandle, Object> bindings);
+ 
+-    Iterable<PartitionChunk> getPartitionChunks(List<Partition> partitions);
++    Iterable<Split> getPartitionSplits(List<Partition> partitions);
+ 
+-    RecordSet getRecords(PartitionChunk partitionChunk, List<? extends ColumnHandle> columns);
+-
+-    byte[] serializePartitionChunk(PartitionChunk partitionChunk);
+-
+-    PartitionChunk deserializePartitionChunk(byte[] bytes);
++    RecordSet getRecords(Split split, List<? extends ColumnHandle> columns);
+ 
+     boolean canHandle(TableHandle tableHandle);
+ 
+     boolean canHandle(ColumnHandle tableHandle);
+ 
++    boolean canHandle(Split split);
++
+     Class<? extends TableHandle> getTableHandleClass();
+ 
+     Class<? extends ColumnHandle> getColumnHandleClass();
++
++    Class<? extends Split> getSplitClass();
+ }
+diff --git a/presto-spi/src/main/java/com/facebook/presto/spi/PartitionChunk.java b/presto-spi/src/main/java/com/facebook/presto/spi/PartitionChunk.java
+deleted file mode 100644
+index 7906396145960..0000000000000
+--- a/presto-spi/src/main/java/com/facebook/presto/spi/PartitionChunk.java
++++ /dev/null
+@@ -1,28 +0,0 @@
+-package com.facebook.presto.spi;
+-
+-import java.net.InetAddress;
+-import java.util.List;
+-
+-public interface PartitionChunk
+-{
+-    /**
+-     * Returns the name of the partition that this chunk belongs to.
+-     */
+-    String getPartitionName();
+-
+-    /**
+-     * Marks the last chunk for a partition. This is transient and only valid
+-     * while iterating over the return value from {@link ImportClient#getPartitionChunks(String, String, List, List)} or
+-     * {@link ImportClient#getPartitionChunks(String, String, String, List)}.
+-     *
+-     * If a partition chunk returns true on this method, then no more chunks for the partition named by
+-     * {@link PartitionChunk#getPartitionName()} will be returned.
+-     */
+-    boolean isLastChunk();
+-
+-    long getLength();
+-
+-    List<InetAddress> getHosts();
+-
+-    Object getInfo();
+-}
+diff --git a/presto-spi/src/main/java/com/facebook/presto/spi/PartitionedSplit.java b/presto-spi/src/main/java/com/facebook/presto/spi/PartitionedSplit.java
+new file mode 100644
+index 0000000000000..e9182ae9a442f
+--- /dev/null
++++ b/presto-spi/src/main/java/com/facebook/presto/spi/PartitionedSplit.java
+@@ -0,0 +1,9 @@
++package com.facebook.presto.spi;
++
++public interface PartitionedSplit
++        extends Split
++{
++    String getPartitionId();
++
++    boolean isLastSplit();
++}
+diff --git a/presto-spi/src/main/java/com/facebook/presto/spi/Split.java b/presto-spi/src/main/java/com/facebook/presto/spi/Split.java
+new file mode 100644
+index 0000000000000..b687248a79373
+--- /dev/null
++++ b/presto-spi/src/main/java/com/facebook/presto/spi/Split.java
+@@ -0,0 +1,13 @@
++package com.facebook.presto.spi;
++
++import java.util.List;
++
++public interface Split
++{
++    boolean isRemotelyAccessible();
++
++    List<HostAddress> getAddresses();
++
++    Object getInfo();
++
++}

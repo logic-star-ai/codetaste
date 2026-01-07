@@ -1,0 +1,3259 @@
+diff --git a/core/src/avm2/activation.rs b/core/src/avm2/activation.rs
+index 4d396b5e41b5..ae72dceb9a34 100644
+--- a/core/src/avm2/activation.rs
++++ b/core/src/avm2/activation.rs
+@@ -24,7 +24,7 @@ use crate::avm2::{Avm2, Error};
+ use crate::context::{GcContext, UpdateContext};
+ use crate::string::{AvmAtom, AvmString};
+ use crate::tag_utils::SwfMovie;
+-use gc_arena::{Gc, GcCell};
++use gc_arena::Gc;
+ use smallvec::SmallVec;
+ use std::cmp::{min, Ordering};
+ use std::sync::Arc;
+@@ -779,7 +779,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+         &mut self,
+         method: Gc<'gc, BytecodeMethod<'gc>>,
+         index: Index<AbcClass>,
+-    ) -> Result<GcCell<'gc, Class<'gc>>, Error<'gc>> {
++    ) -> Result<Class<'gc>, Error<'gc>> {
+         method.translation_unit().load_class(index.0, self)
+     }
+ 
+@@ -1723,7 +1723,6 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+                 .instance_of()
+                 .map(|cls| {
+                     cls.inner_class_definition()
+-                        .read()
+                         .name()
+                         .to_qualified_name_err_message(self.context.gc_context)
+                 })
+@@ -2620,10 +2619,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+         Ok(FrameControl::Continue)
+     }
+ 
+-    fn op_is_type(
+-        &mut self,
+-        class: GcCell<'gc, Class<'gc>>,
+-    ) -> Result<FrameControl<'gc>, Error<'gc>> {
++    fn op_is_type(&mut self, class: Class<'gc>) -> Result<FrameControl<'gc>, Error<'gc>> {
+         let value = self.pop_stack();
+ 
+         let is_instance_of = value.is_of_type(self, class);
+@@ -2652,10 +2648,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+         Ok(FrameControl::Continue)
+     }
+ 
+-    fn op_as_type(
+-        &mut self,
+-        class: GcCell<'gc, Class<'gc>>,
+-    ) -> Result<FrameControl<'gc>, Error<'gc>> {
++    fn op_as_type(&mut self, class: Class<'gc>) -> Result<FrameControl<'gc>, Error<'gc>> {
+         let value = self.pop_stack();
+ 
+         if value.is_of_type(self, class) {
+@@ -2821,10 +2814,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+     }
+ 
+     /// Implements `Op::Coerce`
+-    fn op_coerce(
+-        &mut self,
+-        class: GcCell<'gc, Class<'gc>>,
+-    ) -> Result<FrameControl<'gc>, Error<'gc>> {
++    fn op_coerce(&mut self, class: Class<'gc>) -> Result<FrameControl<'gc>, Error<'gc>> {
+         let val = self.pop_stack();
+         let x = val.coerce_to_type(self, class)?;
+ 
+diff --git a/core/src/avm2/amf.rs b/core/src/avm2/amf.rs
+index dfffbcee57b7..20309cd0a5e5 100644
+--- a/core/src/avm2/amf.rs
++++ b/core/src/avm2/amf.rs
+@@ -130,7 +130,7 @@ pub fn serialize_value<'gc>(
+                 let name = class_to_alias(activation, class);
+ 
+                 let mut attributes = EnumSet::empty();
+-                if !class.inner_class_definition().read().is_sealed() {
++                if !class.inner_class_definition().is_sealed() {
+                     attributes.insert(Attribute::Dynamic);
+                 }
+ 
+diff --git a/core/src/avm2/class.rs b/core/src/avm2/class.rs
+index a824d5aad77f..2475f25d398d 100644
+--- a/core/src/avm2/class.rs
++++ b/core/src/avm2/class.rs
+@@ -15,9 +15,12 @@ use crate::context::UpdateContext;
+ use bitflags::bitflags;
+ use fnv::FnvHashMap;
+ use gc_arena::{Collect, GcCell, Mutation};
++
++use std::cell::Ref;
+ use std::fmt;
+ use std::hash::{Hash, Hasher};
+ use std::ops::Deref;
++
+ use swf::avm2::types::{
+     Class as AbcClass, Instance as AbcInstance, Method as AbcMethod, MethodBody as AbcMethodBody,
+ };
+@@ -72,18 +75,22 @@ impl fmt::Debug for Allocator {
+     }
+ }
+ 
++#[derive(Collect, Clone, Copy)]
++#[collect(no_drop)]
++pub struct Class<'gc>(pub GcCell<'gc, ClassData<'gc>>);
++
+ /// A loaded ABC Class which can be used to construct objects with.
+ #[derive(Clone, Collect)]
+ #[collect(no_drop)]
+-pub struct Class<'gc> {
++pub struct ClassData<'gc> {
+     /// The name of the class.
+     name: QName<'gc>,
+ 
+     /// The type parameter for this class (only supported for Vector)
+-    param: Option<Option<GcCell<'gc, Class<'gc>>>>,
++    param: Option<Option<Class<'gc>>>,
+ 
+     /// This class's superclass, or None if it has no superclass
+-    super_class: Option<GcCell<'gc, Class<'gc>>>,
++    super_class: Option<Class<'gc>>,
+ 
+     /// Attributes of the given class.
+     #[collect(require_static)]
+@@ -153,7 +160,7 @@ pub struct Class<'gc> {
+     /// Maps a type parameter to the application of this class with that parameter.
+     ///
+     /// Only applicable if this class is generic.
+-    applications: FnvHashMap<Option<ClassKey<'gc>>, GcCell<'gc, Class<'gc>>>,
++    applications: FnvHashMap<Option<ClassKey<'gc>>, Class<'gc>>,
+ 
+     /// Whether or not this is a system-defined class.
+     ///
+@@ -168,21 +175,27 @@ pub struct Class<'gc> {
+     class_objects: Vec<ClassObject<'gc>>,
+ }
+ 
++impl PartialEq for Class<'_> {
++    fn eq(&self, other: &Self) -> bool {
++        GcCell::ptr_eq(self.0, other.0)
++    }
++}
++
+ impl<'gc> core::fmt::Debug for Class<'gc> {
+     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+         f.debug_struct("Class").field("name", &self.name()).finish()
+     }
+ }
+ 
+-/// Allows using a `GcCell<'gc, Class<'gc>>` as a HashMap key,
++/// Allows using a `Class<'gc>` as a HashMap key,
+ /// using the pointer address for hashing/equality.
+ #[derive(Collect, Copy, Clone)]
+ #[collect(no_drop)]
+-struct ClassKey<'gc>(GcCell<'gc, Class<'gc>>);
++struct ClassKey<'gc>(Class<'gc>);
+ 
+ impl PartialEq for ClassKey<'_> {
+     fn eq(&self, other: &Self) -> bool {
+-        GcCell::ptr_eq(self.0, other.0)
++        self.0 == other.0
+     }
+ }
+ 
+@@ -190,7 +203,7 @@ impl Eq for ClassKey<'_> {}
+ 
+ impl Hash for ClassKey<'_> {
+     fn hash<H: Hasher>(&self, state: &mut H) {
+-        self.0.as_ptr().hash(state);
++        self.0 .0.as_ptr().hash(state);
+     }
+ }
+ 
+@@ -205,16 +218,16 @@ impl<'gc> Class<'gc> {
+     /// using `load_traits`.
+     pub fn new(
+         name: QName<'gc>,
+-        super_class: Option<GcCell<'gc, Class<'gc>>>,
++        super_class: Option<Class<'gc>>,
+         instance_init: Method<'gc>,
+         class_init: Method<'gc>,
+         mc: &Mutation<'gc>,
+-    ) -> GcCell<'gc, Self> {
++    ) -> Self {
+         let native_instance_init = instance_init;
+ 
+-        GcCell::new(
++        Class(GcCell::new(
+             mc,
+-            Self {
++            ClassData {
+                 name,
+                 param: None,
+                 super_class,
+@@ -234,16 +247,12 @@ impl<'gc> Class<'gc> {
+                 applications: FnvHashMap::default(),
+                 class_objects: Vec::new(),
+             },
+-        )
++        ))
+     }
+ 
+-    pub fn add_application(
+-        &mut self,
+-        param: Option<GcCell<'gc, Class<'gc>>>,
+-        cls: GcCell<'gc, Class<'gc>>,
+-    ) {
++    pub fn add_application(self, mc: &Mutation<'gc>, param: Option<Class<'gc>>, cls: Class<'gc>) {
+         let key = param.map(ClassKey);
+-        self.applications.insert(key, cls);
++        self.0.write(mc).applications.insert(key, cls);
+     }
+ 
+     /// Apply type parameters to an existing class.
+@@ -252,33 +261,33 @@ impl<'gc> Class<'gc> {
+     /// longer be generic.
+     pub fn with_type_param(
+         context: &mut UpdateContext<'_, 'gc>,
+-        this: GcCell<'gc, Class<'gc>>,
+-        param: Option<GcCell<'gc, Class<'gc>>>,
+-    ) -> GcCell<'gc, Class<'gc>> {
++        this: Class<'gc>,
++        param: Option<Class<'gc>>,
++    ) -> Class<'gc> {
+         let mc = context.gc_context;
++        let this_read = this.0.read();
+ 
+-        let read = this.read();
+         let key = param.map(ClassKey);
+ 
+-        if let Some(application) = read.applications.get(&key) {
++        if let Some(application) = this_read.applications.get(&key) {
+             return *application;
+         }
+ 
+         // This can only happen for non-builtin Vector types,
+         // so let's create one here directly.
+ 
+-        let object_vector_cls = read
++        let object_vector_cls = this_read
+             .applications
+             .get(&None)
+             .expect("Vector.<*> not initialized?");
+ 
+         let param = param.expect("Trying to create Vector<*>, which shouldn't happen here");
+-        let name = format!("Vector.<{}>", param.read().name().to_qualified_name(mc));
++        let name = format!("Vector.<{}>", param.name().to_qualified_name(mc));
+ 
+         let new_class = Self::new(
+             // FIXME - we should store a `Multiname` instead of a `QName`, and use the
+             // `params` field. For now, this is good enough to get tests passing
+-            QName::new(read.name.namespace(), AvmString::new_utf8(mc, name)),
++            QName::new(this.name().namespace(), AvmString::new_utf8(mc, name)),
+             Some(
+                 context
+                     .avm2
+@@ -286,34 +295,38 @@ impl<'gc> Class<'gc> {
+                     .object_vector
+                     .inner_class_definition(),
+             ),
+-            object_vector_cls.read().instance_init(),
+-            object_vector_cls.read().class_init(),
++            object_vector_cls.instance_init(),
++            object_vector_cls.class_init(),
+             mc,
+         );
+-        new_class.write(mc).param = Some(Some(param));
+-        new_class.write(mc).call_handler = object_vector_cls.read().call_handler();
+ 
+-        drop(read);
+-        this.write(mc).applications.insert(key, new_class);
++        new_class.set_param(mc, Some(Some(param)));
++        new_class.0.write(mc).call_handler = object_vector_cls.call_handler();
++
++        drop(this_read);
++
++        this.0.write(mc).applications.insert(key, new_class);
+         new_class
+     }
+ 
+     /// Set the attributes of the class (sealed/final/interface status).
+-    pub fn set_attributes(&mut self, attributes: ClassAttributes) {
+-        self.attributes = attributes;
++    pub fn set_attributes(self, mc: &Mutation<'gc>, attributes: ClassAttributes) {
++        self.0.write(mc).attributes = attributes;
+     }
+ 
+-    pub fn add_class_object(&mut self, class_object: ClassObject<'gc>) {
+-        self.class_objects.push(class_object);
++    pub fn add_class_object(self, mc: &Mutation<'gc>, class_object: ClassObject<'gc>) {
++        self.0.write(mc).class_objects.push(class_object);
+     }
+ 
+-    pub fn class_objects(&self) -> &[ClassObject<'gc>] {
+-        &self.class_objects
++    pub fn class_objects(&self) -> Ref<Vec<ClassObject<'gc>>> {
++        Ref::map(self.0.read(), |c| &c.class_objects)
+     }
+ 
+-    pub fn class_object(&self) -> Option<ClassObject<'gc>> {
+-        if self.class_objects.len() == 1 {
+-            Some(self.class_objects[0])
++    pub fn class_object(self) -> Option<ClassObject<'gc>> {
++        let read = self.0.read();
++
++        if read.class_objects.len() == 1 {
++            Some(read.class_objects[0])
+         } else {
+             None
+         }
+@@ -328,7 +341,7 @@ impl<'gc> Class<'gc> {
+         unit: TranslationUnit<'gc>,
+         class_index: u32,
+         activation: &mut Activation<'_, 'gc>,
+-    ) -> Result<GcCell<'gc, Self>, Error<'gc>> {
++    ) -> Result<Self, Error<'gc>> {
+         let abc = unit.abc();
+         let abc_class: Result<&AbcClass, Error<'gc>> = abc
+             .classes
+@@ -427,9 +440,9 @@ impl<'gc> Class<'gc> {
+             }
+         }
+ 
+-        Ok(GcCell::new(
++        Ok(Class(GcCell::new(
+             activation.context.gc_context,
+-            Self {
++            ClassData {
+                 name,
+                 param: None,
+                 super_class,
+@@ -449,7 +462,7 @@ impl<'gc> Class<'gc> {
+                 applications: Default::default(),
+                 class_objects: Vec::new(),
+             },
+-        ))
++        )))
+     }
+ 
+     /// Finish the class-loading process by loading traits.
+@@ -459,16 +472,18 @@ impl<'gc> Class<'gc> {
+     /// or double-borrows. It should be done before the class is actually
+     /// instantiated into an `Object`.
+     pub fn load_traits(
+-        &mut self,
++        self,
++        activation: &mut Activation<'_, 'gc>,
+         unit: TranslationUnit<'gc>,
+         class_index: u32,
+-        activation: &mut Activation<'_, 'gc>,
+     ) -> Result<(), Error<'gc>> {
+-        if self.traits_loaded {
++        if self.0.read().traits_loaded {
+             return Ok(());
+         }
+ 
+-        self.traits_loaded = true;
++        let mut write = self.0.write(activation.context.gc_context);
++
++        write.traits_loaded = true;
+ 
+         let abc = unit.abc();
+         let abc_class: Result<&AbcClass, Error<'gc>> = abc
+@@ -484,12 +499,14 @@ impl<'gc> Class<'gc> {
+         let abc_instance = abc_instance?;
+ 
+         for abc_trait in abc_instance.traits.iter() {
+-            self.instance_traits
++            write
++                .instance_traits
+                 .push(Trait::from_abc_trait(unit, abc_trait, activation)?);
+         }
+ 
+         for abc_trait in abc_class.traits.iter() {
+-            self.class_traits
++            write
++                .class_traits
+                 .push(Trait::from_abc_trait(unit, abc_trait, activation)?);
+         }
+ 
+@@ -501,15 +518,17 @@ impl<'gc> Class<'gc> {
+     /// This should be called at class creation time once the superclass name
+     /// has been resolved. It will return Ok for a valid class, and a
+     /// VerifyError for any invalid class.
+-    pub fn validate_class(&self, superclass: Option<ClassObject<'gc>>) -> Result<(), Error<'gc>> {
++    pub fn validate_class(self, superclass: Option<ClassObject<'gc>>) -> Result<(), Error<'gc>> {
++        let read = self.0.read();
++
+         // System classes do not throw verify errors.
+-        if self.is_system {
++        if read.is_system {
+             return Ok(());
+         }
+ 
+         if let Some(superclass) = superclass {
+-            for instance_trait in self.instance_traits.iter() {
+-                let is_protected = self.protected_namespace().map_or(false, |prot| {
++            for instance_trait in read.instance_traits.iter() {
++                let is_protected = read.protected_namespace.map_or(false, |prot| {
+                     prot.exact_version_match(instance_trait.name().namespace())
+                 });
+ 
+@@ -518,18 +537,19 @@ impl<'gc> Class<'gc> {
+ 
+                 while let Some(superclass) = current_superclass {
+                     let superclass_def = superclass.inner_class_definition();
+-                    let read = superclass_def.read();
+ 
+-                    for supertrait in read.instance_traits.iter() {
++                    for supertrait in &*superclass_def.instance_traits() {
+                         let super_name = supertrait.name();
+                         let my_name = instance_trait.name();
+ 
+                         let names_match = super_name.local_name() == my_name.local_name()
+                             && (super_name.namespace().matches_ns(my_name.namespace())
+                                 || (is_protected
+-                                    && read.protected_namespace().map_or(false, |prot| {
+-                                        prot.exact_version_match(super_name.namespace())
+-                                    })));
++                                    && superclass_def
++                                        .protected_namespace()
++                                        .map_or(false, |prot| {
++                                            prot.exact_version_match(super_name.namespace())
++                                        })));
+                         if names_match {
+                             match (supertrait.kind(), instance_trait.kind()) {
+                                 //Getter/setter pairs do NOT override one another
+@@ -539,11 +559,11 @@ impl<'gc> Class<'gc> {
+                             }
+ 
+                             if supertrait.is_final() {
+-                                return Err(format!("VerifyError: Trait {} in class {} overrides final trait {} in class {}", instance_trait.name().local_name(), self.name().local_name(), supertrait.name().local_name(), read.name().local_name()).into());
++                                return Err(format!("VerifyError: Trait {} in class {} overrides final trait {} in class {}", instance_trait.name().local_name(), superclass_def.name().local_name(), supertrait.name().local_name(), superclass_def.name().local_name()).into());
+                             }
+ 
+                             if !instance_trait.is_override() {
+-                                return Err(format!("VerifyError: Trait {} in class {} has same name as trait {} in class {}, but does not override it", instance_trait.name().local_name(), self.name().local_name(), supertrait.name().local_name(), read.name().local_name()).into());
++                                return Err(format!("VerifyError: Trait {} in class {} has same name as trait {} in class {}, but does not override it", instance_trait.name().local_name(), self.name().local_name(), supertrait.name().local_name(), superclass_def.name().local_name()).into());
+                             }
+ 
+                             break;
+@@ -560,7 +580,7 @@ impl<'gc> Class<'gc> {
+                 }
+ 
+                 if instance_trait.is_override() && !did_override {
+-                    return Err(format!("VerifyError: Trait {} in class {:?} marked as override, does not override any other trait", instance_trait.name().local_name(), self.name()).into());
++                    return Err(format!("VerifyError: Trait {} in class {:?} marked as override, does not override any other trait", instance_trait.name().local_name(), read.name).into());
+                 }
+             }
+         }
+@@ -573,7 +593,7 @@ impl<'gc> Class<'gc> {
+         translation_unit: TranslationUnit<'gc>,
+         method: &AbcMethod,
+         body: &AbcMethodBody,
+-    ) -> Result<GcCell<'gc, Self>, Error<'gc>> {
++    ) -> Result<Class<'gc>, Error<'gc>> {
+         let name =
+             translation_unit.pool_string(method.name.as_u30(), &mut activation.borrow_gc())?;
+         let mut traits = Vec::with_capacity(body.traits.len());
+@@ -586,9 +606,9 @@ impl<'gc> Class<'gc> {
+             )?);
+         }
+ 
+-        Ok(GcCell::new(
++        Ok(Class(GcCell::new(
+             activation.context.gc_context,
+-            Self {
++            ClassData {
+                 name: QName::new(activation.avm2().public_namespace_base_version, name),
+                 param: None,
+                 super_class: None,
+@@ -620,81 +640,90 @@ impl<'gc> Class<'gc> {
+                 applications: Default::default(),
+                 class_objects: Vec::new(),
+             },
+-        ))
++        )))
+     }
+ 
+-    pub fn name(&self) -> QName<'gc> {
+-        self.name
++    pub fn name(self) -> QName<'gc> {
++        self.0.read().name
+     }
+ 
+-    pub fn set_name(&mut self, name: QName<'gc>) {
+-        self.name = name;
++    pub fn try_name(self) -> Result<QName<'gc>, std::cell::BorrowError> {
++        self.0.try_read().map(|r| r.name)
+     }
+ 
+-    pub fn set_param(&mut self, param: Option<Option<GcCell<'gc, Class<'gc>>>>) {
+-        self.param = param;
++    pub fn set_param(self, mc: &Mutation<'gc>, param: Option<Option<Class<'gc>>>) {
++        self.0.write(mc).param = param;
+     }
+ 
+-    pub fn super_class(&self) -> Option<GcCell<'gc, Class<'gc>>> {
+-        self.super_class
++    pub fn super_class(self) -> Option<Class<'gc>> {
++        self.0.read().super_class
+     }
+ 
+-    pub fn super_class_name(&self) -> Option<Multiname<'gc>> {
+-        self.super_class.map(|c| c.read().name().into())
++    pub fn super_class_name(self) -> Option<Multiname<'gc>> {
++        self.0.read().super_class.map(|c| c.name().into())
+     }
+ 
+-    pub fn protected_namespace(&self) -> Option<Namespace<'gc>> {
+-        self.protected_namespace
++    pub fn protected_namespace(self) -> Option<Namespace<'gc>> {
++        self.0.read().protected_namespace
+     }
+ 
+     #[inline(never)]
+     pub fn define_constant_number_class_traits(
+-        &mut self,
++        self,
+         namespace: Namespace<'gc>,
+         items: &[(&'static str, f64)],
+         activation: &mut Activation<'_, 'gc>,
+     ) {
+         for &(name, value) in items {
+-            self.define_class_trait(Trait::from_const(
+-                QName::new(namespace, name),
+-                Multiname::new(activation.avm2().public_namespace_base_version, "Number"),
+-                Some(value.into()),
+-            ));
++            self.define_class_trait(
++                activation.context.gc_context,
++                Trait::from_const(
++                    QName::new(namespace, name),
++                    Multiname::new(activation.avm2().public_namespace_base_version, "Number"),
++                    Some(value.into()),
++                ),
++            );
+         }
+     }
+     #[inline(never)]
+     pub fn define_constant_uint_class_traits(
+-        &mut self,
++        self,
+         namespace: Namespace<'gc>,
+         items: &[(&'static str, u32)],
+         activation: &mut Activation<'_, 'gc>,
+     ) {
+         for &(name, value) in items {
+-            self.define_class_trait(Trait::from_const(
+-                QName::new(namespace, name),
+-                Multiname::new(activation.avm2().public_namespace_base_version, "uint"),
+-                Some(value.into()),
+-            ));
++            self.define_class_trait(
++                activation.context.gc_context,
++                Trait::from_const(
++                    QName::new(namespace, name),
++                    Multiname::new(activation.avm2().public_namespace_base_version, "uint"),
++                    Some(value.into()),
++                ),
++            );
+         }
+     }
+     #[inline(never)]
+     pub fn define_constant_int_class_traits(
+-        &mut self,
++        self,
+         namespace: Namespace<'gc>,
+         items: &[(&'static str, i32)],
+         activation: &mut Activation<'_, 'gc>,
+     ) {
+         for &(name, value) in items {
+-            self.define_class_trait(Trait::from_const(
+-                QName::new(namespace, name),
+-                Multiname::new(activation.avm2().public_namespace_base_version, "int"),
+-                Some(value.into()),
+-            ));
++            self.define_class_trait(
++                activation.context.gc_context,
++                Trait::from_const(
++                    QName::new(namespace, name),
++                    Multiname::new(activation.avm2().public_namespace_base_version, "int"),
++                    Some(value.into()),
++                ),
++            );
+         }
+     }
+     #[inline(never)]
+     pub fn define_builtin_class_properties(
+-        &mut self,
++        self,
+         mc: &Mutation<'gc>,
+         namespace: Namespace<'gc>,
+         items: &[(
+@@ -705,37 +734,46 @@ impl<'gc> Class<'gc> {
+     ) {
+         for &(name, getter, setter) in items {
+             if let Some(getter) = getter {
+-                self.define_class_trait(Trait::from_getter(
+-                    QName::new(namespace, name),
+-                    Method::from_builtin(getter, name, mc),
+-                ));
++                self.define_class_trait(
++                    mc,
++                    Trait::from_getter(
++                        QName::new(namespace, name),
++                        Method::from_builtin(getter, name, mc),
++                    ),
++                );
+             }
+             if let Some(setter) = setter {
+-                self.define_class_trait(Trait::from_setter(
+-                    QName::new(namespace, name),
+-                    Method::from_builtin(setter, name, mc),
+-                ));
++                self.define_class_trait(
++                    mc,
++                    Trait::from_setter(
++                        QName::new(namespace, name),
++                        Method::from_builtin(setter, name, mc),
++                    ),
++                );
+             }
+         }
+     }
+     #[inline(never)]
+     pub fn define_builtin_instance_methods(
+-        &mut self,
++        self,
+         mc: &Mutation<'gc>,
+         namespace: Namespace<'gc>,
+         items: &[(&'static str, NativeMethodImpl)],
+     ) {
+         for &(name, value) in items {
+-            self.define_instance_trait(Trait::from_method(
+-                QName::new(namespace, name),
+-                Method::from_builtin(value, name, mc),
+-            ));
++            self.define_instance_trait(
++                mc,
++                Trait::from_method(
++                    QName::new(namespace, name),
++                    Method::from_builtin(value, name, mc),
++                ),
++            );
+         }
+     }
+ 
+     #[inline(never)]
+     pub fn define_builtin_instance_methods_with_sig(
+-        &mut self,
++        self,
+         mc: &Mutation<'gc>,
+         namespace: Namespace<'gc>,
+         items: Vec<(
+@@ -746,30 +784,36 @@ impl<'gc> Class<'gc> {
+         )>,
+     ) {
+         for (name, value, params, return_type) in items {
+-            self.define_instance_trait(Trait::from_method(
+-                QName::new(namespace, name),
+-                Method::from_builtin_and_params(value, name, params, return_type, false, mc),
+-            ));
++            self.define_instance_trait(
++                mc,
++                Trait::from_method(
++                    QName::new(namespace, name),
++                    Method::from_builtin_and_params(value, name, params, return_type, false, mc),
++                ),
++            );
+         }
+     }
+ 
+     #[inline(never)]
+     pub fn define_builtin_class_methods(
+-        &mut self,
++        self,
+         mc: &Mutation<'gc>,
+         namespace: Namespace<'gc>,
+         items: &[(&'static str, NativeMethodImpl)],
+     ) {
+         for &(name, value) in items {
+-            self.define_class_trait(Trait::from_method(
+-                QName::new(namespace, name),
+-                Method::from_builtin(value, name, mc),
+-            ));
++            self.define_class_trait(
++                mc,
++                Trait::from_method(
++                    QName::new(namespace, name),
++                    Method::from_builtin(value, name, mc),
++                ),
++            );
+         }
+     }
+     #[inline(never)]
+     pub fn define_builtin_instance_properties(
+-        &mut self,
++        self,
+         mc: &Mutation<'gc>,
+         namespace: Namespace<'gc>,
+         items: &[(
+@@ -780,45 +824,54 @@ impl<'gc> Class<'gc> {
+     ) {
+         for &(name, getter, setter) in items {
+             if let Some(getter) = getter {
+-                self.define_instance_trait(Trait::from_getter(
+-                    QName::new(namespace, name),
+-                    Method::from_builtin(getter, name, mc),
+-                ));
++                self.define_instance_trait(
++                    mc,
++                    Trait::from_getter(
++                        QName::new(namespace, name),
++                        Method::from_builtin(getter, name, mc),
++                    ),
++                );
+             }
+             if let Some(setter) = setter {
+-                self.define_instance_trait(Trait::from_setter(
+-                    QName::new(namespace, name),
+-                    Method::from_builtin(setter, name, mc),
+-                ));
++                self.define_instance_trait(
++                    mc,
++                    Trait::from_setter(
++                        QName::new(namespace, name),
++                        Method::from_builtin(setter, name, mc),
++                    ),
++                );
+             }
+         }
+     }
+     #[inline(never)]
+     pub fn define_slot_number_instance_traits(
+-        &mut self,
++        self,
+         namespace: Namespace<'gc>,
+         items: &[(&'static str, Option<f64>)],
+         activation: &mut Activation<'_, 'gc>,
+     ) {
+         for &(name, value) in items {
+-            self.define_instance_trait(Trait::from_slot(
+-                QName::new(namespace, name),
+-                Multiname::new(activation.avm2().public_namespace_base_version, "Number"),
+-                value.map(|v| v.into()),
+-            ));
++            self.define_instance_trait(
++                activation.context.gc_context,
++                Trait::from_slot(
++                    QName::new(namespace, name),
++                    Multiname::new(activation.avm2().public_namespace_base_version, "Number"),
++                    value.map(|v| v.into()),
++                ),
++            );
+         }
+     }
+ 
+     /// Define a trait on the class.
+     ///
+     /// Class traits will be accessible as properties on the class object.
+-    pub fn define_class_trait(&mut self, my_trait: Trait<'gc>) {
+-        self.class_traits.push(my_trait);
++    pub fn define_class_trait(self, mc: &Mutation<'gc>, my_trait: Trait<'gc>) {
++        self.0.write(mc).class_traits.push(my_trait);
+     }
+ 
+     /// Return class traits provided by this class.
+-    pub fn class_traits(&self) -> &[Trait<'gc>] {
+-        &self.class_traits[..]
++    pub fn class_traits(&self) -> Ref<Vec<Trait<'gc>>> {
++        Ref::map(self.0.read(), |c| &c.class_traits)
+     }
+ 
+     /// Define a trait on instances of the class.
+@@ -826,108 +879,111 @@ impl<'gc> Class<'gc> {
+     /// Instance traits will be accessible as properties on instances of the
+     /// class. They will not be accessible on the class prototype, and any
+     /// properties defined on the prototype will be shadowed by these traits.
+-    pub fn define_instance_trait(&mut self, my_trait: Trait<'gc>) {
+-        self.instance_traits.push(my_trait);
++    pub fn define_instance_trait(self, mc: &Mutation<'gc>, my_trait: Trait<'gc>) {
++        self.0.write(mc).instance_traits.push(my_trait);
+     }
+ 
+     /// Return instance traits provided by this class.
+-    pub fn instance_traits(&self) -> &[Trait<'gc>] {
+-        &self.instance_traits[..]
++    pub fn instance_traits(&self) -> Ref<Vec<Trait<'gc>>> {
++        Ref::map(self.0.read(), |c| &c.instance_traits)
+     }
+ 
+     /// Get this class's instance allocator.
+     ///
+     /// If `None`, then you should use the instance allocator of the superclass
+     /// or allocate as a `ScriptObject` if no such class exists.
+-    pub fn instance_allocator(&self) -> Option<AllocatorFn> {
+-        self.instance_allocator.as_ref().map(|a| a.0)
++    pub fn instance_allocator(self) -> Option<AllocatorFn> {
++        self.0.read().instance_allocator.map(|a| a.0)
+     }
+ 
+     /// Set this class's instance allocator.
+-    pub fn set_instance_allocator(&mut self, alloc: AllocatorFn) {
+-        self.instance_allocator = Some(Allocator(alloc));
++    pub fn set_instance_allocator(self, mc: &Mutation<'gc>, alloc: AllocatorFn) {
++        self.0.write(mc).instance_allocator = Some(Allocator(alloc));
+     }
+ 
+     /// Get this class's instance initializer.
+-    pub fn instance_init(&self) -> Method<'gc> {
+-        self.instance_init
++    pub fn instance_init(self) -> Method<'gc> {
++        self.0.read().instance_init
+     }
+ 
+     /// Get this class's native-code instance initializer.
+-    pub fn native_instance_init(&self) -> Method<'gc> {
+-        self.native_instance_init
++    pub fn native_instance_init(self) -> Method<'gc> {
++        self.0.read().native_instance_init
+     }
+ 
+     /// Set a native-code instance initializer for this class.
+-    pub fn set_native_instance_init(&mut self, new_native_init: Method<'gc>) {
+-        self.native_instance_init = new_native_init;
++    pub fn set_native_instance_init(self, mc: &Mutation<'gc>, new_native_init: Method<'gc>) {
++        self.0.write(mc).native_instance_init = new_native_init;
+     }
+ 
+     /// Get this class's class initializer.
+-    pub fn class_init(&self) -> Method<'gc> {
+-        self.class_init
++    pub fn class_init(self) -> Method<'gc> {
++        self.0.read().class_init
+     }
+ 
+     /// Set a call handler for this class.
+-    pub fn set_call_handler(&mut self, new_call_handler: Method<'gc>) {
+-        self.call_handler = Some(new_call_handler);
++    pub fn set_call_handler(self, mc: &Mutation<'gc>, new_call_handler: Method<'gc>) {
++        self.0.write(mc).call_handler = Some(new_call_handler);
+     }
+ 
+     /// Get this class's call handler.
+-    pub fn call_handler(&self) -> Option<Method<'gc>> {
+-        self.call_handler
++    pub fn call_handler(self) -> Option<Method<'gc>> {
++        self.0.read().call_handler
+     }
+ 
+     /// Check if the class has already been initialized.
+-    pub fn is_class_initialized(&self) -> bool {
+-        self.class_initializer_called
++    pub fn is_class_initialized(self) -> bool {
++        self.0.read().class_initializer_called
+     }
+ 
+     /// Mark the class as initialized.
+-    pub fn mark_class_initialized(&mut self) {
+-        self.class_initializer_called = true;
++    pub fn mark_class_initialized(self, mc: &Mutation<'gc>) {
++        self.0.write(mc).class_initializer_called = true;
+     }
+ 
+-    pub fn direct_interfaces(&self) -> &[Multiname<'gc>] {
+-        &self.direct_interfaces
++    pub fn direct_interfaces(&self) -> Ref<Vec<Multiname<'gc>>> {
++        Ref::map(self.0.read(), |c| &c.direct_interfaces)
+     }
+ 
+-    pub fn implements(&mut self, iface: Multiname<'gc>) {
+-        self.direct_interfaces.push(iface)
++    pub fn implements(self, mc: &Mutation<'gc>, iface: Multiname<'gc>) {
++        self.0.write(mc).direct_interfaces.push(iface)
+     }
+ 
+     /// Determine if this class is sealed (no dynamic properties)
+-    pub fn is_sealed(&self) -> bool {
+-        self.attributes.contains(ClassAttributes::SEALED)
++    pub fn is_sealed(self) -> bool {
++        self.0.read().attributes.contains(ClassAttributes::SEALED)
+     }
+ 
+     /// Determine if this class is final (cannot be subclassed)
+-    pub fn is_final(&self) -> bool {
+-        self.attributes.contains(ClassAttributes::FINAL)
++    pub fn is_final(self) -> bool {
++        self.0.read().attributes.contains(ClassAttributes::FINAL)
+     }
+ 
+     /// Determine if this class is an interface
+-    pub fn is_interface(&self) -> bool {
+-        self.attributes.contains(ClassAttributes::INTERFACE)
++    pub fn is_interface(self) -> bool {
++        self.0
++            .read()
++            .attributes
++            .contains(ClassAttributes::INTERFACE)
+     }
+ 
+     /// Determine if this class is generic (can be specialized)
+-    pub fn is_generic(&self) -> bool {
+-        self.attributes.contains(ClassAttributes::GENERIC)
++    pub fn is_generic(self) -> bool {
++        self.0.read().attributes.contains(ClassAttributes::GENERIC)
+     }
+ }
+ 
+-pub struct ClassHashWrapper<'gc>(pub GcCell<'gc, Class<'gc>>);
++pub struct ClassHashWrapper<'gc>(pub Class<'gc>);
+ 
+ impl<'gc> PartialEq for ClassHashWrapper<'gc> {
+     fn eq(&self, other: &Self) -> bool {
+-        GcCell::ptr_eq(self.0, other.0)
++        GcCell::ptr_eq(self.0 .0, other.0 .0)
+     }
+ }
+ impl<'gc> Eq for ClassHashWrapper<'gc> {}
+ 
+ impl<'gc> Hash for ClassHashWrapper<'gc> {
+     fn hash<H: Hasher>(&self, state: &mut H) {
+-        self.0.as_ptr().hash(state);
++        self.0 .0.as_ptr().hash(state);
+     }
+ }
+diff --git a/core/src/avm2/domain.rs b/core/src/avm2/domain.rs
+index 3740ebf7196d..50fb407ed4fd 100644
+--- a/core/src/avm2/domain.rs
++++ b/core/src/avm2/domain.rs
+@@ -37,7 +37,7 @@ struct DomainData<'gc> {
+ 
+     /// A map of all Clasess defined in this domain. Used by ClassObject
+     /// to perform early interface resolution.
+-    classes: PropertyMap<'gc, GcCell<'gc, Class<'gc>>>,
++    classes: PropertyMap<'gc, Class<'gc>>,
+ 
+     /// The parent domain.
+     parent: Option<Domain<'gc>>,
+@@ -90,7 +90,7 @@ impl<'gc> Domain<'gc> {
+         domain
+     }
+ 
+-    pub fn classes(&self) -> Ref<'_, PropertyMap<'gc, GcCell<'gc, Class<'gc>>>> {
++    pub fn classes(&self) -> Ref<'_, PropertyMap<'gc, Class<'gc>>> {
+         Ref::map(self.0.read(), |r| &r.classes)
+     }
+ 
+@@ -199,7 +199,7 @@ impl<'gc> Domain<'gc> {
+         Ok(None)
+     }
+ 
+-    fn get_class_inner(self, multiname: &Multiname<'gc>) -> Option<GcCell<'gc, Class<'gc>>> {
++    fn get_class_inner(self, multiname: &Multiname<'gc>) -> Option<Class<'gc>> {
+         let read = self.0.read();
+         if let Some(class) = read.classes.get_for_multiname(multiname).copied() {
+             return Some(class);
+@@ -216,7 +216,7 @@ impl<'gc> Domain<'gc> {
+         self,
+         context: &mut UpdateContext<'_, 'gc>,
+         multiname: &Multiname<'gc>,
+-    ) -> Option<GcCell<'gc, Class<'gc>>> {
++    ) -> Option<Class<'gc>> {
+         let class = self.get_class_inner(multiname);
+ 
+         if let Some(class) = class {
+@@ -333,12 +333,7 @@ impl<'gc> Domain<'gc> {
+     /// Export a class into the current application domain.
+     ///
+     /// This does nothing if the definition already exists in this domain or a parent.
+-    pub fn export_class(
+-        &self,
+-        export_name: QName<'gc>,
+-        class: GcCell<'gc, Class<'gc>>,
+-        mc: &Mutation<'gc>,
+-    ) {
++    pub fn export_class(&self, export_name: QName<'gc>, class: Class<'gc>, mc: &Mutation<'gc>) {
+         if self.has_class(export_name) {
+             return;
+         }
+diff --git a/core/src/avm2/error.rs b/core/src/avm2/error.rs
+index 2c495b42598b..7f5d99b4c81e 100644
+--- a/core/src/avm2/error.rs
++++ b/core/src/avm2/error.rs
+@@ -100,7 +100,6 @@ pub fn make_reference_error<'gc>(
+     let class_name = object_class
+         .map(|cls| {
+             cls.inner_class_definition()
+-                .read()
+                 .name()
+                 .to_qualified_name_err_message(activation.context.gc_context)
+         })
+diff --git a/core/src/avm2/function.rs b/core/src/avm2/function.rs
+index f145d1759675..01b935bfca30 100644
+--- a/core/src/avm2/function.rs
++++ b/core/src/avm2/function.rs
+@@ -288,7 +288,7 @@ pub fn display_function<'gc>(
+ ) {
+     let class_def = superclass.map(|superclass| {
+         let class_def = superclass.inner_class_definition();
+-        let name = class_def.read().name().to_qualified_name_no_mc();
++        let name = class_def.name().to_qualified_name_no_mc();
+         output.push_str(&name);
+         class_def
+     });
+@@ -302,7 +302,6 @@ pub fn display_function<'gc>(
+             // rather than the name of the method itself.
+             if let Some(class_def) = class_def {
+                 if class_def
+-                    .read()
+                     .class_init()
+                     .into_bytecode()
+                     .map(|b| Gc::ptr_eq(b, *method))
+@@ -310,7 +309,6 @@ pub fn display_function<'gc>(
+                 {
+                     output.push_utf8("$cinit");
+                 } else if !class_def
+-                    .read()
+                     .instance_init()
+                     .into_bytecode()
+                     .map(|b| Gc::ptr_eq(b, *method))
+@@ -318,10 +316,11 @@ pub fn display_function<'gc>(
+                 {
+                     // TODO: Ideally, the declaring trait of this executable should already be attached here, that way
+                     // we can avoid needing to lookup the trait like this.
+-                    let class_def = class_def.read();
+                     let mut method_trait = None;
++
+                     // First search instance traits for the method
+-                    for t in class_def.instance_traits() {
++                    let instance_traits = class_def.instance_traits();
++                    for t in &*instance_traits {
+                         if let Some(b) = t.as_method().and_then(|m| m.into_bytecode().ok()) {
+                             if Gc::ptr_eq(b, *method) {
+                                 method_trait = Some(t);
+@@ -329,9 +328,11 @@ pub fn display_function<'gc>(
+                             }
+                         }
+                     }
++
++                    let class_traits = class_def.class_traits();
+                     if method_trait.is_none() {
+                         // If we can't find it in instance traits, search class traits instead
+-                        for t in class_def.class_traits() {
++                        for t in class_traits.iter() {
+                             if let Some(b) = t.as_method().and_then(|m| m.into_bytecode().ok()) {
+                                 if Gc::ptr_eq(b, *method) {
+                                     // Class traits always start with $
+@@ -342,6 +343,7 @@ pub fn display_function<'gc>(
+                             }
+                         }
+                     }
++
+                     if let Some(method_trait) = method_trait {
+                         output.push_char('/');
+                         match method_trait.kind() {
+diff --git a/core/src/avm2/globals.rs b/core/src/avm2/globals.rs
+index 58e054a7c27c..76102aa28be0 100644
+--- a/core/src/avm2/globals.rs
++++ b/core/src/avm2/globals.rs
+@@ -11,7 +11,7 @@ use crate::avm2::Namespace;
+ use crate::avm2::QName;
+ use crate::string::AvmString;
+ use crate::tag_utils::{self, ControlFlow, SwfMovie, SwfSlice, SwfStream};
+-use gc_arena::{Collect, GcCell, Mutation};
++use gc_arena::{Collect, Mutation};
+ use std::sync::Arc;
+ use swf::TagCode;
+ 
+@@ -357,7 +357,7 @@ fn dynamic_class<'gc>(
+ ) {
+     let (_, global, mut domain) = script.init();
+     let class = class_object.inner_class_definition();
+-    let name = class.read().name();
++    let name = class.name();
+ 
+     global.install_const_late(mc, name, class_object.into(), class_class);
+     domain.export_definition(name, script, mc)
+@@ -368,17 +368,15 @@ fn dynamic_class<'gc>(
+ /// This function returns the class object and class prototype as a class, which
+ /// may be stored in `SystemClasses`
+ fn class<'gc>(
+-    class_def: GcCell<'gc, Class<'gc>>,
++    class_def: Class<'gc>,
+     script: Script<'gc>,
+     activation: &mut Activation<'_, 'gc>,
+ ) -> Result<ClassObject<'gc>, Error<'gc>> {
+     let mc = activation.context.gc_context;
+     let (_, global, mut domain) = script.init();
+ 
+-    let class_read = class_def.read();
+-    let super_class = if let Some(super_class) = class_read.super_class() {
++    let super_class = if let Some(super_class) = class_def.super_class() {
+         let super_class = super_class
+-            .read()
+             .class_object()
+             .ok_or_else(|| Error::from("Base class should have been initialized"))?;
+ 
+@@ -387,8 +385,7 @@ fn class<'gc>(
+         None
+     };
+ 
+-    let class_name = class_read.name();
+-    drop(class_read);
++    let class_name = class_def.name();
+ 
+     let class_object = ClassObject::from_class(activation, class_def, super_class)?;
+     global.install_const_late(
+@@ -422,9 +419,7 @@ fn vector_class<'gc>(
+     let generic_vector = activation.avm2().classes().generic_vector;
+     generic_vector.add_application(mc, param_class, vector_cls);
+     let generic_cls = generic_vector.inner_class_definition();
+-    generic_cls
+-        .write(mc)
+-        .add_application(cls, vector_cls.inner_class_definition());
++    generic_cls.add_application(mc, cls, vector_cls.inner_class_definition());
+ 
+     let legacy_name = QName::new(activation.avm2().vector_internal_namespace, legacy_name);
+     global.install_const_late(
+@@ -484,24 +479,24 @@ pub fn load_player_globals<'gc>(
+     let object_classdef = object::create_class(activation);
+     let object_class = ClassObject::from_class_partial(activation, object_classdef, None)?;
+     let object_proto = ScriptObject::custom_object(mc, Some(object_class), None);
+-    domain.export_class(object_classdef.read().name(), object_classdef, mc);
++    domain.export_class(object_classdef.name(), object_classdef, mc);
+ 
+     let fn_classdef = function::create_class(activation, object_classdef);
+     let fn_class = ClassObject::from_class_partial(activation, fn_classdef, Some(object_class))?;
+     let fn_proto = ScriptObject::custom_object(mc, Some(fn_class), Some(object_proto));
+-    domain.export_class(fn_classdef.read().name(), fn_classdef, mc);
++    domain.export_class(fn_classdef.name(), fn_classdef, mc);
+ 
+     let class_classdef = class::create_class(activation, object_classdef);
+     let class_class =
+         ClassObject::from_class_partial(activation, class_classdef, Some(object_class))?;
+     let class_proto = ScriptObject::custom_object(mc, Some(object_class), Some(object_proto));
+-    domain.export_class(class_classdef.read().name(), class_classdef, mc);
++    domain.export_class(class_classdef.name(), class_classdef, mc);
+ 
+     let global_classdef = global_scope::create_class(activation, object_classdef);
+     let global_class =
+         ClassObject::from_class_partial(activation, global_classdef, Some(object_class))?;
+     let global_proto = ScriptObject::custom_object(mc, Some(object_class), Some(object_proto));
+-    domain.export_class(global_classdef.read().name(), global_classdef, mc);
++    domain.export_class(global_classdef.name(), global_classdef, mc);
+ 
+     // Now to weave the Gordian knot...
+     object_class.link_prototype(activation, object_proto)?;
+diff --git a/core/src/avm2/globals/array.rs b/core/src/avm2/globals/array.rs
+index 8039512355e3..49f125956aab 100644
+--- a/core/src/avm2/globals/array.rs
++++ b/core/src/avm2/globals/array.rs
+@@ -11,7 +11,6 @@ use crate::avm2::Error;
+ use crate::avm2::QName;
+ use crate::string::AvmString;
+ use bitflags::bitflags;
+-use gc_arena::GcCell;
+ use std::cmp::{min, Ordering};
+ use std::mem::swap;
+ 
+@@ -1242,7 +1241,7 @@ pub fn remove_at<'gc>(
+ }
+ 
+ /// Construct `Array`'s class.
+-pub fn create_class<'gc>(activation: &mut Activation<'_, 'gc>) -> GcCell<'gc, Class<'gc>> {
++pub fn create_class<'gc>(activation: &mut Activation<'_, 'gc>) -> Class<'gc> {
+     let mc = activation.context.gc_context;
+     let class = Class::new(
+         QName::new(activation.avm2().public_namespace_base_version, "Array"),
+@@ -1252,23 +1251,24 @@ pub fn create_class<'gc>(activation: &mut Activation<'_, 'gc>) -> GcCell<'gc, Cl
+         mc,
+     );
+ 
+-    let mut write = class.write(mc);
+-
+-    write.set_instance_allocator(array_allocator);
+-    write.set_call_handler(Method::from_builtin(class_call, "<Array call handler>", mc));
++    class.set_instance_allocator(mc, array_allocator);
++    class.set_call_handler(
++        mc,
++        Method::from_builtin(class_call, "<Array call handler>", mc),
++    );
+ 
+     const PUBLIC_INSTANCE_PROPERTIES: &[(
+         &str,
+         Option<NativeMethodImpl>,
+         Option<NativeMethodImpl>,
+     )] = &[("length", Some(length), Some(set_length))];
+-    write.define_builtin_instance_properties(
++    class.define_builtin_instance_properties(
+         mc,
+         activation.avm2().public_namespace_base_version,
+         PUBLIC_INSTANCE_PROPERTIES,
+     );
+ 
+-    write.define_builtin_instance_methods(
++    class.define_builtin_instance_methods(
+         mc,
+         activation.avm2().as3_namespace,
+         PUBLIC_AS3_INSTANCE_METHODS,
+@@ -1287,14 +1287,14 @@ pub fn create_class<'gc>(activation: &mut Activation<'_, 'gc>) -> GcCell<'gc, Cl
+         ),
+         ("UNIQUESORT", SortOptions::UNIQUE_SORT.bits() as u32),
+     ];
+-    write.define_constant_uint_class_traits(
++    class.define_constant_uint_class_traits(
+         activation.avm2().public_namespace_base_version,
+         CONSTANTS_UINT,
+         activation,
+     );
+ 
+     const CONSTANTS_INT: &[(&str, i32)] = &[("length", 1)];
+-    write.define_constant_int_class_traits(
++    class.define_constant_int_class_traits(
+         activation.avm2().public_namespace_base_version,
+         CONSTANTS_INT,
+         activation,
+diff --git a/core/src/avm2/globals/avmplus.rs b/core/src/avm2/globals/avmplus.rs
+index b3f61a495b61..9d2875001a81 100644
+--- a/core/src/avm2/globals/avmplus.rs
++++ b/core/src/avm2/globals/avmplus.rs
+@@ -34,7 +34,6 @@ pub fn describe_type_json<'gc>(
+     }
+ 
+     let class = class_obj.inner_class_definition();
+-    let class = class.read();
+ 
+     let qualified_name = class
+         .name()
+@@ -160,7 +159,6 @@ fn describe_internal_body<'gc>(
+         while let Some(super_obj) = current_super_obj {
+             let super_name = super_obj
+                 .inner_class_definition()
+-                .read()
+                 .name()
+                 .to_qualified_name(activation.context.gc_context);
+             bases_array.push(super_name.into());
+@@ -184,7 +182,6 @@ fn describe_internal_body<'gc>(
+     if flags.contains(DescribeTypeFlags::INCLUDE_INTERFACES) && use_instance_traits {
+         for interface in class_obj.interfaces() {
+             let interface_name = interface
+-                .read()
+                 .name()
+                 .to_qualified_name(activation.context.gc_context);
+             interfaces_array.push(interface_name.into());
+@@ -294,7 +291,6 @@ fn describe_internal_body<'gc>(
+ 
+                 let declared_by_name = declared_by
+                     .inner_class_definition()
+-                    .read()
+                     .name()
+                     .to_qualified_name(activation.context.gc_context);
+ 
+@@ -382,7 +378,6 @@ fn describe_internal_body<'gc>(
+                     method_type.to_qualified_name_or_star(activation.context.gc_context);
+                 let declared_by = defining_class
+                     .inner_class_definition()
+-                    .read()
+                     .name()
+                     .to_qualified_name(activation.context.gc_context);
+ 
+diff --git a/core/src/avm2/globals/boolean.rs b/core/src/avm2/globals/boolean.rs
+index 5fdb6a7d1e62..7fef532a8394 100644
+--- a/core/src/avm2/globals/boolean.rs
++++ b/core/src/avm2/globals/boolean.rs
+@@ -8,7 +8,6 @@ use crate::avm2::object::{primitive_allocator, FunctionObject, Object, TObject};
+ use crate::avm2::value::Value;
+ use crate::avm2::Error;
+ use crate::avm2::QName;
+-use gc_arena::GcCell;
+ 
+ /// Implements `Boolean`'s instance initializer.
+ fn instance_init<'gc>(
+@@ -131,7 +130,7 @@ fn value_of<'gc>(
+ }
+ 
+ /// Construct `Boolean`'s class.
+-pub fn create_class<'gc>(activation: &mut Activation<'_, 'gc>) -> GcCell<'gc, Class<'gc>> {
++pub fn create_class<'gc>(activation: &mut Activation<'_, 'gc>) -> Class<'gc> {
+     let mc = activation.context.gc_context;
+     let class = Class::new(
+         QName::new(activation.avm2().public_namespace_base_version, "Boolean"),
+@@ -141,30 +140,31 @@ pub fn create_class<'gc>(activation: &mut Activation<'_, 'gc>) -> GcCell<'gc, Cl
+         mc,
+     );
+ 
+-    let mut write = class.write(mc);
+-    write.set_attributes(ClassAttributes::FINAL | ClassAttributes::SEALED);
+-    write.set_instance_allocator(primitive_allocator);
+-    write.set_native_instance_init(Method::from_builtin(
+-        native_instance_init,
+-        "<Boolean native instance initializer>",
++    class.set_attributes(mc, ClassAttributes::FINAL | ClassAttributes::SEALED);
++    class.set_instance_allocator(mc, primitive_allocator);
++    class.set_native_instance_init(
+         mc,
+-    ));
+-    write.set_call_handler(Method::from_builtin(
+-        call_handler,
+-        "<Boolean call handler>",
++        Method::from_builtin(
++            native_instance_init,
++            "<Boolean native instance initializer>",
++            mc,
++        ),
++    );
++    class.set_call_handler(
+         mc,
+-    ));
++        Method::from_builtin(call_handler, "<Boolean call handler>", mc),
++    );
+ 
+     const AS3_INSTANCE_METHODS: &[(&str, NativeMethodImpl)] =
+         &[("toString", to_string), ("valueOf", value_of)];
+-    write.define_builtin_instance_methods(
++    class.define_builtin_instance_methods(
+         mc,
+         activation.avm2().as3_namespace,
+         AS3_INSTANCE_METHODS,
+     );
+ 
+     const CONSTANTS_INT: &[(&str, i32)] = &[("length", 1)];
+-    write.define_constant_int_class_traits(
++    class.define_constant_int_class_traits(
+         activation.avm2().public_namespace_base_version,
+         CONSTANTS_INT,
+         activation,
+diff --git a/core/src/avm2/globals/class.rs b/core/src/avm2/globals/class.rs
+index 3f5ddd26f2c2..9edc96ece35a 100644
+--- a/core/src/avm2/globals/class.rs
++++ b/core/src/avm2/globals/class.rs
+@@ -7,7 +7,6 @@ use crate::avm2::object::{Object, TObject};
+ use crate::avm2::value::Value;
+ use crate::avm2::Error;
+ use crate::avm2::QName;
+-use gc_arena::GcCell;
+ 
+ /// Implements `Class`'s instance initializer.
+ ///
+@@ -45,8 +44,8 @@ fn prototype<'gc>(
+ /// Construct `Class`'s class.
+ pub fn create_class<'gc>(
+     activation: &mut Activation<'_, 'gc>,
+-    object_class: GcCell<'gc, Class<'gc>>,
+-) -> GcCell<'gc, Class<'gc>> {
++    object_class: Class<'gc>,
++) -> Class<'gc> {
+     let gc_context = activation.context.gc_context;
+     let class_class = Class::new(
+         QName::new(activation.avm2().public_namespace_base_version, "Class"),
+@@ -56,12 +55,10 @@ pub fn create_class<'gc>(
+         gc_context,
+     );
+ 
+-    let mut write = class_class.write(gc_context);
+-
+     // 'length' is a weird undocumented constant in Class.
+     // We need to define it, since it shows up in 'describeType'
+     const CLASS_CONSTANTS: &[(&str, i32)] = &[("length", 1)];
+-    write.define_constant_int_class_traits(
++    class_class.define_constant_int_class_traits(
+         activation.avm2().public_namespace_base_version,
+         CLASS_CONSTANTS,
+         activation,
+@@ -72,7 +69,7 @@ pub fn create_class<'gc>(
+         Option<NativeMethodImpl>,
+         Option<NativeMethodImpl>,
+     )] = &[("prototype", Some(prototype), None)];
+-    write.define_builtin_instance_properties(
++    class_class.define_builtin_instance_properties(
+         gc_context,
+         activation.avm2().public_namespace_base_version,
+         PUBLIC_INSTANCE_PROPERTIES,
+diff --git a/core/src/avm2/globals/date.rs b/core/src/avm2/globals/date.rs
+index c9547c5e46ef..78c5e18af875 100644
+--- a/core/src/avm2/globals/date.rs
++++ b/core/src/avm2/globals/date.rs
+@@ -10,7 +10,6 @@ use crate::avm2::QName;
+ use crate::locale::{get_current_date_time, get_timezone};
+ use crate::string::{utils as string_utils, AvmString, WStr};
+ use chrono::{DateTime, Datelike, Duration, FixedOffset, LocalResult, TimeZone, Timelike, Utc};
+-use gc_arena::GcCell;
+ use num_traits::ToPrimitive;
+ 
+ // All of these methods will be defined as both
+@@ -1322,7 +1321,7 @@ pub fn parse<'gc>(
+ }
+ 
+ /// Construct `Date`'s class.
+-pub fn create_class<'gc>(activation: &mut Activation<'_, 'gc>) -> GcCell<'gc, Class<'gc>> {
++pub fn create_class<'gc>(activation: &mut Activation<'_, 'gc>) -> Class<'gc> {
+     let mc = activation.context.gc_context;
+     let class = Class::new(
+         QName::new(activation.avm2().public_namespace_base_version, "Date"),
+@@ -1332,13 +1331,11 @@ pub fn create_class<'gc>(activation: &mut Activation<'_, 'gc>) -> GcCell<'gc, Cl
+         mc,
+     );
+ 
+-    let mut write = class.write(mc);
+-    write.set_instance_allocator(date_allocator);
+-    write.set_call_handler(Method::from_builtin(
+-        call_handler,
+-        "<Date call handler>",
++    class.set_instance_allocator(mc, date_allocator);
++    class.set_call_handler(
+         mc,
+-    ));
++        Method::from_builtin(call_handler, "<Date call handler>", mc),
++    );
+ 
+     const PUBLIC_INSTANCE_PROPERTIES: &[(
+         &str,
+@@ -1368,12 +1365,12 @@ pub fn create_class<'gc>(activation: &mut Activation<'_, 'gc>) -> GcCell<'gc, Cl
+         ("dayUTC", Some(day_utc), None),
+         ("timezoneOffset", Some(timezone_offset), None),
+     ];
+-    write.define_builtin_instance_properties(
++    class.define_builtin_instance_properties(
+         mc,
+         activation.avm2().public_namespace_base_version,
+         PUBLIC_INSTANCE_PROPERTIES,
+     );
+-    write.define_builtin_instance_methods(
++    class.define_builtin_instance_methods(
+         mc,
+         activation.avm2().as3_namespace,
+         PUBLIC_INSTANCE_AND_PROTO_METHODS,
+@@ -1381,7 +1378,7 @@ pub fn create_class<'gc>(activation: &mut Activation<'_, 'gc>) -> GcCell<'gc, Cl
+ 
+     const PUBLIC_CLASS_METHODS: &[(&str, NativeMethodImpl)] = &[("UTC", utc), ("parse", parse)];
+ 
+-    write.define_builtin_class_methods(
++    class.define_builtin_class_methods(
+         mc,
+         activation.avm2().public_namespace_base_version,
+         PUBLIC_CLASS_METHODS,
+@@ -1389,7 +1386,7 @@ pub fn create_class<'gc>(activation: &mut Activation<'_, 'gc>) -> GcCell<'gc, Cl
+ 
+     const CLASS_CONSTANTS_INT: &[(&str, i32)] = &[("length", 7)];
+ 
+-    write.define_constant_int_class_traits(
++    class.define_constant_int_class_traits(
+         activation.avm2().public_namespace_base_version,
+         CLASS_CONSTANTS_INT,
+         activation,
+diff --git a/core/src/avm2/globals/flash/display/bitmap_data.rs b/core/src/avm2/globals/flash/display/bitmap_data.rs
+index 491211cd89fc..5d19c3e11e70 100644
+--- a/core/src/avm2/globals/flash/display/bitmap_data.rs
++++ b/core/src/avm2/globals/flash/display/bitmap_data.rs
+@@ -92,7 +92,7 @@ pub fn init<'gc>(
+ ) -> Result<Value<'gc>, Error<'gc>> {
+     // We set the underlying BitmapData instance - we start out with a dummy BitmapDataWrapper,
+     // which makes custom classes see a disposed BitmapData before they call super()
+-    let name = this.instance_of_class_definition().map(|c| c.read().name());
++    let name = this.instance_of_class_definition().map(|c| c.name());
+     let character = this
+         .instance_of()
+         .and_then(|t| {
+diff --git a/core/src/avm2/globals/flash/display/display_object.rs b/core/src/avm2/globals/flash/display/display_object.rs
+index 7336a3e6b77d..aa9d5c7b9e2b 100644
+--- a/core/src/avm2/globals/flash/display/display_object.rs
++++ b/core/src/avm2/globals/flash/display/display_object.rs
+@@ -23,7 +23,7 @@ pub fn display_object_allocator<'gc>(
+     class: ClassObject<'gc>,
+     activation: &mut Activation<'_, 'gc>,
+ ) -> Result<Object<'gc>, Error<'gc>> {
+-    let class_name = class.inner_class_definition().read().name().local_name();
++    let class_name = class.inner_class_definition().name().local_name();
+ 
+     return Err(Error::AvmError(argument_error(
+         activation,
+diff --git a/core/src/avm2/globals/flash/media/sound.rs b/core/src/avm2/globals/flash/media/sound.rs
+index db64e90f6a7d..b7e449af9d97 100644
+--- a/core/src/avm2/globals/flash/media/sound.rs
++++ b/core/src/avm2/globals/flash/media/sound.rs
+@@ -41,7 +41,7 @@ pub fn init<'gc>(
+                 let sound = *sound;
+                 sound_object.set_sound(&mut activation.context, sound)?;
+             } else {
+-                tracing::warn!("Attempted to construct subclass of Sound, {}, which is associated with non-Sound character {}", class_object.inner_class_definition().read().name().local_name(), symbol);
++                tracing::warn!("Attempted to construct subclass of Sound, {}, which is associated with non-Sound character {}", class_object.inner_class_definition().name().local_name(), symbol);
+             }
+         }
+     }
+diff --git a/core/src/avm2/globals/flash/media/video.rs b/core/src/avm2/globals/flash/media/video.rs
+index 3a9f5c030303..7648d8ce2fa5 100644
+--- a/core/src/avm2/globals/flash/media/video.rs
++++ b/core/src/avm2/globals/flash/media/video.rs
+@@ -69,7 +69,7 @@ pub fn attach_net_stream<'gc>(
+                 "Cannot use value of type {:?} as video source",
+                 source
+                     .and_then(|o| o.instance_of_class_definition())
+-                    .map(|c| c.read().name().local_name())
++                    .map(|c| c.name().local_name())
+                     .unwrap_or_else(|| "Object".into())
+             )
+             .into());
+diff --git a/core/src/avm2/globals/flash/utils.rs b/core/src/avm2/globals/flash/utils.rs
+index a7fa215008d8..5d88578a92d8 100644
+--- a/core/src/avm2/globals/flash/utils.rs
++++ b/core/src/avm2/globals/flash/utils.rs
+@@ -208,7 +208,6 @@ pub fn get_qualified_class_name<'gc>(
+ 
+     Ok(class
+         .inner_class_definition()
+-        .read()
+         .name()
+         .to_qualified_name(activation.context.gc_context)
+         .into())
+@@ -236,7 +235,6 @@ pub fn get_qualified_superclass_name<'gc>(
+     if let Some(super_class) = class.superclass_object() {
+         Ok(super_class
+             .inner_class_definition()
+-            .read()
+             .name()
+             .to_qualified_name(activation.context.gc_context)
+             .into())
+diff --git a/core/src/avm2/globals/function.rs b/core/src/avm2/globals/function.rs
+index 55599dd8c378..cec6c1822177 100644
+--- a/core/src/avm2/globals/function.rs
++++ b/core/src/avm2/globals/function.rs
+@@ -9,7 +9,6 @@ use crate::avm2::object::{function_allocator, FunctionObject, Object, TObject};
+ use crate::avm2::value::Value;
+ use crate::avm2::Error;
+ use crate::avm2::QName;
+-use gc_arena::GcCell;
+ 
+ /// Implements `Function`'s instance initializer.
+ pub fn instance_init<'gc>(
+@@ -223,8 +222,8 @@ fn set_prototype<'gc>(
+ /// Construct `Function`'s class.
+ pub fn create_class<'gc>(
+     activation: &mut Activation<'_, 'gc>,
+-    object_classdef: GcCell<'gc, Class<'gc>>,
+-) -> GcCell<'gc, Class<'gc>> {
++    object_classdef: Class<'gc>,
++) -> Class<'gc> {
+     let gc_context = activation.context.gc_context;
+     let function_class = Class::new(
+         QName::new(activation.avm2().public_namespace_base_version, "Function"),
+@@ -234,11 +233,9 @@ pub fn create_class<'gc>(
+         gc_context,
+     );
+ 
+-    let mut write = function_class.write(gc_context);
+-
+     // Fixed traits (in AS3 namespace)
+     const AS3_INSTANCE_METHODS: &[(&str, NativeMethodImpl)] = &[("call", call), ("apply", apply)];
+-    write.define_builtin_instance_methods(
++    function_class.define_builtin_instance_methods(
+         gc_context,
+         activation.avm2().as3_namespace,
+         AS3_INSTANCE_METHODS,
+@@ -252,25 +249,24 @@ pub fn create_class<'gc>(
+         ("prototype", Some(prototype), Some(set_prototype)),
+         ("length", Some(length), None),
+     ];
+-    write.define_builtin_instance_properties(
++    function_class.define_builtin_instance_properties(
+         gc_context,
+         activation.avm2().public_namespace_base_version,
+         PUBLIC_INSTANCE_PROPERTIES,
+     );
+ 
+     const CONSTANTS_INT: &[(&str, i32)] = &[("length", 1)];
+-    write.define_constant_int_class_traits(
++    function_class.define_constant_int_class_traits(
+         activation.avm2().public_namespace_base_version,
+         CONSTANTS_INT,
+         activation,
+     );
+ 
+-    write.set_instance_allocator(function_allocator);
+-    write.set_call_handler(Method::from_builtin(
+-        class_call,
+-        "<Function call handler>",
++    function_class.set_instance_allocator(gc_context, function_allocator);
++    function_class.set_call_handler(
+         gc_context,
+-    ));
++        Method::from_builtin(class_call, "<Function call handler>", gc_context),
++    );
+ 
+     function_class
+ }
+diff --git a/core/src/avm2/globals/global_scope.rs b/core/src/avm2/globals/global_scope.rs
+index f0b99cb4fbc0..e4ff9ca83c3b 100644
+--- a/core/src/avm2/globals/global_scope.rs
++++ b/core/src/avm2/globals/global_scope.rs
+@@ -11,7 +11,6 @@ use crate::avm2::object::Object;
+ use crate::avm2::value::Value;
+ use crate::avm2::Error;
+ use crate::avm2::QName;
+-use gc_arena::GcCell;
+ 
+ /// Implements `global`'s instance constructor.
+ pub fn instance_init<'gc>(
+@@ -34,8 +33,8 @@ pub fn class_init<'gc>(
+ /// Construct `global`'s class.
+ pub fn create_class<'gc>(
+     activation: &mut Activation<'_, 'gc>,
+-    object_class: GcCell<'gc, Class<'gc>>,
+-) -> GcCell<'gc, Class<'gc>> {
++    object_class: Class<'gc>,
++) -> Class<'gc> {
+     let mc = activation.context.gc_context;
+     Class::new(
+         QName::new(activation.avm2().public_namespace_base_version, "global"),
+diff --git a/core/src/avm2/globals/int.rs b/core/src/avm2/globals/int.rs
+index 22aa6c034c0b..003db0aeff98 100644
+--- a/core/src/avm2/globals/int.rs
++++ b/core/src/avm2/globals/int.rs
+@@ -8,7 +8,6 @@ use crate::avm2::method::{Method, NativeMethodImpl, ParamConfig};
+ use crate::avm2::object::{primitive_allocator, FunctionObject, Object, TObject};
+ use crate::avm2::value::Value;
+ use crate::avm2::{AvmString, Error, Multiname, QName};
+-use gc_arena::GcCell;
+ 
+ /// Implements `int`'s instance initializer.
+ fn instance_init<'gc>(
+@@ -212,7 +211,7 @@ fn value_of<'gc>(
+ }
+ 
+ /// Construct `int`'s class.
+-pub fn create_class<'gc>(activation: &mut Activation<'_, 'gc>) -> GcCell<'gc, Class<'gc>> {
++pub fn create_class<'gc>(activation: &mut Activation<'_, 'gc>) -> Class<'gc> {
+     let mc = activation.context.gc_context;
+     let class = Class::new(
+         QName::new(activation.avm2().public_namespace_base_version, "int"),
+@@ -233,15 +232,20 @@ pub fn create_class<'gc>(activation: &mut Activation<'_, 'gc>) -> GcCell<'gc, Cl
+         mc,
+     );
+ 
+-    let mut write = class.write(mc);
+-    write.set_attributes(ClassAttributes::FINAL | ClassAttributes::SEALED);
+-    write.set_instance_allocator(primitive_allocator);
+-    write.set_native_instance_init(Method::from_builtin(
+-        native_instance_init,
+-        "<int native instance initializer>",
++    class.set_attributes(mc, ClassAttributes::FINAL | ClassAttributes::SEALED);
++    class.set_instance_allocator(mc, primitive_allocator);
++    class.set_native_instance_init(
+         mc,
+-    ));
+-    write.set_call_handler(Method::from_builtin(call_handler, "<int call handler>", mc));
++        Method::from_builtin(
++            native_instance_init,
++            "<int native instance initializer>",
++            mc,
++        ),
++    );
++    class.set_call_handler(
++        mc,
++        Method::from_builtin(call_handler, "<int call handler>", mc),
++    );
+ 
+     // 'length' is a weird undocumented constant in int.
+     // We need to define it, since it shows up in 'describeType'
+@@ -250,7 +254,7 @@ pub fn create_class<'gc>(activation: &mut Activation<'_, 'gc>) -> GcCell<'gc, Cl
+         ("MIN_VALUE", i32::MIN),
+         ("length", 1),
+     ];
+-    write.define_constant_int_class_traits(
++    class.define_constant_int_class_traits(
+         activation.avm2().public_namespace_base_version,
+         CLASS_CONSTANTS,
+         activation,
+@@ -263,7 +267,7 @@ pub fn create_class<'gc>(activation: &mut Activation<'_, 'gc>) -> GcCell<'gc, Cl
+         ("toString", to_string),
+         ("valueOf", value_of),
+     ];
+-    write.define_builtin_instance_methods(
++    class.define_builtin_instance_methods(
+         mc,
+         activation.avm2().as3_namespace,
+         AS3_INSTANCE_METHODS,
+diff --git a/core/src/avm2/globals/namespace.rs b/core/src/avm2/globals/namespace.rs
+index 4c534709a9b0..ab73a21667fa 100644
+--- a/core/src/avm2/globals/namespace.rs
++++ b/core/src/avm2/globals/namespace.rs
+@@ -9,7 +9,6 @@ use crate::avm2::Error;
+ use crate::avm2::Namespace;
+ use crate::avm2::QName;
+ use crate::{avm2_stub_constructor, avm2_stub_getter};
+-use gc_arena::GcCell;
+ 
+ // All of these methods will be defined as both
+ // AS3 instance methods and methods on the `Namespace` class prototype.
+@@ -128,7 +127,7 @@ pub fn uri<'gc>(
+ }
+ 
+ /// Construct `Namespace`'s class.
+-pub fn create_class<'gc>(activation: &mut Activation<'_, 'gc>) -> GcCell<'gc, Class<'gc>> {
++pub fn create_class<'gc>(activation: &mut Activation<'_, 'gc>) -> Class<'gc> {
+     let mc = activation.context.gc_context;
+     let class = Class::new(
+         QName::new(activation.avm2().public_namespace_base_version, "Namespace"),
+@@ -138,38 +137,39 @@ pub fn create_class<'gc>(activation: &mut Activation<'_, 'gc>) -> GcCell<'gc, Cl
+         mc,
+     );
+ 
+-    let mut write = class.write(mc);
+-    write.set_instance_allocator(namespace_allocator);
+-    write.set_native_instance_init(Method::from_builtin(
+-        native_instance_init,
+-        "<Namespace native instance initializer>",
++    class.set_instance_allocator(mc, namespace_allocator);
++    class.set_native_instance_init(
+         mc,
+-    ));
+-    write.set_call_handler(Method::from_builtin(
+-        class_call,
+-        "<Namespace call handler>",
++        Method::from_builtin(
++            native_instance_init,
++            "<Namespace native instance initializer>",
++            mc,
++        ),
++    );
++    class.set_call_handler(
+         mc,
+-    ));
++        Method::from_builtin(class_call, "<Namespace call handler>", mc),
++    );
+ 
+     const PUBLIC_INSTANCE_PROPERTIES: &[(
+         &str,
+         Option<NativeMethodImpl>,
+         Option<NativeMethodImpl>,
+     )] = &[("prefix", Some(prefix), None), ("uri", Some(uri), None)];
+-    write.define_builtin_instance_properties(
++    class.define_builtin_instance_properties(
+         mc,
+         activation.avm2().public_namespace_base_version,
+         PUBLIC_INSTANCE_PROPERTIES,
+     );
+ 
+     const CONSTANTS_INT: &[(&str, i32)] = &[("length", 2)];
+-    write.define_constant_int_class_traits(
++    class.define_constant_int_class_traits(
+         activation.avm2().public_namespace_base_version,
+         CONSTANTS_INT,
+         activation,
+     );
+ 
+-    write.define_builtin_instance_methods(
++    class.define_builtin_instance_methods(
+         mc,
+         activation.avm2().as3_namespace,
+         PUBLIC_INSTANCE_AND_PROTO_METHODS,
+diff --git a/core/src/avm2/globals/number.rs b/core/src/avm2/globals/number.rs
+index 512715426362..c6a22aeac46b 100644
+--- a/core/src/avm2/globals/number.rs
++++ b/core/src/avm2/globals/number.rs
+@@ -8,7 +8,6 @@ use crate::avm2::object::{primitive_allocator, FunctionObject, Object, TObject};
+ use crate::avm2::value::Value;
+ use crate::avm2::QName;
+ use crate::avm2::{AvmString, Error};
+-use gc_arena::GcCell;
+ 
+ /// Implements `Number`'s instance initializer.
+ fn instance_init<'gc>(
+@@ -367,7 +366,7 @@ fn value_of<'gc>(
+ }
+ 
+ /// Construct `Number`'s class.
+-pub fn create_class<'gc>(activation: &mut Activation<'_, 'gc>) -> GcCell<'gc, Class<'gc>> {
++pub fn create_class<'gc>(activation: &mut Activation<'_, 'gc>) -> Class<'gc> {
+     let mc = activation.context.gc_context;
+     let class = Class::new(
+         QName::new(activation.avm2().public_namespace_base_version, "Number"),
+@@ -377,19 +376,20 @@ pub fn create_class<'gc>(activation: &mut Activation<'_, 'gc>) -> GcCell<'gc, Cl
+         mc,
+     );
+ 
+-    let mut write = class.write(mc);
+-    write.set_attributes(ClassAttributes::FINAL | ClassAttributes::SEALED);
+-    write.set_instance_allocator(primitive_allocator);
+-    write.set_native_instance_init(Method::from_builtin(
+-        native_instance_init,
+-        "<Number native instance initializer>",
++    class.set_attributes(mc, ClassAttributes::FINAL | ClassAttributes::SEALED);
++    class.set_instance_allocator(mc, primitive_allocator);
++    class.set_native_instance_init(
+         mc,
+-    ));
+-    write.set_call_handler(Method::from_builtin(
+-        call_handler,
+-        "<Number call handler>",
++        Method::from_builtin(
++            native_instance_init,
++            "<Number native instance initializer>",
++            mc,
++        ),
++    );
++    class.set_call_handler(
+         mc,
+-    ));
++        Method::from_builtin(call_handler, "<Number call handler>", mc),
++    );
+ 
+     const CLASS_CONSTANTS_NUMBER: &[(&str, f64)] = &[
+         ("MAX_VALUE", f64::MAX),
+@@ -406,14 +406,14 @@ pub fn create_class<'gc>(activation: &mut Activation<'_, 'gc>) -> GcCell<'gc, Cl
+         ("LOG2E", std::f64::consts::LOG2_E),
+         ("LOG10E", std::f64::consts::LOG10_E),
+     ];
+-    write.define_constant_number_class_traits(
++    class.define_constant_number_class_traits(
+         activation.avm2().public_namespace_base_version,
+         CLASS_CONSTANTS_NUMBER,
+         activation,
+     );
+ 
+     const CLASS_CONSTANTS_INT: &[(&str, i32)] = &[("length", 1)];
+-    write.define_constant_int_class_traits(
++    class.define_constant_int_class_traits(
+         activation.avm2().public_namespace_base_version,
+         CLASS_CONSTANTS_INT,
+         activation,
+@@ -426,7 +426,7 @@ pub fn create_class<'gc>(activation: &mut Activation<'_, 'gc>) -> GcCell<'gc, Cl
+         ("toString", to_string),
+         ("valueOf", value_of),
+     ];
+-    write.define_builtin_instance_methods(
++    class.define_builtin_instance_methods(
+         mc,
+         activation.avm2().as3_namespace,
+         AS3_INSTANCE_METHODS,
+diff --git a/core/src/avm2/globals/object.rs b/core/src/avm2/globals/object.rs
+index 0f15dac9c599..a8fe819b2cdc 100644
+--- a/core/src/avm2/globals/object.rs
++++ b/core/src/avm2/globals/object.rs
+@@ -9,7 +9,6 @@ use crate::avm2::value::Value;
+ use crate::avm2::Error;
+ use crate::avm2::Multiname;
+ use crate::avm2::QName;
+-use gc_arena::GcCell;
+ 
+ /// Implements `Object`'s instance initializer.
+ pub fn instance_init<'gc>(
+@@ -251,7 +250,7 @@ pub fn init<'gc>(
+ }
+ 
+ /// Construct `Object`'s class.
+-pub fn create_class<'gc>(activation: &mut Activation<'_, 'gc>) -> GcCell<'gc, Class<'gc>> {
++pub fn create_class<'gc>(activation: &mut Activation<'_, 'gc>) -> Class<'gc> {
+     let gc_context = activation.context.gc_context;
+     let object_class = Class::new(
+         QName::new(activation.avm2().public_namespace_base_version, "Object"),
+@@ -260,18 +259,20 @@ pub fn create_class<'gc>(activation: &mut Activation<'_, 'gc>) -> GcCell<'gc, Cl
+         Method::from_builtin(class_init, "<Object class initializer>", gc_context),
+         gc_context,
+     );
+-    let mut write = object_class.write(gc_context);
+-    write.set_call_handler(Method::from_builtin(
+-        class_call,
+-        "<Object call handler>",
++
++    object_class.set_call_handler(
+         gc_context,
+-    ));
++        Method::from_builtin(class_call, "<Object call handler>", gc_context),
++    );
+ 
+-    write.define_class_trait(Trait::from_const(
+-        QName::new(activation.avm2().public_namespace_base_version, "length"),
+-        Multiname::new(activation.avm2().public_namespace_base_version, "int"),
+-        Some(1.into()),
+-    ));
++    object_class.define_class_trait(
++        gc_context,
++        Trait::from_const(
++            QName::new(activation.avm2().public_namespace_base_version, "length"),
++            Multiname::new(activation.avm2().public_namespace_base_version, "int"),
++            Some(1.into()),
++        ),
++    );
+ 
+     // Fixed traits (in AS3 namespace)
+     let as3_instance_methods: Vec<(&str, NativeMethodImpl, _, _)> = vec![
+@@ -307,14 +308,14 @@ pub fn create_class<'gc>(activation: &mut Activation<'_, 'gc>) -> GcCell<'gc, Cl
+             Multiname::new(activation.avm2().public_namespace_base_version, "Boolean"),
+         ),
+     ];
+-    write.define_builtin_instance_methods_with_sig(
++    object_class.define_builtin_instance_methods_with_sig(
+         gc_context,
+         activation.avm2().as3_namespace,
+         as3_instance_methods,
+     );
+ 
+     const INTERNAL_INIT_METHOD: &[(&str, NativeMethodImpl)] = &[("init", init)];
+-    write.define_builtin_class_methods(
++    object_class.define_builtin_class_methods(
+         gc_context,
+         activation.avm2().internal_namespace,
+         INTERNAL_INIT_METHOD,
+diff --git a/core/src/avm2/globals/string.rs b/core/src/avm2/globals/string.rs
+index 56f644a36244..b798708ba993 100644
+--- a/core/src/avm2/globals/string.rs
++++ b/core/src/avm2/globals/string.rs
+@@ -11,7 +11,6 @@ use crate::avm2::Error;
+ use crate::avm2::QName;
+ use crate::avm2::{ArrayObject, ArrayStorage};
+ use crate::string::{AvmString, WString};
+-use gc_arena::GcCell;
+ 
+ // All of these methods will be defined as both
+ // AS3 instance methods and methods on the `String` class prototype.
+@@ -667,7 +666,7 @@ fn to_upper_case<'gc>(
+ }
+ 
+ /// Construct `String`'s class.
+-pub fn create_class<'gc>(activation: &mut Activation<'_, 'gc>) -> GcCell<'gc, Class<'gc>> {
++pub fn create_class<'gc>(activation: &mut Activation<'_, 'gc>) -> Class<'gc> {
+     let mc = activation.context.gc_context;
+     let class = Class::new(
+         QName::new(activation.avm2().public_namespace_base_version, "String"),
+@@ -677,33 +676,31 @@ pub fn create_class<'gc>(activation: &mut Activation<'_, 'gc>) -> GcCell<'gc, Cl
+         mc,
+     );
+ 
+-    let mut write = class.write(mc);
+-    write.set_attributes(ClassAttributes::FINAL | ClassAttributes::SEALED);
+-    write.set_instance_allocator(primitive_allocator);
+-    write.set_call_handler(Method::from_builtin(
+-        call_handler,
+-        "<String call handler>",
++    class.set_attributes(mc, ClassAttributes::FINAL | ClassAttributes::SEALED);
++    class.set_instance_allocator(mc, primitive_allocator);
++    class.set_call_handler(
+         mc,
+-    ));
++        Method::from_builtin(call_handler, "<String call handler>", mc),
++    );
+ 
+     const PUBLIC_INSTANCE_PROPERTIES: &[(
+         &str,
+         Option<NativeMethodImpl>,
+         Option<NativeMethodImpl>,
+     )] = &[("length", Some(length), None)];
+-    write.define_builtin_instance_properties(
++    class.define_builtin_instance_properties(
+         mc,
+         activation.avm2().public_namespace_base_version,
+         PUBLIC_INSTANCE_PROPERTIES,
+     );
+-    write.define_builtin_instance_methods(
++    class.define_builtin_instance_methods(
+         mc,
+         activation.avm2().as3_namespace,
+         PUBLIC_INSTANCE_AND_PROTO_METHODS,
+     );
+ 
+     const CONSTANTS_INT: &[(&str, i32)] = &[("length", 1)];
+-    write.define_constant_int_class_traits(
++    class.define_constant_int_class_traits(
+         activation.avm2().public_namespace_base_version,
+         CONSTANTS_INT,
+         activation,
+@@ -711,8 +708,8 @@ pub fn create_class<'gc>(activation: &mut Activation<'_, 'gc>) -> GcCell<'gc, Cl
+ 
+     const AS3_CLASS_METHODS: &[(&str, NativeMethodImpl)] = &[("fromCharCode", from_char_code)];
+     const PUBLIC_CLASS_METHODS: &[(&str, NativeMethodImpl)] = &[("fromCharCode", from_char_code)];
+-    write.define_builtin_class_methods(mc, activation.avm2().as3_namespace, AS3_CLASS_METHODS);
+-    write.define_builtin_class_methods(
++    class.define_builtin_class_methods(mc, activation.avm2().as3_namespace, AS3_CLASS_METHODS);
++    class.define_builtin_class_methods(
+         mc,
+         activation.avm2().public_namespace_base_version,
+         PUBLIC_CLASS_METHODS,
+diff --git a/core/src/avm2/globals/uint.rs b/core/src/avm2/globals/uint.rs
+index dd4250629614..e0f0051bbe20 100644
+--- a/core/src/avm2/globals/uint.rs
++++ b/core/src/avm2/globals/uint.rs
+@@ -8,7 +8,6 @@ use crate::avm2::method::{Method, NativeMethodImpl, ParamConfig};
+ use crate::avm2::object::{primitive_allocator, FunctionObject, Object, TObject};
+ use crate::avm2::value::Value;
+ use crate::avm2::{AvmString, Error, Multiname, QName};
+-use gc_arena::GcCell;
+ 
+ /// Implements `uint`'s instance initializer.
+ fn instance_init<'gc>(
+@@ -213,7 +212,7 @@ fn value_of<'gc>(
+ }
+ 
+ /// Construct `uint`'s class.
+-pub fn create_class<'gc>(activation: &mut Activation<'_, 'gc>) -> GcCell<'gc, Class<'gc>> {
++pub fn create_class<'gc>(activation: &mut Activation<'_, 'gc>) -> Class<'gc> {
+     let mc = activation.context.gc_context;
+     let class = Class::new(
+         QName::new(activation.avm2().public_namespace_base_version, "uint"),
+@@ -234,30 +233,31 @@ pub fn create_class<'gc>(activation: &mut Activation<'_, 'gc>) -> GcCell<'gc, Cl
+         mc,
+     );
+ 
+-    let mut write = class.write(mc);
+-    write.set_attributes(ClassAttributes::FINAL | ClassAttributes::SEALED);
+-    write.set_instance_allocator(primitive_allocator);
+-    write.set_native_instance_init(Method::from_builtin(
+-        native_instance_init,
+-        "<uint native instance initializer>",
++    class.set_attributes(mc, ClassAttributes::FINAL | ClassAttributes::SEALED);
++    class.set_instance_allocator(mc, primitive_allocator);
++    class.set_native_instance_init(
+         mc,
+-    ));
+-    write.set_call_handler(Method::from_builtin(
+-        call_handler,
+-        "<uint call handler>",
++        Method::from_builtin(
++            native_instance_init,
++            "<uint native instance initializer>",
++            mc,
++        ),
++    );
++    class.set_call_handler(
+         mc,
+-    ));
++        Method::from_builtin(call_handler, "<uint call handler>", mc),
++    );
+ 
+     const CLASS_CONSTANTS_UINT: &[(&str, u32)] =
+         &[("MAX_VALUE", u32::MAX), ("MIN_VALUE", u32::MIN)];
+-    write.define_constant_uint_class_traits(
++    class.define_constant_uint_class_traits(
+         activation.avm2().public_namespace_base_version,
+         CLASS_CONSTANTS_UINT,
+         activation,
+     );
+ 
+     const CLASS_CONSTANTS_INT: &[(&str, i32)] = &[("length", 1)];
+-    write.define_constant_int_class_traits(
++    class.define_constant_int_class_traits(
+         activation.avm2().public_namespace_base_version,
+         CLASS_CONSTANTS_INT,
+         activation,
+@@ -270,7 +270,7 @@ pub fn create_class<'gc>(activation: &mut Activation<'_, 'gc>) -> GcCell<'gc, Cl
+         ("toString", to_string),
+         ("valueOf", value_of),
+     ];
+-    write.define_builtin_instance_methods(
++    class.define_builtin_instance_methods(
+         mc,
+         activation.avm2().as3_namespace,
+         AS3_INSTANCE_METHODS,
+diff --git a/core/src/avm2/globals/vector.rs b/core/src/avm2/globals/vector.rs
+index 5515c7159340..afc9a42cf783 100644
+--- a/core/src/avm2/globals/vector.rs
++++ b/core/src/avm2/globals/vector.rs
+@@ -16,7 +16,6 @@ use crate::avm2::vector::VectorStorage;
+ use crate::avm2::Error;
+ use crate::avm2::QName;
+ use crate::string::AvmString;
+-use gc_arena::GcCell;
+ use std::cmp::{max, min, Ordering};
+ 
+ pub fn generic_vector_allocator<'gc>(
+@@ -265,7 +264,6 @@ pub fn concat<'gc>(
+         if !arg.is_of_type(activation, my_base_vector_class.inner_class_definition()) {
+             let base_vector_name = my_base_vector_class
+                 .inner_class_definition()
+-                .read()
+                 .name()
+                 .to_qualified_name_err_message(activation.context.gc_context);
+ 
+@@ -295,8 +293,8 @@ pub fn concat<'gc>(
+                         .ok_or("TypeError: Tried to concat a bare object into a Vector")?;
+                     return Err(format!(
+                         "TypeError: Cannot coerce Vector value of type {:?} to type {:?}",
+-                        other_val_class.read().name(),
+-                        val_class.read().name()
++                        other_val_class.name(),
++                        val_class.name()
+                     )
+                     .into());
+                 }
+@@ -912,7 +910,7 @@ pub fn splice<'gc>(
+ }
+ 
+ /// Construct `Vector`'s class.
+-pub fn create_generic_class<'gc>(activation: &mut Activation<'_, 'gc>) -> GcCell<'gc, Class<'gc>> {
++pub fn create_generic_class<'gc>(activation: &mut Activation<'_, 'gc>) -> Class<'gc> {
+     let mc = activation.context.gc_context;
+     let class = Class::new(
+         QName::new(activation.avm2().vector_public_namespace, "Vector"),
+@@ -922,23 +920,22 @@ pub fn create_generic_class<'gc>(activation: &mut Activation<'_, 'gc>) -> GcCell
+         mc,
+     );
+ 
+-    let mut write = class.write(mc);
+-    write.set_attributes(ClassAttributes::GENERIC | ClassAttributes::FINAL);
+-    write.set_instance_allocator(generic_vector_allocator);
++    class.set_attributes(mc, ClassAttributes::GENERIC | ClassAttributes::FINAL);
++    class.set_instance_allocator(mc, generic_vector_allocator);
+     class
+ }
+ 
+ /// Construct `Vector.<int/uint/Number/*>`'s class.
+ pub fn create_builtin_class<'gc>(
+     activation: &mut Activation<'_, 'gc>,
+-    param: Option<GcCell<'gc, Class<'gc>>>,
+-) -> GcCell<'gc, Class<'gc>> {
++    param: Option<Class<'gc>>,
++) -> Class<'gc> {
+     let mc = activation.context.gc_context;
+ 
+     // FIXME - we should store a `Multiname` instead of a `QName`, and use the
+     // `params` field. For now, this is good enough to get tests passing
+     let name = if let Some(param) = param {
+-        let name = format!("Vector.<{}>", param.read().name().to_qualified_name(mc));
++        let name = format!("Vector.<{}>", param.name().to_qualified_name(mc));
+         QName::new(
+             activation.avm2().vector_public_namespace,
+             AvmString::new_utf8(mc, name),
+@@ -955,20 +952,17 @@ pub fn create_builtin_class<'gc>(
+         mc,
+     );
+ 
+-    let mut write = class.write(mc);
+-
+     // TODO: Vector.<*> is also supposed to be final, but currently
+     // that'd make it impossible for us to create derived Vector.<MyType>.
+     if param.is_some() {
+-        write.set_attributes(ClassAttributes::FINAL);
++        class.set_attributes(mc, ClassAttributes::FINAL);
+     }
+-    write.set_param(Some(param));
+-    write.set_instance_allocator(vector_allocator);
+-    write.set_call_handler(Method::from_builtin(
+-        class_call,
+-        "<Vector.<T> call handler>",
++    class.set_param(mc, Some(param));
++    class.set_instance_allocator(mc, vector_allocator);
++    class.set_call_handler(
+         mc,
+-    ));
++        Method::from_builtin(class_call, "<Vector.<T> call handler>", mc),
++    );
+ 
+     const PUBLIC_INSTANCE_PROPERTIES: &[(
+         &str,
+@@ -978,7 +972,7 @@ pub fn create_builtin_class<'gc>(
+         ("length", Some(length), Some(set_length)),
+         ("fixed", Some(fixed), Some(set_fixed)),
+     ];
+-    write.define_builtin_instance_properties(
++    class.define_builtin_instance_properties(
+         mc,
+         activation.avm2().public_namespace_base_version,
+         PUBLIC_INSTANCE_PROPERTIES,
+@@ -1007,7 +1001,7 @@ pub fn create_builtin_class<'gc>(
+         ("sort", sort),
+         ("splice", splice),
+     ];
+-    write.define_builtin_instance_methods(
++    class.define_builtin_instance_methods(
+         mc,
+         activation.avm2().as3_namespace,
+         AS3_INSTANCE_METHODS,
+diff --git a/core/src/avm2/globals/void.rs b/core/src/avm2/globals/void.rs
+index dbb17825d722..5a346b683ffd 100644
+--- a/core/src/avm2/globals/void.rs
++++ b/core/src/avm2/globals/void.rs
+@@ -8,7 +8,6 @@ use crate::avm2::object::Object;
+ use crate::avm2::value::Value;
+ use crate::avm2::Error;
+ use crate::avm2::QName;
+-use gc_arena::GcCell;
+ 
+ fn void_init<'gc>(
+     _activation: &mut Activation<'_, 'gc>,
+@@ -20,7 +19,7 @@ fn void_init<'gc>(
+     Ok(Value::Undefined)
+ }
+ 
+-pub fn create_class<'gc>(activation: &mut Activation<'_, 'gc>) -> GcCell<'gc, Class<'gc>> {
++pub fn create_class<'gc>(activation: &mut Activation<'_, 'gc>) -> Class<'gc> {
+     let mc = activation.context.gc_context;
+     let class = Class::new(
+         QName::new(activation.avm2().public_namespace_base_version, "void"),
+diff --git a/core/src/avm2/method.rs b/core/src/avm2/method.rs
+index 252e4a514469..e06d66ad77cc 100644
+--- a/core/src/avm2/method.rs
++++ b/core/src/avm2/method.rs
+@@ -47,7 +47,7 @@ pub struct ResolvedParamConfig<'gc> {
+     pub param_name: AvmString<'gc>,
+ 
+     /// The type of the parameter.
+-    pub param_type: Option<GcCell<'gc, Class<'gc>>>,
++    pub param_type: Option<Class<'gc>>,
+ 
+     /// The default value for this parameter.
+     pub default_value: Option<Value<'gc>>,
+@@ -254,7 +254,7 @@ impl<'gc> BytecodeMethod<'gc> {
+         &self.signature
+     }
+ 
+-    pub fn resolved_return_type(&self) -> Option<GcCell<'gc, Class<'gc>>> {
++    pub fn resolved_return_type(&self) -> Option<Class<'gc>> {
+         let verified_info = self.verified_info.read();
+ 
+         verified_info.as_ref().unwrap().return_type
+diff --git a/core/src/avm2/object.rs b/core/src/avm2/object.rs
+index 9ac736bc7240..de4e74d8abe4 100644
+--- a/core/src/avm2/object.rs
++++ b/core/src/avm2/object.rs
+@@ -729,7 +729,7 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
+             None => {
+                 if self
+                     .instance_of_class_definition()
+-                    .map(|c| c.read().is_sealed())
++                    .map(|c| c.is_sealed())
+                     .unwrap_or(false)
+                 {
+                     Ok(false)
+@@ -985,7 +985,7 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
+     fn to_string(&self, activation: &mut Activation<'_, 'gc>) -> Result<Value<'gc>, Error<'gc>> {
+         let class_name = self
+             .instance_of_class_definition()
+-            .map(|c| c.read().name().local_name())
++            .map(|c| c.name().local_name())
+             .unwrap_or_else(|| "Object".into());
+ 
+         Ok(AvmString::new_utf8(activation.gc(), format!("[object {class_name}]")).into())
+@@ -1005,7 +1005,7 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
+     ) -> Result<Value<'gc>, Error<'gc>> {
+         let class_name = self
+             .instance_of_class_definition()
+-            .map(|c| c.read().name().local_name())
++            .map(|c| c.name().local_name())
+             .unwrap_or_else(|| "Object".into());
+ 
+         Ok(AvmString::new_utf8(
+@@ -1101,20 +1101,13 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
+     ///
+     /// The given object should be the class object for the given type we are
+     /// checking against this object.
+-    fn is_of_type(
+-        &self,
+-        test_class: GcCell<'gc, Class<'gc>>,
+-        context: &mut UpdateContext<'_, 'gc>,
+-    ) -> bool {
++    fn is_of_type(&self, test_class: Class<'gc>, context: &mut UpdateContext<'_, 'gc>) -> bool {
+         let my_class = self.instance_of();
+ 
+         // ES3 objects are not class instances but are still treated as
+         // instances of Object, which is an ES4 class.
+         if my_class.is_none()
+-            && GcCell::ptr_eq(
+-                test_class,
+-                context.avm2.classes().object.inner_class_definition(),
+-            )
++            && test_class == context.avm2.classes().object.inner_class_definition()
+         {
+             true
+         } else if let Some(my_class) = my_class {
+@@ -1146,14 +1139,14 @@ pub trait TObject<'gc>: 'gc + Collect + Debug + Into<Object<'gc>> + Clone + Copy
+     }
+ 
+     /// Get this object's class's `Class`, if it has one.
+-    fn instance_of_class_definition(&self) -> Option<GcCell<'gc, Class<'gc>>> {
++    fn instance_of_class_definition(&self) -> Option<Class<'gc>> {
+         self.instance_of().map(|cls| cls.inner_class_definition())
+     }
+ 
+     /// Get this object's class's name, formatted for debug output.
+     fn instance_of_class_name(&self, mc: &Mutation<'gc>) -> AvmString<'gc> {
+         self.instance_of_class_definition()
+-            .map(|r| r.read().name().to_qualified_name(mc))
++            .map(|r| r.name().to_qualified_name(mc))
+             .unwrap_or_else(|| "<Unknown type>".into())
+     }
+ 
+diff --git a/core/src/avm2/object/class_object.rs b/core/src/avm2/object/class_object.rs
+index 40dbc9e86d06..30464b37d9f6 100644
+--- a/core/src/avm2/object/class_object.rs
++++ b/core/src/avm2/object/class_object.rs
+@@ -40,7 +40,7 @@ pub struct ClassObjectData<'gc> {
+     base: ScriptObjectData<'gc>,
+ 
+     /// The class associated with this class object.
+-    class: GcCell<'gc, Class<'gc>>,
++    class: Class<'gc>,
+ 
+     /// The associated prototype.
+     /// Should always be non-None after initialization.
+@@ -94,7 +94,7 @@ pub struct ClassObjectData<'gc> {
+     /// from parent classes and superinterfaces (recursively).
+     /// TODO - avoid cloning this when a subclass implements the
+     /// same interface as its superclass.
+-    interfaces: Vec<GcCell<'gc, Class<'gc>>>,
++    interfaces: Vec<Class<'gc>>,
+ 
+     /// VTable used for instances of this class.
+     instance_vtable: VTable<'gc>,
+@@ -138,7 +138,7 @@ impl<'gc> ClassObject<'gc> {
+     /// to be limited to interfaces.
+     pub fn from_class(
+         activation: &mut Activation<'_, 'gc>,
+-        class: GcCell<'gc, Class<'gc>>,
++        class: Class<'gc>,
+         superclass_object: Option<ClassObject<'gc>>,
+     ) -> Result<Self, Error<'gc>> {
+         let class_object = Self::from_class_partial(activation, class, superclass_object)?;
+@@ -172,30 +172,29 @@ impl<'gc> ClassObject<'gc> {
+     /// allocated.
+     pub fn from_class_partial(
+         activation: &mut Activation<'_, 'gc>,
+-        class: GcCell<'gc, Class<'gc>>,
++        class: Class<'gc>,
+         superclass_object: Option<ClassObject<'gc>>,
+     ) -> Result<Self, Error<'gc>> {
+         let scope = activation.create_scopechain();
+         if let Some(base_class) = superclass_object.map(|b| b.inner_class_definition()) {
+-            if base_class.read().is_final() {
++            if base_class.is_final() {
+                 return Err(format!(
+                     "Base class {:?} is final and cannot be extended",
+-                    base_class.read().name().local_name()
++                    base_class.name().local_name()
+                 )
+                 .into());
+             }
+ 
+-            if base_class.read().is_interface() {
++            if base_class.is_interface() {
+                 return Err(format!(
+                     "Base class {:?} is an interface and cannot be extended",
+-                    base_class.read().name().local_name()
++                    base_class.name().local_name()
+                 )
+                 .into());
+             }
+         }
+ 
+         let instance_allocator = class
+-            .read()
+             .instance_allocator()
+             .or_else(|| superclass_object.and_then(|c| c.instance_allocator()))
+             .unwrap_or(scriptobject_allocator);
+@@ -210,9 +209,9 @@ impl<'gc> ClassObject<'gc> {
+                 instance_scope: scope,
+                 superclass_object,
+                 instance_allocator: Allocator(instance_allocator),
+-                constructor: class.read().instance_init(),
+-                native_constructor: class.read().native_instance_init(),
+-                call_handler: class.read().call_handler(),
++                constructor: class.instance_init(),
++                native_constructor: class.native_instance_init(),
++                call_handler: class.call_handler(),
+                 params: None,
+                 applications: Default::default(),
+                 interfaces: Vec::new(),
+@@ -232,9 +231,7 @@ impl<'gc> ClassObject<'gc> {
+             .write(activation.context.gc_context)
+             .instance_scope = instance_scope;
+ 
+-        class
+-            .write(activation.context.gc_context)
+-            .add_class_object(class_object);
++        class.add_class_object(activation.context.gc_context, class_object);
+ 
+         Ok(class_object)
+     }
+@@ -248,11 +245,11 @@ impl<'gc> ClassObject<'gc> {
+             "Cannot finish initialization of core class without it being linked to a type!",
+         )?;
+ 
+-        class.read().validate_class(self.superclass_object())?;
++        class.validate_class(self.superclass_object())?;
+ 
+         self.instance_vtable().init_vtable(
+             self,
+-            class.read().instance_traits(),
++            &class.instance_traits(),
+             self.instance_scope(),
+             self.superclass_object().map(|cls| cls.instance_vtable()),
+             activation,
+@@ -287,7 +284,7 @@ impl<'gc> ClassObject<'gc> {
+         // class vtable == class traits + Class instance traits
+         self.class_vtable().init_vtable(
+             self,
+-            class.read().class_traits(),
++            &class.class_traits(),
+             self.class_scope(),
+             Some(self.instance_of().unwrap().instance_vtable()),
+             activation,
+@@ -332,13 +329,13 @@ impl<'gc> ClassObject<'gc> {
+         let class = write.class;
+         let scope = write.class_scope;
+ 
+-        let interface_names = class.read().direct_interfaces().to_vec();
++        let interface_names = class.direct_interfaces().to_vec();
+         let mut interfaces = Vec::with_capacity(interface_names.len());
+ 
+         let mut dedup = HashSet::new();
+         let mut queue = vec![class];
+         while let Some(cls) = queue.pop() {
+-            for interface_name in cls.read().direct_interfaces() {
++            for interface_name in &*cls.direct_interfaces() {
+                 let interface = scope
+                     .domain()
+                     .get_class(&mut activation.context, interface_name)
+@@ -346,10 +343,10 @@ impl<'gc> ClassObject<'gc> {
+                         Error::from(format!("Could not resolve interface {interface_name:?}"))
+                     })?;
+ 
+-                if !interface.read().is_interface() {
++                if !interface.is_interface() {
+                     return Err(format!(
+                         "Class {:?} is not an interface and cannot be implemented by classes",
+-                        interface.read().name().local_name()
++                        interface.name().local_name()
+                     )
+                     .into());
+                 }
+@@ -360,7 +357,7 @@ impl<'gc> ClassObject<'gc> {
+                 }
+             }
+ 
+-            if let Some(super_class) = cls.read().super_class() {
++            if let Some(super_class) = cls.super_class() {
+                 queue.push(super_class);
+             }
+         }
+@@ -374,8 +371,7 @@ impl<'gc> ClassObject<'gc> {
+         // Otherwise, our behavior diverges from Flash Player in certain cases.
+         // See the ignored test 'tests/tests/swfs/avm2/weird_superinterface_properties/'
+         for interface in &read.interfaces {
+-            let iface_read = interface.read();
+-            for interface_trait in iface_read.instance_traits() {
++            for interface_trait in &*interface.instance_traits() {
+                 if !interface_trait.name().namespace().is_public() {
+                     let public_name = QName::new(
+                         activation.context.avm2.public_namespace_vm_internal,
+@@ -421,10 +417,9 @@ impl<'gc> ClassObject<'gc> {
+ 
+         let scope = self.0.read().class_scope;
+         let class = self.0.read().class;
+-        let class_read = class.read();
+ 
+-        if !class_read.is_class_initialized() {
+-            let class_initializer = class_read.class_init();
++        if !class.is_class_initialized() {
++            let class_initializer = class.class_init();
+             let class_init_fn = FunctionObject::from_method(
+                 activation,
+                 class_initializer,
+@@ -433,10 +428,7 @@ impl<'gc> ClassObject<'gc> {
+                 Some(self),
+             );
+ 
+-            drop(class_read);
+-            class
+-                .write(activation.context.gc_context)
+-                .mark_class_initialized();
++            class.mark_class_initialized(activation.context.gc_context);
+ 
+             class_init_fn.call(object.into(), &[], activation)?;
+         }
+@@ -450,11 +442,11 @@ impl<'gc> ClassObject<'gc> {
+     /// interface we are checking against this class.
+     ///
+     /// To test if a class *instance* is of a given type, see is_of_type.
+-    pub fn has_class_in_chain(self, test_class: GcCell<'gc, Class<'gc>>) -> bool {
++    pub fn has_class_in_chain(self, test_class: Class<'gc>) -> bool {
+         let mut my_class = Some(self);
+ 
+         while let Some(class) = my_class {
+-            if GcCell::ptr_eq(class.inner_class_definition(), test_class) {
++            if class.inner_class_definition() == test_class {
+                 return true;
+             }
+ 
+@@ -466,9 +458,9 @@ impl<'gc> ClassObject<'gc> {
+         // Therefore, we only need to check interfaces once, and we can skip
+         // checking them when we processing superclasses in the `while`
+         // further down in this method.
+-        if test_class.read().is_interface() {
++        if test_class.is_interface() {
+             for interface in self.interfaces() {
+-                if GcCell::ptr_eq(interface, test_class) {
++                if interface == test_class {
+                     return true;
+                 }
+             }
+@@ -545,7 +537,6 @@ impl<'gc> ClassObject<'gc> {
+             let qualified_multiname_name = multiname.as_uri(activation.context.gc_context);
+             let qualified_class_name = self
+                 .inner_class_definition()
+-                .read()
+                 .name()
+                 .to_qualified_name_err_message(activation.context.gc_context);
+ 
+@@ -752,11 +743,11 @@ impl<'gc> ClassObject<'gc> {
+     /// in contexts where panicking would be extremely undesirable,
+     /// and there's a fallback if we cannot obtain the `Class`
+     /// (such as `Debug` impls),
+-    pub fn try_inner_class_definition(&self) -> Result<GcCell<'gc, Class<'gc>>, BorrowError> {
++    pub fn try_inner_class_definition(&self) -> Result<Class<'gc>, BorrowError> {
+         self.0.try_read().map(|c| c.class)
+     }
+ 
+-    pub fn inner_class_definition(self) -> GcCell<'gc, Class<'gc>> {
++    pub fn inner_class_definition(self) -> Class<'gc> {
+         self.0.read().class
+     }
+ 
+@@ -764,7 +755,7 @@ impl<'gc> ClassObject<'gc> {
+         self.0.read().prototype.unwrap()
+     }
+ 
+-    pub fn interfaces(self) -> Vec<GcCell<'gc, Class<'gc>>> {
++    pub fn interfaces(self) -> Vec<Class<'gc>> {
+         self.0.read().interfaces.clone()
+     }
+ 
+@@ -802,7 +793,7 @@ impl<'gc> ClassObject<'gc> {
+     pub fn debug_class_name(&self) -> Box<dyn Debug + 'gc> {
+         let class_name = self
+             .try_inner_class_definition()
+-            .and_then(|class| class.try_read().map(|c| c.name()));
++            .and_then(|class| class.try_name());
+ 
+         match class_name {
+             Ok(class_name) => Box::new(class_name),
+@@ -827,7 +818,7 @@ impl<'gc> TObject<'gc> for ClassObject<'gc> {
+     fn to_string(&self, activation: &mut Activation<'_, 'gc>) -> Result<Value<'gc>, Error<'gc>> {
+         Ok(AvmString::new_utf8(
+             activation.context.gc_context,
+-            format!("[class {}]", self.0.read().class.read().name().local_name()),
++            format!("[class {}]", self.0.read().class.name().local_name()),
+         )
+         .into())
+     }
+@@ -913,14 +904,13 @@ impl<'gc> TObject<'gc> for ClassObject<'gc> {
+     ) -> Result<ClassObject<'gc>, Error<'gc>> {
+         let self_class = self.inner_class_definition();
+ 
+-        if !self_class.read().is_generic() {
++        if !self_class.is_generic() {
+             return Err(make_error_1127(activation));
+         }
+ 
+         if nullable_params.len() != 1 {
+             let class_name = self
+                 .inner_class_definition()
+-                .read()
+                 .name()
+                 .to_qualified_name(activation.context.gc_context);
+ 
+@@ -950,7 +940,7 @@ impl<'gc> TObject<'gc> for ClassObject<'gc> {
+                         // Note: FP throws VerifyError #1107 here
+                         format!(
+                             "Cannot apply class {:?} with non-class parameter",
+-                            self_class.read().name()
++                            self_class.name()
+                         )
+                     })?,
+             ),
+@@ -965,7 +955,7 @@ impl<'gc> TObject<'gc> for ClassObject<'gc> {
+ 
+         let class_param = object_param.map(|c| c.inner_class_definition());
+ 
+-        let parameterized_class: GcCell<'_, Class<'_>> =
++        let parameterized_class =
+             Class::with_type_param(&mut activation.context, self_class, class_param);
+ 
+         // NOTE: this isn't fully accurate, but much simpler.
+diff --git a/core/src/avm2/object/loaderinfo_object.rs b/core/src/avm2/object/loaderinfo_object.rs
+index 320ebfb7dc4d..8d29523f5b68 100644
+--- a/core/src/avm2/object/loaderinfo_object.rs
++++ b/core/src/avm2/object/loaderinfo_object.rs
+@@ -22,7 +22,7 @@ pub fn loader_info_allocator<'gc>(
+     class: ClassObject<'gc>,
+     activation: &mut Activation<'_, 'gc>,
+ ) -> Result<Object<'gc>, Error<'gc>> {
+-    let class_name = class.inner_class_definition().read().name().local_name();
++    let class_name = class.inner_class_definition().name().local_name();
+ 
+     Err(Error::AvmError(argument_error(
+         activation,
+diff --git a/core/src/avm2/object/primitive_object.rs b/core/src/avm2/object/primitive_object.rs
+index a9f95d4d220d..985d073aad84 100644
+--- a/core/src/avm2/object/primitive_object.rs
++++ b/core/src/avm2/object/primitive_object.rs
+@@ -124,7 +124,7 @@ impl<'gc> TObject<'gc> for PrimitiveObject<'gc> {
+             _ => {
+                 let class_name = self
+                     .instance_of_class_definition()
+-                    .map(|c| c.read().name().local_name())
++                    .map(|c| c.name().local_name())
+                     .unwrap_or_else(|| "Object".into());
+ 
+                 Ok(AvmString::new_utf8(
+diff --git a/core/src/avm2/object/script_object.rs b/core/src/avm2/object/script_object.rs
+index ca5da3e627f6..9d1bbf44938c 100644
+--- a/core/src/avm2/object/script_object.rs
++++ b/core/src/avm2/object/script_object.rs
+@@ -401,7 +401,7 @@ impl<'gc> ScriptObjectData<'gc> {
+ 
+     pub fn is_sealed(&self) -> bool {
+         self.instance_of()
+-            .map(|cls| cls.inner_class_definition().read().is_sealed())
++            .map(|cls| cls.inner_class_definition().is_sealed())
+             .unwrap_or(false)
+     }
+ 
+diff --git a/core/src/avm2/op.rs b/core/src/avm2/op.rs
+index 2466f5f319d9..5ad40b8618bc 100644
+--- a/core/src/avm2/op.rs
++++ b/core/src/avm2/op.rs
+@@ -2,7 +2,7 @@ use crate::avm2::class::Class;
+ use crate::avm2::multiname::Multiname;
+ use crate::string::AvmAtom;
+ 
+-use gc_arena::{Collect, Gc, GcCell};
++use gc_arena::{Collect, Gc};
+ use swf::avm2::types::{Class as AbcClass, Exception, Index, LookupSwitch, Method, Namespace};
+ 
+ #[derive(Clone, Collect, Debug)]
+@@ -14,7 +14,7 @@ pub enum Op<'gc> {
+         num_types: u32,
+     },
+     AsType {
+-        class: GcCell<'gc, Class<'gc>>,
++        class: Class<'gc>,
+     },
+     AsTypeLate,
+     BitAnd,
+@@ -66,7 +66,7 @@ pub enum Op<'gc> {
+     },
+     CheckFilter,
+     Coerce {
+-        class: GcCell<'gc, Class<'gc>>,
++        class: Class<'gc>,
+     },
+     CoerceA,
+     CoerceB,
+@@ -218,7 +218,7 @@ pub enum Op<'gc> {
+     },
+     InstanceOf,
+     IsType {
+-        class: GcCell<'gc, Class<'gc>>,
++        class: Class<'gc>,
+     },
+     IsTypeLate,
+     Jump {
+diff --git a/core/src/avm2/optimize.rs b/core/src/avm2/optimize.rs
+index 33234df38c68..68013cd6a025 100644
+--- a/core/src/avm2/optimize.rs
++++ b/core/src/avm2/optimize.rs
+@@ -7,7 +7,7 @@ use crate::avm2::op::Op;
+ use crate::avm2::property::Property;
+ use crate::avm2::verify::JumpSources;
+ 
+-use gc_arena::{Gc, GcCell};
++use gc_arena::Gc;
+ use std::collections::HashMap;
+ 
+ #[derive(Clone, Copy, Debug)]
+@@ -57,10 +57,10 @@ impl<'gc> OptValue<'gc> {
+             ..Self::any()
+         }
+     }
+-    pub fn of_type_from_class(class: GcCell<'gc, Class<'gc>>) -> Self {
++    pub fn of_type_from_class(class: Class<'gc>) -> Self {
+         // FIXME: Getting the ClassObject this way should be unnecessary
+         // after the ClassObject refactor
+-        if let Some(cls) = class.read().class_object() {
++        if let Some(cls) = class.class_object() {
+             Self::of_type(cls)
+         } else {
+             Self::any()
+@@ -105,7 +105,7 @@ impl<'gc> Stack<'gc> {
+         self.0.push(OptValue::of_type(class));
+     }
+ 
+-    fn push_class(&mut self, class: GcCell<'gc, Class<'gc>>) {
++    fn push_class(&mut self, class: Class<'gc>) {
+         self.0.push(OptValue::of_type_from_class(class));
+     }
+ 
+@@ -152,7 +152,7 @@ pub fn optimize<'gc>(
+     method: &BytecodeMethod<'gc>,
+     code: &mut Vec<Op<'gc>>,
+     resolved_parameters: &[ResolvedParamConfig<'gc>],
+-    return_type: Option<GcCell<'gc, Class<'gc>>>,
++    return_type: Option<Class<'gc>>,
+     jump_targets: HashMap<i32, JumpSources>,
+ ) {
+     // These make the code less readable
+@@ -281,10 +281,9 @@ pub fn optimize<'gc>(
+                                 if let (Some(source_local_class), Some(target_local_class)) =
+                                     (source_local.class, target_local.class)
+                                 {
+-                                    if GcCell::ptr_eq(
+-                                        source_local_class.inner_class_definition(),
+-                                        target_local_class.inner_class_definition(),
+-                                    ) {
++                                    if source_local_class.inner_class_definition()
++                                        == target_local_class.inner_class_definition()
++                                    {
+                                         merged_types.set(i, OptValue::of_type(source_local_class));
+                                     }
+                                 }
+@@ -636,10 +635,11 @@ pub fn optimize<'gc>(
+             Op::AsType { class } => {
+                 let stack_value = stack.pop_or_any();
+ 
+-                let class_is_primitive = GcCell::ptr_eq(*class, types.int.inner_class_definition())
+-                    || GcCell::ptr_eq(*class, types.uint.inner_class_definition())
+-                    || GcCell::ptr_eq(*class, types.number.inner_class_definition())
+-                    || GcCell::ptr_eq(*class, types.boolean.inner_class_definition());
++                let class_is_primitive = *class == types.int.inner_class_definition()
++                    || *class == types.uint.inner_class_definition()
++                    || *class == types.number.inner_class_definition()
++                    || *class == types.boolean.inner_class_definition()
++                    || *class == types.void.inner_class_definition();
+ 
+                 let mut new_value = OptValue::any();
+                 if !class_is_primitive {
+@@ -647,7 +647,7 @@ pub fn optimize<'gc>(
+                     new_value = OptValue::of_type_from_class(*class);
+                 }
+                 if let Some(class_object) = stack_value.class {
+-                    if GcCell::ptr_eq(*class, class_object.inner_class_definition()) {
++                    if *class == class_object.inner_class_definition() {
+                         // If type check is guaranteed, preserve original type
+                         // TODO: there are more cases when this can succeed,
+                         // like inheritance and numbers (`x: Number = 1; x as int;`)
+@@ -666,17 +666,17 @@ pub fn optimize<'gc>(
+ 
+                 if stack_value.guaranteed_null {
+                     // Coercing null to a non-primitive or void is a noop.
+-                    if !GcCell::ptr_eq(*class, types.int.inner_class_definition())
+-                        && !GcCell::ptr_eq(*class, types.uint.inner_class_definition())
+-                        && !GcCell::ptr_eq(*class, types.number.inner_class_definition())
+-                        && !GcCell::ptr_eq(*class, types.boolean.inner_class_definition())
+-                        && !GcCell::ptr_eq(*class, types.void.inner_class_definition())
++                    if *class != types.int.inner_class_definition()
++                        && *class != types.uint.inner_class_definition()
++                        && *class != types.number.inner_class_definition()
++                        && *class != types.boolean.inner_class_definition()
++                        && *class != types.void.inner_class_definition()
+                     {
+                         *op = Op::Nop;
+                     }
+                 } else if let Some(class_object) = stack_value.class {
+                     // TODO: this could check for inheritance
+-                    if GcCell::ptr_eq(*class, class_object.inner_class_definition()) {
++                    if *class == class_object.inner_class_definition() {
+                         *op = Op::Nop;
+                     }
+                 }
+@@ -794,7 +794,7 @@ pub fn optimize<'gc>(
+ 
+                 if !multiname.has_lazy_component() {
+                     if let Some(class) = stack_value.class {
+-                        if !class.inner_class_definition().read().is_interface() {
++                        if !class.inner_class_definition().is_interface() {
+                             match class.instance_vtable().get_trait(multiname) {
+                                 Some(Property::Slot { slot_id })
+                                 | Some(Property::ConstSlot { slot_id }) => {
+@@ -846,7 +846,7 @@ pub fn optimize<'gc>(
+                 let stack_value = stack.pop_or_any();
+                 if !multiname.has_lazy_component() {
+                     if let Some(class) = stack_value.class {
+-                        if !class.inner_class_definition().read().is_interface() {
++                        if !class.inner_class_definition().is_interface() {
+                             match class.instance_vtable().get_trait(multiname) {
+                                 Some(Property::Slot { slot_id })
+                                 | Some(Property::ConstSlot { slot_id }) => {
+@@ -861,10 +861,9 @@ pub fn optimize<'gc>(
+                                     if let Ok(slot_class) = resolved_value_class {
+                                         if let Some(slot_class) = slot_class {
+                                             if let Some(set_value_class) = set_value.class {
+-                                                if GcCell::ptr_eq(
+-                                                    set_value_class.inner_class_definition(),
+-                                                    slot_class,
+-                                                ) {
++                                                if set_value_class.inner_class_definition()
++                                                    == slot_class
++                                                {
+                                                     *op = Op::SetSlotNoCoerce { index: slot_id };
+                                                 }
+                                             }
+@@ -897,7 +896,7 @@ pub fn optimize<'gc>(
+                 let stack_value = stack.pop_or_any();
+                 if !multiname.has_lazy_component() {
+                     if let Some(class) = stack_value.class {
+-                        if !class.inner_class_definition().read().is_interface() {
++                        if !class.inner_class_definition().is_interface() {
+                             match class.instance_vtable().get_trait(multiname) {
+                                 Some(Property::Slot { slot_id }) => {
+                                     *op = Op::SetSlot { index: slot_id };
+@@ -911,10 +910,9 @@ pub fn optimize<'gc>(
+                                     if let Ok(slot_class) = resolved_value_class {
+                                         if let Some(slot_class) = slot_class {
+                                             if let Some(set_value_class) = set_value.class {
+-                                                if GcCell::ptr_eq(
+-                                                    set_value_class.inner_class_definition(),
+-                                                    slot_class,
+-                                                ) {
++                                                if set_value_class.inner_class_definition()
++                                                    == slot_class
++                                                {
+                                                     *op = Op::SetSlotNoCoerce { index: slot_id };
+                                                 }
+                                             }
+@@ -1026,7 +1024,7 @@ pub fn optimize<'gc>(
+ 
+                 if !multiname.has_lazy_component() {
+                     if let Some(class) = stack_value.class {
+-                        if !class.inner_class_definition().read().is_interface() {
++                        if !class.inner_class_definition().is_interface() {
+                             match class.instance_vtable().get_trait(multiname) {
+                                 Some(Property::Method { disp_id }) => {
+                                     *op = Op::CallMethod {
+@@ -1059,7 +1057,7 @@ pub fn optimize<'gc>(
+ 
+                 if !multiname.has_lazy_component() {
+                     if let Some(class) = stack_value.class {
+-                        if !class.inner_class_definition().read().is_interface() {
++                        if !class.inner_class_definition().is_interface() {
+                             match class.instance_vtable().get_trait(multiname) {
+                                 Some(Property::Method { disp_id }) => {
+                                     *op = Op::CallMethod {
+@@ -1199,7 +1197,7 @@ pub fn optimize<'gc>(
+ 
+                 if let Some(return_type) = return_type {
+                     if let Some(stack_value_class) = stack_value.class {
+-                        if GcCell::ptr_eq(stack_value_class.inner_class_definition(), return_type) {
++                        if stack_value_class.inner_class_definition() == return_type {
+                             *op = Op::ReturnValueNoCoerce;
+                         }
+                     }
+diff --git a/core/src/avm2/property.rs b/core/src/avm2/property.rs
+index 68dd114e61dc..06551a246a77 100644
+--- a/core/src/avm2/property.rs
++++ b/core/src/avm2/property.rs
+@@ -5,9 +5,7 @@ use crate::avm2::Error;
+ use crate::avm2::Multiname;
+ use crate::avm2::TranslationUnit;
+ use crate::avm2::Value;
+-use gc_arena::GcCell;
+-use gc_arena::Mutation;
+-use gc_arena::{Collect, Gc};
++use gc_arena::{Collect, Gc, Mutation};
+ 
+ use super::class::Class;
+ 
+@@ -40,7 +38,7 @@ pub enum PropertyClass<'gc> {
+     /// `Value::Undefined`, so it needs to be distinguished
+     /// from the `Object` class
+     Any,
+-    Class(GcCell<'gc, Class<'gc>>),
++    Class(Class<'gc>),
+     Name(Gc<'gc, (Multiname<'gc>, Option<TranslationUnit<'gc>>)>),
+ }
+ 
+@@ -103,7 +101,7 @@ impl<'gc> PropertyClass<'gc> {
+     pub fn get_class(
+         &mut self,
+         activation: &mut Activation<'_, 'gc>,
+-    ) -> Result<Option<GcCell<'gc, Class<'gc>>>, Error<'gc>> {
++    ) -> Result<Option<Class<'gc>>, Error<'gc>> {
+         match self {
+             PropertyClass::Class(class) => Ok(Some(*class)),
+             PropertyClass::Name(gc) => {
+@@ -131,7 +129,7 @@ impl<'gc> PropertyClass<'gc> {
+ 
+     pub fn get_name(&self, mc: &Mutation<'gc>) -> Multiname<'gc> {
+         match self {
+-            PropertyClass::Class(class) => class.read().name().into(),
++            PropertyClass::Class(class) => class.name().into(),
+             PropertyClass::Name(gc) => gc.0.clone(),
+             PropertyClass::Any => Multiname::any(mc),
+         }
+diff --git a/core/src/avm2/script.rs b/core/src/avm2/script.rs
+index e9f65fb382cc..118eae2639b7 100644
+--- a/core/src/avm2/script.rs
++++ b/core/src/avm2/script.rs
+@@ -55,7 +55,7 @@ struct TranslationUnitData<'gc> {
+     abc: Rc<AbcFile>,
+ 
+     /// All classes loaded from the ABC's class list.
+-    classes: Vec<Option<GcCell<'gc, Class<'gc>>>>,
++    classes: Vec<Option<Class<'gc>>>,
+ 
+     /// All methods loaded from the ABC's method list.
+     methods: Vec<Option<Method<'gc>>>,
+@@ -125,7 +125,7 @@ impl<'gc> TranslationUnit<'gc> {
+             // and how it's exported again when it is encountered in a trait (see `Script::load_traits`).
+             // We currently don't handle them and just export it in the domain in both cases.
+             self.domain()
+-                .export_class(class.read().name(), class, activation.context.gc_context);
++                .export_class(class.name(), class, activation.context.gc_context);
+         }
+ 
+         Ok(())
+@@ -215,7 +215,7 @@ impl<'gc> TranslationUnit<'gc> {
+         self,
+         class_index: u32,
+         activation: &mut Activation<'_, 'gc>,
+-    ) -> Result<GcCell<'gc, Class<'gc>>, Error<'gc>> {
++    ) -> Result<Class<'gc>, Error<'gc>> {
+         let read = self.0.read();
+         if let Some(Some(class)) = read.classes.get(class_index as usize) {
+             return Ok(*class);
+@@ -226,9 +226,7 @@ impl<'gc> TranslationUnit<'gc> {
+         let class = Class::from_abc_index(self, class_index, activation)?;
+         self.0.write(activation.context.gc_context).classes[class_index as usize] = Some(class);
+ 
+-        class
+-            .write(activation.context.gc_context)
+-            .load_traits(self, class_index, activation)?;
++        class.load_traits(activation, self, class_index)?;
+ 
+         Ok(class)
+     }
+diff --git a/core/src/avm2/specification.rs b/core/src/avm2/specification.rs
+index aa2b00123afe..1a16b05fb55d 100644
+--- a/core/src/avm2/specification.rs
++++ b/core/src/avm2/specification.rs
+@@ -271,20 +271,19 @@ impl Definition {
+         let mut definition = Self::default();
+         let class = class_object.inner_class_definition();
+ 
+-        if class.read().is_final() {
++        if class.is_final() {
+             definition
+                 .classinfo
+                 .get_or_insert_with(Default::default)
+                 .is_final = true;
+         }
+-        if !class.read().is_sealed() {
++        if !class.is_sealed() {
+             definition
+                 .classinfo
+                 .get_or_insert_with(Default::default)
+                 .dynamic = true;
+         }
+         if let Some(super_name) = class
+-            .read()
+             .super_class_name()
+             .as_ref()
+             .and_then(|n| n.local_name())
+@@ -322,13 +321,13 @@ impl Definition {
+ 
+         Self::fill_traits(
+             activation.avm2(),
+-            class.read().class_traits(),
++            &class.class_traits(),
+             &mut definition.static_traits,
+             stubs,
+         );
+         Self::fill_traits(
+             activation.avm2(),
+-            class.read().instance_traits(),
++            &class.instance_traits(),
+             &mut definition.instance_traits,
+             stubs,
+         );
+@@ -476,7 +475,6 @@ pub fn capture_specification(context: &mut UpdateContext, output: &Path) {
+             if let Some(class) = object.as_class_object() {
+                 let class_name = class
+                     .inner_class_definition()
+-                    .read()
+                     .name()
+                     .to_qualified_name_err_message(activation.context.gc_context)
+                     .to_string();
+diff --git a/core/src/avm2/traits.rs b/core/src/avm2/traits.rs
+index 286b5ec949e3..ad116e58f08f 100644
+--- a/core/src/avm2/traits.rs
++++ b/core/src/avm2/traits.rs
+@@ -10,7 +10,7 @@ use crate::avm2::Error;
+ use crate::avm2::Multiname;
+ use crate::avm2::QName;
+ use bitflags::bitflags;
+-use gc_arena::{Collect, GcCell};
++use gc_arena::Collect;
+ use std::ops::Deref;
+ use swf::avm2::types::{
+     DefaultValue as AbcDefaultValue, Trait as AbcTrait, TraitKind as AbcTraitKind,
+@@ -91,10 +91,7 @@ pub enum TraitKind<'gc> {
+ 
+     /// A class property on an object that can be used to construct more
+     /// objects.
+-    Class {
+-        slot_id: u32,
+-        class: GcCell<'gc, Class<'gc>>,
+-    },
++    Class { slot_id: u32, class: Class<'gc> },
+ 
+     /// A free function (not an instance method) that can be called.
+     Function { slot_id: u32, function: Method<'gc> },
+@@ -110,8 +107,8 @@ pub enum TraitKind<'gc> {
+ }
+ 
+ impl<'gc> Trait<'gc> {
+-    pub fn from_class(class: GcCell<'gc, Class<'gc>>) -> Self {
+-        let name = class.read().name();
++    pub fn from_class(class: Class<'gc>) -> Self {
++        let name = class.name();
+ 
+         Trait {
+             name,
+diff --git a/core/src/avm2/value.rs b/core/src/avm2/value.rs
+index e23f849916f0..f7d78d87a640 100644
+--- a/core/src/avm2/value.rs
++++ b/core/src/avm2/value.rs
+@@ -10,7 +10,7 @@ use crate::avm2::Multiname;
+ use crate::avm2::Namespace;
+ use crate::ecma_conversions::{f64_to_wrapping_i32, f64_to_wrapping_u32};
+ use crate::string::{AvmAtom, AvmString, WStr};
+-use gc_arena::{Collect, GcCell, Mutation};
++use gc_arena::{Collect, Mutation};
+ use num_bigint::BigInt;
+ use num_traits::{ToPrimitive, Zero};
+ use std::cell::Ref;
+@@ -994,50 +994,32 @@ impl<'gc> Value<'gc> {
+     pub fn coerce_to_type(
+         &self,
+         activation: &mut Activation<'_, 'gc>,
+-        class: GcCell<'gc, Class<'gc>>,
++        class: Class<'gc>,
+     ) -> Result<Value<'gc>, Error<'gc>> {
+-        if GcCell::ptr_eq(
+-            class,
+-            activation.avm2().classes().int.inner_class_definition(),
+-        ) {
++        if class == activation.avm2().classes().int.inner_class_definition() {
+             return Ok(self.coerce_to_i32(activation)?.into());
+         }
+ 
+-        if GcCell::ptr_eq(
+-            class,
+-            activation.avm2().classes().uint.inner_class_definition(),
+-        ) {
++        if class == activation.avm2().classes().uint.inner_class_definition() {
+             return Ok(self.coerce_to_u32(activation)?.into());
+         }
+ 
+-        if GcCell::ptr_eq(
+-            class,
+-            activation.avm2().classes().number.inner_class_definition(),
+-        ) {
++        if class == activation.avm2().classes().number.inner_class_definition() {
+             return Ok(self.coerce_to_number(activation)?.into());
+         }
+ 
+-        if GcCell::ptr_eq(
+-            class,
+-            activation.avm2().classes().boolean.inner_class_definition(),
+-        ) {
++        if class == activation.avm2().classes().boolean.inner_class_definition() {
+             return Ok(self.coerce_to_boolean().into());
+         }
+ 
+         if matches!(self, Value::Undefined) || matches!(self, Value::Null) {
+-            if GcCell::ptr_eq(
+-                class,
+-                activation.avm2().classes().void.inner_class_definition(),
+-            ) {
++            if class == activation.avm2().classes().void.inner_class_definition() {
+                 return Ok(Value::Undefined);
+             }
+             return Ok(Value::Null);
+         }
+ 
+-        if GcCell::ptr_eq(
+-            class,
+-            activation.avm2().classes().string.inner_class_definition(),
+-        ) {
++        if class == activation.avm2().classes().string.inner_class_definition() {
+             return Ok(self.coerce_to_string(activation)?.into());
+         }
+ 
+@@ -1048,7 +1030,6 @@ impl<'gc> Value<'gc> {
+         }
+ 
+         let name = class
+-            .read()
+             .name()
+             .to_qualified_name_err_message(activation.context.gc_context);
+ 
+@@ -1116,32 +1097,20 @@ impl<'gc> Value<'gc> {
+     pub fn is_of_type(
+         &self,
+         activation: &mut Activation<'_, 'gc>,
+-        type_object: GcCell<'gc, Class<'gc>>,
++        type_object: Class<'gc>,
+     ) -> bool {
+-        if GcCell::ptr_eq(
+-            type_object,
+-            activation.avm2().classes().number.inner_class_definition(),
+-        ) {
++        if type_object == activation.avm2().classes().number.inner_class_definition() {
+             return self.is_number();
+         }
+-        if GcCell::ptr_eq(
+-            type_object,
+-            activation.avm2().classes().uint.inner_class_definition(),
+-        ) {
++        if type_object == activation.avm2().classes().uint.inner_class_definition() {
+             return self.is_u32();
+         }
+-        if GcCell::ptr_eq(
+-            type_object,
+-            activation.avm2().classes().int.inner_class_definition(),
+-        ) {
++        if type_object == activation.avm2().classes().int.inner_class_definition() {
+             return self.is_i32();
+         }
+ 
+         if let Value::Undefined = self {
+-            if GcCell::ptr_eq(
+-                type_object,
+-                activation.avm2().classes().void.inner_class_definition(),
+-            ) {
++            if type_object == activation.avm2().classes().void.inner_class_definition() {
+                 return true;
+             }
+         }
+diff --git a/core/src/avm2/verify.rs b/core/src/avm2/verify.rs
+index bec15cbcefb7..0a5cb729347d 100644
+--- a/core/src/avm2/verify.rs
++++ b/core/src/avm2/verify.rs
+@@ -10,7 +10,7 @@ use crate::avm2::script::TranslationUnit;
+ use crate::avm2::{Activation, Error, QName};
+ use crate::string::AvmAtom;
+ 
+-use gc_arena::{Collect, Gc, GcCell};
++use gc_arena::{Collect, Gc};
+ use std::collections::{HashMap, HashSet};
+ use swf::avm2::read::Reader;
+ use swf::avm2::types::{
+@@ -26,7 +26,7 @@ pub struct VerifiedMethodInfo<'gc> {
+     pub exceptions: Vec<Exception<'gc>>,
+ 
+     pub param_config: Vec<ResolvedParamConfig<'gc>>,
+-    pub return_type: Option<GcCell<'gc, Class<'gc>>>,
++    pub return_type: Option<Class<'gc>>,
+ }
+ 
+ #[derive(Collect)]
+@@ -37,7 +37,7 @@ pub struct Exception<'gc> {
+     pub target_offset: u32,
+ 
+     pub variable_name: Option<QName<'gc>>,
+-    pub target_class: Option<GcCell<'gc, Class<'gc>>>,
++    pub target_class: Option<Class<'gc>>,
+ }
+ 
+ #[derive(Clone, Debug)]
+@@ -636,7 +636,7 @@ pub fn resolve_param_config<'gc>(
+ fn resolve_return_type<'gc>(
+     activation: &mut Activation<'_, 'gc>,
+     return_type: &Multiname<'gc>,
+-) -> Result<Option<GcCell<'gc, Class<'gc>>>, Error<'gc>> {
++) -> Result<Option<Class<'gc>>, Error<'gc>> {
+     if return_type.has_lazy_component() {
+         return Err(make_error_1014(activation, "[]".into()));
+     }
+diff --git a/core/src/avm2/vtable.rs b/core/src/avm2/vtable.rs
+index a8a41cd3d646..e386bf93681c 100644
+--- a/core/src/avm2/vtable.rs
++++ b/core/src/avm2/vtable.rs
+@@ -285,7 +285,6 @@ impl<'gc> VTable<'gc> {
+ 
+         write.protected_namespace = defining_class
+             .inner_class_definition()
+-            .read()
+             .protected_namespace();
+ 
+         if let Some(superclass_vtable) = superclass_vtable {
+diff --git a/core/src/debug_ui/avm2.rs b/core/src/debug_ui/avm2.rs
+index d94a7d0c26b1..c30a451b4bd9 100644
+--- a/core/src/debug_ui/avm2.rs
++++ b/core/src/debug_ui/avm2.rs
+@@ -185,7 +185,7 @@ impl Avm2ObjectWindow {
+             .spacing([8.0, 8.0])
+             .show(ui, |ui| {
+                 let definition = class.inner_class_definition();
+-                let name = definition.read().name();
++                let name = definition.name();
+ 
+                 ui.label("Namespace");
+                 ui.text_edit_singleline(&mut name.namespace().as_uri().to_string().as_str());
+@@ -216,7 +216,6 @@ impl Avm2ObjectWindow {
+                     for interface in class.interfaces() {
+                         ui.text_edit_singleline(
+                             &mut interface
+-                                .read()
+                                 .name()
+                                 .to_qualified_name_err_message(activation.context.gc_context)
+                                 .to_string()
+@@ -434,14 +433,13 @@ fn object_name<'gc>(mc: &Mutation<'gc>, object: Object<'gc>) -> String {
+     if let Some(class) = object.as_class_object() {
+         class
+             .inner_class_definition()
+-            .read()
+             .name()
+             .to_qualified_name_err_message(mc)
+             .to_string()
+     } else {
+         let name = object
+             .instance_of_class_definition()
+-            .map(|r| Cow::Owned(r.read().name().local_name().to_string()))
++            .map(|r| Cow::Owned(r.name().local_name().to_string()))
+             .unwrap_or(Cow::Borrowed("Object"));
+         format!("{} {:p}", name, object.as_ptr())
+     }
+diff --git a/core/src/debug_ui/domain.rs b/core/src/debug_ui/domain.rs
+index c7cf57864c30..c231b11083fa 100644
+--- a/core/src/debug_ui/domain.rs
++++ b/core/src/debug_ui/domain.rs
+@@ -57,15 +57,15 @@ impl DomainListWindow {
+                 classes.sort_by_key(|(name, _, _)| *name);
+ 
+                 for (_, _, class) in classes {
+-                    let class_name = class.read().name().to_qualified_name(context.gc_context);
++                    let class_name = class.name().to_qualified_name(context.gc_context);
+                     if !class_name.to_string().to_ascii_lowercase().contains(search) {
+                         continue;
+                     }
+ 
+                     CollapsingHeader::new(format!("Class {class_name}"))
+-                        .id_source(ui.id().with(class.as_ptr()))
++                        .id_source(ui.id().with(class.0.as_ptr()))
+                         .show(ui, |ui| {
+-                            for class_obj in class.read().class_objects() {
++                            for class_obj in &*class.class_objects() {
+                                 let button = ui.button(format!("{class_obj:?}"));
+                                 if button.clicked() {
+                                     messages.push(Message::TrackAVM2Object(AVM2ObjectHandle::new(
+diff --git a/core/src/display_object/movie_clip.rs b/core/src/display_object/movie_clip.rs
+index 5714886f4e91..c4fb23d9611a 100644
+--- a/core/src/display_object/movie_clip.rs
++++ b/core/src/display_object/movie_clip.rs
+@@ -964,7 +964,7 @@ impl<'gc> MovieClip<'gc> {
+                                     *avm2_bitmapdata_class.write(activation.context.gc_context) =
+                                         bitmap_class;
+                                 } else {
+-                                    tracing::error!("Associated class {:?} for symbol {} must extend flash.display.Bitmap or BitmapData, does neither", class_object.inner_class_definition().read().name(), self.id());
++                                    tracing::error!("Associated class {:?} for symbol {} must extend flash.display.Bitmap or BitmapData, does neither", class_object.inner_class_definition().name(), self.id());
+                                 }
+                             }
+                             _ => {
+@@ -2253,7 +2253,7 @@ impl<'gc> MovieClip<'gc> {
+                     e,
+                     class_object
+                         .try_inner_class_definition()
+-                        .map(|c| c.read().name().to_qualified_name(context.gc_context))
++                        .map(|c| c.name().to_qualified_name(context.gc_context))
+                         .unwrap_or_else(|_| "[BorrowError!]".into())
+                 );
+             }

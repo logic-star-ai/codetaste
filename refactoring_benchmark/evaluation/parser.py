@@ -27,14 +27,16 @@ def parse_test_output(stdout: str) -> Optional[TestMetrics]:
 
     # Try to parse from last line backwards (container may output JSON at end)
     lines = stdout.strip().split("\n")
-    for line in reversed(lines):
+    for i, line in enumerate(reversed(lines)):
+        if i == 10:
+            break
         line = line.strip()
         if not line:
             continue
         try:
             data = json.loads(line)
             return TestMetrics(**data)
-        except (json.JSONDecodeError, ValueError):
+        except (json.JSONDecodeError, ValueError, TypeError):
             continue
 
     return None

@@ -1,0 +1,1504 @@
+diff --git a/Dockerfiles/ebpf-builder.Dockerfile b/Dockerfiles/ebpf-builder.Dockerfile
+index 8a183073522..8b5bf115c49 100644
+--- a/Dockerfiles/ebpf-builder.Dockerfile
++++ b/Dockerfiles/ebpf-builder.Dockerfile
+@@ -32,7 +32,3 @@ ENV GOCACHE=/tmp/
+ # avoid trouble when running as non root.
+ RUN mkdir -m 777 /work
+ WORKDIR /work
+-# The resulting docker image should be run with:
+-# docker run --rm --name ebpf-object-builder --user $(id -u):$(id -g) -v $(pwd):/work name-of-this-image
+-ENTRYPOINT TARGET=arm64 go generate ./... \
+-	&& TARGET=amd64 go generate ./...
+diff --git a/Makefile b/Makefile
+index 90d2384b1ba..9b38b473a2d 100644
+--- a/Makefile
++++ b/Makefile
+@@ -71,11 +71,23 @@ phony_explicit:
+ 
+ ebpf-objects:
+ 	docker run --rm --name ebpf-object-builder --user $(shell id -u):$(shell id -g) \
+-		-v $(shell pwd):/work $(EBPF_BUILDER)
++		-v $(shell pwd):/work $(EBPF_BUILDER) \
++		make ebpf-objects-outside-docker
+ 
+ ebpf-objects-outside-docker:
+-	TARGET=arm64 go generate ./...
+-	TARGET=amd64 go generate ./...
++# We need <asm/types.h> and depending on Linux distributions, it is installed
++# at different paths:
++#
++# * Ubuntu, package linux-libc-dev:
++#   /usr/include/x86_64-linux-gnu/asm/types.h
++#
++# * Fedora, package kernel-headers
++#   /usr/include/asm/types.h
++#
++# Since Ubuntu does not install it in a standard path, add a compiler flag for
++# it.
++	TARGET=arm64 CFLAGS="-I/usr/include/$(uname -m)-linux-gnu -I$(shell pwd)/include/gadget/arm64/ -I$(shell pwd)/include/" go generate ./...
++	TARGET=amd64 CFLAGS="-I/usr/include/$(uname -m)-linux-gnu -I$(shell pwd)/include/gadget/amd64/ -I$(shell pwd)/include/" go generate ./...
+ 
+ # ig
+ 
+@@ -280,6 +292,14 @@ generate-manifests:
+ 	make -C charts APP_VERSION=latest template
+ 	cat charts/bin/deploy.yaml >> pkg/resources/manifests/deploy.yaml
+ 
++.PHONY: install-headers
++install-headers:
++	cp -r ./include/gadget/ /usr/include/
++
++.PHONY: remove-headers
++remove-headers:
++	rm -rf /usr/include/gadget
++
+ .PHONY: help
+ help:
+ 	@echo  'Building targets:'
+@@ -319,3 +339,5 @@ help:
+ 	@echo  '  generate-manifests		- Generate manifests for the gadget deployment'
+ 	@echo  '  minikube-start		- Start a kubernetes cluster using minikube with the docker driver'
+ 	@echo  '  minikube-deploy		- Build and deploy the gadget container on minikube with docker driver, the cluster is started if it does not exist'
++	@echo  '  install-headers		- Install headers used to build gadgets in /usr/include/gadget'
++	@echo  '  remove-headers		- Remove headers installed in /usr/include/gadget'
+diff --git a/gadgets/Makefile b/gadgets/Makefile
+index fe735493e11..86163acabc0 100644
+--- a/gadgets/Makefile
++++ b/gadgets/Makefile
+@@ -11,15 +11,13 @@ all: $(GADGETS)
+ 
+ %_x86.bpf.o : %.bpf.c
+ 	clang -target bpf -Wall -g -O2 -D __TARGET_ARCH_x86 -c $(filter %.c,$^) \
+-		-I ../pkg/amd64/ \
+-		-I ../pkg/gadgets/common/ \
+-		-I ../pkg/gadgets/internal/socketenricher/bpf/ \
++		-I ../include/ \
++		-I ../include/gadget/amd64/ \
+ 		-o $@
+ %_arm64.bpf.o : %.bpf.c
+ 	clang -target bpf -Wall -g -O2 -D __TARGET_ARCH_arm64 -c $(filter %.c,$^) \
+-		-I ../pkg/arm64/ \
+-		-I ../pkg/gadgets/common/ \
+-		-I ../pkg/gadgets/internal/socketenricher/bpf/ \
++		-I ../include/ \
++		-I ../include/gadget/arm64/ \
+ 		-o $@
+ 
+ clean:
+diff --git a/gadgets/trace_dns.bpf.c b/gadgets/trace_dns.bpf.c
+index 3c5d5c2b3d1..021cd0872f2 100644
+--- a/gadgets/trace_dns.bpf.c
++++ b/gadgets/trace_dns.bpf.c
+@@ -11,10 +11,10 @@
+ #include <bpf/bpf_helpers.h>
+ #include <bpf/bpf_endian.h>
+ 
+-#include "types.h"
++#include <gadget/types.h>
+ 
+ #define GADGET_TYPE_NETWORKING
+-#include <sockets-map.h>
++#include <gadget/sockets-map.h>
+ 
+ // Max DNS name length: 255
+ // https://datatracker.ietf.org/doc/html/rfc1034#section-3.1
+diff --git a/gadgets/trace_dns_arm64.bpf.o b/gadgets/trace_dns_arm64.bpf.o
+index 48a0cb57cb9..8da3370db71 100644
+Binary files a/gadgets/trace_dns_arm64.bpf.o and b/gadgets/trace_dns_arm64.bpf.o differ
+diff --git a/gadgets/trace_dns_x86.bpf.o b/gadgets/trace_dns_x86.bpf.o
+index 48a0cb57cb9..8da3370db71 100644
+Binary files a/gadgets/trace_dns_x86.bpf.o and b/gadgets/trace_dns_x86.bpf.o differ
+diff --git a/gadgets/trace_exec.bpf.c b/gadgets/trace_exec.bpf.c
+index 26340311310..6289436ee87 100644
+--- a/gadgets/trace_exec.bpf.c
++++ b/gadgets/trace_exec.bpf.c
+@@ -1,14 +1,14 @@
+ // SPDX-License-Identifier: (LGPL-2.1 OR BSD-2-Clause)
+ 
+-#include <vmlinux/vmlinux.h>
++#include <vmlinux.h>
+ #include <bpf/bpf_helpers.h>
+ #include <bpf/bpf_core_read.h>
+ #ifdef __TARGET_ARCH_arm64
+ #include <bpf/bpf_tracing.h>
+ #endif /* __TARGET_ARCH_arm64 */
+ 
+-#include "mntns_filter.h"
+-#include "types.h"
++#include <gadget/mntns_filter.h>
++#include <gadget/types.h>
+ 
+ #define ARGSIZE 128
+ #define TOTAL_MAX_ARGS 60
+diff --git a/gadgets/trace_exec_arm64.bpf.o b/gadgets/trace_exec_arm64.bpf.o
+index 5e035139e03..55b57faccaf 100644
+Binary files a/gadgets/trace_exec_arm64.bpf.o and b/gadgets/trace_exec_arm64.bpf.o differ
+diff --git a/gadgets/trace_exec_x86.bpf.o b/gadgets/trace_exec_x86.bpf.o
+index e48bdf3b41d..dd3d58552ca 100644
+Binary files a/gadgets/trace_exec_x86.bpf.o and b/gadgets/trace_exec_x86.bpf.o differ
+diff --git a/gadgets/trace_open.bpf.c b/gadgets/trace_open.bpf.c
+index bc78a0a0db0..654fa45a098 100644
+--- a/gadgets/trace_open.bpf.c
++++ b/gadgets/trace_open.bpf.c
+@@ -2,12 +2,12 @@
+ // Copyright (c) 2019 Facebook
+ // Copyright (c) 2020 Netflix
+ 
+-#include <vmlinux/vmlinux.h>
++#include <vmlinux.h>
+ #include <bpf/bpf_helpers.h>
+ #include <bpf/bpf_core_read.h>
+ 
+-#include "mntns_filter.h"
+-#include "types.h"
++#include <gadget/mntns_filter.h>
++#include <gadget/types.h>
+ 
+ #define TASK_RUNNING 0
+ #define NAME_MAX 255
+diff --git a/gadgets/trace_open_arm64.bpf.o b/gadgets/trace_open_arm64.bpf.o
+index 1b7ae7db295..ba05a6b951e 100644
+Binary files a/gadgets/trace_open_arm64.bpf.o and b/gadgets/trace_open_arm64.bpf.o differ
+diff --git a/gadgets/trace_open_x86.bpf.o b/gadgets/trace_open_x86.bpf.o
+index 8133825101b..9a744f93790 100644
+Binary files a/gadgets/trace_open_x86.bpf.o and b/gadgets/trace_open_x86.bpf.o differ
+diff --git a/gadgets/trace_tcpconnect.bpf.c b/gadgets/trace_tcpconnect.bpf.c
+index 35f0475ebae..cd460409a8a 100644
+--- a/gadgets/trace_tcpconnect.bpf.c
++++ b/gadgets/trace_tcpconnect.bpf.c
+@@ -2,16 +2,16 @@
+ // Copyright (c) 2020 Anton Protopopov
+ //
+ // Based on tcpconnect(8) from BCC by Brendan Gregg
+-#include <vmlinux/vmlinux.h>
++#include <vmlinux.h>
+ 
+ #include <bpf/bpf_helpers.h>
+ #include <bpf/bpf_core_read.h>
+ #include <bpf/bpf_tracing.h>
+ #include <bpf/bpf_endian.h>
+ 
+-#include "maps.bpf.h"
+-#include "mntns_filter.h"
+-#include "types.h"
++#include <gadget/maps.bpf.h>
++#include <gadget/mntns_filter.h>
++#include <gadget/types.h>
+ 
+ /* The maximum number of items in maps */
+ #define MAX_ENTRIES 8192
+diff --git a/gadgets/trace_tcpconnect_arm64.bpf.o b/gadgets/trace_tcpconnect_arm64.bpf.o
+index ea43ae4580c..7af5162623e 100644
+Binary files a/gadgets/trace_tcpconnect_arm64.bpf.o and b/gadgets/trace_tcpconnect_arm64.bpf.o differ
+diff --git a/gadgets/trace_tcpconnect_x86.bpf.o b/gadgets/trace_tcpconnect_x86.bpf.o
+index 07c747622cc..331d19efe36 100644
+Binary files a/gadgets/trace_tcpconnect_x86.bpf.o and b/gadgets/trace_tcpconnect_x86.bpf.o differ
+diff --git a/gadgets/trace_tcpretrans.bpf.c b/gadgets/trace_tcpretrans.bpf.c
+index a454ff3de74..edf376eb73c 100644
+--- a/gadgets/trace_tcpretrans.bpf.c
++++ b/gadgets/trace_tcpretrans.bpf.c
+@@ -8,19 +8,19 @@
+ // 03-Nov-2017   Matthias Tafelmeier Extended this.
+ // Copyright 2023 Microsoft Corporation
+ 
+-#include <vmlinux/vmlinux.h>
++#include <vmlinux.h>
+ 
+ #include <bpf/bpf_helpers.h>
+ #include <bpf/bpf_core_read.h>
+ #include <bpf/bpf_tracing.h>
+ #include <bpf/bpf_endian.h>
+ 
+-#include "maps.bpf.h"
+-#include "mntns_filter.h"
+-#include "types.h"
++#include <gadget/maps.bpf.h>
++#include <gadget/mntns_filter.h>
++#include <gadget/types.h>
+ 
+ #define GADGET_TYPE_TRACING
+-#include <sockets-map.h>
++#include <gadget/sockets-map.h>
+ 
+ #define TASK_COMM_LEN 16
+ 
+diff --git a/gadgets/trace_tcpretrans_arm64.bpf.o b/gadgets/trace_tcpretrans_arm64.bpf.o
+index 17d187c2267..ff0cb8c5ae0 100644
+Binary files a/gadgets/trace_tcpretrans_arm64.bpf.o and b/gadgets/trace_tcpretrans_arm64.bpf.o differ
+diff --git a/gadgets/trace_tcpretrans_x86.bpf.o b/gadgets/trace_tcpretrans_x86.bpf.o
+index 2f36a48036e..c21978d1a3c 100644
+Binary files a/gadgets/trace_tcpretrans_x86.bpf.o and b/gadgets/trace_tcpretrans_x86.bpf.o differ
+diff --git a/pkg/amd64/vmlinux/vmlinux-cgo.h b/include/gadget/amd64/vmlinux-cgo.h
+similarity index 100%
+rename from pkg/amd64/vmlinux/vmlinux-cgo.h
+rename to include/gadget/amd64/vmlinux-cgo.h
+diff --git a/pkg/amd64/vmlinux/vmlinux.h b/include/gadget/amd64/vmlinux.h
+similarity index 100%
+rename from pkg/amd64/vmlinux/vmlinux.h
+rename to include/gadget/amd64/vmlinux.h
+diff --git a/pkg/arm64/vmlinux/vmlinux-cgo.h b/include/gadget/arm64/vmlinux-cgo.h
+similarity index 100%
+rename from pkg/arm64/vmlinux/vmlinux-cgo.h
+rename to include/gadget/arm64/vmlinux-cgo.h
+diff --git a/pkg/arm64/vmlinux/vmlinux.h b/include/gadget/arm64/vmlinux.h
+similarity index 100%
+rename from pkg/arm64/vmlinux/vmlinux.h
+rename to include/gadget/arm64/vmlinux.h
+diff --git a/pkg/gadgets/common/bits.bpf.h b/include/gadget/bits.bpf.h
+similarity index 100%
+rename from pkg/gadgets/common/bits.bpf.h
+rename to include/gadget/bits.bpf.h
+diff --git a/pkg/gadgets/common/core_fixes.bpf.h b/include/gadget/core_fixes.bpf.h
+similarity index 100%
+rename from pkg/gadgets/common/core_fixes.bpf.h
+rename to include/gadget/core_fixes.bpf.h
+diff --git a/pkg/gadgets/common/filesystem.h b/include/gadget/filesystem.h
+similarity index 100%
+rename from pkg/gadgets/common/filesystem.h
+rename to include/gadget/filesystem.h
+diff --git a/pkg/gadgets/common/maps.bpf.h b/include/gadget/maps.bpf.h
+similarity index 100%
+rename from pkg/gadgets/common/maps.bpf.h
+rename to include/gadget/maps.bpf.h
+diff --git a/pkg/gadgets/common/mntns_filter.h b/include/gadget/mntns_filter.h
+similarity index 100%
+rename from pkg/gadgets/common/mntns_filter.h
+rename to include/gadget/mntns_filter.h
+diff --git a/pkg/gadgets/internal/socketenricher/bpf/sockets-map.h b/include/gadget/sockets-map.h
+similarity index 100%
+rename from pkg/gadgets/internal/socketenricher/bpf/sockets-map.h
+rename to include/gadget/sockets-map.h
+diff --git a/pkg/gadgets/common/types.h b/include/gadget/types.h
+similarity index 100%
+rename from pkg/gadgets/common/types.h
+rename to include/gadget/types.h
+diff --git a/pkg/amd64/vmlinux/doc.go b/pkg/amd64/vmlinux/doc.go
+deleted file mode 100644
+index e6989193d78..00000000000
+--- a/pkg/amd64/vmlinux/doc.go
++++ /dev/null
+@@ -1,19 +0,0 @@
+-// Copyright 2019-2021 The Inspektor Gadget authors
+-//
+-// Licensed under the Apache License, Version 2.0 (the "License");
+-// you may not use this file except in compliance with the License.
+-// You may obtain a copy of the License at
+-//
+-//     http://www.apache.org/licenses/LICENSE-2.0
+-//
+-// Unless required by applicable law or agreed to in writing, software
+-// distributed under the License is distributed on an "AS IS" BASIS,
+-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+-// See the License for the specific language governing permissions and
+-// limitations under the License.
+-
+-// Package vmlinux does not provide any Go code but vmlinux.h to compile your
+-// BPF code. vmlinux was generated with the following command on
+-// Linux 5.12.6-300.fc34.x86_64:
+-// $ bpftool btf dump file /sys/kernel/btf/vmlinux format c > /tmp/vmlinux.h
+-package vmlinux
+diff --git a/pkg/arm64/vmlinux/doc.go b/pkg/arm64/vmlinux/doc.go
+deleted file mode 100644
+index db78cd10c71..00000000000
+--- a/pkg/arm64/vmlinux/doc.go
++++ /dev/null
+@@ -1,18 +0,0 @@
+-// Copyright 2019-2021 The Inspektor Gadget authors
+-//
+-// Licensed under the Apache License, Version 2.0 (the "License");
+-// you may not use this file except in compliance with the License.
+-// You may obtain a copy of the License at
+-//
+-//     http://www.apache.org/licenses/LICENSE-2.0
+-//
+-// Unless required by applicable law or agreed to in writing, software
+-// distributed under the License is distributed on an "AS IS" BASIS,
+-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+-// See the License for the specific language governing permissions and
+-// limitations under the License.
+-
+-// Package vmlinux does not provide any Go code but vmlinux.h to compile your
+-// BPF code. vmlinux was taken from iovisor/bcc as time of commit:
+-// 0a5fbf66ac71 ("libbpf-tools: add arm64 and powerpc vmlinux.h headers")
+-package vmlinux
+diff --git a/pkg/container-hook/bpf/execruntime.bpf.c b/pkg/container-hook/bpf/execruntime.bpf.c
+index e45ae4c7e13..bcf41e722b5 100644
+--- a/pkg/container-hook/bpf/execruntime.bpf.c
++++ b/pkg/container-hook/bpf/execruntime.bpf.c
+@@ -1,5 +1,5 @@
+ // SPDX-License-Identifier: (GPL-2.0 WITH Linux-syscall-note) OR Apache-2.0
+-#include <vmlinux/vmlinux.h>
++#include <vmlinux.h>
+ #include <bpf/bpf_helpers.h>
+ #include <bpf/bpf_core_read.h>
+ #include <bpf/bpf_tracing.h>
+diff --git a/pkg/container-hook/bpf/privatedata.bpf.c b/pkg/container-hook/bpf/privatedata.bpf.c
+index 61c22074087..14e84c46213 100644
+--- a/pkg/container-hook/bpf/privatedata.bpf.c
++++ b/pkg/container-hook/bpf/privatedata.bpf.c
+@@ -1,5 +1,5 @@
+ // SPDX-License-Identifier: (GPL-2.0 WITH Linux-syscall-note) OR Apache-2.0
+-#include <vmlinux/vmlinux.h>
++#include <vmlinux.h>
+ #include <bpf/bpf_helpers.h>
+ #include <bpf/bpf_core_read.h>
+ #include <bpf/bpf_tracing.h>
+diff --git a/pkg/container-hook/privatedata.go b/pkg/container-hook/privatedata.go
+index 82eace72682..0fcf8ae553f 100644
+--- a/pkg/container-hook/privatedata.go
++++ b/pkg/container-hook/privatedata.go
+@@ -26,7 +26,7 @@ import (
+ 	"golang.org/x/sys/unix"
+ )
+ 
+-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target $TARGET -cc clang -no-global-types privatedata ./bpf/privatedata.bpf.c -- -I./bpf/ -I../${TARGET}
++//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target $TARGET -cc clang -cflags ${CFLAGS} -no-global-types privatedata ./bpf/privatedata.bpf.c -- -I./bpf/
+ 
+ // readPrivateDataFromFd use ebpf to read the private_data pointer from the
+ // kernel "struct file" associated with the given fd.
+diff --git a/pkg/container-hook/tracer.go b/pkg/container-hook/tracer.go
+index c5c1bb4c1ca..1818db2f4f3 100644
+--- a/pkg/container-hook/tracer.go
++++ b/pkg/container-hook/tracer.go
+@@ -56,7 +56,7 @@ import (
+ 	"github.com/inspektor-gadget/inspektor-gadget/pkg/utils/host"
+ )
+ 
+-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target $TARGET -cc clang -no-global-types -type record execruntime ./bpf/execruntime.bpf.c -- -I./bpf/ -I../${TARGET}
++//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target $TARGET -cc clang -cflags ${CFLAGS} -no-global-types -type record execruntime ./bpf/execruntime.bpf.c -- -I./bpf/
+ 
+ type EventType int
+ 
+diff --git a/pkg/gadgets/advise/seccomp/tracer/bpf/seccomp.bpf.c b/pkg/gadgets/advise/seccomp/tracer/bpf/seccomp.bpf.c
+index 09676b75164..c65459fed00 100644
+--- a/pkg/gadgets/advise/seccomp/tracer/bpf/seccomp.bpf.c
++++ b/pkg/gadgets/advise/seccomp/tracer/bpf/seccomp.bpf.c
+@@ -4,7 +4,7 @@
+ /* This BPF program uses the GPL-restricted function bpf_probe_read*().
+  */
+ 
+-#include <vmlinux/vmlinux.h>
++#include <vmlinux.h>
+ 
+ #include <bpf/bpf_helpers.h>
+ #include <bpf/bpf_core_read.h>
+diff --git a/pkg/gadgets/advise/seccomp/tracer/tracer.go b/pkg/gadgets/advise/seccomp/tracer/tracer.go
+index c2acbb1246f..0462b9ec175 100644
+--- a/pkg/gadgets/advise/seccomp/tracer/tracer.go
++++ b/pkg/gadgets/advise/seccomp/tracer/tracer.go
+@@ -30,7 +30,7 @@ import (
+ 	"github.com/inspektor-gadget/inspektor-gadget/pkg/gadgets"
+ )
+ 
+-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target $TARGET -cc clang seccomp ./bpf/seccomp.bpf.c -- -I./bpf/ -I../../../../${TARGET}
++//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target ${TARGET} -cc clang -cflags ${CFLAGS} seccomp ./bpf/seccomp.bpf.c -- -I./bpf/
+ 
+ const (
+ 	// Please update these values also in bpf/seccomp-common.h
+diff --git a/pkg/gadgets/audit/seccomp/tracer/auditseccomp_bpfel_arm64.o b/pkg/gadgets/audit/seccomp/tracer/auditseccomp_bpfel_arm64.o
+index edb3d1406c7..174476ea448 100644
+Binary files a/pkg/gadgets/audit/seccomp/tracer/auditseccomp_bpfel_arm64.o and b/pkg/gadgets/audit/seccomp/tracer/auditseccomp_bpfel_arm64.o differ
+diff --git a/pkg/gadgets/audit/seccomp/tracer/auditseccomp_bpfel_x86.o b/pkg/gadgets/audit/seccomp/tracer/auditseccomp_bpfel_x86.o
+index c1431d20cd5..32a68451c44 100644
+Binary files a/pkg/gadgets/audit/seccomp/tracer/auditseccomp_bpfel_x86.o and b/pkg/gadgets/audit/seccomp/tracer/auditseccomp_bpfel_x86.o differ
+diff --git a/pkg/gadgets/audit/seccomp/tracer/bpf/audit-seccomp.bpf.c b/pkg/gadgets/audit/seccomp/tracer/bpf/audit-seccomp.bpf.c
+index ea9b2fee94b..41c47688b46 100644
+--- a/pkg/gadgets/audit/seccomp/tracer/bpf/audit-seccomp.bpf.c
++++ b/pkg/gadgets/audit/seccomp/tracer/bpf/audit-seccomp.bpf.c
+@@ -4,13 +4,13 @@
+ /* This BPF program uses the GPL-restricted function bpf_probe_read*().
+  */
+ 
+-#include <vmlinux/vmlinux.h>
++#include <vmlinux.h>
+ #include <bpf/bpf_helpers.h>
+ #include <bpf/bpf_core_read.h>
+ #include <bpf/bpf_tracing.h>
+ 
+ #include "audit-seccomp.h"
+-#include "mntns_filter.h"
++#include <gadget/mntns_filter.h>
+ 
+ /* The stack is limited, so use a map to build the event */
+ struct {
+diff --git a/pkg/gadgets/audit/seccomp/tracer/bpf/audit-seccomp.h b/pkg/gadgets/audit/seccomp/tracer/bpf/audit-seccomp.h
+index dd8ce76faee..4c770b46b18 100644
+--- a/pkg/gadgets/audit/seccomp/tracer/bpf/audit-seccomp.h
++++ b/pkg/gadgets/audit/seccomp/tracer/bpf/audit-seccomp.h
+@@ -2,13 +2,13 @@
+ #define GADGET_AUDIT_SECCOMP_H
+ 
+ #ifdef __TARGET_ARCH_arm64
+-#include "../../../../../arm64/vmlinux/vmlinux-cgo.h"
++#include "../../../../../../include/gadget/amd64/vmlinux-cgo.h"
+ #else
+ // In several case (e.g. make test), we compile this file without having set
+ // BPF_ARCH, so we default to include amd64 vmlinux.h.
+ // For other architecture, like arm64, we use __TARGET_ARCH_arch to
+ // differentiate.
+-#include "../../../../../amd64/vmlinux/vmlinux-cgo.h"
++#include "../../../../../../include/gadget/amd64/vmlinux-cgo.h"
+ #endif
+ 
+ #define TASK_COMM_LEN 16
+diff --git a/pkg/gadgets/audit/seccomp/tracer/tracer.go b/pkg/gadgets/audit/seccomp/tracer/tracer.go
+index f90c6db4a8c..4a4f957bf1c 100644
+--- a/pkg/gadgets/audit/seccomp/tracer/tracer.go
++++ b/pkg/gadgets/audit/seccomp/tracer/tracer.go
+@@ -32,7 +32,7 @@ import (
+ 	eventtypes "github.com/inspektor-gadget/inspektor-gadget/pkg/types"
+ )
+ 
+-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target $TARGET -type event -cc clang auditseccomp ./bpf/audit-seccomp.bpf.c -- -I./bpf/ -I../../../../ -I../../../../${TARGET} -D__KERNEL__ -I ../../../common/
++//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target $TARGET -type event -cc clang -cflags ${CFLAGS} auditseccomp ./bpf/audit-seccomp.bpf.c -- -I./bpf/ -D__KERNEL__
+ 
+ type Tracer struct {
+ 	config        *Config
+diff --git a/pkg/gadgets/internal/networktracer/clangosflags.sh b/pkg/gadgets/internal/networktracer/clangosflags.sh
+deleted file mode 100755
+index 24e6501b37a..00000000000
+--- a/pkg/gadgets/internal/networktracer/clangosflags.sh
++++ /dev/null
+@@ -1,16 +0,0 @@
+-# We need <asm/types.h> and depending on Linux distributions, it is installed
+-# at different paths:
+-#
+-# * Ubuntu, package linux-libc-dev:
+-#   /usr/include/x86_64-linux-gnu/asm/types.h
+-#
+-# * Fedora, package kernel-headers
+-#   /usr/include/asm/types.h
+-#
+-# Since Ubuntu does not install it in a standard path, add a compiler flag for
+-# it.
+-#! /bin/bash
+-CLANG_OS_FLAGS=
+-if [ "$(grep -oP '^NAME="\K\w+(?=")' /etc/os-release)" == "Ubuntu" ]; then
+-       CLANG_OS_FLAGS="-I/usr/include/$(uname -m)-linux-gnu"
+-fi
+diff --git a/pkg/gadgets/internal/networktracer/tracer.go b/pkg/gadgets/internal/networktracer/tracer.go
+index a162fcd987b..b29d604488a 100644
+--- a/pkg/gadgets/internal/networktracer/tracer.go
++++ b/pkg/gadgets/internal/networktracer/tracer.go
+@@ -54,7 +54,7 @@ import (
+ 	"github.com/inspektor-gadget/inspektor-gadget/pkg/types"
+ )
+ 
+-//go:generate bash -c "source ./clangosflags.sh; go run github.com/cilium/ebpf/cmd/bpf2go -target bpfel -cc clang dispatcher ./bpf/dispatcher.bpf.c -- $CLANG_OS_FLAGS -I./bpf/ -I../socketenricher/bpf"
++//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target bpfel -cc clang -cflags ${CFLAGS} dispatcher ./bpf/dispatcher.bpf.c -- -I./bpf/ -I../socketenricher/bpf
+ 
+ type attachment struct {
+ 	dispatcherObjs dispatcherObjects
+diff --git a/pkg/gadgets/internal/socketenricher/bpf/socket-enricher-helpers.h b/pkg/gadgets/internal/socketenricher/bpf/socket-enricher-helpers.h
+index fd4a714e2d4..985a0d06e89 100644
+--- a/pkg/gadgets/internal/socketenricher/bpf/socket-enricher-helpers.h
++++ b/pkg/gadgets/internal/socketenricher/bpf/socket-enricher-helpers.h
+@@ -3,7 +3,7 @@
+ #ifndef SOCKET_ENRICHER_HELPERS_H
+ #define SOCKET_ENRICHER_HELPERS_H
+ 
+-#include <vmlinux/vmlinux.h>
++#include <vmlinux.h>
+ #include <bpf/bpf_helpers.h>
+ #include <bpf/bpf_core_read.h>
+ #include <bpf/bpf_tracing.h>
+diff --git a/pkg/gadgets/internal/socketenricher/bpf/socket-enricher.bpf.c b/pkg/gadgets/internal/socketenricher/bpf/socket-enricher.bpf.c
+index 5c0c7d69218..47e8a2f70ff 100644
+--- a/pkg/gadgets/internal/socketenricher/bpf/socket-enricher.bpf.c
++++ b/pkg/gadgets/internal/socketenricher/bpf/socket-enricher.bpf.c
+@@ -1,7 +1,7 @@
+ // SPDX-License-Identifier: (GPL-2.0 WITH Linux-syscall-note) OR Apache-2.0
+ /* Copyright (c) 2023 The Inspektor Gadget authors */
+ 
+-#include <vmlinux/vmlinux.h>
++#include <vmlinux.h>
+ #include <bpf/bpf_helpers.h>
+ #include <bpf/bpf_core_read.h>
+ #include <bpf/bpf_tracing.h>
+@@ -9,7 +9,7 @@
+ 
+ #include <bpf/bpf_helpers.h>
+ 
+-#include "sockets-map.h"
++#include <gadget/sockets-map.h>
+ #include "socket-enricher-helpers.h"
+ 
+ #define MAX_ENTRIES 10240
+diff --git a/pkg/gadgets/internal/socketenricher/bpf/sockets-iter.bpf.c b/pkg/gadgets/internal/socketenricher/bpf/sockets-iter.bpf.c
+index 99f194522b0..72c87a7b53e 100644
+--- a/pkg/gadgets/internal/socketenricher/bpf/sockets-iter.bpf.c
++++ b/pkg/gadgets/internal/socketenricher/bpf/sockets-iter.bpf.c
+@@ -1,7 +1,7 @@
+ // SPDX-License-Identifier: (GPL-2.0 WITH Linux-syscall-note) OR Apache-2.0
+ /* Copyright (c) 2023 The Inspektor Gadget authors */
+ 
+-#include <vmlinux/vmlinux.h>
++#include <vmlinux.h>
+ #include <bpf/bpf_helpers.h>
+ #include <bpf/bpf_core_read.h>
+ #include <bpf/bpf_tracing.h>
+@@ -9,7 +9,7 @@
+ 
+ #include <bpf/bpf_helpers.h>
+ 
+-#include "sockets-map.h"
++#include <gadget/sockets-map.h>
+ #include "socket-enricher-helpers.h"
+ 
+ const volatile __u64 socket_file_ops_addr = 0;
+diff --git a/pkg/gadgets/internal/socketenricher/socketsiter_bpfel_x86.o b/pkg/gadgets/internal/socketenricher/socketsiter_bpfel_x86.o
+index c785e24954b..61e43c66e9b 100644
+Binary files a/pkg/gadgets/internal/socketenricher/socketsiter_bpfel_x86.o and b/pkg/gadgets/internal/socketenricher/socketsiter_bpfel_x86.o differ
+diff --git a/pkg/gadgets/internal/socketenricher/tracer.go b/pkg/gadgets/internal/socketenricher/tracer.go
+index 9629aabefdf..ac7ac77fb4b 100644
+--- a/pkg/gadgets/internal/socketenricher/tracer.go
++++ b/pkg/gadgets/internal/socketenricher/tracer.go
+@@ -28,9 +28,9 @@ import (
+ 	bpfiterns "github.com/inspektor-gadget/inspektor-gadget/pkg/utils/bpf-iter-ns"
+ )
+ 
+-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target $TARGET -cc clang socketenricher ./bpf/socket-enricher.bpf.c -- -I./bpf/ -I../../../ -I../../../${TARGET}
++//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target $TARGET -cc clang -cflags ${CFLAGS} socketenricher ./bpf/socket-enricher.bpf.c -- -I./bpf/
+ 
+-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target $TARGET -cc clang socketsiter ./bpf/sockets-iter.bpf.c -- -I./bpf/ -I../../../ -I../../../${TARGET}
++//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target $TARGET -cc clang -cflags ${CFLAGS} socketsiter ./bpf/sockets-iter.bpf.c -- -I./bpf/
+ 
+ const (
+ 	SocketsMapName = "gadget_sockets"
+diff --git a/pkg/gadgets/profile/block-io/tracer/biolatency_bpfel_arm64.o b/pkg/gadgets/profile/block-io/tracer/biolatency_bpfel_arm64.o
+index 156e360c032..60eb9552031 100644
+Binary files a/pkg/gadgets/profile/block-io/tracer/biolatency_bpfel_arm64.o and b/pkg/gadgets/profile/block-io/tracer/biolatency_bpfel_arm64.o differ
+diff --git a/pkg/gadgets/profile/block-io/tracer/biolatency_bpfel_x86.o b/pkg/gadgets/profile/block-io/tracer/biolatency_bpfel_x86.o
+index e9e5514f379..183191bc010 100644
+Binary files a/pkg/gadgets/profile/block-io/tracer/biolatency_bpfel_x86.o and b/pkg/gadgets/profile/block-io/tracer/biolatency_bpfel_x86.o differ
+diff --git a/pkg/gadgets/profile/block-io/tracer/bpf/biolatency.bpf.c b/pkg/gadgets/profile/block-io/tracer/bpf/biolatency.bpf.c
+index 367c120087b..d78d5958714 100644
+--- a/pkg/gadgets/profile/block-io/tracer/bpf/biolatency.bpf.c
++++ b/pkg/gadgets/profile/block-io/tracer/bpf/biolatency.bpf.c
+@@ -1,12 +1,12 @@
+ // SPDX-License-Identifier: GPL-2.0
+ // Copyright (c) 2020 Wenbo Zhang
+-#include <vmlinux/vmlinux.h>
++#include <vmlinux.h>
+ #include <bpf/bpf_helpers.h>
+ #include <bpf/bpf_core_read.h>
+ #include <bpf/bpf_tracing.h>
+ #include "biolatency.h"
+-#include "bits.bpf.h"
+-#include "core_fixes.bpf.h"
++#include <gadget/bits.bpf.h>
++#include <gadget/core_fixes.bpf.h>
+ 
+ #define MAX_ENTRIES 10240
+ 
+diff --git a/pkg/gadgets/profile/block-io/tracer/tracer.go b/pkg/gadgets/profile/block-io/tracer/tracer.go
+index 1335fc830dd..6c2433c0829 100644
+--- a/pkg/gadgets/profile/block-io/tracer/tracer.go
++++ b/pkg/gadgets/profile/block-io/tracer/tracer.go
+@@ -30,7 +30,7 @@ import (
+ 	"github.com/inspektor-gadget/inspektor-gadget/pkg/histogram"
+ )
+ 
+-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target $TARGET -type hist -type hist_key -cc clang biolatency ./bpf/biolatency.bpf.c -- -I./bpf/ -I../../../../${TARGET} -I ../../../common/
++//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target $TARGET -type hist -type hist_key -cc clang -cflags ${CFLAGS} biolatency ./bpf/biolatency.bpf.c -- -I./bpf/
+ 
+ type Tracer struct {
+ 	objs                biolatencyObjects
+diff --git a/pkg/gadgets/profile/cpu/tracer/bpf/profile.bpf.c b/pkg/gadgets/profile/cpu/tracer/bpf/profile.bpf.c
+index 913922eb3fb..8f75bd0341d 100644
+--- a/pkg/gadgets/profile/cpu/tracer/bpf/profile.bpf.c
++++ b/pkg/gadgets/profile/cpu/tracer/bpf/profile.bpf.c
+@@ -1,12 +1,12 @@
+ /* SPDX-License-Identifier: BSD-2-Clause */
+ /* Copyright (c) 2022 LG Electronics */
+-#include <vmlinux/vmlinux.h>
++#include <vmlinux.h>
+ #include <bpf/bpf_helpers.h>
+ #include <bpf/bpf_core_read.h>
+ #include <bpf/bpf_tracing.h>
+ #include "profile.h"
+-#include "maps.bpf.h"
+-#include "mntns_filter.h"
++#include <gadget/maps.bpf.h>
++#include <gadget/mntns_filter.h>
+ 
+ const volatile bool kernel_stacks_only = false;
+ const volatile bool user_stacks_only = false;
+diff --git a/pkg/gadgets/profile/cpu/tracer/profile_bpfel_arm64.o b/pkg/gadgets/profile/cpu/tracer/profile_bpfel_arm64.o
+index ac4a4ce6a99..d683f6ce93b 100644
+Binary files a/pkg/gadgets/profile/cpu/tracer/profile_bpfel_arm64.o and b/pkg/gadgets/profile/cpu/tracer/profile_bpfel_arm64.o differ
+diff --git a/pkg/gadgets/profile/cpu/tracer/profile_bpfel_x86.o b/pkg/gadgets/profile/cpu/tracer/profile_bpfel_x86.o
+index 92e8fa901cd..7b83b8a0a49 100644
+Binary files a/pkg/gadgets/profile/cpu/tracer/profile_bpfel_x86.o and b/pkg/gadgets/profile/cpu/tracer/profile_bpfel_x86.o differ
+diff --git a/pkg/gadgets/profile/cpu/tracer/tracer.go b/pkg/gadgets/profile/cpu/tracer/tracer.go
+index 93ec20071e6..0c48f28bb20 100644
+--- a/pkg/gadgets/profile/cpu/tracer/tracer.go
++++ b/pkg/gadgets/profile/cpu/tracer/tracer.go
+@@ -35,7 +35,7 @@ import (
+ 	eventtypes "github.com/inspektor-gadget/inspektor-gadget/pkg/types"
+ )
+ 
+-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target $TARGET -type key_t -cc clang profile ./bpf/profile.bpf.c -- -I./bpf/ -I../../../../${TARGET} -I ../../../common/
++//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target $TARGET -type key_t -cc clang -cflags ${CFLAGS} profile ./bpf/profile.bpf.c -- -I./bpf/
+ 
+ type Config struct {
+ 	MountnsMap      *ebpf.Map
+diff --git a/pkg/gadgets/profile/tcprtt/tracer/bpf/tcprtt.bpf.c b/pkg/gadgets/profile/tcprtt/tracer/bpf/tcprtt.bpf.c
+index 42ce8adbe34..06618507d53 100644
+--- a/pkg/gadgets/profile/tcprtt/tracer/bpf/tcprtt.bpf.c
++++ b/pkg/gadgets/profile/tcprtt/tracer/bpf/tcprtt.bpf.c
+@@ -1,14 +1,14 @@
+ // SPDX-License-Identifier: GPL-2.0
+ // Copyright (c) 2021 Wenbo Zhang
+ // Copyright (c) 2023 The Inspektor Gadget authors
+-#include <vmlinux/vmlinux.h>
++#include <vmlinux.h>
+ #include <bpf/bpf_helpers.h>
+ #include <bpf/bpf_core_read.h>
+ #include <bpf/bpf_tracing.h>
+ #include <bpf/bpf_endian.h>
+ #include "tcprtt.h"
+-#include "bits.bpf.h"
+-#include "maps.bpf.h"
++#include <gadget/bits.bpf.h>
++#include <gadget/maps.bpf.h>
+ 
+ /* Taken from kernel include/linux/socket.h. */
+ #define AF_INET 2 /* IP version 4			*/
+diff --git a/pkg/gadgets/profile/tcprtt/tracer/tcprtt_bpfel_arm64.o b/pkg/gadgets/profile/tcprtt/tracer/tcprtt_bpfel_arm64.o
+index d2188e43e54..29e511d350a 100644
+Binary files a/pkg/gadgets/profile/tcprtt/tracer/tcprtt_bpfel_arm64.o and b/pkg/gadgets/profile/tcprtt/tracer/tcprtt_bpfel_arm64.o differ
+diff --git a/pkg/gadgets/profile/tcprtt/tracer/tcprtt_bpfel_x86.o b/pkg/gadgets/profile/tcprtt/tracer/tcprtt_bpfel_x86.o
+index 1e6a28099ac..fd9df656a48 100644
+Binary files a/pkg/gadgets/profile/tcprtt/tracer/tcprtt_bpfel_x86.o and b/pkg/gadgets/profile/tcprtt/tracer/tcprtt_bpfel_x86.o differ
+diff --git a/pkg/gadgets/profile/tcprtt/tracer/tracer.go b/pkg/gadgets/profile/tcprtt/tracer/tracer.go
+index dad510ef5f4..74bda7c5a94 100644
+--- a/pkg/gadgets/profile/tcprtt/tracer/tracer.go
++++ b/pkg/gadgets/profile/tcprtt/tracer/tracer.go
+@@ -35,7 +35,7 @@ import (
+ 	"github.com/inspektor-gadget/inspektor-gadget/pkg/params"
+ )
+ 
+-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target $TARGET -type hist -cc clang tcpRTT ./bpf/tcprtt.bpf.c -- -I./bpf/ -I../../../../${TARGET} -I ../../../common/
++//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target $TARGET -type hist -cc clang -cflags ${CFLAGS} tcpRTT ./bpf/tcprtt.bpf.c -- -I./bpf/
+ 
+ type Config struct {
+ 	useMilliseconds       bool
+diff --git a/pkg/gadgets/snapshot/process/tracer/bpf/process-collector.bpf.c b/pkg/gadgets/snapshot/process/tracer/bpf/process-collector.bpf.c
+index 04f4c2caac6..ed789c98cd1 100644
+--- a/pkg/gadgets/snapshot/process/tracer/bpf/process-collector.bpf.c
++++ b/pkg/gadgets/snapshot/process/tracer/bpf/process-collector.bpf.c
+@@ -9,10 +9,10 @@
+ /* This BPF program uses the GPL-restricted function bpf_seq_printf().
+  */
+ 
+-#include <vmlinux/vmlinux.h>
++#include <vmlinux.h>
+ #include <bpf/bpf_helpers.h>
+ 
+-#include "mntns_filter.h"
++#include <gadget/mntns_filter.h>
+ 
+ const volatile bool show_threads = false;
+ 
+diff --git a/pkg/gadgets/snapshot/process/tracer/processcollector_bpfel.o b/pkg/gadgets/snapshot/process/tracer/processcollector_bpfel.o
+index cced0db1df3..04966e0a418 100644
+Binary files a/pkg/gadgets/snapshot/process/tracer/processcollector_bpfel.o and b/pkg/gadgets/snapshot/process/tracer/processcollector_bpfel.o differ
+diff --git a/pkg/gadgets/snapshot/process/tracer/tracer.go b/pkg/gadgets/snapshot/process/tracer/tracer.go
+index a1afa8dd065..30ff3e9cb66 100644
+--- a/pkg/gadgets/snapshot/process/tracer/tracer.go
++++ b/pkg/gadgets/snapshot/process/tracer/tracer.go
+@@ -36,7 +36,7 @@ import (
+ 	"github.com/inspektor-gadget/inspektor-gadget/pkg/utils/host"
+ )
+ 
+-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target bpfel -cc clang -type process_entry processCollector ./bpf/process-collector.bpf.c -- -I../../../../${TARGET} -I ../../../common/ -Werror -O2 -g -c -x c
++//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target bpfel -cc clang -cflags ${CFLAGS} -type process_entry processCollector ./bpf/process-collector.bpf.c -- -Werror -O2 -g -c -x c
+ 
+ type Config struct {
+ 	MountnsMap  *ebpf.Map
+diff --git a/pkg/gadgets/snapshot/socket/tracer/bpf/socket.bpf.c b/pkg/gadgets/snapshot/socket/tracer/bpf/socket.bpf.c
+index a9afcaa42fc..063c2e16d37 100644
+--- a/pkg/gadgets/snapshot/socket/tracer/bpf/socket.bpf.c
++++ b/pkg/gadgets/snapshot/socket/tracer/bpf/socket.bpf.c
+@@ -11,7 +11,7 @@
+  * This BPF program uses the GPL-restricted function bpf_seq_printf().
+  */
+ 
+-#include <vmlinux/vmlinux.h>
++#include <vmlinux.h>
+ 
+ #include <bpf/bpf_helpers.h>
+ #include <bpf/bpf_endian.h>
+diff --git a/pkg/gadgets/snapshot/socket/tracer/tracer.go b/pkg/gadgets/snapshot/socket/tracer/tracer.go
+index bb9bd46328a..b16cb786278 100644
+--- a/pkg/gadgets/snapshot/socket/tracer/tracer.go
++++ b/pkg/gadgets/snapshot/socket/tracer/tracer.go
+@@ -32,7 +32,7 @@ import (
+ 	eventtypes "github.com/inspektor-gadget/inspektor-gadget/pkg/types"
+ )
+ 
+-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target bpfel -cc clang -type entry  socket ./bpf/socket.bpf.c -- -I../../../../${TARGET} -Werror -O2 -g -c -x c
++//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target bpfel -cc clang -cflags ${CFLAGS} -type entry  socket ./bpf/socket.bpf.c -- -Werror -O2 -g -c -x c
+ 
+ type Tracer struct {
+ 	iters []*link.Iter
+diff --git a/pkg/gadgets/top/block-io/tracer/biotop_bpfel_arm64.o b/pkg/gadgets/top/block-io/tracer/biotop_bpfel_arm64.o
+index c0768a77c6b..26ff899292f 100644
+Binary files a/pkg/gadgets/top/block-io/tracer/biotop_bpfel_arm64.o and b/pkg/gadgets/top/block-io/tracer/biotop_bpfel_arm64.o differ
+diff --git a/pkg/gadgets/top/block-io/tracer/biotop_bpfel_x86.o b/pkg/gadgets/top/block-io/tracer/biotop_bpfel_x86.o
+index 2fdf0c08ec8..00a03f458ca 100644
+Binary files a/pkg/gadgets/top/block-io/tracer/biotop_bpfel_x86.o and b/pkg/gadgets/top/block-io/tracer/biotop_bpfel_x86.o differ
+diff --git a/pkg/gadgets/top/block-io/tracer/bpf/biotop.bpf.c b/pkg/gadgets/top/block-io/tracer/bpf/biotop.bpf.c
+index bf10c177332..e371336bafc 100644
+--- a/pkg/gadgets/top/block-io/tracer/bpf/biotop.bpf.c
++++ b/pkg/gadgets/top/block-io/tracer/bpf/biotop.bpf.c
+@@ -1,14 +1,14 @@
+ // SPDX-License-Identifier: GPL-2.0
+ // Copyright (c) 2022 Francis Laniel <flaniel@linux.microsoft.com>
+-#include <vmlinux/vmlinux.h>
++#include <vmlinux.h>
+ #include <bpf/bpf_helpers.h>
+ #include <bpf/bpf_core_read.h>
+ #include <bpf/bpf_tracing.h>
+ 
+ #include "biotop.h"
+-#include "maps.bpf.h"
+-#include "core_fixes.bpf.h"
+-#include "mntns_filter.h"
++#include <gadget/maps.bpf.h>
++#include <gadget/core_fixes.bpf.h>
++#include <gadget/mntns_filter.h>
+ 
+ struct {
+ 	__uint(type, BPF_MAP_TYPE_HASH);
+diff --git a/pkg/gadgets/top/block-io/tracer/tracer.go b/pkg/gadgets/top/block-io/tracer/tracer.go
+index 6a31c01e34d..2410e323b3f 100644
+--- a/pkg/gadgets/top/block-io/tracer/tracer.go
++++ b/pkg/gadgets/top/block-io/tracer/tracer.go
+@@ -34,7 +34,7 @@ import (
+ 	eventtypes "github.com/inspektor-gadget/inspektor-gadget/pkg/types"
+ )
+ 
+-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target $TARGET -type info_t -type val_t -cc clang biotop ./bpf/biotop.bpf.c -- -I./bpf/ -I../../../../${TARGET}  -I ../../../common/
++//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target $TARGET -type info_t -type val_t -cc clang -cflags ${CFLAGS} biotop ./bpf/biotop.bpf.c --
+ 
+ type Config struct {
+ 	MaxRows    int
+diff --git a/pkg/gadgets/top/ebpf/piditer/bpf/pid_iter.bpf.c b/pkg/gadgets/top/ebpf/piditer/bpf/pid_iter.bpf.c
+index 5f072f61290..eb8fcb434d1 100644
+--- a/pkg/gadgets/top/ebpf/piditer/bpf/pid_iter.bpf.c
++++ b/pkg/gadgets/top/ebpf/piditer/bpf/pid_iter.bpf.c
+@@ -1,6 +1,6 @@
+ // SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+ /* Copyright (c) 2020 Facebook, (c) 2022 The Inspektor Gadget authors */
+-#include <vmlinux/vmlinux.h>
++#include <vmlinux.h>
+ #include <bpf/bpf_helpers.h>
+ #include <bpf/bpf_core_read.h>
+ #include <bpf/bpf_tracing.h>
+diff --git a/pkg/gadgets/top/ebpf/piditer/iter.go b/pkg/gadgets/top/ebpf/piditer/iter.go
+index ebe5c8724c3..07e08856f78 100644
+--- a/pkg/gadgets/top/ebpf/piditer/iter.go
++++ b/pkg/gadgets/top/ebpf/piditer/iter.go
+@@ -26,7 +26,7 @@ import (
+ 	bpfiterns "github.com/inspektor-gadget/inspektor-gadget/pkg/utils/bpf-iter-ns"
+ )
+ 
+-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target $TARGET -cc clang -type pid_iter_entry piditer ./bpf/pid_iter.bpf.c -- -I./bpf/ -I../../../../${TARGET}
++//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target $TARGET -cc clang -cflags ${CFLAGS} -type pid_iter_entry piditer ./bpf/pid_iter.bpf.c -- -I./bpf/
+ 
+ type PidIter struct {
+ 	objs piditerObjects
+diff --git a/pkg/gadgets/top/file/tracer/bpf/filetop.bpf.c b/pkg/gadgets/top/file/tracer/bpf/filetop.bpf.c
+index 06ce73950f8..79297cd08b0 100644
+--- a/pkg/gadgets/top/file/tracer/bpf/filetop.bpf.c
++++ b/pkg/gadgets/top/file/tracer/bpf/filetop.bpf.c
+@@ -1,12 +1,12 @@
+ /* SPDX-License-Identifier: (LGPL-2.1 OR BSD-2-Clause) */
+ /* Copyright (c) 2021 Hengqi Chen */
+-#include <vmlinux/vmlinux.h>
++#include <vmlinux.h>
+ #include <bpf/bpf_helpers.h>
+ #include <bpf/bpf_core_read.h>
+ #include <bpf/bpf_tracing.h>
+ #include "filetop.h"
+ #include "stat.h"
+-#include "mntns_filter.h"
++#include <gadget/mntns_filter.h>
+ 
+ #define MAX_ENTRIES 10240
+ 
+diff --git a/pkg/gadgets/top/file/tracer/filetop_bpfel_arm64.o b/pkg/gadgets/top/file/tracer/filetop_bpfel_arm64.o
+index 2af8254fb39..ca0d11e6392 100644
+Binary files a/pkg/gadgets/top/file/tracer/filetop_bpfel_arm64.o and b/pkg/gadgets/top/file/tracer/filetop_bpfel_arm64.o differ
+diff --git a/pkg/gadgets/top/file/tracer/filetop_bpfel_x86.o b/pkg/gadgets/top/file/tracer/filetop_bpfel_x86.o
+index 18274fe35e7..87e6b563f81 100644
+Binary files a/pkg/gadgets/top/file/tracer/filetop_bpfel_x86.o and b/pkg/gadgets/top/file/tracer/filetop_bpfel_x86.o differ
+diff --git a/pkg/gadgets/top/file/tracer/tracer.go b/pkg/gadgets/top/file/tracer/tracer.go
+index 34a64f8dc50..b94d7f69a13 100644
+--- a/pkg/gadgets/top/file/tracer/tracer.go
++++ b/pkg/gadgets/top/file/tracer/tracer.go
+@@ -33,7 +33,7 @@ import (
+ 	eventtypes "github.com/inspektor-gadget/inspektor-gadget/pkg/types"
+ )
+ 
+-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target $TARGET -type file_stat -type file_id -cc clang filetop ./bpf/filetop.bpf.c -- -I./bpf/ -I../../../../${TARGET} -I ../../../common/
++//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target $TARGET -type file_stat -type file_id -cc clang -cflags ${CFLAGS} filetop ./bpf/filetop.bpf.c --
+ 
+ type Config struct {
+ 	MountnsMap *ebpf.Map
+diff --git a/pkg/gadgets/top/tcp/tracer/bpf/tcptop.bpf.c b/pkg/gadgets/top/tcp/tracer/bpf/tcptop.bpf.c
+index b7dec3c4aec..b9a30b0684c 100644
+--- a/pkg/gadgets/top/tcp/tracer/bpf/tcptop.bpf.c
++++ b/pkg/gadgets/top/tcp/tracer/bpf/tcptop.bpf.c
+@@ -1,13 +1,13 @@
+ // SPDX-License-Identifier: GPL-2.0
+ // Copyright (c) 2022 Francis Laniel <flaniel@linux.microsoft.com>
+-#include <vmlinux/vmlinux.h>
++#include <vmlinux.h>
+ #include <bpf/bpf_helpers.h>
+ #include <bpf/bpf_core_read.h>
+ #include <bpf/bpf_tracing.h>
+ #include <bpf/bpf_endian.h>
+ 
+ #include "tcptop.h"
+-#include "mntns_filter.h"
++#include <gadget/mntns_filter.h>
+ 
+ /* Taken from kernel include/linux/socket.h. */
+ #define AF_INET 2 /* Internet IP Protocol 	*/
+diff --git a/pkg/gadgets/top/tcp/tracer/tcptop_bpfel_arm64.o b/pkg/gadgets/top/tcp/tracer/tcptop_bpfel_arm64.o
+index 7d61e42487a..4b33ac63fd7 100644
+Binary files a/pkg/gadgets/top/tcp/tracer/tcptop_bpfel_arm64.o and b/pkg/gadgets/top/tcp/tracer/tcptop_bpfel_arm64.o differ
+diff --git a/pkg/gadgets/top/tcp/tracer/tcptop_bpfel_x86.o b/pkg/gadgets/top/tcp/tracer/tcptop_bpfel_x86.o
+index edb02946661..67ce69c2f19 100644
+Binary files a/pkg/gadgets/top/tcp/tracer/tcptop_bpfel_x86.o and b/pkg/gadgets/top/tcp/tracer/tcptop_bpfel_x86.o differ
+diff --git a/pkg/gadgets/top/tcp/tracer/tracer.go b/pkg/gadgets/top/tcp/tracer/tracer.go
+index b1d700955dc..3d2f90258d5 100644
+--- a/pkg/gadgets/top/tcp/tracer/tracer.go
++++ b/pkg/gadgets/top/tcp/tracer/tracer.go
+@@ -33,7 +33,7 @@ import (
+ 	eventtypes "github.com/inspektor-gadget/inspektor-gadget/pkg/types"
+ )
+ 
+-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -no-global-types -target $TARGET -type ip_key_t -type traffic_t -cc clang tcptop ./bpf/tcptop.bpf.c -- -I./bpf/ -I../../../../${TARGET} -I ../../../common/
++//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -no-global-types -target $TARGET -type ip_key_t -type traffic_t -cc clang -cflags ${CFLAGS} tcptop ./bpf/tcptop.bpf.c -- -I./bpf/
+ 
+ type Config struct {
+ 	MountnsMap   *ebpf.Map
+diff --git a/pkg/gadgets/trace/bind/tracer/bindsnoop_bpfel_arm64.o b/pkg/gadgets/trace/bind/tracer/bindsnoop_bpfel_arm64.o
+index f8244fd0a73..aced7e31c58 100644
+Binary files a/pkg/gadgets/trace/bind/tracer/bindsnoop_bpfel_arm64.o and b/pkg/gadgets/trace/bind/tracer/bindsnoop_bpfel_arm64.o differ
+diff --git a/pkg/gadgets/trace/bind/tracer/bindsnoop_bpfel_x86.o b/pkg/gadgets/trace/bind/tracer/bindsnoop_bpfel_x86.o
+index 1c2bd2eec03..8be8449c237 100644
+Binary files a/pkg/gadgets/trace/bind/tracer/bindsnoop_bpfel_x86.o and b/pkg/gadgets/trace/bind/tracer/bindsnoop_bpfel_x86.o differ
+diff --git a/pkg/gadgets/trace/bind/tracer/bpf/bindsnoop.bpf.c b/pkg/gadgets/trace/bind/tracer/bpf/bindsnoop.bpf.c
+index 8e90b0d77e4..9a162ec8426 100644
+--- a/pkg/gadgets/trace/bind/tracer/bpf/bindsnoop.bpf.c
++++ b/pkg/gadgets/trace/bind/tracer/bpf/bindsnoop.bpf.c
+@@ -1,12 +1,12 @@
+ /* SPDX-License-Identifier: (LGPL-2.1 OR BSD-2-Clause) */
+ /* Copyright (c) 2021 Hengqi Chen */
+-#include <vmlinux/vmlinux.h>
++#include <vmlinux.h>
+ #include <bpf/bpf_helpers.h>
+ #include <bpf/bpf_core_read.h>
+ #include <bpf/bpf_tracing.h>
+ #include <bpf/bpf_endian.h>
+ #include "bindsnoop.h"
+-#include "mntns_filter.h"
++#include <gadget/mntns_filter.h>
+ 
+ #define MAX_ENTRIES 10240
+ #define MAX_PORTS 1024
+diff --git a/pkg/gadgets/trace/bind/tracer/tracer.go b/pkg/gadgets/trace/bind/tracer/tracer.go
+index d2a6c8f2720..a977445ee3a 100644
+--- a/pkg/gadgets/trace/bind/tracer/tracer.go
++++ b/pkg/gadgets/trace/bind/tracer/tracer.go
+@@ -33,7 +33,7 @@ import (
+ 	eventtypes "github.com/inspektor-gadget/inspektor-gadget/pkg/types"
+ )
+ 
+-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target $TARGET -cc clang -type bind_event bindsnoop ./bpf/bindsnoop.bpf.c -- -I./bpf/ -I../../../../${TARGET} -I ../../../common/
++//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target $TARGET -cc clang -cflags ${CFLAGS} -type bind_event bindsnoop ./bpf/bindsnoop.bpf.c -- -I./bpf/
+ 
+ type Config struct {
+ 	MountnsMap   *ebpf.Map
+diff --git a/pkg/gadgets/trace/capabilities/tracer/bpf/capable.bpf.c b/pkg/gadgets/trace/capabilities/tracer/bpf/capable.bpf.c
+index 7f3fdac77f7..61e06427e77 100644
+--- a/pkg/gadgets/trace/capabilities/tracer/bpf/capable.bpf.c
++++ b/pkg/gadgets/trace/capabilities/tracer/bpf/capable.bpf.c
+@@ -5,12 +5,12 @@
+ //
+ // Copyright 2022 Sony Group Corporation
+ 
+-#include <vmlinux/vmlinux.h>
++#include <vmlinux.h>
+ #include <bpf/bpf_core_read.h>
+ #include <bpf/bpf_helpers.h>
+ #include <bpf/bpf_tracing.h>
+ #include "capable.h"
+-#include "mntns_filter.h"
++#include <gadget/mntns_filter.h>
+ 
+ // include/linux/security.h
+ #ifndef CAP_OPT_NOAUDIT
+diff --git a/pkg/gadgets/trace/capabilities/tracer/capabilities_bpfel_arm64.o b/pkg/gadgets/trace/capabilities/tracer/capabilities_bpfel_arm64.o
+index 33062e8a5c4..67d059a2afc 100644
+Binary files a/pkg/gadgets/trace/capabilities/tracer/capabilities_bpfel_arm64.o and b/pkg/gadgets/trace/capabilities/tracer/capabilities_bpfel_arm64.o differ
+diff --git a/pkg/gadgets/trace/capabilities/tracer/capabilities_bpfel_x86.o b/pkg/gadgets/trace/capabilities/tracer/capabilities_bpfel_x86.o
+index 4f2b3bc20b6..a82bd3ca716 100644
+Binary files a/pkg/gadgets/trace/capabilities/tracer/capabilities_bpfel_x86.o and b/pkg/gadgets/trace/capabilities/tracer/capabilities_bpfel_x86.o differ
+diff --git a/pkg/gadgets/trace/capabilities/tracer/tracer.go b/pkg/gadgets/trace/capabilities/tracer/tracer.go
+index e22e5ee8f9d..bf7d39aed39 100644
+--- a/pkg/gadgets/trace/capabilities/tracer/tracer.go
++++ b/pkg/gadgets/trace/capabilities/tracer/tracer.go
+@@ -34,7 +34,7 @@ import (
+ 	eventtypes "github.com/inspektor-gadget/inspektor-gadget/pkg/types"
+ )
+ 
+-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target $TARGET -cc clang -type cap_event capabilities ./bpf/capable.bpf.c -- -I./bpf/ -I../../../../${TARGET} -I ../../../common/
++//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target ${TARGET} -cc clang -cflags ${CFLAGS} -type cap_event capabilities ./bpf/capable.bpf.c -- -I./bpf/
+ 
+ type Config struct {
+ 	MountnsMap *ebpf.Map
+diff --git a/pkg/gadgets/trace/dns/tracer/bpf/dns.c b/pkg/gadgets/trace/dns/tracer/bpf/dns.c
+index 4b4008351cf..25406840e49 100644
+--- a/pkg/gadgets/trace/dns/tracer/bpf/dns.c
++++ b/pkg/gadgets/trace/dns/tracer/bpf/dns.c
+@@ -12,7 +12,7 @@
+ #include <bpf/bpf_endian.h>
+ 
+ #define GADGET_TYPE_NETWORKING
+-#include <sockets-map.h>
++#include <gadget/sockets-map.h>
+ 
+ #include "dns-common.h"
+ 
+@@ -210,7 +210,7 @@ static __always_inline int output_dns_event(struct __sk_buff *skb,
+ 
+ 	// Check network protocol.
+ 	// This only works with IPv4.
+-	// For IPv6, gadget_socket_lookup() in pkg/gadgets/internal/socketenricher/bpf/sockets-map.h
++	// For IPv6, gadget_socket_lookup() in sockets-map.h
+ 	// provides an example how to parse ip/ports on IPv6.
+ 	event->proto =
+ 		load_byte(skb, ETH_HLEN + offsetof(struct iphdr, protocol));
+diff --git a/pkg/gadgets/trace/dns/tracer/dns_bpfel.o b/pkg/gadgets/trace/dns/tracer/dns_bpfel.o
+index ecf7606a7e9..20803267f2e 100644
+Binary files a/pkg/gadgets/trace/dns/tracer/dns_bpfel.o and b/pkg/gadgets/trace/dns/tracer/dns_bpfel.o differ
+diff --git a/pkg/gadgets/trace/dns/tracer/tracer.go b/pkg/gadgets/trace/dns/tracer/tracer.go
+index febeeb194d4..a3ce3d5070b 100644
+--- a/pkg/gadgets/trace/dns/tracer/tracer.go
++++ b/pkg/gadgets/trace/dns/tracer/tracer.go
+@@ -30,7 +30,7 @@ import (
+ 	eventtypes "github.com/inspektor-gadget/inspektor-gadget/pkg/types"
+ )
+ 
+-//go:generate bash -c "source ../../../internal/networktracer/clangosflags.sh; go run github.com/cilium/ebpf/cmd/bpf2go -target bpfel -cc clang -type event_t dns ./bpf/dns.c -- $CLANG_OS_FLAGS -I./bpf/ -I../../../internal/socketenricher/bpf"
++//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target bpfel -cc clang -cflags ${CFLAGS} -type event_t dns ./bpf/dns.c -- $CLANG_OS_FLAGS -I./bpf/
+ 
+ const (
+ 	BPFQueryMapName = "query_map"
+diff --git a/pkg/gadgets/trace/exec/tracer/bpf/execsnoop.bpf.c b/pkg/gadgets/trace/exec/tracer/bpf/execsnoop.bpf.c
+index 334fb30a51f..d30c9fe0c0b 100644
+--- a/pkg/gadgets/trace/exec/tracer/bpf/execsnoop.bpf.c
++++ b/pkg/gadgets/trace/exec/tracer/bpf/execsnoop.bpf.c
+@@ -1,14 +1,14 @@
+ // SPDX-License-Identifier: (LGPL-2.1 OR BSD-2-Clause)
+-#include <vmlinux/vmlinux.h>
++#include <vmlinux.h>
+ #include <bpf/bpf_helpers.h>
+ #include <bpf/bpf_core_read.h>
+ #ifdef __TARGET_ARCH_arm64
+ #include <bpf/bpf_tracing.h>
+ #endif /* __TARGET_ARCH_arm64 */
+ 
+-#include "mntns_filter.h"
++#include <gadget/mntns_filter.h>
+ #ifdef WITH_CWD
+-#include "filesystem.h"
++#include <gadget/filesystem.h>
+ #endif
+ #include "execsnoop.h"
+ 
+diff --git a/pkg/gadgets/trace/exec/tracer/execsnoop_bpfel_arm64.o b/pkg/gadgets/trace/exec/tracer/execsnoop_bpfel_arm64.o
+index c2c41784f20..1ca9d93bee9 100644
+Binary files a/pkg/gadgets/trace/exec/tracer/execsnoop_bpfel_arm64.o and b/pkg/gadgets/trace/exec/tracer/execsnoop_bpfel_arm64.o differ
+diff --git a/pkg/gadgets/trace/exec/tracer/execsnoop_bpfel_x86.o b/pkg/gadgets/trace/exec/tracer/execsnoop_bpfel_x86.o
+index 8e2d9eb2948..cc132f7fd39 100644
+Binary files a/pkg/gadgets/trace/exec/tracer/execsnoop_bpfel_x86.o and b/pkg/gadgets/trace/exec/tracer/execsnoop_bpfel_x86.o differ
+diff --git a/pkg/gadgets/trace/exec/tracer/execsnoopwithcwd_bpfel_arm64.o b/pkg/gadgets/trace/exec/tracer/execsnoopwithcwd_bpfel_arm64.o
+index 303b784a635..bdd33b1ca24 100644
+Binary files a/pkg/gadgets/trace/exec/tracer/execsnoopwithcwd_bpfel_arm64.o and b/pkg/gadgets/trace/exec/tracer/execsnoopwithcwd_bpfel_arm64.o differ
+diff --git a/pkg/gadgets/trace/exec/tracer/execsnoopwithcwd_bpfel_x86.o b/pkg/gadgets/trace/exec/tracer/execsnoopwithcwd_bpfel_x86.o
+index 91f2c864b42..631ec78a6c6 100644
+Binary files a/pkg/gadgets/trace/exec/tracer/execsnoopwithcwd_bpfel_x86.o and b/pkg/gadgets/trace/exec/tracer/execsnoopwithcwd_bpfel_x86.o differ
+diff --git a/pkg/gadgets/trace/exec/tracer/tracer.go b/pkg/gadgets/trace/exec/tracer/tracer.go
+index 1ae48879fb4..5f5d6d07a04 100644
+--- a/pkg/gadgets/trace/exec/tracer/tracer.go
++++ b/pkg/gadgets/trace/exec/tracer/tracer.go
+@@ -32,8 +32,8 @@ import (
+ 	eventtypes "github.com/inspektor-gadget/inspektor-gadget/pkg/types"
+ )
+ 
+-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target ${TARGET} -cc clang -type event execsnoop ./bpf/execsnoop.bpf.c -- -I./bpf/ -I../../../../${TARGET} -I ../../../common/
+-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target ${TARGET} -cc clang -type event execsnoopWithCwd ./bpf/execsnoop.bpf.c -- -DWITH_CWD -I./bpf/ -I../../../../${TARGET} -I ../../../common/
++//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target ${TARGET} -cc clang -cflags ${CFLAGS} -type event execsnoop ./bpf/execsnoop.bpf.c -- -I./bpf/
++//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target ${TARGET} -cc clang -cflags ${CFLAGS} -type event execsnoopWithCwd ./bpf/execsnoop.bpf.c -- -DWITH_CWD -I./bpf/
+ 
+ type Config struct {
+ 	MountnsMap   *ebpf.Map
+diff --git a/pkg/gadgets/trace/fsslower/tracer/bpf/fsslower.bpf.c b/pkg/gadgets/trace/fsslower/tracer/bpf/fsslower.bpf.c
+index 475b696111c..c35376fd367 100644
+--- a/pkg/gadgets/trace/fsslower/tracer/bpf/fsslower.bpf.c
++++ b/pkg/gadgets/trace/fsslower/tracer/bpf/fsslower.bpf.c
+@@ -1,11 +1,11 @@
+ /* SPDX-License-Identifier: GPL-2.0 */
+ /* Copyright (c) 2020 Wenbo Zhang */
+-#include <vmlinux/vmlinux.h>
++#include <vmlinux.h>
+ #include <bpf/bpf_helpers.h>
+ #include <bpf/bpf_core_read.h>
+ #include <bpf/bpf_tracing.h>
+ #include "fsslower.h"
+-#include "mntns_filter.h"
++#include <gadget/mntns_filter.h>
+ 
+ #define MAX_ENTRIES 8192
+ 
+diff --git a/pkg/gadgets/trace/fsslower/tracer/fsslower_bpfel_arm64.o b/pkg/gadgets/trace/fsslower/tracer/fsslower_bpfel_arm64.o
+index a0540538daa..e5fbe723447 100644
+Binary files a/pkg/gadgets/trace/fsslower/tracer/fsslower_bpfel_arm64.o and b/pkg/gadgets/trace/fsslower/tracer/fsslower_bpfel_arm64.o differ
+diff --git a/pkg/gadgets/trace/fsslower/tracer/fsslower_bpfel_x86.o b/pkg/gadgets/trace/fsslower/tracer/fsslower_bpfel_x86.o
+index 27ef284b0ce..e26249ede7c 100644
+Binary files a/pkg/gadgets/trace/fsslower/tracer/fsslower_bpfel_x86.o and b/pkg/gadgets/trace/fsslower/tracer/fsslower_bpfel_x86.o differ
+diff --git a/pkg/gadgets/trace/fsslower/tracer/tracer.go b/pkg/gadgets/trace/fsslower/tracer/tracer.go
+index 9f44a6959be..0594b21f332 100644
+--- a/pkg/gadgets/trace/fsslower/tracer/tracer.go
++++ b/pkg/gadgets/trace/fsslower/tracer/tracer.go
+@@ -32,8 +32,7 @@ import (
+ 	eventtypes "github.com/inspektor-gadget/inspektor-gadget/pkg/types"
+ )
+ 
+-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -no-global-types -target $TARGET -cc clang -type event fsslower ./bpf/fsslower.bpf.c -- -I./bpf/ -I../../../../${TARGET} -I ../../../common/
+-
++//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -no-global-types -target $TARGET -cc clang -cflags ${CFLAGS} -type event fsslower ./bpf/fsslower.bpf.c -- -I./bpf/
+ type Config struct {
+ 	MountnsMap *ebpf.Map
+ 
+diff --git a/pkg/gadgets/trace/mount/tracer/bpf/mountsnoop.bpf.c b/pkg/gadgets/trace/mount/tracer/bpf/mountsnoop.bpf.c
+index b7c2185c8ec..4a2823c80cc 100644
+--- a/pkg/gadgets/trace/mount/tracer/bpf/mountsnoop.bpf.c
++++ b/pkg/gadgets/trace/mount/tracer/bpf/mountsnoop.bpf.c
+@@ -1,10 +1,10 @@
+ /* SPDX-License-Identifier: GPL-2.0 */
+ /* Copyright (c) 2021 Hengqi Chen */
+-#include <vmlinux/vmlinux.h>
++#include <vmlinux.h>
+ #include <bpf/bpf_helpers.h>
+ #include <bpf/bpf_core_read.h>
+ #include "mountsnoop.h"
+-#include "mntns_filter.h"
++#include <gadget/mntns_filter.h>
+ 
+ #define MAX_ENTRIES 10240
+ 
+diff --git a/pkg/gadgets/trace/mount/tracer/mountsnoop_bpfel.o b/pkg/gadgets/trace/mount/tracer/mountsnoop_bpfel.o
+index f9f3d6e716b..7deb06915e4 100644
+Binary files a/pkg/gadgets/trace/mount/tracer/mountsnoop_bpfel.o and b/pkg/gadgets/trace/mount/tracer/mountsnoop_bpfel.o differ
+diff --git a/pkg/gadgets/trace/mount/tracer/tracer.go b/pkg/gadgets/trace/mount/tracer/tracer.go
+index b31cb1eb45d..f5d467b350e 100644
+--- a/pkg/gadgets/trace/mount/tracer/tracer.go
++++ b/pkg/gadgets/trace/mount/tracer/tracer.go
+@@ -32,7 +32,7 @@ import (
+ 	eventtypes "github.com/inspektor-gadget/inspektor-gadget/pkg/types"
+ )
+ 
+-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -no-global-types -target bpfel -cc clang -type event -type op mountsnoop ./bpf/mountsnoop.bpf.c -- -I./bpf/ -I../../../../${TARGET} -I ../../../common/
++//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -no-global-types -target bpfel -cc clang -cflags ${CFLAGS} -type event -type op mountsnoop ./bpf/mountsnoop.bpf.c -- -I./bpf/
+ 
+ type Config struct {
+ 	MountnsMap *ebpf.Map
+diff --git a/pkg/gadgets/trace/network/tracer/bpf/network.c b/pkg/gadgets/trace/network/tracer/bpf/network.c
+index 9adb896d5c8..db73cdb46be 100644
+--- a/pkg/gadgets/trace/network/tracer/bpf/network.c
++++ b/pkg/gadgets/trace/network/tracer/bpf/network.c
+@@ -11,7 +11,7 @@
+ #include <bpf/bpf_endian.h>
+ 
+ #define GADGET_TYPE_NETWORKING
+-#include <sockets-map.h>
++#include <gadget/sockets-map.h>
+ 
+ #include "network.h"
+ 
+diff --git a/pkg/gadgets/trace/network/tracer/network_bpfel.o b/pkg/gadgets/trace/network/tracer/network_bpfel.o
+index 19ebddc30e3..3db134bfd42 100644
+Binary files a/pkg/gadgets/trace/network/tracer/network_bpfel.o and b/pkg/gadgets/trace/network/tracer/network_bpfel.o differ
+diff --git a/pkg/gadgets/trace/network/tracer/tracer.go b/pkg/gadgets/trace/network/tracer/tracer.go
+index 4d5db629ac9..eb0abc00fff 100644
+--- a/pkg/gadgets/trace/network/tracer/tracer.go
++++ b/pkg/gadgets/trace/network/tracer/tracer.go
+@@ -31,7 +31,7 @@ import (
+ 	eventtypes "github.com/inspektor-gadget/inspektor-gadget/pkg/types"
+ )
+ 
+-//go:generate bash -c "source ../../../internal/networktracer/clangosflags.sh; go run github.com/cilium/ebpf/cmd/bpf2go -target bpfel -cc clang -type event_t network ./bpf/network.c -- $CLANG_OS_FLAGS -I./bpf/ -I../../../internal/socketenricher/bpf"
++//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target bpfel -cc clang -cflags ${CFLAGS} -type event_t network ./bpf/network.c -- $CLANG_OS_FLAGS -I./bpf/ -I../../../../../include/
+ 
+ type Tracer struct {
+ 	*networktracer.Tracer[types.Event]
+diff --git a/pkg/gadgets/trace/oomkill/tracer/bpf/oomkill.bpf.c b/pkg/gadgets/trace/oomkill/tracer/bpf/oomkill.bpf.c
+index d55a20a3d2a..1e603670279 100644
+--- a/pkg/gadgets/trace/oomkill/tracer/bpf/oomkill.bpf.c
++++ b/pkg/gadgets/trace/oomkill/tracer/bpf/oomkill.bpf.c
+@@ -1,13 +1,13 @@
+ // SPDX-License-Identifier: GPL-2.0
+ // Copyright (c) 2022 Jingxiang Zeng
+ // Copyright (c) 2022 Francis Laniel <flaniel@linux.microsoft.com>
+-#include <vmlinux/vmlinux.h>
++#include <vmlinux.h>
+ #include <bpf/bpf_helpers.h>
+ #include <bpf/bpf_core_read.h>
+ #include <bpf/bpf_tracing.h>
+ 
+ #include "oomkill.h"
+-#include "mntns_filter.h"
++#include <gadget/mntns_filter.h>
+ 
+ // we need this to make sure the compiler doesn't remove our struct
+ const struct data_t *unuseddata __attribute__((unused));
+diff --git a/pkg/gadgets/trace/oomkill/tracer/oomkill_bpfel_arm64.o b/pkg/gadgets/trace/oomkill/tracer/oomkill_bpfel_arm64.o
+index 12dc1255828..8f13c52ab69 100644
+Binary files a/pkg/gadgets/trace/oomkill/tracer/oomkill_bpfel_arm64.o and b/pkg/gadgets/trace/oomkill/tracer/oomkill_bpfel_arm64.o differ
+diff --git a/pkg/gadgets/trace/oomkill/tracer/oomkill_bpfel_x86.o b/pkg/gadgets/trace/oomkill/tracer/oomkill_bpfel_x86.o
+index c14de4ed039..d19f273b9f0 100644
+Binary files a/pkg/gadgets/trace/oomkill/tracer/oomkill_bpfel_x86.o and b/pkg/gadgets/trace/oomkill/tracer/oomkill_bpfel_x86.o differ
+diff --git a/pkg/gadgets/trace/oomkill/tracer/tracer.go b/pkg/gadgets/trace/oomkill/tracer/tracer.go
+index 7261be4667e..8636a9d5a5d 100644
+--- a/pkg/gadgets/trace/oomkill/tracer/tracer.go
++++ b/pkg/gadgets/trace/oomkill/tracer/tracer.go
+@@ -32,7 +32,7 @@ import (
+ 	eventtypes "github.com/inspektor-gadget/inspektor-gadget/pkg/types"
+ )
+ 
+-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target $TARGET -cc clang -type data_t oomkill ./bpf/oomkill.bpf.c -- -I./bpf/ -I../../../../${TARGET} -I ../../../common/
++//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target $TARGET -cc clang -cflags ${CFLAGS} -type data_t oomkill ./bpf/oomkill.bpf.c -- -I./bpf/
+ 
+ type Config struct {
+ 	MountnsMap *ebpf.Map
+diff --git a/pkg/gadgets/trace/open/tracer/bpf/opensnoop.bpf.c b/pkg/gadgets/trace/open/tracer/bpf/opensnoop.bpf.c
+index 1f06df9e6ee..c0bb530c129 100644
+--- a/pkg/gadgets/trace/open/tracer/bpf/opensnoop.bpf.c
++++ b/pkg/gadgets/trace/open/tracer/bpf/opensnoop.bpf.c
+@@ -1,11 +1,11 @@
+ // SPDX-License-Identifier: GPL-2.0
+ // Copyright (c) 2019 Facebook
+ // Copyright (c) 2020 Netflix
+-#include <vmlinux/vmlinux.h>
++#include <vmlinux.h>
+ #include <bpf/bpf_helpers.h>
+ #include <bpf/bpf_core_read.h>
+-#include "mntns_filter.h"
+-#include "filesystem.h"
++#include <gadget/mntns_filter.h>
++#include <gadget/filesystem.h>
+ #include "opensnoop.h"
+ 
+ #define TASK_RUNNING 0
+diff --git a/pkg/gadgets/trace/open/tracer/opensnoop_bpfel.o b/pkg/gadgets/trace/open/tracer/opensnoop_bpfel.o
+index 2b638424a19..f9659a088a8 100644
+Binary files a/pkg/gadgets/trace/open/tracer/opensnoop_bpfel.o and b/pkg/gadgets/trace/open/tracer/opensnoop_bpfel.o differ
+diff --git a/pkg/gadgets/trace/open/tracer/tracer.go b/pkg/gadgets/trace/open/tracer/tracer.go
+index 4d2be830120..d42c965f9f7 100644
+--- a/pkg/gadgets/trace/open/tracer/tracer.go
++++ b/pkg/gadgets/trace/open/tracer/tracer.go
+@@ -34,7 +34,7 @@ import (
+ 	eventtypes "github.com/inspektor-gadget/inspektor-gadget/pkg/types"
+ )
+ 
+-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -no-global-types -target bpfel -cc clang -type event opensnoop ./bpf/opensnoop.bpf.c -- -I./bpf/ -I../../../../${TARGET} -I ../../../common/
++//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -no-global-types -target bpfel -cc clang -cflags ${CFLAGS} -type event opensnoop ./bpf/opensnoop.bpf.c -- -I./bpf/
+ 
+ type Config struct {
+ 	MountnsMap *ebpf.Map
+diff --git a/pkg/gadgets/trace/signal/tracer/bpf/sigsnoop.bpf.c b/pkg/gadgets/trace/signal/tracer/bpf/sigsnoop.bpf.c
+index 9881815ff32..b1ad601bb5e 100644
+--- a/pkg/gadgets/trace/signal/tracer/bpf/sigsnoop.bpf.c
++++ b/pkg/gadgets/trace/signal/tracer/bpf/sigsnoop.bpf.c
+@@ -1,10 +1,10 @@
+ // SPDX-License-Identifier: (LGPL-2.1 OR BSD-2-Clause)
+ /* Copyright (c) 2021~2022 Hengqi Chen */
+-#include <vmlinux/vmlinux.h>
++#include <vmlinux.h>
+ #include <bpf/bpf_core_read.h>
+ #include <bpf/bpf_helpers.h>
+ #include "sigsnoop.h"
+-#include "mntns_filter.h"
++#include <gadget/mntns_filter.h>
+ 
+ #define MAX_ENTRIES 10240
+ 
+diff --git a/pkg/gadgets/trace/signal/tracer/sigsnoop_bpfel.o b/pkg/gadgets/trace/signal/tracer/sigsnoop_bpfel.o
+index 78fbd8ea399..a32d21236d7 100644
+Binary files a/pkg/gadgets/trace/signal/tracer/sigsnoop_bpfel.o and b/pkg/gadgets/trace/signal/tracer/sigsnoop_bpfel.o differ
+diff --git a/pkg/gadgets/trace/signal/tracer/tracer.go b/pkg/gadgets/trace/signal/tracer/tracer.go
+index c0301865d61..8d1b606a873 100644
+--- a/pkg/gadgets/trace/signal/tracer/tracer.go
++++ b/pkg/gadgets/trace/signal/tracer/tracer.go
+@@ -37,7 +37,7 @@ import (
+ 	"golang.org/x/sys/unix"
+ )
+ 
+-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target bpfel -cc clang -type event sigsnoop ./bpf/sigsnoop.bpf.c -- -I../../../../${TARGET} -I ../../../common/
++//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target bpfel -cc clang -cflags ${CFLAGS} -type event sigsnoop ./bpf/sigsnoop.bpf.c --
+ 
+ type Config struct {
+ 	MountnsMap   *ebpf.Map
+diff --git a/pkg/gadgets/trace/sni/tracer/bpf/snisnoop.c b/pkg/gadgets/trace/sni/tracer/bpf/snisnoop.c
+index 9d42c94fdf0..f3ad8e1a18a 100644
+--- a/pkg/gadgets/trace/sni/tracer/bpf/snisnoop.c
++++ b/pkg/gadgets/trace/sni/tracer/bpf/snisnoop.c
+@@ -12,7 +12,7 @@
+ #include <bpf/bpf_endian.h>
+ 
+ #define GADGET_TYPE_NETWORKING
+-#include <sockets-map.h>
++#include <gadget/sockets-map.h>
+ 
+ #include "snisnoop.h"
+ 
+diff --git a/pkg/gadgets/trace/sni/tracer/snisnoop_bpfel.o b/pkg/gadgets/trace/sni/tracer/snisnoop_bpfel.o
+index 743d90d2faf..4bd86fe16f0 100644
+Binary files a/pkg/gadgets/trace/sni/tracer/snisnoop_bpfel.o and b/pkg/gadgets/trace/sni/tracer/snisnoop_bpfel.o differ
+diff --git a/pkg/gadgets/trace/sni/tracer/tracer.go b/pkg/gadgets/trace/sni/tracer/tracer.go
+index f4b7884a56e..f4d04e43b4f 100644
+--- a/pkg/gadgets/trace/sni/tracer/tracer.go
++++ b/pkg/gadgets/trace/sni/tracer/tracer.go
+@@ -29,7 +29,7 @@ import (
+ 	eventtypes "github.com/inspektor-gadget/inspektor-gadget/pkg/types"
+ )
+ 
+-//go:generate bash -c "source ../../../internal/networktracer/clangosflags.sh; go run github.com/cilium/ebpf/cmd/bpf2go -target bpfel -cc clang -type event_t snisnoop ./bpf/snisnoop.c -- $CLANG_OS_FLAGS -I./bpf/ -I../../../internal/socketenricher/bpf"
++//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target bpfel -cc clang -cflags ${CFLAGS} -type event_t snisnoop ./bpf/snisnoop.c -- $CLANG_OS_FLAGS -I./bpf/
+ 
+ const (
+ 	TLSMaxServerNameLen = len(snisnoopEventT{}.Name)
+diff --git a/pkg/gadgets/trace/tcp/tracer/bpf/tcptracer.bpf.c b/pkg/gadgets/trace/tcp/tracer/bpf/tcptracer.bpf.c
+index 65b9ab671e5..1e36627e2e8 100644
+--- a/pkg/gadgets/trace/tcp/tracer/bpf/tcptracer.bpf.c
++++ b/pkg/gadgets/trace/tcp/tracer/bpf/tcptracer.bpf.c
+@@ -3,14 +3,14 @@
+ //
+ // Based on tcptracer(8) from BCC by Kinvolk GmbH and
+ // tcpconnect(8) by Anton Protopopov
+-#include <vmlinux/vmlinux.h>
++#include <vmlinux.h>
+ 
+ #include <bpf/bpf_helpers.h>
+ #include <bpf/bpf_core_read.h>
+ #include <bpf/bpf_tracing.h>
+ #include <bpf/bpf_endian.h>
+ #include "tcptracer.h"
+-#include "mntns_filter.h"
++#include <gadget/mntns_filter.h>
+ 
+ const volatile uid_t filter_uid = -1;
+ const volatile pid_t filter_pid = 0;
+diff --git a/pkg/gadgets/trace/tcp/tracer/tcptracer_bpfel_arm64.o b/pkg/gadgets/trace/tcp/tracer/tcptracer_bpfel_arm64.o
+index 78f8c978974..1acdef6f502 100644
+Binary files a/pkg/gadgets/trace/tcp/tracer/tcptracer_bpfel_arm64.o and b/pkg/gadgets/trace/tcp/tracer/tcptracer_bpfel_arm64.o differ
+diff --git a/pkg/gadgets/trace/tcp/tracer/tcptracer_bpfel_x86.o b/pkg/gadgets/trace/tcp/tracer/tcptracer_bpfel_x86.o
+index 62bea587836..d8d9720ebd9 100644
+Binary files a/pkg/gadgets/trace/tcp/tracer/tcptracer_bpfel_x86.o and b/pkg/gadgets/trace/tcp/tracer/tcptracer_bpfel_x86.o differ
+diff --git a/pkg/gadgets/trace/tcp/tracer/tracer.go b/pkg/gadgets/trace/tcp/tracer/tracer.go
+index 9ade5dd83f8..78a745713e8 100644
+--- a/pkg/gadgets/trace/tcp/tracer/tracer.go
++++ b/pkg/gadgets/trace/tcp/tracer/tracer.go
+@@ -32,7 +32,7 @@ import (
+ 	eventtypes "github.com/inspektor-gadget/inspektor-gadget/pkg/types"
+ )
+ 
+-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target $TARGET -cc clang -no-global-types -type event -type event_type tcptracer ./bpf/tcptracer.bpf.c -- -I./bpf/ -I../../../../${TARGET} -I ../../../common/
++//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target $TARGET -cc clang -cflags ${CFLAGS} -no-global-types -type event -type event_type tcptracer ./bpf/tcptracer.bpf.c -- -I./bpf/
+ 
+ type Config struct {
+ 	MountnsMap *ebpf.Map
+diff --git a/pkg/gadgets/trace/tcpconnect/tracer/bpf/tcpconnect.bpf.c b/pkg/gadgets/trace/tcpconnect/tracer/bpf/tcpconnect.bpf.c
+index f9a814e43db..99034fe2de7 100644
+--- a/pkg/gadgets/trace/tcpconnect/tracer/bpf/tcpconnect.bpf.c
++++ b/pkg/gadgets/trace/tcpconnect/tracer/bpf/tcpconnect.bpf.c
+@@ -2,15 +2,15 @@
+ // Copyright (c) 2020 Anton Protopopov
+ //
+ // Based on tcpconnect(8) from BCC by Brendan Gregg
+-#include <vmlinux/vmlinux.h>
++#include <vmlinux.h>
+ 
+ #include <bpf/bpf_helpers.h>
+ #include <bpf/bpf_core_read.h>
+ #include <bpf/bpf_tracing.h>
+ 
+-#include "maps.bpf.h"
++#include <gadget/maps.bpf.h>
+ #include "tcpconnect.h"
+-#include "mntns_filter.h"
++#include <gadget/mntns_filter.h>
+ 
+ const volatile int filter_ports[MAX_PORTS];
+ const volatile int filter_ports_len = 0;
+diff --git a/pkg/gadgets/trace/tcpconnect/tracer/tcpconnect_bpfel_arm64.o b/pkg/gadgets/trace/tcpconnect/tracer/tcpconnect_bpfel_arm64.o
+index 8a2196ba9e8..58e3ad8f1d7 100644
+Binary files a/pkg/gadgets/trace/tcpconnect/tracer/tcpconnect_bpfel_arm64.o and b/pkg/gadgets/trace/tcpconnect/tracer/tcpconnect_bpfel_arm64.o differ
+diff --git a/pkg/gadgets/trace/tcpconnect/tracer/tcpconnect_bpfel_x86.o b/pkg/gadgets/trace/tcpconnect/tracer/tcpconnect_bpfel_x86.o
+index 30c831d739b..496e54d1c18 100644
+Binary files a/pkg/gadgets/trace/tcpconnect/tracer/tcpconnect_bpfel_x86.o and b/pkg/gadgets/trace/tcpconnect/tracer/tcpconnect_bpfel_x86.o differ
+diff --git a/pkg/gadgets/trace/tcpconnect/tracer/tracer.go b/pkg/gadgets/trace/tcpconnect/tracer/tracer.go
+index 91976288057..7fea95630a9 100644
+--- a/pkg/gadgets/trace/tcpconnect/tracer/tracer.go
++++ b/pkg/gadgets/trace/tcpconnect/tracer/tracer.go
+@@ -33,7 +33,7 @@ import (
+ 	eventtypes "github.com/inspektor-gadget/inspektor-gadget/pkg/types"
+ )
+ 
+-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target $TARGET -cc clang -type event tcpconnect ./bpf/tcpconnect.bpf.c -- -I./bpf/ -I../../../../${TARGET} -I ../../../common/
++//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target $TARGET -cc clang -cflags ${CFLAGS} -type event tcpconnect ./bpf/tcpconnect.bpf.c -- -I./bpf/
+ 
+ type Config struct {
+ 	MountnsMap       *ebpf.Map
+diff --git a/pkg/gadgets/trace/tcpdrop/tracer/bpf/tcpdrop.bpf.c b/pkg/gadgets/trace/tcpdrop/tracer/bpf/tcpdrop.bpf.c
+index bbad8928f9d..2d3c210a409 100644
+--- a/pkg/gadgets/trace/tcpdrop/tracer/bpf/tcpdrop.bpf.c
++++ b/pkg/gadgets/trace/tcpdrop/tracer/bpf/tcpdrop.bpf.c
+@@ -7,7 +7,7 @@
+ // 15-Jun-2022    Rong Tao        Add tracepoint:skb:kfree_skb
+ // Copyright 2023 Microsoft Corporation
+ 
+-#include <vmlinux/vmlinux.h>
++#include <vmlinux.h>
+ 
+ #include <bpf/bpf_helpers.h>
+ #include <bpf/bpf_core_read.h>
+@@ -15,7 +15,7 @@
+ #include <bpf/bpf_endian.h>
+ 
+ #define GADGET_TYPE_TRACING
+-#include <sockets-map.h>
++#include <gadget/sockets-map.h>
+ 
+ #include "tcpdrop.h"
+ 
+diff --git a/pkg/gadgets/trace/tcpdrop/tracer/tcpdrop_bpfel_arm64.o b/pkg/gadgets/trace/tcpdrop/tracer/tcpdrop_bpfel_arm64.o
+index 793b5c96198..8d2dcdbfaec 100644
+Binary files a/pkg/gadgets/trace/tcpdrop/tracer/tcpdrop_bpfel_arm64.o and b/pkg/gadgets/trace/tcpdrop/tracer/tcpdrop_bpfel_arm64.o differ
+diff --git a/pkg/gadgets/trace/tcpdrop/tracer/tcpdrop_bpfel_x86.o b/pkg/gadgets/trace/tcpdrop/tracer/tcpdrop_bpfel_x86.o
+index e5fa9c50bad..ee64175e4e0 100644
+Binary files a/pkg/gadgets/trace/tcpdrop/tracer/tcpdrop_bpfel_x86.o and b/pkg/gadgets/trace/tcpdrop/tracer/tcpdrop_bpfel_x86.o differ
+diff --git a/pkg/gadgets/trace/tcpdrop/tracer/tracer.go b/pkg/gadgets/trace/tcpdrop/tracer/tracer.go
+index 280c03d1246..88aff7eeb07 100644
+--- a/pkg/gadgets/trace/tcpdrop/tracer/tracer.go
++++ b/pkg/gadgets/trace/tcpdrop/tracer/tracer.go
+@@ -36,8 +36,7 @@ import (
+ 	eventtypes "github.com/inspektor-gadget/inspektor-gadget/pkg/types"
+ )
+ 
+-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target $TARGET -cc clang -no-global-types -type event tcpdrop ./bpf/tcpdrop.bpf.c -- -I./bpf/ -I../../../../${TARGET} -I../../../internal/socketenricher/bpf
+-
++//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target $TARGET -cc clang -cflags ${CFLAGS} -no-global-types -type event tcpdrop ./bpf/tcpdrop.bpf.c -- -I./bpf/
+ type Tracer struct {
+ 	socketEnricher *socketenricher.SocketEnricher
+ 	dropReasons    map[int]string
+diff --git a/pkg/gadgets/trace/tcpretrans/tracer/bpf/tcpretrans.bpf.c b/pkg/gadgets/trace/tcpretrans/tracer/bpf/tcpretrans.bpf.c
+index c3b9e113a94..f6a9c87456a 100644
+--- a/pkg/gadgets/trace/tcpretrans/tracer/bpf/tcpretrans.bpf.c
++++ b/pkg/gadgets/trace/tcpretrans/tracer/bpf/tcpretrans.bpf.c
+@@ -8,7 +8,7 @@
+ // 03-Nov-2017   Matthias Tafelmeier Extended this.
+ // Copyright 2023 Microsoft Corporation
+ 
+-#include <vmlinux/vmlinux.h>
++#include <vmlinux.h>
+ 
+ #include <bpf/bpf_helpers.h>
+ #include <bpf/bpf_core_read.h>
+@@ -16,7 +16,7 @@
+ #include <bpf/bpf_endian.h>
+ 
+ #define GADGET_TYPE_TRACING
+-#include <sockets-map.h>
++#include <gadget/sockets-map.h>
+ 
+ #include "tcpretrans.h"
+ 
+diff --git a/pkg/gadgets/trace/tcpretrans/tracer/tcpretrans_bpfel_arm64.o b/pkg/gadgets/trace/tcpretrans/tracer/tcpretrans_bpfel_arm64.o
+index 951ccf49e79..4e598c9f308 100644
+Binary files a/pkg/gadgets/trace/tcpretrans/tracer/tcpretrans_bpfel_arm64.o and b/pkg/gadgets/trace/tcpretrans/tracer/tcpretrans_bpfel_arm64.o differ
+diff --git a/pkg/gadgets/trace/tcpretrans/tracer/tcpretrans_bpfel_x86.o b/pkg/gadgets/trace/tcpretrans/tracer/tcpretrans_bpfel_x86.o
+index c7af2667abe..8dfa3e4dbed 100644
+Binary files a/pkg/gadgets/trace/tcpretrans/tracer/tcpretrans_bpfel_x86.o and b/pkg/gadgets/trace/tcpretrans/tracer/tcpretrans_bpfel_x86.o differ
+diff --git a/pkg/gadgets/trace/tcpretrans/tracer/tracer.go b/pkg/gadgets/trace/tcpretrans/tracer/tracer.go
+index ce8dd8fb050..caffbb924ed 100644
+--- a/pkg/gadgets/trace/tcpretrans/tracer/tracer.go
++++ b/pkg/gadgets/trace/tcpretrans/tracer/tracer.go
+@@ -34,7 +34,7 @@ import (
+ 	eventtypes "github.com/inspektor-gadget/inspektor-gadget/pkg/types"
+ )
+ 
+-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target $TARGET -cc clang -no-global-types -type event tcpretrans ./bpf/tcpretrans.bpf.c -- -I./bpf/ -I../../../../${TARGET} -I../../../internal/socketenricher/bpf
++//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target $TARGET -cc clang -cflags ${CFLAGS} -no-global-types -type event tcpretrans ./bpf/tcpretrans.bpf.c -- -I./bpf/
+ 
+ type Tracer struct {
+ 	socketEnricher *socketenricher.SocketEnricher
+diff --git a/pkg/gadgets/traceloop/tracer/bpf/traceloop.bpf.c b/pkg/gadgets/traceloop/tracer/bpf/traceloop.bpf.c
+index 529e8d27ad1..220c9b799da 100644
+--- a/pkg/gadgets/traceloop/tracer/bpf/traceloop.bpf.c
++++ b/pkg/gadgets/traceloop/tracer/bpf/traceloop.bpf.c
+@@ -1,5 +1,5 @@
+ // SPDX-License-Identifier: GPL-2.0
+-#include <vmlinux/vmlinux.h>
++#include <vmlinux.h>
+ #include <bpf/bpf_helpers.h>
+ #include <bpf/bpf_core_read.h>
+ #include <bpf/bpf_tracing.h>
+diff --git a/pkg/gadgets/traceloop/tracer/tracer.go b/pkg/gadgets/traceloop/tracer/tracer.go
+index d5623e68fee..2ae8e9692a6 100644
+--- a/pkg/gadgets/traceloop/tracer/tracer.go
++++ b/pkg/gadgets/traceloop/tracer/tracer.go
+@@ -41,7 +41,7 @@ import (
+ 	eventtypes "github.com/inspektor-gadget/inspektor-gadget/pkg/types"
+ )
+ 
+-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -type syscall_event_t -type syscall_event_cont_t -target ${TARGET} -cc clang traceloop ./bpf/traceloop.bpf.c -- -I./bpf/ -I../../../${TARGET}
++//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -type syscall_event_t -type syscall_event_cont_t -target ${TARGET} -cc clang -cflags ${CFLAGS} traceloop ./bpf/traceloop.bpf.c -- -I./bpf/
+ 
+ // These variables must match content of traceloop.h.
+ var (
+diff --git a/pkg/gadgettracermanager/containers-map/bpf/containers-map.c b/pkg/gadgettracermanager/containers-map/bpf/containers-map.c
+index 56706812744..da6d0856ccc 100644
+--- a/pkg/gadgettracermanager/containers-map/bpf/containers-map.c
++++ b/pkg/gadgettracermanager/containers-map/bpf/containers-map.c
+@@ -1,7 +1,7 @@
+ // SPDX-License-Identifier: (GPL-2.0 WITH Linux-syscall-note) OR Apache-2.0
+ /* Copyright (c) 2021 The Inspektor Gadget authors */
+ 
+-#include <vmlinux/vmlinux.h>
++#include <vmlinux.h>
+ 
+ #include <bpf/bpf_helpers.h>
+ 
+diff --git a/pkg/gadgettracermanager/containers-map/tracer.go b/pkg/gadgettracermanager/containers-map/tracer.go
+index 11cc1bb2ce8..d1824fac04b 100644
+--- a/pkg/gadgettracermanager/containers-map/tracer.go
++++ b/pkg/gadgettracermanager/containers-map/tracer.go
+@@ -27,7 +27,7 @@ import (
+ 	"github.com/inspektor-gadget/inspektor-gadget/pkg/gadgettracermanager/common"
+ )
+ 
+-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target bpfel -cc clang containersmap ./bpf/containers-map.c -- -I./bpf/ -I../../ -I../../${TARGET}
++//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target bpfel -cc clang -cflags ${CFLAGS} containersmap ./bpf/containers-map.c -- -I./bpf/ -I../../
+ 
+ const (
+ 	BPFMapName        = "containers"

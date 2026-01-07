@@ -1,0 +1,1850 @@
+diff --git a/crates/bevy_app/src/app.rs b/crates/bevy_app/src/app.rs
+index 0c3a7d89d1413..aff7afe904c7c 100644
+--- a/crates/bevy_app/src/app.rs
++++ b/crates/bevy_app/src/app.rs
+@@ -1,6 +1,4 @@
+-use crate::{
+-    First, Main, MainSchedulePlugin, Plugin, PluginGroup, Startup, StateTransition, Update,
+-};
++use crate::{First, Main, MainSchedulePlugin, Plugin, Plugins, Startup, StateTransition, Update};
+ pub use bevy_derive::AppLabel;
+ use bevy_ecs::{
+     prelude::*,
+@@ -18,6 +16,7 @@ use std::{
+ 
+ #[cfg(feature = "trace")]
+ use bevy_utils::tracing::info_span;
++
+ bevy_utils::define_label!(
+     /// A strongly-typed class of labels used to identify an [`App`].
+     AppLabel,
+@@ -183,7 +182,7 @@ impl Default for App {
+         #[cfg(feature = "bevy_reflect")]
+         app.init_resource::<AppTypeRegistry>();
+ 
+-        app.add_plugin(MainSchedulePlugin);
++        app.add_plugins(MainSchedulePlugin);
+         app.add_event::<AppExit>();
+ 
+         #[cfg(feature = "bevy_ci_testing")]
+@@ -685,19 +684,16 @@ impl App {
+     /// # Panics
+     ///
+     /// Panics if the plugin was already added to the application.
++    #[deprecated(since = "0.11.0", note = "Please use `add_plugins` instead.")]
+     pub fn add_plugin<T>(&mut self, plugin: T) -> &mut Self
+     where
+         T: Plugin,
+     {
+-        match self.add_boxed_plugin(Box::new(plugin)) {
+-            Ok(app) => app,
+-            Err(AppError::DuplicatePlugin { plugin_name }) => panic!(
+-                "Error adding plugin {plugin_name}: : plugin was already added in application"
+-            ),
+-        }
++        self.add_plugins(plugin)
+     }
+ 
+-    /// Boxed variant of [`add_plugin`](App::add_plugin) that can be used from a [`PluginGroup`]
++    /// Boxed variant of [`add_plugin`](App::add_plugin) that can be used from a
++    /// [`PluginGroup`](super::PluginGroup)
+     pub(crate) fn add_boxed_plugin(
+         &mut self,
+         plugin: Box<dyn Plugin>,
+@@ -752,7 +748,7 @@ impl App {
+     /// #    fn build(&self, app: &mut App) {}
+     /// # }
+     /// # let mut app = App::new();
+-    /// # app.add_plugin(ImagePlugin::default());
++    /// # app.add_plugins(ImagePlugin::default());
+     /// let default_sampler = app.get_added_plugins::<ImagePlugin>()[0].default_sampler;
+     /// ```
+     pub fn get_added_plugins<T>(&self) -> Vec<&T>
+@@ -765,7 +761,10 @@ impl App {
+             .collect()
+     }
+ 
+-    /// Adds a group of [`Plugin`]s.
++    /// Adds one or more [`Plugin`]s.
++    ///
++    /// One of Bevy's core principles is modularity. All Bevy engine features are implemented
++    /// as [`Plugin`]s. This includes internal features like the renderer.
+     ///
+     /// [`Plugin`]s can be grouped into a set by using a [`PluginGroup`].
+     ///
+@@ -773,23 +772,35 @@ impl App {
+     /// The [`PluginGroup`]s available by default are `DefaultPlugins` and `MinimalPlugins`.
+     ///
+     /// To customize the plugins in the group (reorder, disable a plugin, add a new plugin
+-    /// before / after another plugin), call [`build()`](PluginGroup::build) on the group,
++    /// before / after another plugin), call [`build()`](super::PluginGroup::build) on the group,
+     /// which will convert it to a [`PluginGroupBuilder`](crate::PluginGroupBuilder).
+     ///
++    /// You can also specify a group of [`Plugin`]s by using a tuple over [`Plugin`]s and
++    /// [`PluginGroup`]s. See [`Plugins`] for more details.
++    ///
+     /// ## Examples
+     /// ```
+     /// # use bevy_app::{prelude::*, PluginGroupBuilder, NoopPluginGroup as MinimalPlugins};
+     /// #
++    /// # // Dummies created to avoid using `bevy_log`,
++    /// # // which pulls in too many dependencies and breaks rust-analyzer
++    /// # pub struct LogPlugin;
++    /// # impl Plugin for LogPlugin {
++    /// #     fn build(&self, app: &mut App) {}
++    /// # }
+     /// App::new()
+     ///     .add_plugins(MinimalPlugins);
++    /// App::new()
++    ///     .add_plugins((MinimalPlugins, LogPlugin));
+     /// ```
+     ///
+     /// # Panics
+     ///
+-    /// Panics if one of the plugin in the group was already added to the application.
+-    pub fn add_plugins<T: PluginGroup>(&mut self, group: T) -> &mut Self {
+-        let builder = group.build();
+-        builder.finish(self);
++    /// Panics if one of the plugins was already added to the application.
++    ///
++    /// [`PluginGroup`]:super::PluginGroup
++    pub fn add_plugins<M>(&mut self, plugins: impl Plugins<M>) -> &mut Self {
++        plugins.add_to_app(self);
+         self
+     }
+ 
+@@ -1006,23 +1017,23 @@ mod tests {
+ 
+     #[test]
+     fn can_add_two_plugins() {
+-        App::new().add_plugin(PluginA).add_plugin(PluginB);
++        App::new().add_plugins((PluginA, PluginB));
+     }
+ 
+     #[test]
+     #[should_panic]
+     fn cant_add_twice_the_same_plugin() {
+-        App::new().add_plugin(PluginA).add_plugin(PluginA);
++        App::new().add_plugins((PluginA, PluginA));
+     }
+ 
+     #[test]
+     fn can_add_twice_the_same_plugin_with_different_type_param() {
+-        App::new().add_plugin(PluginC(0)).add_plugin(PluginC(true));
++        App::new().add_plugins((PluginC(0), PluginC(true)));
+     }
+ 
+     #[test]
+     fn can_add_twice_the_same_plugin_not_unique() {
+-        App::new().add_plugin(PluginD).add_plugin(PluginD);
++        App::new().add_plugins((PluginD, PluginD));
+     }
+ 
+     #[test]
+@@ -1035,10 +1046,10 @@ mod tests {
+         }
+         impl Plugin for PluginRun {
+             fn build(&self, app: &mut crate::App) {
+-                app.add_plugin(InnerPlugin).run();
++                app.add_plugins(InnerPlugin).run();
+             }
+         }
+-        App::new().add_plugin(PluginRun);
++        App::new().add_plugins(PluginRun);
+     }
+ 
+     #[derive(States, PartialEq, Eq, Debug, Default, Hash, Clone)]
+diff --git a/crates/bevy_app/src/plugin.rs b/crates/bevy_app/src/plugin.rs
+index 725ebbe19539c..12e7d1f1c8d66 100644
+--- a/crates/bevy_app/src/plugin.rs
++++ b/crates/bevy_app/src/plugin.rs
+@@ -65,3 +65,61 @@ impl_downcast!(Plugin);
+ ///
+ /// See `bevy_dynamic_plugin/src/loader.rs#dynamically_load_plugin`.
+ pub type CreatePlugin = unsafe fn() -> *mut dyn Plugin;
++
++/// Types that represent a set of [`Plugin`]s.
++///
++/// This is implemented for all types which implement [`Plugin`],
++/// [`PluginGroup`](super::PluginGroup), and tuples over [`Plugins`].
++pub trait Plugins<Marker>: sealed::Plugins<Marker> {}
++
++impl<Marker, T> Plugins<Marker> for T where T: sealed::Plugins<Marker> {}
++
++mod sealed {
++
++    use bevy_ecs::all_tuples;
++
++    use crate::{App, AppError, Plugin, PluginGroup};
++
++    pub trait Plugins<Marker> {
++        fn add_to_app(self, app: &mut App);
++    }
++
++    pub struct PluginMarker;
++    pub struct PluginGroupMarker;
++    pub struct PluginsTupleMarker;
++
++    impl<P: Plugin> Plugins<PluginMarker> for P {
++        fn add_to_app(self, app: &mut App) {
++            if let Err(AppError::DuplicatePlugin { plugin_name }) =
++                app.add_boxed_plugin(Box::new(self))
++            {
++                panic!(
++                    "Error adding plugin {plugin_name}: : plugin was already added in application"
++                )
++            }
++        }
++    }
++
++    impl<P: PluginGroup> Plugins<PluginGroupMarker> for P {
++        fn add_to_app(self, app: &mut App) {
++            self.build().finish(app);
++        }
++    }
++
++    macro_rules! impl_plugins_tuples {
++        ($(($param: ident, $plugins: ident)),*) => {
++            impl<$($param, $plugins),*> Plugins<(PluginsTupleMarker, $($param,)*)> for ($($plugins,)*)
++            where
++                $($plugins: Plugins<$param>),*
++            {
++                #[allow(non_snake_case, unused_variables)]
++                fn add_to_app(self, app: &mut App) {
++                    let ($($plugins,)*) = self;
++                    $($plugins.add_to_app(app);)*
++                }
++            }
++        }
++    }
++
++    all_tuples!(impl_plugins_tuples, 0, 15, P, S);
++}
+diff --git a/crates/bevy_asset/src/asset_server.rs b/crates/bevy_asset/src/asset_server.rs
+index e7e830cd1d90a..d97f206bbdc36 100644
+--- a/crates/bevy_asset/src/asset_server.rs
++++ b/crates/bevy_asset/src/asset_server.rs
+@@ -85,7 +85,7 @@ pub struct AssetServerInternal {
+ /// # use bevy_utils::Duration;
+ /// # let mut app = App::new();
+ /// // The asset plugin can be configured to watch for asset changes.
+-/// app.add_plugin(AssetPlugin {
++/// app.add_plugins(AssetPlugin {
+ ///     watch_for_changes: ChangeWatcher::with_delay(Duration::from_millis(200)),
+ ///     ..Default::default()
+ /// });
+diff --git a/crates/bevy_asset/src/assets.rs b/crates/bevy_asset/src/assets.rs
+index fb9ac6cb93e3c..a27e30cb01726 100644
+--- a/crates/bevy_asset/src/assets.rs
++++ b/crates/bevy_asset/src/assets.rs
+@@ -494,9 +494,11 @@ mod tests {
+         #[uuid = "44115972-f31b-46e5-be5c-2b9aece6a52f"]
+         struct MyAsset;
+         let mut app = App::new();
+-        app.add_plugin(bevy_core::TaskPoolPlugin::default())
+-            .add_plugin(bevy_core::TypeRegistrationPlugin::default())
+-            .add_plugin(crate::AssetPlugin::default());
++        app.add_plugins((
++            bevy_core::TaskPoolPlugin::default(),
++            bevy_core::TypeRegistrationPlugin::default(),
++            crate::AssetPlugin::default(),
++        ));
+         app.add_asset::<MyAsset>();
+         let mut assets_before = app.world.resource_mut::<Assets<MyAsset>>();
+         let handle = assets_before.add(MyAsset);
+diff --git a/crates/bevy_asset/src/debug_asset_server.rs b/crates/bevy_asset/src/debug_asset_server.rs
+index 93595020ec9a0..6c2e3d4815102 100644
+--- a/crates/bevy_asset/src/debug_asset_server.rs
++++ b/crates/bevy_asset/src/debug_asset_server.rs
+@@ -71,7 +71,7 @@ impl Plugin for DebugAssetServerPlugin {
+                 .build()
+         });
+         let mut debug_asset_app = App::new();
+-        debug_asset_app.add_plugin(AssetPlugin {
++        debug_asset_app.add_plugins(AssetPlugin {
+             asset_folder: "crates".to_string(),
+             watch_for_changes: ChangeWatcher::with_delay(Duration::from_millis(200)),
+         });
+diff --git a/crates/bevy_asset/src/reflect.rs b/crates/bevy_asset/src/reflect.rs
+index 0e735724b0c45..cade543c20b48 100644
+--- a/crates/bevy_asset/src/reflect.rs
++++ b/crates/bevy_asset/src/reflect.rs
+@@ -268,7 +268,7 @@ mod tests {
+     #[test]
+     fn test_reflect_asset_operations() {
+         let mut app = App::new();
+-        app.add_plugin(AssetPlugin::default())
++        app.add_plugins(AssetPlugin::default())
+             .add_asset::<AssetType>()
+             .register_asset_reflect::<AssetType>();
+ 
+diff --git a/crates/bevy_audio/src/lib.rs b/crates/bevy_audio/src/lib.rs
+index d703673191482..6544c789698fc 100644
+--- a/crates/bevy_audio/src/lib.rs
++++ b/crates/bevy_audio/src/lib.rs
+@@ -7,9 +7,7 @@
+ //! # use bevy_app::{App, AppExit, NoopPluginGroup as MinimalPlugins, Startup};
+ //! fn main() {
+ //!    App::new()
+-//!         .add_plugins(MinimalPlugins)
+-//!         .add_plugin(AssetPlugin::default())
+-//!         .add_plugin(AudioPlugin::default())
++//!         .add_plugins((MinimalPlugins, AssetPlugin::default(), AudioPlugin::default()))
+ //!         .add_systems(Startup, play_background_audio)
+ //!         .run();
+ //! }
+diff --git a/crates/bevy_core/src/lib.rs b/crates/bevy_core/src/lib.rs
+index 055e92c7dd3c6..a9b10b1e81f2b 100644
+--- a/crates/bevy_core/src/lib.rs
++++ b/crates/bevy_core/src/lib.rs
+@@ -165,8 +165,7 @@ mod tests {
+     #[test]
+     fn runs_spawn_local_tasks() {
+         let mut app = App::new();
+-        app.add_plugin(TaskPoolPlugin::default());
+-        app.add_plugin(TypeRegistrationPlugin::default());
++        app.add_plugins((TaskPoolPlugin::default(), TypeRegistrationPlugin::default()));
+ 
+         let (async_tx, async_rx) = crossbeam_channel::unbounded();
+         AsyncComputeTaskPool::get()
+@@ -199,9 +198,11 @@ mod tests {
+     #[test]
+     fn frame_counter_update() {
+         let mut app = App::new();
+-        app.add_plugin(TaskPoolPlugin::default());
+-        app.add_plugin(TypeRegistrationPlugin::default());
+-        app.add_plugin(FrameCountPlugin::default());
++        app.add_plugins((
++            TaskPoolPlugin::default(),
++            TypeRegistrationPlugin::default(),
++            FrameCountPlugin::default(),
++        ));
+         app.update();
+ 
+         let frame_count = app.world.resource::<FrameCount>();
+diff --git a/crates/bevy_core_pipeline/src/bloom/mod.rs b/crates/bevy_core_pipeline/src/bloom/mod.rs
+index 9991da1ee2150..e5271544e2d78 100644
+--- a/crates/bevy_core_pipeline/src/bloom/mod.rs
++++ b/crates/bevy_core_pipeline/src/bloom/mod.rs
+@@ -52,8 +52,10 @@ impl Plugin for BloomPlugin {
+         app.register_type::<BloomSettings>();
+         app.register_type::<BloomPrefilterSettings>();
+         app.register_type::<BloomCompositeMode>();
+-        app.add_plugin(ExtractComponentPlugin::<BloomSettings>::default());
+-        app.add_plugin(UniformComponentPlugin::<BloomUniforms>::default());
++        app.add_plugins((
++            ExtractComponentPlugin::<BloomSettings>::default(),
++            UniformComponentPlugin::<BloomUniforms>::default(),
++        ));
+ 
+         let render_app = match app.get_sub_app_mut(RenderApp) {
+             Ok(render_app) => render_app,
+diff --git a/crates/bevy_core_pipeline/src/contrast_adaptive_sharpening/mod.rs b/crates/bevy_core_pipeline/src/contrast_adaptive_sharpening/mod.rs
+index cdb57d03e63ac..b26c02b54754b 100644
+--- a/crates/bevy_core_pipeline/src/contrast_adaptive_sharpening/mod.rs
++++ b/crates/bevy_core_pipeline/src/contrast_adaptive_sharpening/mod.rs
+@@ -108,8 +108,10 @@ impl Plugin for CASPlugin {
+         );
+ 
+         app.register_type::<ContrastAdaptiveSharpeningSettings>();
+-        app.add_plugin(ExtractComponentPlugin::<ContrastAdaptiveSharpeningSettings>::default());
+-        app.add_plugin(UniformComponentPlugin::<CASUniform>::default());
++        app.add_plugins((
++            ExtractComponentPlugin::<ContrastAdaptiveSharpeningSettings>::default(),
++            UniformComponentPlugin::<CASUniform>::default(),
++        ));
+ 
+         let render_app = match app.get_sub_app_mut(RenderApp) {
+             Ok(render_app) => render_app,
+diff --git a/crates/bevy_core_pipeline/src/core_2d/mod.rs b/crates/bevy_core_pipeline/src/core_2d/mod.rs
+index 19e0375f670ab..d3d12130b393f 100644
+--- a/crates/bevy_core_pipeline/src/core_2d/mod.rs
++++ b/crates/bevy_core_pipeline/src/core_2d/mod.rs
+@@ -45,7 +45,7 @@ pub struct Core2dPlugin;
+ impl Plugin for Core2dPlugin {
+     fn build(&self, app: &mut App) {
+         app.register_type::<Camera2d>()
+-            .add_plugin(ExtractComponentPlugin::<Camera2d>::default());
++            .add_plugins(ExtractComponentPlugin::<Camera2d>::default());
+ 
+         let render_app = match app.get_sub_app_mut(RenderApp) {
+             Ok(render_app) => render_app,
+diff --git a/crates/bevy_core_pipeline/src/core_3d/mod.rs b/crates/bevy_core_pipeline/src/core_3d/mod.rs
+index 5d9a42989d1c0..29e7157165d13 100644
+--- a/crates/bevy_core_pipeline/src/core_3d/mod.rs
++++ b/crates/bevy_core_pipeline/src/core_3d/mod.rs
+@@ -69,8 +69,7 @@ impl Plugin for Core3dPlugin {
+     fn build(&self, app: &mut App) {
+         app.register_type::<Camera3d>()
+             .register_type::<Camera3dDepthLoadOp>()
+-            .add_plugin(SkyboxPlugin)
+-            .add_plugin(ExtractComponentPlugin::<Camera3d>::default());
++            .add_plugins((SkyboxPlugin, ExtractComponentPlugin::<Camera3d>::default()));
+ 
+         let render_app = match app.get_sub_app_mut(RenderApp) {
+             Ok(render_app) => render_app,
+diff --git a/crates/bevy_core_pipeline/src/fxaa/mod.rs b/crates/bevy_core_pipeline/src/fxaa/mod.rs
+index 4ddcb84e214fa..e153a77b623b0 100644
+--- a/crates/bevy_core_pipeline/src/fxaa/mod.rs
++++ b/crates/bevy_core_pipeline/src/fxaa/mod.rs
+@@ -87,7 +87,7 @@ impl Plugin for FxaaPlugin {
+         load_internal_asset!(app, FXAA_SHADER_HANDLE, "fxaa.wgsl", Shader::from_wgsl);
+ 
+         app.register_type::<Fxaa>();
+-        app.add_plugin(ExtractComponentPlugin::<Fxaa>::default());
++        app.add_plugins(ExtractComponentPlugin::<Fxaa>::default());
+ 
+         let render_app = match app.get_sub_app_mut(RenderApp) {
+             Ok(render_app) => render_app,
+diff --git a/crates/bevy_core_pipeline/src/lib.rs b/crates/bevy_core_pipeline/src/lib.rs
+index f169cdd89e08d..51e5ae36278e9 100644
+--- a/crates/bevy_core_pipeline/src/lib.rs
++++ b/crates/bevy_core_pipeline/src/lib.rs
+@@ -68,15 +68,17 @@ impl Plugin for CorePipelinePlugin {
+             .register_type::<DepthPrepass>()
+             .register_type::<NormalPrepass>()
+             .init_resource::<ClearColor>()
+-            .add_plugin(ExtractResourcePlugin::<ClearColor>::default())
+-            .add_plugin(Core2dPlugin)
+-            .add_plugin(Core3dPlugin)
+-            .add_plugin(BlitPlugin)
+-            .add_plugin(MsaaWritebackPlugin)
+-            .add_plugin(TonemappingPlugin)
+-            .add_plugin(UpscalingPlugin)
+-            .add_plugin(BloomPlugin)
+-            .add_plugin(FxaaPlugin)
+-            .add_plugin(CASPlugin);
++            .add_plugins((
++                ExtractResourcePlugin::<ClearColor>::default(),
++                Core2dPlugin,
++                Core3dPlugin,
++                BlitPlugin,
++                MsaaWritebackPlugin,
++                TonemappingPlugin,
++                UpscalingPlugin,
++                BloomPlugin,
++                FxaaPlugin,
++                CASPlugin,
++            ));
+     }
+ }
+diff --git a/crates/bevy_core_pipeline/src/skybox/mod.rs b/crates/bevy_core_pipeline/src/skybox/mod.rs
+index 7917c9efb51f3..ccf21334aa10a 100644
+--- a/crates/bevy_core_pipeline/src/skybox/mod.rs
++++ b/crates/bevy_core_pipeline/src/skybox/mod.rs
+@@ -34,7 +34,7 @@ impl Plugin for SkyboxPlugin {
+     fn build(&self, app: &mut App) {
+         load_internal_asset!(app, SKYBOX_SHADER_HANDLE, "skybox.wgsl", Shader::from_wgsl);
+ 
+-        app.add_plugin(ExtractComponentPlugin::<Skybox>::default());
++        app.add_plugins(ExtractComponentPlugin::<Skybox>::default());
+ 
+         let render_app = match app.get_sub_app_mut(RenderApp) {
+             Ok(render_app) => render_app,
+diff --git a/crates/bevy_core_pipeline/src/tonemapping/mod.rs b/crates/bevy_core_pipeline/src/tonemapping/mod.rs
+index 4fc33fda37515..0896c37f3ec9b 100644
+--- a/crates/bevy_core_pipeline/src/tonemapping/mod.rs
++++ b/crates/bevy_core_pipeline/src/tonemapping/mod.rs
+@@ -82,13 +82,15 @@ impl Plugin for TonemappingPlugin {
+             app.insert_resource(tonemapping_luts);
+         }
+ 
+-        app.add_plugin(ExtractResourcePlugin::<TonemappingLuts>::default());
++        app.add_plugins(ExtractResourcePlugin::<TonemappingLuts>::default());
+ 
+         app.register_type::<Tonemapping>();
+         app.register_type::<DebandDither>();
+ 
+-        app.add_plugin(ExtractComponentPlugin::<Tonemapping>::default());
+-        app.add_plugin(ExtractComponentPlugin::<DebandDither>::default());
++        app.add_plugins((
++            ExtractComponentPlugin::<Tonemapping>::default(),
++            ExtractComponentPlugin::<DebandDither>::default(),
++        ));
+ 
+         if let Ok(render_app) = app.get_sub_app_mut(RenderApp) {
+             render_app
+diff --git a/crates/bevy_diagnostic/src/diagnostic.rs b/crates/bevy_diagnostic/src/diagnostic.rs
+index 934de2676ae2d..6fa04ce573f20 100644
+--- a/crates/bevy_diagnostic/src/diagnostic.rs
++++ b/crates/bevy_diagnostic/src/diagnostic.rs
+@@ -299,7 +299,7 @@ impl RegisterDiagnostic for App {
+     ///
+     /// App::new()
+     ///     .register_diagnostic(Diagnostic::new(UNIQUE_DIAG_ID, "example", 10))
+-    ///     .add_plugin(DiagnosticsPlugin)
++    ///     .add_plugins(DiagnosticsPlugin)
+     ///     .run();
+     /// ```
+     fn register_diagnostic(&mut self, diagnostic: Diagnostic) -> &mut Self {
+diff --git a/crates/bevy_gizmos/src/lib.rs b/crates/bevy_gizmos/src/lib.rs
+index b288d72f747dc..3a6b89f3e0e52 100644
+--- a/crates/bevy_gizmos/src/lib.rs
++++ b/crates/bevy_gizmos/src/lib.rs
+@@ -78,9 +78,9 @@ impl Plugin for GizmoPlugin {
+     fn build(&self, app: &mut bevy_app::App) {
+         load_internal_asset!(app, LINE_SHADER_HANDLE, "lines.wgsl", Shader::from_wgsl);
+ 
+-        app.add_plugin(UniformComponentPlugin::<LineGizmoUniform>::default())
++        app.add_plugins(UniformComponentPlugin::<LineGizmoUniform>::default())
+             .add_asset::<LineGizmo>()
+-            .add_plugin(RenderAssetPlugin::<LineGizmo>::default())
++            .add_plugins(RenderAssetPlugin::<LineGizmo>::default())
+             .init_resource::<LineGizmoHandles>()
+             .init_resource::<GizmoConfig>()
+             .init_resource::<GizmoStorage>()
+@@ -100,9 +100,9 @@ impl Plugin for GizmoPlugin {
+             .add_systems(Render, queue_line_gizmo_bind_group.in_set(RenderSet::Queue));
+ 
+         #[cfg(feature = "bevy_sprite")]
+-        app.add_plugin(pipeline_2d::LineGizmo2dPlugin);
++        app.add_plugins(pipeline_2d::LineGizmo2dPlugin);
+         #[cfg(feature = "bevy_pbr")]
+-        app.add_plugin(pipeline_3d::LineGizmo3dPlugin);
++        app.add_plugins(pipeline_3d::LineGizmo3dPlugin);
+     }
+ 
+     fn finish(&self, app: &mut bevy_app::App) {
+diff --git a/crates/bevy_pbr/src/environment_map/mod.rs b/crates/bevy_pbr/src/environment_map/mod.rs
+index 0b0250268bab2..7e6e8732028eb 100644
+--- a/crates/bevy_pbr/src/environment_map/mod.rs
++++ b/crates/bevy_pbr/src/environment_map/mod.rs
+@@ -28,7 +28,7 @@ impl Plugin for EnvironmentMapPlugin {
+         );
+ 
+         app.register_type::<EnvironmentMapLight>()
+-            .add_plugin(ExtractComponentPlugin::<EnvironmentMapLight>::default());
++            .add_plugins(ExtractComponentPlugin::<EnvironmentMapLight>::default());
+     }
+ }
+ 
+diff --git a/crates/bevy_pbr/src/lib.rs b/crates/bevy_pbr/src/lib.rs
+index 0f146ed121716..2460a0e0f67df 100644
+--- a/crates/bevy_pbr/src/lib.rs
++++ b/crates/bevy_pbr/src/lib.rs
+@@ -182,18 +182,21 @@ impl Plugin for PbrPlugin {
+             .register_type::<PointLight>()
+             .register_type::<PointLightShadowMap>()
+             .register_type::<SpotLight>()
+-            .add_plugin(MeshRenderPlugin)
+-            .add_plugin(MaterialPlugin::<StandardMaterial> {
+-                prepass_enabled: self.prepass_enabled,
+-                ..Default::default()
+-            })
+-            .add_plugin(ScreenSpaceAmbientOcclusionPlugin)
+-            .add_plugin(EnvironmentMapPlugin)
+             .init_resource::<AmbientLight>()
+             .init_resource::<GlobalVisiblePointLights>()
+             .init_resource::<DirectionalLightShadowMap>()
+             .init_resource::<PointLightShadowMap>()
+-            .add_plugin(ExtractResourcePlugin::<AmbientLight>::default())
++            .add_plugins((
++                MeshRenderPlugin,
++                MaterialPlugin::<StandardMaterial> {
++                    prepass_enabled: self.prepass_enabled,
++                    ..Default::default()
++                },
++                ScreenSpaceAmbientOcclusionPlugin,
++                EnvironmentMapPlugin,
++                ExtractResourcePlugin::<AmbientLight>::default(),
++                FogPlugin,
++            ))
+             .configure_sets(
+                 PostUpdate,
+                 (
+@@ -203,7 +206,6 @@ impl Plugin for PbrPlugin {
+                 )
+                     .chain(),
+             )
+-            .add_plugin(FogPlugin)
+             .add_systems(
+                 PostUpdate,
+                 (
+diff --git a/crates/bevy_pbr/src/material.rs b/crates/bevy_pbr/src/material.rs
+index 559c880051f10..5741419674207 100644
+--- a/crates/bevy_pbr/src/material.rs
++++ b/crates/bevy_pbr/src/material.rs
+@@ -188,7 +188,7 @@ where
+ {
+     fn build(&self, app: &mut App) {
+         app.add_asset::<M>()
+-            .add_plugin(ExtractComponentPlugin::<Handle<M>>::extract_visible());
++            .add_plugins(ExtractComponentPlugin::<Handle<M>>::extract_visible());
+ 
+         if let Ok(render_app) = app.get_sub_app_mut(RenderApp) {
+             render_app
+@@ -214,10 +214,10 @@ where
+         }
+ 
+         // PrepassPipelinePlugin is required for shadow mapping and the optional PrepassPlugin
+-        app.add_plugin(PrepassPipelinePlugin::<M>::default());
++        app.add_plugins(PrepassPipelinePlugin::<M>::default());
+ 
+         if self.prepass_enabled {
+-            app.add_plugin(PrepassPlugin::<M>::default());
++            app.add_plugins(PrepassPlugin::<M>::default());
+         }
+     }
+ 
+diff --git a/crates/bevy_pbr/src/render/fog.rs b/crates/bevy_pbr/src/render/fog.rs
+index bd58605899b52..6c314ccd0495f 100644
+--- a/crates/bevy_pbr/src/render/fog.rs
++++ b/crates/bevy_pbr/src/render/fog.rs
+@@ -138,7 +138,7 @@ impl Plugin for FogPlugin {
+         load_internal_asset!(app, FOG_SHADER_HANDLE, "fog.wgsl", Shader::from_wgsl);
+ 
+         app.register_type::<FogSettings>();
+-        app.add_plugin(ExtractComponentPlugin::<FogSettings>::default());
++        app.add_plugins(ExtractComponentPlugin::<FogSettings>::default());
+ 
+         if let Ok(render_app) = app.get_sub_app_mut(RenderApp) {
+             render_app
+diff --git a/crates/bevy_pbr/src/render/mesh.rs b/crates/bevy_pbr/src/render/mesh.rs
+index 20cb2a198666e..a6049589d9c4a 100644
+--- a/crates/bevy_pbr/src/render/mesh.rs
++++ b/crates/bevy_pbr/src/render/mesh.rs
+@@ -102,7 +102,7 @@ impl Plugin for MeshRenderPlugin {
+         load_internal_asset!(app, MESH_SHADER_HANDLE, "mesh.wgsl", Shader::from_wgsl);
+         load_internal_asset!(app, SKINNING_HANDLE, "skinning.wgsl", Shader::from_wgsl);
+ 
+-        app.add_plugin(UniformComponentPlugin::<MeshUniform>::default());
++        app.add_plugins(UniformComponentPlugin::<MeshUniform>::default());
+ 
+         if let Ok(render_app) = app.get_sub_app_mut(RenderApp) {
+             render_app
+diff --git a/crates/bevy_pbr/src/wireframe.rs b/crates/bevy_pbr/src/wireframe.rs
+index d31590c78e31e..d3c8b3ba47509 100644
+--- a/crates/bevy_pbr/src/wireframe.rs
++++ b/crates/bevy_pbr/src/wireframe.rs
+@@ -40,8 +40,10 @@ impl Plugin for WireframePlugin {
+         app.register_type::<Wireframe>()
+             .register_type::<WireframeConfig>()
+             .init_resource::<WireframeConfig>()
+-            .add_plugin(ExtractResourcePlugin::<WireframeConfig>::default())
+-            .add_plugin(ExtractComponentPlugin::<Wireframe>::default());
++            .add_plugins((
++                ExtractResourcePlugin::<WireframeConfig>::default(),
++                ExtractComponentPlugin::<Wireframe>::default(),
++            ));
+ 
+         if let Ok(render_app) = app.get_sub_app_mut(RenderApp) {
+             render_app
+diff --git a/crates/bevy_render/src/camera/mod.rs b/crates/bevy_render/src/camera/mod.rs
+index 3829d392c0311..b57ae98dc7941 100644
+--- a/crates/bevy_render/src/camera/mod.rs
++++ b/crates/bevy_render/src/camera/mod.rs
+@@ -28,10 +28,12 @@ impl Plugin for CameraPlugin {
+             .register_type::<CameraRenderGraph>()
+             .register_type::<RenderTarget>()
+             .init_resource::<ManualTextureViews>()
+-            .add_plugin(CameraProjectionPlugin::<Projection>::default())
+-            .add_plugin(CameraProjectionPlugin::<OrthographicProjection>::default())
+-            .add_plugin(CameraProjectionPlugin::<PerspectiveProjection>::default())
+-            .add_plugin(ExtractResourcePlugin::<ManualTextureViews>::default());
++            .add_plugins((
++                CameraProjectionPlugin::<Projection>::default(),
++                CameraProjectionPlugin::<OrthographicProjection>::default(),
++                CameraProjectionPlugin::<PerspectiveProjection>::default(),
++                ExtractResourcePlugin::<ManualTextureViews>::default(),
++            ));
+ 
+         if let Ok(render_app) = app.get_sub_app_mut(RenderApp) {
+             render_app
+diff --git a/crates/bevy_render/src/lib.rs b/crates/bevy_render/src/lib.rs
+index 3df8d2295436b..f715bcc7197d2 100644
+--- a/crates/bevy_render/src/lib.rs
++++ b/crates/bevy_render/src/lib.rs
+@@ -329,12 +329,14 @@ impl Plugin for RenderPlugin {
+             }));
+         }
+ 
+-        app.add_plugin(ValidParentCheckPlugin::<view::ComputedVisibility>::default())
+-            .add_plugin(WindowRenderPlugin)
+-            .add_plugin(CameraPlugin)
+-            .add_plugin(ViewPlugin)
+-            .add_plugin(MeshPlugin)
+-            .add_plugin(GlobalsPlugin);
++        app.add_plugins((
++            ValidParentCheckPlugin::<view::ComputedVisibility>::default(),
++            WindowRenderPlugin,
++            CameraPlugin,
++            ViewPlugin,
++            MeshPlugin,
++            GlobalsPlugin,
++        ));
+ 
+         app.register_type::<color::Color>()
+             .register_type::<primitives::Aabb>()
+diff --git a/crates/bevy_render/src/mesh/mod.rs b/crates/bevy_render/src/mesh/mod.rs
+index 790d4531b2456..8042f9c6d9765 100644
+--- a/crates/bevy_render/src/mesh/mod.rs
++++ b/crates/bevy_render/src/mesh/mod.rs
+@@ -19,6 +19,6 @@ impl Plugin for MeshPlugin {
+             .add_asset::<skinning::SkinnedMeshInverseBindposes>()
+             .register_type::<skinning::SkinnedMesh>()
+             .register_type::<Vec<Entity>>()
+-            .add_plugin(RenderAssetPlugin::<Mesh>::default());
++            .add_plugins(RenderAssetPlugin::<Mesh>::default());
+     }
+ }
+diff --git a/crates/bevy_render/src/texture/mod.rs b/crates/bevy_render/src/texture/mod.rs
+index bba263beaa499..6d4fd23bb6c75 100644
+--- a/crates/bevy_render/src/texture/mod.rs
++++ b/crates/bevy_render/src/texture/mod.rs
+@@ -93,7 +93,7 @@ impl Plugin for ImagePlugin {
+             app.init_asset_loader::<HdrTextureLoader>();
+         }
+ 
+-        app.add_plugin(RenderAssetPlugin::<Image>::with_prepare_asset_set(
++        app.add_plugins(RenderAssetPlugin::<Image>::with_prepare_asset_set(
+             PrepareAssetSet::PreAssetPrepare,
+         ))
+         .register_type::<Image>()
+diff --git a/crates/bevy_render/src/view/mod.rs b/crates/bevy_render/src/view/mod.rs
+index e4bd033e15d17..9c09fb8bf6e51 100644
+--- a/crates/bevy_render/src/view/mod.rs
++++ b/crates/bevy_render/src/view/mod.rs
+@@ -50,8 +50,7 @@ impl Plugin for ViewPlugin {
+             .register_type::<ColorGrading>()
+             .init_resource::<Msaa>()
+             // NOTE: windows.is_changed() handles cases where a window was resized
+-            .add_plugin(ExtractResourcePlugin::<Msaa>::default())
+-            .add_plugin(VisibilityPlugin);
++            .add_plugins((ExtractResourcePlugin::<Msaa>::default(), VisibilityPlugin));
+ 
+         if let Ok(render_app) = app.get_sub_app_mut(RenderApp) {
+             render_app
+diff --git a/crates/bevy_render/src/view/window.rs b/crates/bevy_render/src/view/window.rs
+index d022d4cc53902..e76097004a7bc 100644
+--- a/crates/bevy_render/src/view/window.rs
++++ b/crates/bevy_render/src/view/window.rs
+@@ -34,7 +34,7 @@ pub enum WindowSystem {
+ 
+ impl Plugin for WindowRenderPlugin {
+     fn build(&self, app: &mut App) {
+-        app.add_plugin(ScreenshotPlugin);
++        app.add_plugins(ScreenshotPlugin);
+ 
+         if let Ok(render_app) = app.get_sub_app_mut(RenderApp) {
+             render_app
+diff --git a/crates/bevy_sprite/src/lib.rs b/crates/bevy_sprite/src/lib.rs
+index 403e00722e220..fd63b19579cbd 100644
+--- a/crates/bevy_sprite/src/lib.rs
++++ b/crates/bevy_sprite/src/lib.rs
+@@ -65,8 +65,7 @@ impl Plugin for SpritePlugin {
+             .register_type::<TextureAtlasSprite>()
+             .register_type::<Anchor>()
+             .register_type::<Mesh2dHandle>()
+-            .add_plugin(Mesh2dRenderPlugin)
+-            .add_plugin(ColorMaterialPlugin)
++            .add_plugins((Mesh2dRenderPlugin, ColorMaterialPlugin))
+             .add_systems(
+                 PostUpdate,
+                 calculate_bounds_2d.in_set(VisibilitySystems::CalculateBounds),
+diff --git a/crates/bevy_sprite/src/mesh2d/color_material.rs b/crates/bevy_sprite/src/mesh2d/color_material.rs
+index 57c57deb2bc2c..75ba440beb5a6 100644
+--- a/crates/bevy_sprite/src/mesh2d/color_material.rs
++++ b/crates/bevy_sprite/src/mesh2d/color_material.rs
+@@ -23,7 +23,7 @@ impl Plugin for ColorMaterialPlugin {
+             Shader::from_wgsl
+         );
+ 
+-        app.add_plugin(Material2dPlugin::<ColorMaterial>::default())
++        app.add_plugins(Material2dPlugin::<ColorMaterial>::default())
+             .register_asset_reflect::<ColorMaterial>();
+ 
+         app.world
+diff --git a/crates/bevy_sprite/src/mesh2d/material.rs b/crates/bevy_sprite/src/mesh2d/material.rs
+index b33c7a5702578..2ba6765e720df 100644
+--- a/crates/bevy_sprite/src/mesh2d/material.rs
++++ b/crates/bevy_sprite/src/mesh2d/material.rs
+@@ -152,7 +152,7 @@ where
+ {
+     fn build(&self, app: &mut App) {
+         app.add_asset::<M>()
+-            .add_plugin(ExtractComponentPlugin::<Handle<M>>::extract_visible());
++            .add_plugins(ExtractComponentPlugin::<Handle<M>>::extract_visible());
+ 
+         if let Ok(render_app) = app.get_sub_app_mut(RenderApp) {
+             render_app
+diff --git a/crates/bevy_sprite/src/mesh2d/mesh.rs b/crates/bevy_sprite/src/mesh2d/mesh.rs
+index 7161141525736..137f412c38473 100644
+--- a/crates/bevy_sprite/src/mesh2d/mesh.rs
++++ b/crates/bevy_sprite/src/mesh2d/mesh.rs
+@@ -97,7 +97,7 @@ impl Plugin for Mesh2dRenderPlugin {
+         );
+         load_internal_asset!(app, MESH2D_SHADER_HANDLE, "mesh2d.wgsl", Shader::from_wgsl);
+ 
+-        app.add_plugin(UniformComponentPlugin::<Mesh2dUniform>::default());
++        app.add_plugins(UniformComponentPlugin::<Mesh2dUniform>::default());
+ 
+         if let Ok(render_app) = app.get_sub_app_mut(RenderApp) {
+             render_app
+diff --git a/crates/bevy_transform/src/lib.rs b/crates/bevy_transform/src/lib.rs
+index c8b01c1098e94..50444acd8b089 100644
+--- a/crates/bevy_transform/src/lib.rs
++++ b/crates/bevy_transform/src/lib.rs
+@@ -101,7 +101,7 @@ impl Plugin for TransformPlugin {
+ 
+         app.register_type::<Transform>()
+             .register_type::<GlobalTransform>()
+-            .add_plugin(ValidParentCheckPlugin::<GlobalTransform>::default())
++            .add_plugins(ValidParentCheckPlugin::<GlobalTransform>::default())
+             .configure_set(
+                 PostStartup,
+                 PropagateTransformsSet.in_set(TransformSystem::TransformPropagate),
+diff --git a/crates/bevy_ui/src/lib.rs b/crates/bevy_ui/src/lib.rs
+index a2eb9980edce3..d5669288c3db4 100644
+--- a/crates/bevy_ui/src/lib.rs
++++ b/crates/bevy_ui/src/lib.rs
+@@ -81,7 +81,7 @@ impl Default for UiScale {
+ 
+ impl Plugin for UiPlugin {
+     fn build(&self, app: &mut App) {
+-        app.add_plugin(ExtractComponentPlugin::<UiCameraConfig>::default())
++        app.add_plugins(ExtractComponentPlugin::<UiCameraConfig>::default())
+             .init_resource::<UiSurface>()
+             .init_resource::<UiScale>()
+             .init_resource::<UiStack>()
+@@ -144,7 +144,7 @@ impl Plugin for UiPlugin {
+             ),
+         );
+         #[cfg(feature = "bevy_text")]
+-        app.add_plugin(accessibility::AccessibilityPlugin);
++        app.add_plugins(accessibility::AccessibilityPlugin);
+         app.add_systems(PostUpdate, {
+             let system = widget::update_image_content_size_system.before(UiSystem::Layout);
+             // Potential conflicts: `Assets<Image>`
+diff --git a/crates/bevy_winit/src/lib.rs b/crates/bevy_winit/src/lib.rs
+index 900d4126b4433..ac4db6d29fb74 100644
+--- a/crates/bevy_winit/src/lib.rs
++++ b/crates/bevy_winit/src/lib.rs
+@@ -99,10 +99,10 @@ impl Plugin for WinitPlugin {
+                 ),
+             );
+ 
+-        app.add_plugin(AccessibilityPlugin);
++        app.add_plugins(AccessibilityPlugin);
+ 
+         #[cfg(target_arch = "wasm32")]
+-        app.add_plugin(CanvasParentResizePlugin);
++        app.add_plugins(CanvasParentResizePlugin);
+ 
+         #[cfg(not(target_arch = "wasm32"))]
+         let mut create_window_system_state: SystemState<(
+diff --git a/examples/2d/custom_gltf_vertex_attribute.rs b/examples/2d/custom_gltf_vertex_attribute.rs
+index 43356f04e4988..c0dcd5d5784c5 100644
+--- a/examples/2d/custom_gltf_vertex_attribute.rs
++++ b/examples/2d/custom_gltf_vertex_attribute.rs
+@@ -22,14 +22,14 @@ fn main() {
+             color: Color::WHITE,
+             brightness: 1.0 / 5.0f32,
+         })
+-        .add_plugins(
++        .add_plugins((
+             DefaultPlugins.set(
+                 GltfPlugin::default()
+                     // Map a custom glTF attribute name to a `MeshVertexAttribute`.
+                     .add_custom_vertex_attribute("_BARYCENTRIC", ATTRIBUTE_BARYCENTRIC),
+             ),
+-        )
+-        .add_plugin(Material2dPlugin::<CustomMaterial>::default())
++            Material2dPlugin::<CustomMaterial>::default(),
++        ))
+         .add_systems(Startup, setup)
+         .run();
+ }
+diff --git a/examples/2d/mesh2d_manual.rs b/examples/2d/mesh2d_manual.rs
+index 0c55580d49626..942d603483936 100644
+--- a/examples/2d/mesh2d_manual.rs
++++ b/examples/2d/mesh2d_manual.rs
+@@ -32,8 +32,7 @@ use bevy::{
+ 
+ fn main() {
+     App::new()
+-        .add_plugins(DefaultPlugins)
+-        .add_plugin(ColoredMesh2dPlugin)
++        .add_plugins((DefaultPlugins, ColoredMesh2dPlugin))
+         .add_systems(Startup, star)
+         .run();
+ }
+diff --git a/examples/3d/anti_aliasing.rs b/examples/3d/anti_aliasing.rs
+index 8783d86635442..a297858401680 100644
+--- a/examples/3d/anti_aliasing.rs
++++ b/examples/3d/anti_aliasing.rs
+@@ -21,8 +21,7 @@ use bevy::{
+ fn main() {
+     App::new()
+         .insert_resource(Msaa::Off)
+-        .add_plugins(DefaultPlugins)
+-        .add_plugin(TemporalAntiAliasPlugin)
++        .add_plugins((DefaultPlugins, TemporalAntiAliasPlugin))
+         .add_systems(Startup, setup)
+         .add_systems(Update, (modify_aa, modify_sharpening, update_ui))
+         .run();
+diff --git a/examples/3d/lines.rs b/examples/3d/lines.rs
+index 0da72b3bd1c5e..d94f0794b29c8 100644
+--- a/examples/3d/lines.rs
++++ b/examples/3d/lines.rs
+@@ -15,8 +15,7 @@ use bevy::{
+ 
+ fn main() {
+     App::new()
+-        .add_plugins(DefaultPlugins)
+-        .add_plugin(MaterialPlugin::<LineMaterial>::default())
++        .add_plugins((DefaultPlugins, MaterialPlugin::<LineMaterial>::default()))
+         .add_systems(Startup, setup)
+         .run();
+ }
+diff --git a/examples/3d/spotlight.rs b/examples/3d/spotlight.rs
+index 38ee6e11b5fff..96def528d7914 100644
+--- a/examples/3d/spotlight.rs
++++ b/examples/3d/spotlight.rs
+@@ -9,9 +9,11 @@ use rand::{thread_rng, Rng};
+ 
+ fn main() {
+     App::new()
+-        .add_plugins(DefaultPlugins)
+-        .add_plugin(FrameTimeDiagnosticsPlugin)
+-        .add_plugin(LogDiagnosticsPlugin::default())
++        .add_plugins((
++            DefaultPlugins,
++            FrameTimeDiagnosticsPlugin,
++            LogDiagnosticsPlugin::default(),
++        ))
+         .add_systems(Startup, setup)
+         .add_systems(Update, (light_sway, movement))
+         .run();
+diff --git a/examples/3d/ssao.rs b/examples/3d/ssao.rs
+index c95b71f45d25e..415741a8e5963 100644
+--- a/examples/3d/ssao.rs
++++ b/examples/3d/ssao.rs
+@@ -17,8 +17,7 @@ fn main() {
+             brightness: 5.0,
+             ..default()
+         })
+-        .add_plugins(DefaultPlugins)
+-        .add_plugin(TemporalAntiAliasPlugin)
++        .add_plugins((DefaultPlugins, TemporalAntiAliasPlugin))
+         .add_systems(Startup, setup)
+         .add_systems(Update, update)
+         .run();
+diff --git a/examples/3d/tonemapping.rs b/examples/3d/tonemapping.rs
+index 9ae3c84dc8fc6..0bdceaae2ed00 100644
+--- a/examples/3d/tonemapping.rs
++++ b/examples/3d/tonemapping.rs
+@@ -19,8 +19,10 @@ use std::f32::consts::PI;
+ 
+ fn main() {
+     App::new()
+-        .add_plugins(DefaultPlugins)
+-        .add_plugin(MaterialPlugin::<ColorGradientMaterial>::default())
++        .add_plugins((
++            DefaultPlugins,
++            MaterialPlugin::<ColorGradientMaterial>::default(),
++        ))
+         .insert_resource(CameraTransform(
+             Transform::from_xyz(0.7, 0.7, 1.0).looking_at(Vec3::new(0.0, 0.3, 0.0), Vec3::Y),
+         ))
+diff --git a/examples/3d/wireframe.rs b/examples/3d/wireframe.rs
+index f557469b1908b..277ab902a1910 100644
+--- a/examples/3d/wireframe.rs
++++ b/examples/3d/wireframe.rs
+@@ -8,13 +8,15 @@ use bevy::{
+ 
+ fn main() {
+     App::new()
+-        .add_plugins(DefaultPlugins.set(RenderPlugin {
+-            wgpu_settings: WgpuSettings {
+-                features: WgpuFeatures::POLYGON_MODE_LINE,
+-                ..default()
+-            },
+-        }))
+-        .add_plugin(WireframePlugin)
++        .add_plugins((
++            DefaultPlugins.set(RenderPlugin {
++                wgpu_settings: WgpuSettings {
++                    features: WgpuFeatures::POLYGON_MODE_LINE,
++                    ..default()
++                },
++            }),
++            WireframePlugin,
++        ))
+         .add_systems(Startup, setup)
+         .run();
+ }
+diff --git a/examples/app/plugin.rs b/examples/app/plugin.rs
+index f66fd6b842e85..93e22eada7a43 100644
+--- a/examples/app/plugin.rs
++++ b/examples/app/plugin.rs
+@@ -8,12 +8,14 @@ use bevy::{prelude::*, utils::Duration};
+ 
+ fn main() {
+     App::new()
+-        .add_plugins(DefaultPlugins)
+         // plugins are registered as part of the "app building" process
+-        .add_plugin(PrintMessagePlugin {
+-            wait_duration: Duration::from_secs(1),
+-            message: "This is an example plugin".to_string(),
+-        })
++        .add_plugins((
++            DefaultPlugins,
++            PrintMessagePlugin {
++                wait_duration: Duration::from_secs(1),
++                message: "This is an example plugin".to_string(),
++            },
++        ))
+         .run();
+ }
+ 
+diff --git a/examples/app/plugin_group.rs b/examples/app/plugin_group.rs
+index ccd4f27698272..cc35c48bbf211 100644
+--- a/examples/app/plugin_group.rs
++++ b/examples/app/plugin_group.rs
+@@ -5,10 +5,12 @@ use bevy::{app::PluginGroupBuilder, prelude::*};
+ 
+ fn main() {
+     App::new()
+-        // Two PluginGroups that are included with bevy are DefaultPlugins and MinimalPlugins
+-        .add_plugins(DefaultPlugins)
+-        // Adding a plugin group adds all plugins in the group by default
+-        .add_plugins(HelloWorldPlugins)
++        .add_plugins((
++            // Two PluginGroups that are included with bevy are DefaultPlugins and MinimalPlugins
++            DefaultPlugins,
++            // Adding a plugin group adds all plugins in the group by default
++            HelloWorldPlugins,
++        ))
+         // You can also modify a PluginGroup (such as disabling plugins) like this:
+         // .add_plugins(
+         //     HelloWorldPlugins
+diff --git a/examples/diagnostics/custom_diagnostic.rs b/examples/diagnostics/custom_diagnostic.rs
+index 0be6363f15632..60bf0342920fc 100644
+--- a/examples/diagnostics/custom_diagnostic.rs
++++ b/examples/diagnostics/custom_diagnostic.rs
+@@ -7,10 +7,12 @@ use bevy::{
+ 
+ fn main() {
+     App::new()
+-        .add_plugins(DefaultPlugins)
+-        // The "print diagnostics" plugin is optional.
+-        // It just visualizes our diagnostics in the console.
+-        .add_plugin(LogDiagnosticsPlugin::default())
++        .add_plugins((
++            DefaultPlugins,
++            // The "print diagnostics" plugin is optional.
++            // It just visualizes our diagnostics in the console.
++            LogDiagnosticsPlugin::default(),
++        ))
+         // Diagnostics must be initialized before measurements can be added.
+         .register_diagnostic(
+             Diagnostic::new(SYSTEM_ITERATION_COUNT, "system_iteration_count", 10)
+diff --git a/examples/diagnostics/log_diagnostics.rs b/examples/diagnostics/log_diagnostics.rs
+index 2cfb1e6cc80f1..e312ad671d12e 100644
+--- a/examples/diagnostics/log_diagnostics.rs
++++ b/examples/diagnostics/log_diagnostics.rs
+@@ -7,17 +7,18 @@ use bevy::{
+ 
+ fn main() {
+     App::new()
+-        .add_plugins(DefaultPlugins)
+-        // Adds frame time diagnostics
+-        .add_plugin(FrameTimeDiagnosticsPlugin)
+-        // Adds a system that prints diagnostics to the console
+-        .add_plugin(LogDiagnosticsPlugin::default())
+-        // Any plugin can register diagnostics
+-        // Uncomment this to add an entity count diagnostics:
+-        // .add_plugin(bevy::diagnostic::EntityCountDiagnosticsPlugin::default())
+-        // Uncomment this to add an asset count diagnostics:
+-        // .add_plugin(bevy::asset::diagnostic::AssetCountDiagnosticsPlugin::<Texture>::default())
+-        // Uncomment this to add system info diagnostics:
+-        // .add_plugin(bevy::diagnostic::SystemInformationDiagnosticsPlugin::default())
++        .add_plugins((
++            DefaultPlugins,
++            // Adds frame time diagnostics
++            FrameTimeDiagnosticsPlugin,
++            // Adds a system that prints diagnostics to the console
++            LogDiagnosticsPlugin::default(),
++            // Any plugin can register diagnostics. Uncomment this to add an entity count diagnostics:
++            // bevy::diagnostic::EntityCountDiagnosticsPlugin::default(),
++            // Uncomment this to add an asset count diagnostics:
++            // bevy::asset::diagnostic::AssetCountDiagnosticsPlugin::<Texture>::default(),
++            // Uncomment this to add system info diagnostics:
++            // bevy::diagnostic::SystemInformationDiagnosticsPlugin::default()
++        ))
+         .run();
+ }
+diff --git a/examples/ecs/ecs_guide.rs b/examples/ecs/ecs_guide.rs
+index 789e1b513103e..a34871c744ff5 100644
+--- a/examples/ecs/ecs_guide.rs
++++ b/examples/ecs/ecs_guide.rs
+@@ -256,7 +256,7 @@ fn main() {
+         // Plugins are just a grouped set of app builder calls (just like we're doing here).
+         // We could easily turn our game into a plugin, but you can check out the plugin example for
+         // that :) The plugin below runs our app's "system schedule" once every 5 seconds.
+-        .add_plugin(ScheduleRunnerPlugin::run_loop(Duration::from_secs(5)))
++        .add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_secs(5)))
+         // `Startup` systems run exactly once BEFORE all other systems. These are generally used for
+         // app initialization code (ex: adding entities and resources)
+         .add_systems(Startup, startup_system)
+diff --git a/examples/ecs/system_closure.rs b/examples/ecs/system_closure.rs
+index 7c6c077f64864..5049627293a0c 100644
+--- a/examples/ecs/system_closure.rs
++++ b/examples/ecs/system_closure.rs
+@@ -25,7 +25,7 @@ fn main() {
+     let outside_variable = "bar".to_string();
+ 
+     App::new()
+-        .add_plugin(LogPlugin::default())
++        .add_plugins(LogPlugin::default())
+         // we can use a closure as a system
+         .add_systems(Update, simple_closure)
+         // or we can use a more complex closure, and pass an argument to initialize a Local variable.
+diff --git a/examples/ecs/system_piping.rs b/examples/ecs/system_piping.rs
+index c3416c39943c5..f2584c46ad8a5 100644
+--- a/examples/ecs/system_piping.rs
++++ b/examples/ecs/system_piping.rs
+@@ -11,7 +11,7 @@ fn main() {
+     App::new()
+         .insert_resource(Message("42".to_string()))
+         .insert_resource(OptionalWarning(Err("Got to rusty?".to_string())))
+-        .add_plugin(LogPlugin {
++        .add_plugins(LogPlugin {
+             level: Level::TRACE,
+             filter: "".to_string(),
+         })
+diff --git a/examples/games/game_menu.rs b/examples/games/game_menu.rs
+index 3ecdf6ef21f1c..08055514bd825 100644
+--- a/examples/games/game_menu.rs
++++ b/examples/games/game_menu.rs
+@@ -37,9 +37,7 @@ fn main() {
+         .add_state::<GameState>()
+         .add_systems(Startup, setup)
+         // Adds the plugins for each state
+-        .add_plugin(splash::SplashPlugin)
+-        .add_plugin(menu::MenuPlugin)
+-        .add_plugin(game::GamePlugin)
++        .add_plugins((splash::SplashPlugin, menu::MenuPlugin, game::GamePlugin))
+         .run();
+ }
+ 
+diff --git a/examples/shader/animate_shader.rs b/examples/shader/animate_shader.rs
+index 682169032397b..e0cc03d2eeba4 100644
+--- a/examples/shader/animate_shader.rs
++++ b/examples/shader/animate_shader.rs
+@@ -9,8 +9,7 @@ use bevy::{
+ 
+ fn main() {
+     App::new()
+-        .add_plugins(DefaultPlugins)
+-        .add_plugin(MaterialPlugin::<CustomMaterial>::default())
++        .add_plugins((DefaultPlugins, MaterialPlugin::<CustomMaterial>::default()))
+         .add_systems(Startup, setup)
+         .run();
+ }
+diff --git a/examples/shader/array_texture.rs b/examples/shader/array_texture.rs
+index be32661f11649..39e0b94a9a42b 100644
+--- a/examples/shader/array_texture.rs
++++ b/examples/shader/array_texture.rs
+@@ -9,8 +9,10 @@ use bevy::{
+ /// uniform variable.
+ fn main() {
+     App::new()
+-        .add_plugins(DefaultPlugins)
+-        .add_plugin(MaterialPlugin::<ArrayTextureMaterial>::default())
++        .add_plugins((
++            DefaultPlugins,
++            MaterialPlugin::<ArrayTextureMaterial>::default(),
++        ))
+         .add_systems(Startup, setup)
+         .add_systems(Update, create_array_texture)
+         .run();
+diff --git a/examples/shader/compute_shader_game_of_life.rs b/examples/shader/compute_shader_game_of_life.rs
+index 47d5f7593379d..d737fb029c339 100644
+--- a/examples/shader/compute_shader_game_of_life.rs
++++ b/examples/shader/compute_shader_game_of_life.rs
+@@ -23,15 +23,17 @@ const WORKGROUP_SIZE: u32 = 8;
+ fn main() {
+     App::new()
+         .insert_resource(ClearColor(Color::BLACK))
+-        .add_plugins(DefaultPlugins.set(WindowPlugin {
+-            primary_window: Some(Window {
+-                // uncomment for unthrottled FPS
+-                // present_mode: bevy::window::PresentMode::AutoNoVsync,
++        .add_plugins((
++            DefaultPlugins.set(WindowPlugin {
++                primary_window: Some(Window {
++                    // uncomment for unthrottled FPS
++                    // present_mode: bevy::window::PresentMode::AutoNoVsync,
++                    ..default()
++                }),
+                 ..default()
+             }),
+-            ..default()
+-        }))
+-        .add_plugin(GameOfLifeComputePlugin)
++            GameOfLifeComputePlugin,
++        ))
+         .add_systems(Startup, setup)
+         .run();
+ }
+@@ -70,7 +72,7 @@ impl Plugin for GameOfLifeComputePlugin {
+     fn build(&self, app: &mut App) {
+         // Extract the game of life image resource from the main world into the render world
+         // for operation on by the compute shader and display on the sprite.
+-        app.add_plugin(ExtractResourcePlugin::<GameOfLifeImage>::default());
++        app.add_plugins(ExtractResourcePlugin::<GameOfLifeImage>::default());
+         let render_app = app.sub_app_mut(RenderApp);
+         render_app.add_systems(Render, queue_bind_group.in_set(RenderSet::Queue));
+ 
+diff --git a/examples/shader/custom_vertex_attribute.rs b/examples/shader/custom_vertex_attribute.rs
+index 010701d28d75d..aaca77df96aaa 100644
+--- a/examples/shader/custom_vertex_attribute.rs
++++ b/examples/shader/custom_vertex_attribute.rs
+@@ -15,8 +15,7 @@ use bevy::{
+ 
+ fn main() {
+     App::new()
+-        .add_plugins(DefaultPlugins)
+-        .add_plugin(MaterialPlugin::<CustomMaterial>::default())
++        .add_plugins((DefaultPlugins, MaterialPlugin::<CustomMaterial>::default()))
+         .add_systems(Startup, setup)
+         .run();
+ }
+diff --git a/examples/shader/fallback_image.rs b/examples/shader/fallback_image.rs
+index a3762b9fd0f00..7119324216748 100644
+--- a/examples/shader/fallback_image.rs
++++ b/examples/shader/fallback_image.rs
+@@ -13,8 +13,10 @@ use bevy::{
+ 
+ fn main() {
+     App::new()
+-        .add_plugins(DefaultPlugins)
+-        .add_plugin(MaterialPlugin::<FallbackTestMaterial>::default())
++        .add_plugins((
++            DefaultPlugins,
++            MaterialPlugin::<FallbackTestMaterial>::default(),
++        ))
+         .add_systems(Startup, setup)
+         .run();
+ }
+diff --git a/examples/shader/post_processing.rs b/examples/shader/post_processing.rs
+index 1480e699179e8..470519377078b 100644
+--- a/examples/shader/post_processing.rs
++++ b/examples/shader/post_processing.rs
+@@ -35,12 +35,14 @@ use bevy::{
+ 
+ fn main() {
+     App::new()
+-        .add_plugins(DefaultPlugins.set(AssetPlugin {
+-            // Hot reloading the shader works correctly
+-            watch_for_changes: ChangeWatcher::with_delay(Duration::from_millis(200)),
+-            ..default()
+-        }))
+-        .add_plugin(PostProcessPlugin)
++        .add_plugins((
++            DefaultPlugins.set(AssetPlugin {
++                // Hot reloading the shader works correctly
++                watch_for_changes: ChangeWatcher::with_delay(Duration::from_millis(200)),
++                ..default()
++            }),
++            PostProcessPlugin,
++        ))
+         .add_systems(Startup, setup)
+         .add_systems(Update, (rotate, update_settings))
+         .run();
+@@ -51,18 +53,19 @@ struct PostProcessPlugin;
+ 
+ impl Plugin for PostProcessPlugin {
+     fn build(&self, app: &mut App) {
+-        app
++        app.add_plugins((
+             // The settings will be a component that lives in the main world but will
+             // be extracted to the render world every frame.
+             // This makes it possible to control the effect from the main world.
+             // This plugin will take care of extracting it automatically.
+             // It's important to derive [`ExtractComponent`] on [`PostProcessingSettings`]
+             // for this plugin to work correctly.
+-            .add_plugin(ExtractComponentPlugin::<PostProcessSettings>::default())
++            ExtractComponentPlugin::<PostProcessSettings>::default(),
+             // The settings will also be the data used in the shader.
+             // This plugin will prepare the component for the GPU by creating a uniform buffer
+             // and writing the data to that buffer every frame.
+-            .add_plugin(UniformComponentPlugin::<PostProcessSettings>::default());
++            UniformComponentPlugin::<PostProcessSettings>::default(),
++        ));
+ 
+         // We need to get the render app from the main app
+         let Ok(render_app) = app.get_sub_app_mut(RenderApp) else {
+diff --git a/examples/shader/shader_defs.rs b/examples/shader/shader_defs.rs
+index a3ad6e30b7339..1f45c43155203 100644
+--- a/examples/shader/shader_defs.rs
++++ b/examples/shader/shader_defs.rs
+@@ -14,8 +14,7 @@ use bevy::{
+ 
+ fn main() {
+     App::new()
+-        .add_plugins(DefaultPlugins)
+-        .add_plugin(MaterialPlugin::<CustomMaterial>::default())
++        .add_plugins((DefaultPlugins, MaterialPlugin::<CustomMaterial>::default()))
+         .add_systems(Startup, setup)
+         .run();
+ }
+diff --git a/examples/shader/shader_instancing.rs b/examples/shader/shader_instancing.rs
+index a470ae62f08ad..a1cbde6d1825a 100644
+--- a/examples/shader/shader_instancing.rs
++++ b/examples/shader/shader_instancing.rs
+@@ -26,8 +26,7 @@ use bytemuck::{Pod, Zeroable};
+ 
+ fn main() {
+     App::new()
+-        .add_plugins(DefaultPlugins)
+-        .add_plugin(CustomMaterialPlugin)
++        .add_plugins((DefaultPlugins, CustomMaterialPlugin))
+         .add_systems(Startup, setup)
+         .run();
+ }
+@@ -80,7 +79,7 @@ pub struct CustomMaterialPlugin;
+ 
+ impl Plugin for CustomMaterialPlugin {
+     fn build(&self, app: &mut App) {
+-        app.add_plugin(ExtractComponentPlugin::<InstanceMaterialData>::default());
++        app.add_plugins(ExtractComponentPlugin::<InstanceMaterialData>::default());
+         app.sub_app_mut(RenderApp)
+             .add_render_command::<Transparent3d, DrawCustom>()
+             .init_resource::<SpecializedMeshPipelines<CustomPipeline>>()
+diff --git a/examples/shader/shader_material.rs b/examples/shader/shader_material.rs
+index ac321d8ebc324..6e5148d0eca79 100644
+--- a/examples/shader/shader_material.rs
++++ b/examples/shader/shader_material.rs
+@@ -8,8 +8,7 @@ use bevy::{
+ 
+ fn main() {
+     App::new()
+-        .add_plugins(DefaultPlugins)
+-        .add_plugin(MaterialPlugin::<CustomMaterial>::default())
++        .add_plugins((DefaultPlugins, MaterialPlugin::<CustomMaterial>::default()))
+         .add_systems(Startup, setup)
+         .run();
+ }
+diff --git a/examples/shader/shader_material_glsl.rs b/examples/shader/shader_material_glsl.rs
+index 7182cf439a3e2..5d33f470582ea 100644
+--- a/examples/shader/shader_material_glsl.rs
++++ b/examples/shader/shader_material_glsl.rs
+@@ -14,8 +14,7 @@ use bevy::{
+ 
+ fn main() {
+     App::new()
+-        .add_plugins(DefaultPlugins)
+-        .add_plugin(MaterialPlugin::<CustomMaterial>::default())
++        .add_plugins((DefaultPlugins, MaterialPlugin::<CustomMaterial>::default()))
+         .add_systems(Startup, setup)
+         .run();
+ }
+diff --git a/examples/shader/shader_material_screenspace_texture.rs b/examples/shader/shader_material_screenspace_texture.rs
+index bace5855fba8c..b0ec22368ea7c 100644
+--- a/examples/shader/shader_material_screenspace_texture.rs
++++ b/examples/shader/shader_material_screenspace_texture.rs
+@@ -8,8 +8,7 @@ use bevy::{
+ 
+ fn main() {
+     App::new()
+-        .add_plugins(DefaultPlugins)
+-        .add_plugin(MaterialPlugin::<CustomMaterial>::default())
++        .add_plugins((DefaultPlugins, MaterialPlugin::<CustomMaterial>::default()))
+         .add_systems(Startup, setup)
+         .add_systems(Update, rotate_camera)
+         .run();
+diff --git a/examples/shader/shader_prepass.rs b/examples/shader/shader_prepass.rs
+index 6d771628390c1..81bc4dc449a71 100644
+--- a/examples/shader/shader_prepass.rs
++++ b/examples/shader/shader_prepass.rs
+@@ -12,20 +12,22 @@ use bevy::{
+ 
+ fn main() {
+     App::new()
+-        .add_plugins(DefaultPlugins.set(PbrPlugin {
+-            // The prepass is enabled by default on the StandardMaterial,
+-            // but you can disable it if you need to.
+-            //
+-            // prepass_enabled: false,
+-            ..default()
+-        }))
+-        .add_plugin(MaterialPlugin::<CustomMaterial>::default())
+-        .add_plugin(MaterialPlugin::<PrepassOutputMaterial> {
+-            // This material only needs to read the prepass textures,
+-            // but the meshes using it should not contribute to the prepass render, so we can disable it.
+-            prepass_enabled: false,
+-            ..default()
+-        })
++        .add_plugins((
++            DefaultPlugins.set(PbrPlugin {
++                // The prepass is enabled by default on the StandardMaterial,
++                // but you can disable it if you need to.
++                //
++                // prepass_enabled: false,
++                ..default()
++            }),
++            MaterialPlugin::<CustomMaterial>::default(),
++            MaterialPlugin::<PrepassOutputMaterial> {
++                // This material only needs to read the prepass textures,
++                // but the meshes using it should not contribute to the prepass render, so we can disable it.
++                prepass_enabled: false,
++                ..default()
++            },
++        ))
+         .add_systems(Startup, setup)
+         .add_systems(Update, (rotate, toggle_prepass_view))
+         // Disabling MSAA for maximum compatibility. Shader prepass with MSAA needs GPU capability MULTISAMPLED_SHADING
+diff --git a/examples/shader/texture_binding_array.rs b/examples/shader/texture_binding_array.rs
+index 76c1c13e483eb..c4affd57c1d2f 100644
+--- a/examples/shader/texture_binding_array.rs
++++ b/examples/shader/texture_binding_array.rs
+@@ -16,12 +16,13 @@ use std::{num::NonZeroU32, process::exit};
+ 
+ fn main() {
+     let mut app = App::new();
+-    app.add_plugins(DefaultPlugins.set(ImagePlugin::default_nearest()));
+-
+-    app.add_plugin(GpuFeatureSupportChecker)
+-        .add_plugin(MaterialPlugin::<BindlessMaterial>::default())
+-        .add_systems(Startup, setup)
+-        .run();
++    app.add_plugins((
++        DefaultPlugins.set(ImagePlugin::default_nearest()),
++        GpuFeatureSupportChecker,
++        MaterialPlugin::<BindlessMaterial>::default(),
++    ))
++    .add_systems(Startup, setup)
++    .run();
+ }
+ 
+ const MAX_TEXTURE_COUNT: usize = 16;
+diff --git a/examples/stress_tests/bevymark.rs b/examples/stress_tests/bevymark.rs
+index 98065724d8630..d9cbe76a89315 100644
+--- a/examples/stress_tests/bevymark.rs
++++ b/examples/stress_tests/bevymark.rs
+@@ -28,17 +28,19 @@ struct Bird {
+ 
+ fn main() {
+     App::new()
+-        .add_plugins(DefaultPlugins.set(WindowPlugin {
+-            primary_window: Some(Window {
+-                title: "BevyMark".into(),
+-                resolution: (800., 600.).into(),
+-                present_mode: PresentMode::AutoNoVsync,
++        .add_plugins((
++            DefaultPlugins.set(WindowPlugin {
++                primary_window: Some(Window {
++                    title: "BevyMark".into(),
++                    resolution: (800., 600.).into(),
++                    present_mode: PresentMode::AutoNoVsync,
++                    ..default()
++                }),
+                 ..default()
+             }),
+-            ..default()
+-        }))
+-        .add_plugin(FrameTimeDiagnosticsPlugin)
+-        .add_plugin(LogDiagnosticsPlugin::default())
++            FrameTimeDiagnosticsPlugin,
++            LogDiagnosticsPlugin::default(),
++        ))
+         .insert_resource(BevyCounter {
+             count: 0,
+             color: Color::WHITE,
+diff --git a/examples/stress_tests/many_animated_sprites.rs b/examples/stress_tests/many_animated_sprites.rs
+index a5dd281de7f56..6647447d6f2a8 100644
+--- a/examples/stress_tests/many_animated_sprites.rs
++++ b/examples/stress_tests/many_animated_sprites.rs
+@@ -20,15 +20,17 @@ const CAMERA_SPEED: f32 = 1000.0;
+ fn main() {
+     App::new()
+         // Since this is also used as a benchmark, we want it to display performance data.
+-        .add_plugin(LogDiagnosticsPlugin::default())
+-        .add_plugin(FrameTimeDiagnosticsPlugin)
+-        .add_plugins(DefaultPlugins.set(WindowPlugin {
+-            primary_window: Some(Window {
+-                present_mode: PresentMode::AutoNoVsync,
++        .add_plugins((
++            LogDiagnosticsPlugin::default(),
++            FrameTimeDiagnosticsPlugin,
++            DefaultPlugins.set(WindowPlugin {
++                primary_window: Some(Window {
++                    present_mode: PresentMode::AutoNoVsync,
++                    ..default()
++                }),
+                 ..default()
+             }),
+-            ..default()
+-        }))
++        ))
+         .add_systems(Startup, setup)
+         .add_systems(
+             Update,
+diff --git a/examples/stress_tests/many_buttons.rs b/examples/stress_tests/many_buttons.rs
+index 19d424a1df4cb..28846a7f1e248 100644
+--- a/examples/stress_tests/many_buttons.rs
++++ b/examples/stress_tests/many_buttons.rs
+@@ -23,15 +23,17 @@ const FONT_SIZE: f32 = 7.0;
+ fn main() {
+     let mut app = App::new();
+ 
+-    app.add_plugins(DefaultPlugins.set(WindowPlugin {
+-        primary_window: Some(Window {
+-            present_mode: PresentMode::AutoNoVsync,
++    app.add_plugins((
++        DefaultPlugins.set(WindowPlugin {
++            primary_window: Some(Window {
++                present_mode: PresentMode::AutoNoVsync,
++                ..default()
++            }),
+             ..default()
+         }),
+-        ..default()
+-    }))
+-    .add_plugin(FrameTimeDiagnosticsPlugin)
+-    .add_plugin(LogDiagnosticsPlugin::default())
++        FrameTimeDiagnosticsPlugin,
++        LogDiagnosticsPlugin::default(),
++    ))
+     .add_systems(Startup, setup)
+     .add_systems(Update, button_system);
+ 
+diff --git a/examples/stress_tests/many_cubes.rs b/examples/stress_tests/many_cubes.rs
+index dc20c4fa362a7..20495b1ab7a61 100644
+--- a/examples/stress_tests/many_cubes.rs
++++ b/examples/stress_tests/many_cubes.rs
+@@ -21,15 +21,17 @@ use bevy::{
+ 
+ fn main() {
+     App::new()
+-        .add_plugins(DefaultPlugins.set(WindowPlugin {
+-            primary_window: Some(Window {
+-                present_mode: PresentMode::AutoNoVsync,
++        .add_plugins((
++            DefaultPlugins.set(WindowPlugin {
++                primary_window: Some(Window {
++                    present_mode: PresentMode::AutoNoVsync,
++                    ..default()
++                }),
+                 ..default()
+             }),
+-            ..default()
+-        }))
+-        .add_plugin(FrameTimeDiagnosticsPlugin)
+-        .add_plugin(LogDiagnosticsPlugin::default())
++            FrameTimeDiagnosticsPlugin,
++            LogDiagnosticsPlugin::default(),
++        ))
+         .add_systems(Startup, setup)
+         .add_systems(Update, (move_camera, print_mesh_count))
+         .run();
+diff --git a/examples/stress_tests/many_foxes.rs b/examples/stress_tests/many_foxes.rs
+index 9244861d8b00b..18dee869bcf79 100644
+--- a/examples/stress_tests/many_foxes.rs
++++ b/examples/stress_tests/many_foxes.rs
+@@ -20,16 +20,18 @@ struct Foxes {
+ 
+ fn main() {
+     App::new()
+-        .add_plugins(DefaultPlugins.set(WindowPlugin {
+-            primary_window: Some(Window {
+-                title: "🦊🦊🦊 Many Foxes! 🦊🦊🦊".into(),
+-                present_mode: PresentMode::AutoNoVsync,
++        .add_plugins((
++            DefaultPlugins.set(WindowPlugin {
++                primary_window: Some(Window {
++                    title: "🦊🦊🦊 Many Foxes! 🦊🦊🦊".into(),
++                    present_mode: PresentMode::AutoNoVsync,
++                    ..default()
++                }),
+                 ..default()
+             }),
+-            ..default()
+-        }))
+-        .add_plugin(FrameTimeDiagnosticsPlugin)
+-        .add_plugin(LogDiagnosticsPlugin::default())
++            FrameTimeDiagnosticsPlugin,
++            LogDiagnosticsPlugin::default(),
++        ))
+         .insert_resource(Foxes {
+             count: std::env::args()
+                 .nth(1)
+diff --git a/examples/stress_tests/many_gizmos.rs b/examples/stress_tests/many_gizmos.rs
+index 1feb390408d82..472b25d5e4028 100644
+--- a/examples/stress_tests/many_gizmos.rs
++++ b/examples/stress_tests/many_gizmos.rs
+@@ -10,15 +10,17 @@ const SYSTEM_COUNT: u32 = 10;
+ 
+ fn main() {
+     let mut app = App::new();
+-    app.add_plugins(DefaultPlugins.set(WindowPlugin {
+-        primary_window: Some(Window {
+-            title: "Many Debug Lines".to_string(),
+-            present_mode: PresentMode::AutoNoVsync,
++    app.add_plugins((
++        DefaultPlugins.set(WindowPlugin {
++            primary_window: Some(Window {
++                title: "Many Debug Lines".to_string(),
++                present_mode: PresentMode::AutoNoVsync,
++                ..default()
++            }),
+             ..default()
+         }),
+-        ..default()
+-    }))
+-    .add_plugin(FrameTimeDiagnosticsPlugin)
++        FrameTimeDiagnosticsPlugin,
++    ))
+     .insert_resource(Config {
+         line_count: 50_000,
+         fancy: false,
+diff --git a/examples/stress_tests/many_glyphs.rs b/examples/stress_tests/many_glyphs.rs
+index 77127b57cade7..7e5899a7c26ef 100644
+--- a/examples/stress_tests/many_glyphs.rs
++++ b/examples/stress_tests/many_glyphs.rs
+@@ -14,15 +14,17 @@ use bevy::{
+ 
+ fn main() {
+     let mut app = App::new();
+-    app.add_plugins(DefaultPlugins.set(WindowPlugin {
+-        primary_window: Some(Window {
+-            present_mode: PresentMode::AutoNoVsync,
++    app.add_plugins((
++        DefaultPlugins.set(WindowPlugin {
++            primary_window: Some(Window {
++                present_mode: PresentMode::Immediate,
++                ..default()
++            }),
+             ..default()
+         }),
+-        ..default()
+-    }))
+-    .add_plugin(FrameTimeDiagnosticsPlugin)
+-    .add_plugin(LogDiagnosticsPlugin::default())
++        FrameTimeDiagnosticsPlugin,
++        LogDiagnosticsPlugin::default(),
++    ))
+     .add_systems(Startup, setup);
+ 
+     if std::env::args().any(|arg| arg == "recompute-text") {
+diff --git a/examples/stress_tests/many_lights.rs b/examples/stress_tests/many_lights.rs
+index bf81668536190..66fe81ef43834 100644
+--- a/examples/stress_tests/many_lights.rs
++++ b/examples/stress_tests/many_lights.rs
+@@ -15,20 +15,22 @@ use rand::{thread_rng, Rng};
+ 
+ fn main() {
+     App::new()
+-        .add_plugins(DefaultPlugins.set(WindowPlugin {
+-            primary_window: Some(Window {
+-                resolution: (1024.0, 768.0).into(),
+-                title: "many_lights".into(),
+-                present_mode: PresentMode::AutoNoVsync,
++        .add_plugins((
++            DefaultPlugins.set(WindowPlugin {
++                primary_window: Some(Window {
++                    resolution: (1024.0, 768.0).into(),
++                    title: "many_lights".into(),
++                    present_mode: PresentMode::AutoNoVsync,
++                    ..default()
++                }),
+                 ..default()
+             }),
+-            ..default()
+-        }))
+-        .add_plugin(FrameTimeDiagnosticsPlugin)
+-        .add_plugin(LogDiagnosticsPlugin::default())
++            FrameTimeDiagnosticsPlugin,
++            LogDiagnosticsPlugin::default(),
++            LogVisibleLights,
++        ))
+         .add_systems(Startup, setup)
+         .add_systems(Update, (move_camera, print_light_count))
+-        .add_plugin(LogVisibleLights)
+         .run();
+ }
+ 
+diff --git a/examples/stress_tests/many_sprites.rs b/examples/stress_tests/many_sprites.rs
+index 87776ef61e8dd..d95cdf4e58242 100644
+--- a/examples/stress_tests/many_sprites.rs
++++ b/examples/stress_tests/many_sprites.rs
+@@ -28,15 +28,17 @@ fn main() {
+             std::env::args().nth(1).unwrap_or_default() == "--colored",
+         ))
+         // Since this is also used as a benchmark, we want it to display performance data.
+-        .add_plugin(LogDiagnosticsPlugin::default())
+-        .add_plugin(FrameTimeDiagnosticsPlugin)
+-        .add_plugins(DefaultPlugins.set(WindowPlugin {
+-            primary_window: Some(Window {
+-                present_mode: PresentMode::AutoNoVsync,
++        .add_plugins((
++            LogDiagnosticsPlugin::default(),
++            FrameTimeDiagnosticsPlugin,
++            DefaultPlugins.set(WindowPlugin {
++                primary_window: Some(Window {
++                    present_mode: PresentMode::AutoNoVsync,
++                    ..default()
++                }),
+                 ..default()
+             }),
+-            ..default()
+-        }))
++        ))
+         .add_systems(Startup, setup)
+         .add_systems(
+             Update,
+diff --git a/examples/stress_tests/text_pipeline.rs b/examples/stress_tests/text_pipeline.rs
+index 64ffe57ae76df..cd0e77a9b15e9 100644
+--- a/examples/stress_tests/text_pipeline.rs
++++ b/examples/stress_tests/text_pipeline.rs
+@@ -11,15 +11,17 @@ use bevy::{
+ 
+ fn main() {
+     App::new()
+-        .add_plugins(DefaultPlugins.set(WindowPlugin {
+-            primary_window: Some(Window {
+-                present_mode: PresentMode::Immediate,
++        .add_plugins((
++            DefaultPlugins.set(WindowPlugin {
++                primary_window: Some(Window {
++                    present_mode: PresentMode::Immediate,
++                    ..default()
++                }),
+                 ..default()
+             }),
+-            ..default()
+-        }))
+-        .add_plugin(FrameTimeDiagnosticsPlugin)
+-        .add_plugin(LogDiagnosticsPlugin::default())
++            FrameTimeDiagnosticsPlugin,
++            LogDiagnosticsPlugin::default(),
++        ))
+         .add_systems(Startup, spawn)
+         .add_systems(Update, update_text_bounds)
+         .run();
+diff --git a/examples/stress_tests/transform_hierarchy.rs b/examples/stress_tests/transform_hierarchy.rs
+index 18562fcd0d5b7..4f294c077bef2 100644
+--- a/examples/stress_tests/transform_hierarchy.rs
++++ b/examples/stress_tests/transform_hierarchy.rs
+@@ -183,8 +183,7 @@ fn main() {
+ 
+     App::new()
+         .insert_resource(cfg)
+-        .add_plugins(MinimalPlugins)
+-        .add_plugin(TransformPlugin)
++        .add_plugins((MinimalPlugins, TransformPlugin))
+         .add_systems(Startup, setup)
+         // Updating transforms *must* be done before `CoreSet::PostUpdate`
+         // or the hierarchy will momentarily be in an invalid state.
+diff --git a/examples/tools/scene_viewer/main.rs b/examples/tools/scene_viewer/main.rs
+index 1295d7d809d3c..ab20505bf89e3 100644
+--- a/examples/tools/scene_viewer/main.rs
++++ b/examples/tools/scene_viewer/main.rs
+@@ -26,7 +26,7 @@ fn main() {
+         color: Color::WHITE,
+         brightness: 1.0 / 5.0f32,
+     })
+-    .add_plugins(
++    .add_plugins((
+         DefaultPlugins
+             .set(WindowPlugin {
+                 primary_window: Some(Window {
+@@ -40,9 +40,9 @@ fn main() {
+                     .unwrap_or_else(|_| ".".to_string()),
+                 watch_for_changes: ChangeWatcher::with_delay(Duration::from_millis(200)),
+             }),
+-    )
+-    .add_plugin(CameraControllerPlugin)
+-    .add_plugin(SceneViewerPlugin)
++        CameraControllerPlugin,
++        SceneViewerPlugin,
++    ))
+     .add_systems(Startup, setup)
+     .add_systems(PreUpdate, setup_scene_after_load);
+ 
+diff --git a/examples/ui/text.rs b/examples/ui/text.rs
+index 841358c2bd3b2..ccc44f5095039 100644
+--- a/examples/ui/text.rs
++++ b/examples/ui/text.rs
+@@ -10,8 +10,7 @@ use bevy::{
+ 
+ fn main() {
+     App::new()
+-        .add_plugins(DefaultPlugins)
+-        .add_plugin(FrameTimeDiagnosticsPlugin)
++        .add_plugins((DefaultPlugins, FrameTimeDiagnosticsPlugin))
+         .add_systems(Startup, setup)
+         .add_systems(Update, (text_update_system, text_color_system))
+         .run();
+diff --git a/examples/ui/text_debug.rs b/examples/ui/text_debug.rs
+index e1756d3792074..cfacced41c421 100644
+--- a/examples/ui/text_debug.rs
++++ b/examples/ui/text_debug.rs
+@@ -8,14 +8,16 @@ use bevy::{
+ 
+ fn main() {
+     App::new()
+-        .add_plugins(DefaultPlugins.set(WindowPlugin {
+-            primary_window: Some(Window {
+-                present_mode: PresentMode::AutoNoVsync,
++        .add_plugins((
++            DefaultPlugins.set(WindowPlugin {
++                primary_window: Some(Window {
++                    present_mode: PresentMode::AutoNoVsync,
++                    ..default()
++                }),
+                 ..default()
+             }),
+-            ..default()
+-        }))
+-        .add_plugin(FrameTimeDiagnosticsPlugin)
++            FrameTimeDiagnosticsPlugin,
++        ))
+         .add_systems(Startup, infotext_system)
+         .add_systems(Update, change_text_system)
+         .run();
+diff --git a/examples/window/window_settings.rs b/examples/window/window_settings.rs
+index 6bbb48aa254f4..158c1d9b7803a 100644
+--- a/examples/window/window_settings.rs
++++ b/examples/window/window_settings.rs
+@@ -9,22 +9,24 @@ use bevy::{
+ 
+ fn main() {
+     App::new()
+-        .add_plugins(DefaultPlugins.set(WindowPlugin {
+-            primary_window: Some(Window {
+-                title: "I am a window!".into(),
+-                resolution: (500., 300.).into(),
+-                present_mode: PresentMode::AutoVsync,
+-                // Tells wasm to resize the window according to the available canvas
+-                fit_canvas_to_parent: true,
+-                // Tells wasm not to override default event handling, like F5, Ctrl+R etc.
+-                prevent_default_event_handling: false,
+-                window_theme: Some(WindowTheme::Dark),
++        .add_plugins((
++            DefaultPlugins.set(WindowPlugin {
++                primary_window: Some(Window {
++                    title: "I am a window!".into(),
++                    resolution: (500., 300.).into(),
++                    present_mode: PresentMode::AutoVsync,
++                    // Tells wasm to resize the window according to the available canvas
++                    fit_canvas_to_parent: true,
++                    // Tells wasm not to override default event handling, like F5, Ctrl+R etc.
++                    prevent_default_event_handling: false,
++                    window_theme: Some(WindowTheme::Dark),
++                    ..default()
++                }),
+                 ..default()
+             }),
+-            ..default()
+-        }))
+-        .add_plugin(LogDiagnosticsPlugin::default())
+-        .add_plugin(FrameTimeDiagnosticsPlugin)
++            LogDiagnosticsPlugin::default(),
++            FrameTimeDiagnosticsPlugin,
++        ))
+         .add_systems(
+             Update,
+             (

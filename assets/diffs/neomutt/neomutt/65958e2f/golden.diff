@@ -1,0 +1,3826 @@
+diff --git a/ChangeLog.md b/ChangeLog.md
+index 49618de6d46..945f6662e6f 100644
+--- a/ChangeLog.md
++++ b/ChangeLog.md
+@@ -861,7 +861,7 @@
+   - 100% Czech
+   - 70% Turkish
+ * Docs
+-  - Document that `$sort_alias` affects the query menu
++  - Document that `$alias_sort` affects the query menu
+ * Build
+   - improve ASAN flags
+   - add SASL and S/MIME to `--everything`
+diff --git a/Makefile.autosetup b/Makefile.autosetup
+index 1a9f12cf985..496d48cb81a 100644
+--- a/Makefile.autosetup
++++ b/Makefile.autosetup
+@@ -70,8 +70,8 @@ NEOMUTTOBJS=	alternates.o commands.o conststrings.o copy.o editmsg.o \
+ 		maillist.o main.o muttlib.o mutt_account.o mutt_body.o \
+ 		mutt_config.o mutt_header.o mutt_logging.o mutt_mailbox.o \
+ 		mutt_signal.o mutt_socket.o mutt_thread.o mview.o mx.o \
+-		recvcmd.o rfc3676.o score.o sort.o status.o subjectrx.o \
+-		system.o version.o
++		recvcmd.o rfc3676.o score.o status.o subjectrx.o system.o \
++		version.o
+ 
+ @if USE_INOTIFY
+ NEOMUTTOBJS+=	monitor.o
+@@ -404,8 +404,8 @@ $(PWD)/editor:
+ LIBEMAIL=	libemail.a
+ LIBEMAILOBJS=	email/body.o email/email.o email/envelope.o email/from.o \
+ 		email/globals.o email/mime.o email/parameter.o email/parse.o \
+-		email/rfc2047.o email/rfc2231.o email/tags.o email/thread.o \
+-		email/url.o
++		email/rfc2047.o email/rfc2231.o email/sort.o email/tags.o \
++		email/thread.o email/url.o
+ CLEANFILES+=	$(LIBEMAIL) $(LIBEMAILOBJS)
+ ALLOBJS+=	$(LIBEMAILOBJS)
+ 
+@@ -651,13 +651,13 @@ LIBNCRYPTOBJS=	ncrypt/config.o ncrypt/crypt.o ncrypt/crypt_mod.o \
+ @if HAVE_PKG_GPGME
+ LIBNCRYPTOBJS+=	ncrypt/crypt_gpgme.o ncrypt/dlg_gpgme.o \
+ 		ncrypt/gpgme_functions.o ncrypt/crypt_mod_pgp_gpgme.o \
+-		ncrypt/crypt_mod_smime_gpgme.o
++		ncrypt/crypt_mod_smime_gpgme.o ncrypt/sort_gpgme.o
+ @endif
+ @if HAVE_PGP
+ LIBNCRYPTOBJS+=	ncrypt/crypt_mod_pgp_classic.o ncrypt/dlg_pgp.o \
+ 		ncrypt/gnupgparse.o ncrypt/pgp_functions.o ncrypt/pgp.o \
+ 		ncrypt/pgpinvoke.o ncrypt/pgpkey.o ncrypt/pgplib.o \
+-		ncrypt/pgpmicalg.o ncrypt/pgppacket.o
++		ncrypt/pgpmicalg.o ncrypt/pgppacket.o ncrypt/sort_pgp.o
+ @endif
+ @if HAVE_SMIME
+ LIBNCRYPTOBJS+=	ncrypt/crypt_mod_smime_classic.o ncrypt/dlg_smime.o \
+diff --git a/alias/config.c b/alias/config.c
+index 7044f9dc628..babb3641aee 100644
+--- a/alias/config.c
++++ b/alias/config.c
+@@ -35,16 +35,17 @@
+ #include "config/lib.h"
+ #include "expando/lib.h"
+ #include "expando.h"
++#include "sort.h"
+ 
+ /**
+- * SortAliasMethods - Sort methods for email aliases
++ * AliasSortMethods - Sort methods for email aliases
+  */
+-static const struct Mapping SortAliasMethods[] = {
++static const struct Mapping AliasSortMethods[] = {
+   // clang-format off
+-  { "alias",    SORT_ALIAS },
+-  { "email",    SORT_EMAIL },
+-  { "name",     SORT_NAME },
+-  { "unsorted", SORT_ORDER },
++  { "alias",    ALIAS_SORT_ALIAS },
++  { "email",    ALIAS_SORT_EMAIL },
++  { "name",     ALIAS_SORT_NAME },
++  { "unsorted", ALIAS_SORT_UNSORTED },
+   { NULL, 0 },
+   // clang-format on
+ };
+@@ -115,7 +116,7 @@ static struct ConfigDef AliasVars[] = {
+   { "alias_format", DT_EXPANDO|D_NOT_EMPTY, IP "%3i %f%t %-15a %-56A | %C%> %Y", IP &AliasFormatDef, NULL,
+     "printf-like format string for the alias menu"
+   },
+-  { "sort_alias", DT_SORT|D_SORT_REVERSE, SORT_ALIAS, IP SortAliasMethods, NULL,
++  { "alias_sort", DT_SORT|D_SORT_REVERSE, ALIAS_SORT_ALIAS, IP AliasSortMethods, NULL,
+     "Sort method for the alias menu"
+   },
+   { "query_command", DT_STRING|D_STRING_COMMAND, 0, 0, NULL,
+@@ -124,6 +125,9 @@ static struct ConfigDef AliasVars[] = {
+   { "query_format", DT_EXPANDO|D_NOT_EMPTY, IP "%3i %t %-25N %-25E | %C%> %Y", IP &QueryFormatDef, NULL,
+     "printf-like format string for the query menu (address book)"
+   },
++
++  { "sort_alias", DT_SYNONYM, IP "alias_sort", IP "2024-11-19" },
++
+   { NULL },
+   // clang-format on
+ };
+diff --git a/alias/functions.c b/alias/functions.c
+index a61866220f8..7669ef93c93 100644
+--- a/alias/functions.c
++++ b/alias/functions.c
+@@ -50,6 +50,7 @@
+ #include "alias.h"
+ #include "functions.h"
+ #include "gui.h"
++#include "sort.h"
+ #endif
+ 
+ // clang-format off
+@@ -388,7 +389,7 @@ static int op_search(struct AliasMenuData *mdata, int op)
+  */
+ static int op_sort(struct AliasMenuData *mdata, int op)
+ {
+-  int sort = cs_subset_sort(mdata->sub, "sort_alias");
++  int sort = cs_subset_sort(mdata->sub, "alias_sort");
+   bool resort = true;
+   bool reverse = (op == OP_SORT_REVERSE);
+ 
+@@ -405,19 +406,19 @@ static int op_sort(struct AliasMenuData *mdata, int op)
+       break;
+ 
+     case 1: /* (a)lias */
+-      sort = SORT_ALIAS;
++      sort = ALIAS_SORT_ALIAS;
+       break;
+ 
+     case 2: /* (n)ame */
+-      sort = SORT_NAME;
++      sort = ALIAS_SORT_NAME;
+       break;
+ 
+     case 3: /* (e)mail */
+-      sort = SORT_EMAIL;
++      sort = ALIAS_SORT_EMAIL;
+       break;
+ 
+     case 4: /* (u)nsorted */
+-      sort = SORT_ORDER;
++      sort = ALIAS_SORT_UNSORTED;
+       break;
+   }
+ 
+@@ -426,7 +427,7 @@ static int op_sort(struct AliasMenuData *mdata, int op)
+     sort |= reverse ? SORT_REVERSE : 0;
+ 
+     // This will trigger a WA_RECALC
+-    cs_subset_str_native_set(mdata->sub, "sort_alias", sort, NULL);
++    cs_subset_str_native_set(mdata->sub, "alias_sort", sort, NULL);
+   }
+ 
+   return FR_SUCCESS;
+diff --git a/alias/gui.c b/alias/gui.c
+index 4822016afc6..58588f80737 100644
+--- a/alias/gui.c
++++ b/alias/gui.c
+@@ -38,7 +38,7 @@
+ /**
+  * alias_config_observer - Notification that a Config Variable has changed - Implements ::observer_t - @ingroup observer_api
+  *
+- * The Address Book Window is affected by changes to `$sort_alias`.
++ * The Address Book Window is affected by changes to `$alias_sort`.
+  */
+ int alias_config_observer(struct NotifyCallback *nc)
+ {
+@@ -49,7 +49,7 @@ int alias_config_observer(struct NotifyCallback *nc)
+ 
+   struct EventConfig *ev_c = nc->event_data;
+ 
+-  if (!mutt_str_equal(ev_c->name, "sort_alias") && !mutt_str_equal(ev_c->name, "alias_format") &&
++  if (!mutt_str_equal(ev_c->name, "alias_sort") && !mutt_str_equal(ev_c->name, "alias_format") &&
+       !mutt_str_equal(ev_c->name, "query_format"))
+   {
+     return 0;
+diff --git a/alias/sort.c b/alias/sort.c
+index 1d6c6a76895..bac068c35b5 100644
+--- a/alias/sort.c
++++ b/alias/sort.c
+@@ -182,11 +182,11 @@ static int alias_sort_name(const void *a, const void *b, void *sdata)
+ }
+ 
+ /**
+- * alias_sort_unsort - Compare two Aliases by their original configuration position - Implements ::sort_t - @ingroup sort_api
++ * alias_sort_unsorted - Compare two Aliases by their original configuration position - Implements ::sort_t - @ingroup sort_api
+  *
+  * @note Non-visible Aliases are sorted to the end
+  */
+-static int alias_sort_unsort(const void *a, const void *b, void *sdata)
++static int alias_sort_unsorted(const void *a, const void *b, void *sdata)
+ {
+   const struct AliasView *av_a = a;
+   const struct AliasView *av_b = b;
+@@ -204,23 +204,23 @@ static int alias_sort_unsort(const void *a, const void *b, void *sdata)
+ 
+ /**
+  * alias_get_sort_function - Sorting function decision logic
+- * @param sort Sort method, e.g. #SORT_ALIAS
++ * @param sort Sort method, e.g. #ALIAS_SORT_ALIAS
+  */
+ static sort_t alias_get_sort_function(short sort)
+ {
+   switch ((sort & SORT_MASK))
+   {
+-    case SORT_ALIAS:
++    case ALIAS_SORT_ALIAS:
+       return alias_sort_alias;
+ 
+-    case SORT_EMAIL:
++    case ALIAS_SORT_EMAIL:
+       return alias_sort_email;
+ 
+-    case SORT_NAME:
++    case ALIAS_SORT_NAME:
+       return alias_sort_name;
+ 
+-    case SORT_ORDER:
+-      return alias_sort_unsort;
++    case ALIAS_SORT_UNSORTED:
++      return alias_sort_unsorted;
+ 
+     default:
+       return alias_sort_alias;
+@@ -237,14 +237,14 @@ void alias_array_sort(struct AliasViewArray *ava, const struct ConfigSubset *sub
+   if (!ava || ARRAY_EMPTY(ava))
+     return;
+ 
+-  short c_sort_alias = cs_subset_sort(sub, "sort_alias");
+-  if (c_sort_alias == SORT_ALIAS)
++  short c_sort_alias = cs_subset_sort(sub, "alias_sort");
++  if (c_sort_alias == ALIAS_SORT_ALIAS)
+   {
+     struct AliasView *av = ARRAY_GET(ava, 0);
+     struct Alias *a = av->alias;
+ 
+     if (!a->name) // We've got a Query
+-      c_sort_alias = SORT_ADDRESS;
++      c_sort_alias = ALIAS_SORT_NAME;
+   }
+ 
+   bool sort_reverse = (c_sort_alias & SORT_REVERSE);
+diff --git a/alias/sort.h b/alias/sort.h
+new file mode 100644
+index 00000000000..2ddc597eded
+--- /dev/null
++++ b/alias/sort.h
+@@ -0,0 +1,37 @@
++/**
++ * @file
++ * Address book sorting functions
++ *
++ * @authors
++ * Copyright (C) 2024 Richard Russon <rich@flatcap.org>
++ *
++ * @copyright
++ * This program is free software: you can redistribute it and/or modify it under
++ * the terms of the GNU General Public License as published by the Free Software
++ * Foundation, either version 2 of the License, or (at your option) any later
++ * version.
++ *
++ * This program is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
++ * FOR A PARTICULAR PURPOSE.  See the GNU General Public License for more
++ * details.
++ *
++ * You should have received a copy of the GNU General Public License along with
++ * this program.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++#ifndef MUTT_ALIAS_SORT_H
++#define MUTT_ALIAS_SORT_H
++
++/**
++ * enum AliasSortType - Methods for sorting Aliases/Queries
++ */
++enum AliasSortType
++{
++  ALIAS_SORT_ALIAS,       ///< Sort by Alias short name
++  ALIAS_SORT_EMAIL,       ///< Sort by Email Address
++  ALIAS_SORT_NAME,        ///< Sort by Real Name
++  ALIAS_SORT_UNSORTED,    ///< Sort by the order the Aliases were configured
++};
++
++#endif /* MUTT_ALIAS_SORT_H */
+diff --git a/browser/config.c b/browser/config.c
+index aa93b49c199..a81c3ac0c7f 100644
+--- a/browser/config.c
++++ b/browser/config.c
+@@ -35,20 +35,22 @@
+ #include "config/lib.h"
+ #include "lib.h"
+ #include "expando/lib.h"
++#include "sort.h"
+ 
+ /**
+- * SortBrowserMethods - Sort methods for the folder/dir browser
++ * BrowserSortMethods - Sort methods for the folder/dir browser
+  */
+-static const struct Mapping SortBrowserMethods[] = {
++static const struct Mapping BrowserSortMethods[] = {
+   // clang-format off
+-  { "alpha",    SORT_SUBJECT },
+-  { "count",    SORT_COUNT },
+-  { "date",     SORT_DATE },
+-  { "desc",     SORT_DESC },
+-  { "new",      SORT_UNREAD },
+-  { "unread",   SORT_UNREAD },
+-  { "size",     SORT_SIZE },
+-  { "unsorted", SORT_ORDER },
++  { "alpha",    BROWSER_SORT_ALPHA },
++  { "count",    BROWSER_SORT_COUNT },
++  { "date",     BROWSER_SORT_DATE },
++  { "desc",     BROWSER_SORT_DESC },
++  { "size",     BROWSER_SORT_SIZE },
++  { "new",      BROWSER_SORT_NEW },
++  { "unsorted", BROWSER_SORT_UNSORTED },
++  // Compatibility
++  { "unread",   BROWSER_SORT_NEW },
+   { NULL, 0 },
+   // clang-format on
+ };
+@@ -138,6 +140,9 @@ static struct ConfigDef BrowserVars[] = {
+   { "browser_abbreviate_mailboxes", DT_BOOL, true, 0, NULL,
+     "Abbreviate mailboxes using '~' and '=' in the browser"
+   },
++  { "browser_sort", DT_SORT|D_SORT_REVERSE, BROWSER_SORT_ALPHA, IP BrowserSortMethods, NULL,
++    "Sort method for the browser"
++  },
+   { "folder_format", DT_EXPANDO|D_NOT_EMPTY, IP "%2C %t %N %F %2l %-8.8u %-8.8g %8s %d %i", IP &FolderFormatDef, NULL,
+     "printf-like format string for the browser's display of folders"
+   },
+@@ -153,12 +158,12 @@ static struct ConfigDef BrowserVars[] = {
+   { "show_only_unread", DT_BOOL, false, 0, NULL,
+     "(nntp) Only show subscribed newsgroups with unread articles"
+   },
+-  { "sort_browser", DT_SORT|D_SORT_REVERSE, SORT_ALPHA, IP SortBrowserMethods, NULL,
+-    "Sort method for the browser"
+-  },
+   { "browser_sort_dirs_first", DT_BOOL, false, 0, NULL,
+     "Group directories before files in the browser"
+   },
++
++  { "sort_browser", DT_SYNONYM, IP "browser_sort", IP "2024-11-20" },
++
+   { NULL },
+   // clang-format on
+ };
+diff --git a/browser/dlg_browser.c b/browser/dlg_browser.c
+index a9eec323a9c..60584022da3 100644
+--- a/browser/dlg_browser.c
++++ b/browser/dlg_browser.c
+@@ -87,6 +87,7 @@
+ #include <time.h>
+ #include "mutt/lib.h"
+ #include "config/lib.h"
++#include "email/lib.h"
+ #include "core/lib.h"
+ #include "conn/lib.h"
+ #include "gui/lib.h"
+@@ -105,6 +106,7 @@
+ #include "nntp/adata.h"
+ #include "nntp/mdata.h"
+ #include "private_data.h"
++#include "sort.h"
+ 
+ const struct ExpandoRenderData FolderRenderData[];
+ const struct ExpandoRenderData GroupIndexRenderData[];
+@@ -1161,12 +1163,12 @@ static int browser_config_observer(struct NotifyCallback *nc)
+     browser_highlight_default(state, menu);
+   }
+   else if (!mutt_str_equal(ev_c->name, "browser_abbreviate_mailboxes") &&
++           !mutt_str_equal(ev_c->name, "browser_sort") &&
+            !mutt_str_equal(ev_c->name, "date_format") &&
+            !mutt_str_equal(ev_c->name, "folder") &&
+            !mutt_str_equal(ev_c->name, "folder_format") &&
+            !mutt_str_equal(ev_c->name, "group_index_format") &&
+-           !mutt_str_equal(ev_c->name, "mailbox_folder_format") &&
+-           !mutt_str_equal(ev_c->name, "sort_browser"))
++           !mutt_str_equal(ev_c->name, "mailbox_folder_format"))
+   {
+     return 0;
+   }
+@@ -1381,12 +1383,12 @@ void dlg_browser(struct Buffer *file, SelectFileFlags flags, struct Mailbox *m,
+        * only to help readability of the code.  */
+       bool browser_track = false;
+ 
+-      const enum SortType c_sort_browser = cs_subset_sort(NeoMutt->sub, "sort_browser");
+-      switch (c_sort_browser & SORT_MASK)
++      const enum EmailSortType c_browser_sort = cs_subset_sort(NeoMutt->sub, "browser_sort");
++      switch (c_browser_sort & SORT_MASK)
+       {
+-        case SORT_DESC:
+-        case SORT_SUBJECT:
+-        case SORT_ORDER:
++        case BROWSER_SORT_ALPHA:
++        case BROWSER_SORT_DESC:
++        case BROWSER_SORT_UNSORTED:
+           browser_track = true;
+           break;
+       }
+diff --git a/browser/functions.c b/browser/functions.c
+index b7cca2fcf04..ddce2148862 100644
+--- a/browser/functions.c
++++ b/browser/functions.c
+@@ -60,6 +60,7 @@
+ #include "nntp/adata.h"
+ #include "nntp/mdata.h"
+ #include "private_data.h"
++#include "sort.h"
+ #endif
+ 
+ static int op_subscribe_pattern(struct BrowserPrivateData *priv, int op);
+@@ -883,31 +884,31 @@ static int op_sort(struct BrowserPrivateData *priv, int op)
+       break;
+ 
+     case 1: /* (d)ate */
+-      sort = SORT_DATE;
++      sort = BROWSER_SORT_DATE;
+       break;
+ 
+     case 2: /* (a)lpha */
+-      sort = SORT_SUBJECT;
++      sort = BROWSER_SORT_ALPHA;
+       break;
+ 
+     case 3: /* si(z)e */
+-      sort = SORT_SIZE;
++      sort = BROWSER_SORT_SIZE;
+       break;
+ 
+     case 4: /* d(e)scription */
+-      sort = SORT_DESC;
++      sort = BROWSER_SORT_DESC;
+       break;
+ 
+     case 5: /* (c)ount */
+-      sort = SORT_COUNT;
++      sort = BROWSER_SORT_COUNT;
+       break;
+ 
+     case 6: /* ne(w) count */
+-      sort = SORT_UNREAD;
++      sort = BROWSER_SORT_NEW;
+       break;
+ 
+     case 7: /* do(n)'t sort */
+-      sort = SORT_ORDER;
++      sort = BROWSER_SORT_UNSORTED;
+       break;
+   }
+ 
+@@ -915,7 +916,7 @@ static int op_sort(struct BrowserPrivateData *priv, int op)
+     return FR_NO_ACTION;
+ 
+   sort |= reverse ? SORT_REVERSE : 0;
+-  cs_subset_str_native_set(NeoMutt->sub, "sort_browser", sort, NULL);
++  cs_subset_str_native_set(NeoMutt->sub, "browser_sort", sort, NULL);
+   browser_sort(&priv->state);
+   browser_highlight_default(&priv->state, priv->menu);
+   menu_queue_redraw(priv->menu, MENU_REDRAW_FULL);
+diff --git a/browser/sort.c b/browser/sort.c
+index b5d74b2611d..eef494cf993 100644
+--- a/browser/sort.c
++++ b/browser/sort.c
+@@ -33,6 +33,7 @@
+ #include <sys/stat.h>
+ #include "mutt/lib.h"
+ #include "config/lib.h"
++#include "email/lib.h"
+ #include "core/lib.h"
+ #include "sort.h"
+ #include "lib.h"
+@@ -65,11 +66,11 @@ static int browser_sort_subject(const void *a, const void *b, void *sdata)
+ }
+ 
+ /**
+- * browser_sort_order - Compare two browser entries by their order - Implements ::sort_t - @ingroup sort_api
++ * browser_sort_unsorted - Compare two browser entries by their order - Implements ::sort_t - @ingroup sort_api
+  *
+  * @note This only affects browsing mailboxes and is a no-op for folders.
+  */
+-static int browser_sort_order(const void *a, const void *b, void *sdata)
++static int browser_sort_unsorted(const void *a, const void *b, void *sdata)
+ {
+   const struct FolderFile *pa = (const struct FolderFile *) a;
+   const struct FolderFile *pb = (const struct FolderFile *) b;
+@@ -130,9 +131,9 @@ static int browser_sort_count(const void *a, const void *b, void *sdata)
+ }
+ 
+ /**
+- * browser_sort_count_new - Compare two browser entries by their new count - Implements ::sort_t - @ingroup sort_api
++ * browser_sort_new - Compare two browser entries by their new count - Implements ::sort_t - @ingroup sort_api
+  */
+-static int browser_sort_count_new(const void *a, const void *b, void *sdata)
++static int browser_sort_new(const void *a, const void *b, void *sdata)
+ {
+   const struct FolderFile *pa = (const struct FolderFile *) a;
+   const struct FolderFile *pb = (const struct FolderFile *) b;
+@@ -184,11 +185,11 @@ static int browser_sort_helper(const void *a, const void *b, void *sdata)
+  */
+ void browser_sort(struct BrowserState *state)
+ {
+-  const enum SortType c_sort_browser = cs_subset_sort(NeoMutt->sub, "sort_browser");
+-  switch (c_sort_browser & SORT_MASK)
++  const enum EmailSortType c_browser_sort = cs_subset_sort(NeoMutt->sub, "browser_sort");
++  switch (c_browser_sort & SORT_MASK)
+   {
+-    case SORT_SIZE:
+-    case SORT_DATE:
++    case BROWSER_SORT_SIZE:
++    case BROWSER_SORT_DATE:
+       if (OptNews)
+         return;
+       FALLTHROUGH;
+@@ -197,35 +198,35 @@ void browser_sort(struct BrowserState *state)
+   }
+ 
+   sort_t f = NULL;
+-  switch (c_sort_browser & SORT_MASK)
++  switch (c_browser_sort & SORT_MASK)
+   {
+-    case SORT_COUNT:
++    case BROWSER_SORT_COUNT:
+       f = browser_sort_count;
+       break;
+-    case SORT_DATE:
++    case BROWSER_SORT_DATE:
+       f = browser_sort_date;
+       break;
+-    case SORT_DESC:
++    case BROWSER_SORT_DESC:
+       f = browser_sort_desc;
+       break;
+-    case SORT_SIZE:
++    case BROWSER_SORT_SIZE:
+       f = browser_sort_size;
+       break;
+-    case SORT_UNREAD:
+-      f = browser_sort_count_new;
++    case BROWSER_SORT_NEW:
++      f = browser_sort_new;
+       break;
+-    case SORT_SUBJECT:
++    case BROWSER_SORT_ALPHA:
+       f = browser_sort_subject;
+       break;
++    case BROWSER_SORT_UNSORTED:
+     default:
+-    case SORT_ORDER:
+-      f = browser_sort_order;
++      f = browser_sort_unsorted;
+       break;
+   }
+ 
+   struct CompareData cd = {
+     .sort_fn = f,
+-    .sort_reverse = c_sort_browser & SORT_REVERSE,
++    .sort_reverse = c_browser_sort & SORT_REVERSE,
+     .sort_dirs_first = cs_subset_bool(NeoMutt->sub, "browser_sort_dirs_first"),
+   };
+ 
+diff --git a/browser/sort.h b/browser/sort.h
+new file mode 100644
+index 00000000000..0c15d8669c9
+--- /dev/null
++++ b/browser/sort.h
+@@ -0,0 +1,40 @@
++/**
++ * @file
++ * Browser sorting functions
++ *
++ * @authors
++ * Copyright (C) 2024 Richard Russon <rich@flatcap.org>
++ *
++ * @copyright
++ * This program is free software: you can redistribute it and/or modify it under
++ * the terms of the GNU General Public License as published by the Free Software
++ * Foundation, either version 2 of the License, or (at your option) any later
++ * version.
++ *
++ * This program is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
++ * FOR A PARTICULAR PURPOSE.  See the GNU General Public License for more
++ * details.
++ *
++ * You should have received a copy of the GNU General Public License along with
++ * this program.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++#ifndef MUTT_BROWSER_SORT_H
++#define MUTT_BROWSER_SORT_H
++
++/**
++ * enum BrowserSortType - Methods for sorting the Browser
++ */
++enum BrowserSortType
++{
++  BROWSER_SORT_ALPHA,      ///< Sort alphabetically by name
++  BROWSER_SORT_COUNT,      ///< Sort by total message count
++  BROWSER_SORT_DATE,       ///< Sort by date
++  BROWSER_SORT_DESC,       ///< Sort by description
++  BROWSER_SORT_NEW,        ///< Sort by count of new messages
++  BROWSER_SORT_SIZE,       ///< Sort by size
++  BROWSER_SORT_UNSORTED,   ///< Sort into the raw order
++};
++
++#endif /* MUTT_BROWSER_SORT_H */
+diff --git a/compose/functions.c b/compose/functions.c
+index 725259b7334..3c375b1cef6 100644
+--- a/compose/functions.c
++++ b/compose/functions.c
+@@ -902,8 +902,8 @@ static int op_attachment_attach_message(struct ComposeSharedData *shared, int op
+   }
+ 
+   /* `$sort`, `$sort_aux`, `$use_threads` could be changed in dlg_index() */
+-  const enum SortType old_sort = cs_subset_sort(shared->sub, "sort");
+-  const enum SortType old_sort_aux = cs_subset_sort(shared->sub, "sort_aux");
++  const enum EmailSortType old_sort = cs_subset_sort(shared->sub, "sort");
++  const enum EmailSortType old_sort_aux = cs_subset_sort(shared->sub, "sort_aux");
+   const unsigned char old_use_threads = cs_subset_enum(shared->sub, "use_threads");
+ 
+   mutt_message(_("Tag the messages you want to attach"));
+diff --git a/config/lib.h b/config/lib.h
+index f396917e28a..62645220d50 100644
+--- a/config/lib.h
++++ b/config/lib.h
+@@ -62,7 +62,7 @@
+ #include "quad.h"
+ #include "regex2.h"
+ #include "set.h"
+-#include "sort2.h"
++#include "sort.h"
+ #include "subset.h"
+ #include "types.h"
+ // IWYU pragma: end_keep
+diff --git a/config/sort.c b/config/sort.c
+index 33d2f7d6ff2..771946f2126 100644
+--- a/config/sort.c
++++ b/config/sort.c
+@@ -36,8 +36,8 @@
+ #include <stdint.h>
+ #include <string.h>
+ #include "mutt/lib.h"
++#include "sort.h"
+ #include "set.h"
+-#include "sort2.h"
+ #include "types.h"
+ 
+ #define PREFIX_REVERSE "reverse-"
+diff --git a/config/sort.h b/config/sort.h
+new file mode 100644
+index 00000000000..5b438cc73d7
+--- /dev/null
++++ b/config/sort.h
+@@ -0,0 +1,42 @@
++/**
++ * @file
++ * Type representing a sort option
++ *
++ * @authors
++ * Copyright (C) 2017-2019 Richard Russon <rich@flatcap.org>
++ *
++ * @copyright
++ * This program is free software: you can redistribute it and/or modify it under
++ * the terms of the GNU General Public License as published by the Free Software
++ * Foundation, either version 2 of the License, or (at your option) any later
++ * version.
++ *
++ * This program is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
++ * FOR A PARTICULAR PURPOSE.  See the GNU General Public License for more
++ * details.
++ *
++ * You should have received a copy of the GNU General Public License along with
++ * this program.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++#ifndef MUTT_CONFIG_SORT_H
++#define MUTT_CONFIG_SORT_H
++
++#define mutt_numeric_cmp(a,b) ((a) < (b) ? -1 : ((a) > (b) ? 1 : 0))
++
++/* `$sort` and `$sort_aux` are shorts, and are a composite of a constant sort
++ * operation number and a set of compounded bitflags.
++ *
++ * Everything below SORT_MASK is a constant. There's room for SORT_MASK
++ * constant SORT_ values.
++ *
++ * Everything above is a bitflag. It's OK to move SORT_MASK down by powers of 2
++ * if we need more, so long as we don't collide with the constants above. (Or
++ * we can just expand sort and sort_aux to uint32_t.)
++ */
++#define SORT_MASK    ((1 << 8) - 1) ///< Mask for the sort id
++#define SORT_REVERSE  (1 << 8)      ///< Reverse the order of the sort
++#define SORT_LAST     (1 << 9)      ///< Sort thread by last-X, e.g. received date
++
++#endif /* MUTT_CONFIG_SORT_H */
+diff --git a/config/sort2.h b/config/sort2.h
+deleted file mode 100644
+index adc59f53d6a..00000000000
+--- a/config/sort2.h
++++ /dev/null
+@@ -1,76 +0,0 @@
+-/**
+- * @file
+- * Type representing a sort option
+- *
+- * @authors
+- * Copyright (C) 2017-2019 Richard Russon <rich@flatcap.org>
+- *
+- * @copyright
+- * This program is free software: you can redistribute it and/or modify it under
+- * the terms of the GNU General Public License as published by the Free Software
+- * Foundation, either version 2 of the License, or (at your option) any later
+- * version.
+- *
+- * This program is distributed in the hope that it will be useful, but WITHOUT
+- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+- * FOR A PARTICULAR PURPOSE.  See the GNU General Public License for more
+- * details.
+- *
+- * You should have received a copy of the GNU General Public License along with
+- * this program.  If not, see <http://www.gnu.org/licenses/>.
+- */
+-
+-#ifndef MUTT_CONFIG_SORT2_H
+-#define MUTT_CONFIG_SORT2_H
+-
+-#include "mutt/lib.h"
+-
+-extern const struct Mapping SortMethods[];
+-
+-/**
+- * enum SortType - Methods for sorting
+- */
+-enum SortType
+-{
+-  SORT_DATE     =  1, ///< Sort by the date the email was sent
+-  SORT_SIZE     =  2, ///< Sort by the size of the email
+-  SORT_ALPHA    =  3, ///< Required by makedoc.c
+-  SORT_SUBJECT  =  3, ///< Sort by the email's subject
+-  SORT_FROM     =  4, ///< Sort by the email's From field
+-  SORT_ORDER    =  5, ///< Sort by the order the messages appear in the mailbox
+-  SORT_THREADS  =  6, ///< Sort by email threads
+-  SORT_RECEIVED =  7, ///< Sort by when the message were delivered locally
+-  SORT_TO       =  8, ///< Sort by the email's To field
+-  SORT_SCORE    =  9, ///< Sort by the email's score
+-  SORT_ALIAS    = 10, ///< Sort by email alias
+-  SORT_ADDRESS  = 11, ///< Sort by email address
+-  SORT_KEYID    = 12, ///< Sort by the encryption key's ID
+-  SORT_TRUST    = 13, ///< Sort by encryption key's trust level
+-  SORT_SPAM     = 14, ///< Sort by the email's spam score
+-  SORT_COUNT    = 15, ///< Sort by number of emails in a folder
+-  SORT_UNREAD   = 16, ///< Sort by the number of unread emails
+-  SORT_FLAGGED  = 17, ///< Sort by the number of flagged emails
+-  SORT_PATH     = 18, ///< Sort by the folder's path
+-  SORT_LABEL    = 19, ///< Sort by the emails label
+-  SORT_DESC     = 20, ///< Sort by the folder's description
+-  SORT_NAME     = 21, ///< Sort by the alias name
+-  SORT_EMAIL    = 22, ///< Sort by the email address
+-
+-  SORT_MAX,
+-};
+-
+-/* `$sort` and `$sort_aux` are shorts, and are a composite of a constant sort
+- * operation number and a set of compounded bitflags.
+- *
+- * Everything below SORT_MASK is a constant. There's room for SORT_MASK
+- * constant SORT_ values.
+- *
+- * Everything above is a bitflag. It's OK to move SORT_MASK down by powers of 2
+- * if we need more, so long as we don't collide with the constants above. (Or
+- * we can just expand sort and sort_aux to uint32_t.)
+- */
+-#define SORT_MASK    ((1 << 8) - 1) ///< Mask for the sort id
+-#define SORT_REVERSE  (1 << 8)      ///< Reverse the order of the sort
+-#define SORT_LAST     (1 << 9)      ///< Sort thread by last-X, e.g. received date
+-
+-#endif /* MUTT_CONFIG_SORT2_H */
+diff --git a/docs/config.c b/docs/config.c
+index 33b62c25fa6..5dc7b5d3bf2 100644
+--- a/docs/config.c
++++ b/docs/config.c
+@@ -139,6 +139,21 @@
+ ** .de
+ */
+ 
++{ "alias_sort", DT_SORT, ALIAS_SORT_ALIAS },
++/*
++** .pp
++** Specifies how the entries in the "alias" menu are sorted.  The
++** following are legal values:
++** .il
++** .dd address (sort alphabetically by email address)
++** .dd alias (sort alphabetically by alias name)
++** .dd unsorted (leave in order specified in .neomuttrc)
++** .ie
++** .pp
++** Note: This also affects the entries of the address query menu, thus
++** potentially overruling the order of entries as generated by $$query_command.
++*/
++
+ { "allow_8bit", DT_BOOL, true },
+ /*
+ ** .pp
+@@ -482,13 +497,34 @@
+ ** names in the browser mailbox list, using '~' and '='
+ ** shortcuts.
+ ** .pp
+-** The default \fC"alpha"\fP setting of $$sort_browser uses
++** The default \fC"alpha"\fP setting of $$browser_sort uses
+ ** locale-based sorting (using \fCstrcoll(3)\fP), which ignores some
+ ** punctuation.  This can lead to some situations where the order
+ ** doesn't make intuitive sense.  In those cases, it may be
+ ** desirable to \fIunset\fP this variable.
+ */
+ 
++{ "browser_sort", DT_SORT, BROWSER_SORT_ALPHA },
++/*
++** .pp
++** Specifies how to sort entries in the file browser.  By default, the
++** entries are sorted alphabetically.  Valid values:
++** .il
++** .dd alpha (alphabetically by name)
++** .dd count (total message count)
++** .dd date
++** .dd desc (description)
++** .dd new (new message count)
++** .dd size
++** .dd unsorted
++** .ie
++** .pp
++** You may optionally use the "reverse-" prefix to specify reverse sorting
++** order (example: "\fCset browser_sort=reverse-date\fP").
++** .pp
++** The "unread" value is a synonym for "new".
++*/
++
+ { "browser_sort_dirs_first", DT_BOOL, false },
+ /*
+ ** .pp
+@@ -3297,6 +3333,23 @@
+ */
+ #endif
+ 
++{ "pgp_key_sort", DT_SORT, KEY_SORT_ADDRESS },
++/*
++** .pp
++** Specifies how the entries in the pgp menu are sorted. The
++** following are legal values:
++** .dl
++** .dt address .dd sort alphabetically by user id
++** .dt keyid   .dd sort alphabetically by key id
++** .dt date    .dd sort by key creation date
++** .dt trust   .dd sort by the trust of the key
++** .de
++** .pp
++** If you prefer reverse order of the above values, prefix it with
++** "reverse-".
++** (PGP only)
++*/
++
+ { "pgp_long_ids", DT_BOOL, true },
+ /*
+ ** .pp
+@@ -3394,23 +3447,6 @@
+ */
+ #endif
+ 
+-{ "pgp_sort_keys", DT_SORT, SORT_ADDRESS },
+-/*
+-** .pp
+-** Specifies how the entries in the pgp menu are sorted. The
+-** following are legal values:
+-** .dl
+-** .dt address .dd sort alphabetically by user id
+-** .dt keyid   .dd sort alphabetically by key id
+-** .dt date    .dd sort by key creation date
+-** .dt trust   .dd sort by the trust of the key
+-** .de
+-** .pp
+-** If you prefer reverse order of the above values, prefix it with
+-** "reverse-".
+-** (PGP only)
+-*/
+-
+ { "pgp_strict_enc", DT_BOOL, true },
+ /*
+ ** .pp
+@@ -4422,21 +4458,22 @@
+ ** $$sidebar_indent_string, $$sidebar_component_depth.
+ */
+ 
+-{ "sidebar_sort_method", DT_SORT, SORT_ORDER },
++{ "sidebar_sort", DT_SORT, SB_SORT_UNSORTED },
+ /*
+ ** .pp
+ ** Specifies how to sort mailbox entries in the sidebar.  By default, the
+ ** entries are \fBunsorted\fP.  Valid values:
+ ** .il
+-** .dd \fBpath\fP (alphabetically)
+ ** .dd \fBcount\fP (all message count)
++** .dd \fBdesc\fP (mailbox description)
+ ** .dd \fBflagged\fP (flagged message count)
++** .dd \fBpath\fP (alphabetically)
+ ** .dd \fBunread\fP (unread message count)
+ ** .dd \fBunsorted\fP
+ ** .ie
+ ** .pp
+ ** You may optionally use the "reverse-" prefix to specify reverse sorting
+-** order (example: "\fCset sidebar_sort_method=reverse-path\fP").
++** order (example: "\fCset sidebar_sort=reverse-path\fP").
+ ** .pp
+ ** The \fBalpha\fP and \fBname\fP values are synonyms for \fBpath\fP. The
+ ** \fBnew\fP value is a synonym for \fBunread\fP.
+@@ -4893,7 +4930,7 @@
+ ** wait indefinitely.
+ */
+ 
+-{ "sort", DT_SORT, SORT_DATE },
++{ "sort", DT_SORT, EMAIL_SORT_DATE },
+ /*
+ ** .pp
+ ** Specifies how to sort messages in the "index" menu.  Valid values
+@@ -4902,6 +4939,7 @@
+ ** .dd date
+ ** .dd date-received
+ ** .dd from
++** .dd label
+ ** .dd score
+ ** .dd size
+ ** .dd spam
+@@ -4941,22 +4979,7 @@
+ ** examples, https://neomutt.org/feature/use-threads
+ */
+ 
+-{ "sort_alias", DT_SORT, SORT_ALIAS },
+-/*
+-** .pp
+-** Specifies how the entries in the "alias" menu are sorted.  The
+-** following are legal values:
+-** .il
+-** .dd address (sort alphabetically by email address)
+-** .dd alias (sort alphabetically by alias name)
+-** .dd unsorted (leave in order specified in .neomuttrc)
+-** .ie
+-** .pp
+-** Note: This also affects the entries of the address query menu, thus
+-** potentially overruling the order of entries as generated by $$query_command.
+-*/
+-
+-{ "sort_aux", DT_SORT, SORT_DATE },
++{ "sort_aux", DT_SORT, EMAIL_SORT_DATE },
+ /*
+ ** .pp
+ ** This provides a secondary sort for messages in the "index" menu, used
+@@ -4981,27 +5004,6 @@
+ ** examples, https://neomutt.org/feature/use-threads
+ */
+ 
+-{ "sort_browser", DT_SORT, SORT_ALPHA },
+-/*
+-** .pp
+-** Specifies how to sort entries in the file browser.  By default, the
+-** entries are sorted alphabetically.  Valid values:
+-** .il
+-** .dd alpha (alphabetically)
+-** .dd count (all message count)
+-** .dd date
+-** .dd desc (description)
+-** .dd new (new message count)
+-** .dd size
+-** .dd unsorted
+-** .ie
+-** .pp
+-** You may optionally use the "reverse-" prefix to specify reverse sorting
+-** order (example: "\fCset sort_browser=reverse-date\fP").
+-** .pp
+-** The "unread" value is a synonym for "new".
+-*/
+-
+ { "sort_re", DT_BOOL, true },
+ /*
+ ** .pp
+diff --git a/docs/makedoc.c b/docs/makedoc.c
+index da565b51bf1..3baf0de0ace 100644
+--- a/docs/makedoc.c
++++ b/docs/makedoc.c
+@@ -1062,10 +1062,25 @@ static void pretty_default(char *t, size_t l, const char *s, int type)
+     }
+     case DT_SORT:
+     {
+-      /* heuristic! */
+-      if (strncmp(s, "SORT_", 5) != 0)
++      const char *name = s;
++      // heuristic! A constant of SORT_XYZ means "xyz"
++      if (strncmp(s, "SORT_", 5) == 0)
++      {
++        name = s + 5;
++      }
++      else
++      {
++        // Or ABC_SORT_XYZ means "xyz"
++        const char *underscore = strchr(s, '_');
++        if ((underscore) && (strncmp(underscore + 1, "SORT_", 5) == 0))
++        {
++          name = underscore + 6;
++        }
++      }
++
++      if (name == s)
+         fprintf(stderr, "WARNING: expected prefix of SORT_ for type DT_SORT instead of %s\n", s);
+-      strncpy(t, s + 5, l);
++      strncpy(t, name, l);
+       for (; *t; t++)
+         *t = tolower((unsigned char) *t);
+       break;
+diff --git a/docs/manual.xml.head b/docs/manual.xml.head
+index 8f856fd1d47..5abc99f4844 100644
+--- a/docs/manual.xml.head
++++ b/docs/manual.xml.head
+@@ -532,7 +532,7 @@ Cars            4|  3    + Feb 28  Imogen Baker     (193)  Pechora Sea
+           </itemizedlist>
+           <itemizedlist>
+             <title>
+-              <link linkend="sidebar-sort">The order in which mailboxes are displayed</link>
++              <link linkend="sidebar-sorting">The order in which mailboxes are displayed</link>
+             </title>
+             <listitem>
+               <para>
+@@ -639,7 +639,7 @@ Cars            4|  3    + Feb 28  Imogen Baker     (193)  Pechora Sea
+             </listitem>
+             <listitem>
+               <para>
+-                <link linkend="sidebar-sort">Sidebar sort methods</link>
++                <link linkend="sidebar-sorting">Sidebar sort methods</link>
+               </para>
+             </listitem>
+           </itemizedlist>
+@@ -10039,7 +10039,7 @@ ma@yew.com      Murray Abraham  Oscar
+       </para>
+       <note>
+         <para>
+-          The query menu is affected by <link linkend="sort-alias">$sort_alias</link>,
++          The query menu is affected by <link linkend="alias-sort">$alias_sort</link>,
+           thus overruling the order of entries as generated by
+           <link linkend="query-command">$query_command</link>.
+         </para>
+@@ -17704,8 +17704,8 @@ set reply_with_xorig = "yes"
+ 
+ <screen>
+ <emphasis role="comment"># Fixed order</emphasis>
+-set sort_browser="alpha"
+-set sort_browser="unsorted"
++set browser_sort = "alpha"
++set browser_sort = "unsorted"
+ </screen>
+ 
+           <para>
+@@ -17732,8 +17732,8 @@ set sort_browser="unsorted"
+ 
+ <screen>
+ <emphasis role="comment"># Variable order</emphasis>
+-set sort_browser="reverse-count"
+-set sort_browser="reverse-size"
++set browser_sort = "reverse-count"
++set browser_sort = "reverse-size"
+ </screen>
+ 
+           <para>
+@@ -17878,7 +17878,7 @@ set sort_browser="reverse-size"
+                 <entry><literal>no</literal></entry>
+               </row>
+               <row>
+-                <entry><literal>sidebar_sort_method</literal></entry>
++                <entry><literal>sidebar_sort</literal></entry>
+                 <entry>enum</entry>
+                 <entry><literal>unsorted</literal></entry>
+               </row>
+@@ -18088,7 +18088,7 @@ set sort_browser="reverse-size"
+         </para>
+       </sect2>
+ 
+-      <sect2 id="sidebar-sort">
++      <sect2 id="sidebar-sorting">
+         <title>Sort</title>
+ 
+         <table id="table-sidebar-sort">
+@@ -18197,7 +18197,7 @@ set sidebar_format = '%B%&lt;F? [%F]&gt;%* %&lt;N?%N/&gt;%S'
+ <emphasis role="comment">#       unread   – number of unread messages</emphasis>
+ <emphasis role="comment">#       path     – mailbox path</emphasis>
+ <emphasis role="comment">#       unsorted – do not sort the mailboxes</emphasis>
+-set sidebar_sort_method = 'unsorted'
++set sidebar_sort = 'unsorted'
+ <emphasis role="comment"># --------------------------------------------------------------------------</emphasis>
+ <emphasis role="comment"># FUNCTIONS – shown with an example mapping</emphasis>
+ <emphasis role="comment"># --------------------------------------------------------------------------</emphasis>
+diff --git a/email/lib.h b/email/lib.h
+index 71fa83922a4..3b40cdfdb84 100644
+--- a/email/lib.h
++++ b/email/lib.h
+@@ -37,6 +37,7 @@
+  * | email/parse.c          | @subpage email_parse     |
+  * | email/rfc2047.c        | @subpage email_rfc2047   |
+  * | email/rfc2231.c        | @subpage email_rfc2231   |
++ * | email/sort.c           | @subpage email_sort      |
+  * | email/tags.c           | @subpage email_tags      |
+  * | email/thread.c         | @subpage email_thread    |
+  * | email/url.c            | @subpage email_url       |
+@@ -59,6 +60,7 @@
+ #include "parse.h"
+ #include "rfc2047.h"
+ #include "rfc2231.h"
++#include "sort.h"
+ #include "tags.h"
+ #include "thread.h"
+ #include "url.h"
+diff --git a/sort.c b/email/sort.c
+similarity index 72%
+rename from sort.c
+rename to email/sort.c
+index d2c2e29962c..7ecd895b9ea 100644
+--- a/sort.c
++++ b/email/sort.c
+@@ -1,6 +1,6 @@
+ /**
+  * @file
+- * Assorted sorting methods
++ * Email sorting methods
+  *
+  * @authors
+  * Copyright (C) 1996-2000 Michael R. Elkins <me@mutt.org>
+@@ -25,9 +25,9 @@
+  */
+ 
+ /**
+- * @page neo_sort Assorted sorting methods
++ * @page email_sort Email sorting methods
+  *
+- * Assorted sorting methods
++ * Email sorting methods
+  */
+ 
+ #include "config.h"
+@@ -36,20 +36,25 @@
+ #include "mutt/lib.h"
+ #include "address/lib.h"
+ #include "config/lib.h"
+-#include "email/lib.h"
+ #include "core/lib.h"
+ #include "alias/lib.h"
+ #include "sort.h"
+ #include "nntp/lib.h"
+-#include "globals.h"
++#include "body.h"
++#include "email.h"
++#include "envelope.h"
+ #include "mutt_logging.h"
+ #include "mutt_thread.h"
+ #include "mview.h"
+ #include "mx.h"
+ #include "score.h"
+ 
++extern bool OptNeedRescore;
++extern bool OptNeedResort;
++extern bool OptResortInit;
++
+ /**
+- * struct EmailCompare - Context for compare_email_shim()
++ * struct EmailCompare - Context for email_sort_shim()
+  */
+ struct EmailCompare
+ {
+@@ -59,9 +64,9 @@ struct EmailCompare
+ };
+ 
+ /**
+- * compare_email_shim - Helper to sort emails - Implements ::sort_t - @ingroup sort_api
++ * email_sort_shim - Helper to sort emails - Implements ::sort_t - @ingroup sort_api
+  */
+-static int compare_email_shim(const void *a, const void *b, void *sdata)
++static int email_sort_shim(const void *a, const void *b, void *sdata)
+ {
+   const struct Email *ea = *(struct Email const *const *) a;
+   const struct Email *eb = *(struct Email const *const *) b;
+@@ -70,43 +75,43 @@ static int compare_email_shim(const void *a, const void *b, void *sdata)
+ }
+ 
+ /**
+- * compare_score - Compare two emails using their scores - Implements ::sort_mail_t - @ingroup sort_mail_api
++ * email_sort_score - Compare two emails using their scores - Implements ::sort_email_t - @ingroup sort_email_api
+  */
+-static int compare_score(const struct Email *a, const struct Email *b, bool reverse)
++static int email_sort_score(const struct Email *a, const struct Email *b, bool reverse)
+ {
+   int result = mutt_numeric_cmp(b->score, a->score); /* note that this is reverse */
+   return reverse ? -result : result;
+ }
+ 
+ /**
+- * compare_size - Compare the size of two emails - Implements ::sort_mail_t - @ingroup sort_mail_api
++ * email_sort_size - Compare the size of two emails - Implements ::sort_email_t - @ingroup sort_email_api
+  */
+-static int compare_size(const struct Email *a, const struct Email *b, bool reverse)
++static int email_sort_size(const struct Email *a, const struct Email *b, bool reverse)
+ {
+   int result = mutt_numeric_cmp(a->body->length, b->body->length);
+   return reverse ? -result : result;
+ }
+ 
+ /**
+- * compare_date_sent - Compare the sent date of two emails - Implements ::sort_mail_t - @ingroup sort_mail_api
++ * email_sort_date - Compare the sent date of two emails - Implements ::sort_email_t - @ingroup sort_email_api
+  */
+-static int compare_date_sent(const struct Email *a, const struct Email *b, bool reverse)
++static int email_sort_date(const struct Email *a, const struct Email *b, bool reverse)
+ {
+   int result = mutt_numeric_cmp(a->date_sent, b->date_sent);
+   return reverse ? -result : result;
+ }
+ 
+ /**
+- * compare_subject - Compare the subject of two emails - Implements ::sort_mail_t - @ingroup sort_mail_api
++ * email_sort_subject - Compare the subject of two emails - Implements ::sort_email_t - @ingroup sort_email_api
+  */
+-static int compare_subject(const struct Email *a, const struct Email *b, bool reverse)
++static int email_sort_subject(const struct Email *a, const struct Email *b, bool reverse)
+ {
+   int rc;
+ 
+   if (!a->env->real_subj)
+   {
+     if (!b->env->real_subj)
+-      rc = compare_date_sent(a, b, false);
++      rc = email_sort_date(a, b, false);
+     else
+       rc = -1;
+   }
+@@ -150,9 +155,9 @@ const char *mutt_get_name(const struct Address *a)
+ }
+ 
+ /**
+- * compare_to - Compare the 'to' fields of two emails - Implements ::sort_mail_t - @ingroup sort_mail_api
++ * email_sort_to - Compare the 'to' fields of two emails - Implements ::sort_email_t - @ingroup sort_email_api
+  */
+-static int compare_to(const struct Email *a, const struct Email *b, bool reverse)
++static int email_sort_to(const struct Email *a, const struct Email *b, bool reverse)
+ {
+   char fa[128] = { 0 };
+ 
+@@ -163,9 +168,9 @@ static int compare_to(const struct Email *a, const struct Email *b, bool reverse
+ }
+ 
+ /**
+- * compare_from - Compare the 'from' fields of two emails - Implements ::sort_mail_t - @ingroup sort_mail_api
++ * email_sort_from - Compare the 'from' fields of two emails - Implements ::sort_email_t - @ingroup sort_email_api
+  */
+-static int compare_from(const struct Email *a, const struct Email *b, bool reverse)
++static int email_sort_from(const struct Email *a, const struct Email *b, bool reverse)
+ {
+   char fa[128] = { 0 };
+ 
+@@ -176,27 +181,27 @@ static int compare_from(const struct Email *a, const struct Email *b, bool rever
+ }
+ 
+ /**
+- * compare_date_received - Compare the date received of two emails - Implements ::sort_mail_t - @ingroup sort_mail_api
++ * email_sort_date_received - Compare the date received of two emails - Implements ::sort_email_t - @ingroup sort_email_api
+  */
+-static int compare_date_received(const struct Email *a, const struct Email *b, bool reverse)
++static int email_sort_date_received(const struct Email *a, const struct Email *b, bool reverse)
+ {
+   int result = mutt_numeric_cmp(a->received, b->received);
+   return reverse ? -result : result;
+ }
+ 
+ /**
+- * compare_order - Restore the 'unsorted' order of emails - Implements ::sort_mail_t - @ingroup sort_mail_api
++ * email_sort_unsorted - Restore the 'unsorted' order of emails - Implements ::sort_email_t - @ingroup sort_email_api
+  */
+-static int compare_order(const struct Email *a, const struct Email *b, bool reverse)
++static int email_sort_unsorted(const struct Email *a, const struct Email *b, bool reverse)
+ {
+   int result = mutt_numeric_cmp(a->index, b->index);
+   return reverse ? -result : result;
+ }
+ 
+ /**
+- * compare_spam - Compare the spam values of two emails - Implements ::sort_mail_t - @ingroup sort_mail_api
++ * email_sort_spam - Compare the spam values of two emails - Implements ::sort_email_t - @ingroup sort_email_api
+  */
+-static int compare_spam(const struct Email *a, const struct Email *b, bool reverse)
++static int email_sort_spam(const struct Email *a, const struct Email *b, bool reverse)
+ {
+   char *aptr = NULL, *bptr = NULL;
+   int ahas, bhas;
+@@ -243,13 +248,13 @@ static int compare_spam(const struct Email *a, const struct Email *b, bool rever
+ }
+ 
+ /**
+- * compare_label - Compare the labels of two emails - Implements ::sort_mail_t - @ingroup sort_mail_api
++ * email_sort_label - Compare the labels of two emails - Implements ::sort_email_t - @ingroup sort_email_api
+  */
+-static int compare_label(const struct Email *a, const struct Email *b, bool reverse)
++static int email_sort_label(const struct Email *a, const struct Email *b, bool reverse)
+ {
+   int ahas, bhas, result = 0;
+ 
+-  /* As with compare_spam, not all messages will have the x-label
++  /* As with email_sort_spam, not all messages will have the x-label
+    * property.  Blank X-Labels are treated as null in the index
+    * display, so we'll consider them as null for sort, too.       */
+   ahas = a->env && a->env->x_label && *(a->env->x_label);
+@@ -272,37 +277,37 @@ static int compare_label(const struct Email *a, const struct Email *b, bool reve
+ 
+ /**
+  * get_sort_func - Get the sort function for a given sort id
+- * @param method Sort type, see #SortType
++ * @param method Sort type, see #EmailSortType
+  * @param type   The Mailbox type
+- * @retval ptr sort function - Implements ::sort_mail_t
++ * @retval ptr sort function - Implements ::sort_email_t
+  */
+-static sort_mail_t get_sort_func(enum SortType method, enum MailboxType type)
++static sort_email_t get_sort_func(enum EmailSortType method, enum MailboxType type)
+ {
+   switch (method)
+   {
+-    case SORT_DATE:
+-      return compare_date_sent;
+-    case SORT_FROM:
+-      return compare_from;
+-    case SORT_LABEL:
+-      return compare_label;
+-    case SORT_ORDER:
++    case EMAIL_SORT_DATE:
++      return email_sort_date;
++    case EMAIL_SORT_DATE_RECEIVED:
++      return email_sort_date_received;
++    case EMAIL_SORT_FROM:
++      return email_sort_from;
++    case EMAIL_SORT_LABEL:
++      return email_sort_label;
++    case EMAIL_SORT_SCORE:
++      return email_sort_score;
++    case EMAIL_SORT_SIZE:
++      return email_sort_size;
++    case EMAIL_SORT_SPAM:
++      return email_sort_spam;
++    case EMAIL_SORT_SUBJECT:
++      return email_sort_subject;
++    case EMAIL_SORT_TO:
++      return email_sort_to;
++    case EMAIL_SORT_UNSORTED:
+       if (type == MUTT_NNTP)
+-        return nntp_compare_order;
++        return nntp_sort_unsorted;
+       else
+-        return compare_order;
+-    case SORT_RECEIVED:
+-      return compare_date_received;
+-    case SORT_SCORE:
+-      return compare_score;
+-    case SORT_SIZE:
+-      return compare_size;
+-    case SORT_SPAM:
+-      return compare_spam;
+-    case SORT_SUBJECT:
+-      return compare_subject;
+-    case SORT_TO:
+-      return compare_to;
++        return email_sort_unsorted;
+     default:
+       mutt_error(_("Could not find sorting function [report this bug]"));
+       return NULL;
+@@ -316,7 +321,7 @@ static sort_mail_t get_sort_func(enum SortType method, enum MailboxType type)
+  * @param b        Second email
+  * @param type     Mailbox type
+  * @param sort     Primary sort to use (generally $sort)
+- * @param sort_aux Secondary sort (generally $sort_aux or SORT_ORDER)
++ * @param sort_aux Secondary sort (generally $sort_aux or EMAIL_SORT_UNSORTED)
+  * @retval <0 a precedes b
+  * @retval  0 a and b are identical (should not happen in practice)
+  * @retval >0 b precedes a
+@@ -324,7 +329,7 @@ static sort_mail_t get_sort_func(enum SortType method, enum MailboxType type)
+ int mutt_compare_emails(const struct Email *a, const struct Email *b,
+                         enum MailboxType type, short sort, short sort_aux)
+ {
+-  sort_mail_t func = get_sort_func(sort & SORT_MASK, type);
++  sort_email_t func = get_sort_func(sort & SORT_MASK, type);
+   int rc = func(a, b, (sort & SORT_REVERSE) != 0);
+   if (rc == 0)
+   {
+@@ -336,7 +341,7 @@ int mutt_compare_emails(const struct Email *a, const struct Email *b,
+     /* Fallback of last resort to preserve stable order; will only
+      * return 0 if a and b have the same index, which is probably a
+      * bug in the code. */
+-    func = compare_order;
++    func = email_sort_unsorted;
+     rc = func(a, b, false);
+   }
+   return rc;
+@@ -406,7 +411,7 @@ void mutt_sort_headers(struct MailboxView *mv, bool init)
+     cmp.sort = cs_subset_sort(NeoMutt->sub, "sort");
+     cmp.sort_aux = cs_subset_sort(NeoMutt->sub, "sort_aux");
+     mutt_qsort_r((void *) m->emails, m->msg_count, sizeof(struct Email *),
+-                 compare_email_shim, &cmp);
++                 email_sort_shim, &cmp);
+   }
+ 
+   /* adjust the virtual message numbers */
+@@ -438,17 +443,17 @@ void mutt_sort_headers(struct MailboxView *mv, bool init)
+ }
+ 
+ /**
+- * mutt_sort_order - Sort emails by their disk order
++ * mutt_sort_unsorted - Sort emails by their disk order
+  * @param m Mailbox
+  */
+-void mutt_sort_order(struct Mailbox *m)
++void mutt_sort_unsorted(struct Mailbox *m)
+ {
+   if (!m)
+     return;
+ 
+   struct EmailCompare cmp = { 0 };
+   cmp.type = mx_type(m);
+-  cmp.sort = SORT_ORDER;
++  cmp.sort = EMAIL_SORT_UNSORTED;
+   mutt_qsort_r((void *) m->emails, m->msg_count, sizeof(struct Email *),
+-               compare_email_shim, &cmp);
++               email_sort_shim, &cmp);
+ }
+diff --git a/sort.h b/email/sort.h
+similarity index 58%
+rename from sort.h
+rename to email/sort.h
+index b65663aea3a..befef5290f3 100644
+--- a/sort.h
++++ b/email/sort.h
+@@ -22,8 +22,8 @@
+  * this program.  If not, see <http://www.gnu.org/licenses/>.
+  */
+ 
+-#ifndef MUTT_SORT_H
+-#define MUTT_SORT_H
++#ifndef MUTT_EMAIL_SORT_H
++#define MUTT_EMAIL_SORT_H
+ 
+ #include <stdbool.h>
+ #include "core/lib.h"
+@@ -32,10 +32,8 @@ struct Address;
+ struct Email;
+ struct MailboxView;
+ 
+-#define mutt_numeric_cmp(a,b) ((a) < (b) ? -1 : ((a) > (b) ? 1 : 0))
+-
+ /**
+- * @defgroup sort_mail_api Mail Sorting API
++ * @defgroup sort_email_api Email Sorting API
+  *
+  * Prototype for an email comparison function
+  *
+@@ -46,14 +44,32 @@ struct MailboxView;
+  * @retval  0 a and b are identical
+  * @retval >0 b precedes a
+  */
+-typedef int (*sort_mail_t)(const struct Email *a, const struct Email *b, bool reverse);
++typedef int (*sort_email_t)(const struct Email *a, const struct Email *b, bool reverse);
++
++/**
++ * enum EmailSortType - Methods for sorting Emails
++ */
++enum EmailSortType
++{
++  EMAIL_SORT_DATE,             ///< Sort by the date the email was sent
++  EMAIL_SORT_DATE_RECEIVED,    ///< Sort by when the message were delivered locally
++  EMAIL_SORT_FROM,             ///< Sort by the email's From field
++  EMAIL_SORT_LABEL,            ///< Sort by the emails label
++  EMAIL_SORT_SCORE,            ///< Sort by the email's score
++  EMAIL_SORT_SIZE,             ///< Sort by the size of the email
++  EMAIL_SORT_SPAM,             ///< Sort by the email's spam score
++  EMAIL_SORT_SUBJECT,          ///< Sort by the email's subject
++  EMAIL_SORT_THREADS,          ///< Sort by email threads
++  EMAIL_SORT_TO,               ///< Sort by the email's To field
++  EMAIL_SORT_UNSORTED,         ///< Sort by the order the messages appear in the mailbox
++};
+ 
+ int mutt_compare_emails(const struct Email *a, const struct Email *b,
+                         enum MailboxType type, short sort, short sort_aux);
+ 
+ void mutt_sort_headers(struct MailboxView *mv, bool init);
+-void mutt_sort_order(struct Mailbox *m);
++void mutt_sort_unsorted(struct Mailbox *m);
+ 
+ const char *mutt_get_name(const struct Address *a);
+ 
+-#endif /* MUTT_SORT_H */
++#endif /* MUTT_EMAIL_SORT_H */
+diff --git a/external.c b/external.c
+index 242878386da..6dd7cd0ec28 100644
+--- a/external.c
++++ b/external.c
+@@ -475,7 +475,7 @@ void mutt_print_message(struct Mailbox *m, struct EmailArray *ea)
+  */
+ bool mutt_select_sort(bool reverse)
+ {
+-  enum SortType sort = SORT_DATE;
++  enum EmailSortType sort = EMAIL_SORT_DATE;
+ 
+   switch (mw_multi_choice(reverse ?
+                               /* L10N: The highlighted letters must match the "Sort" options */
+@@ -489,56 +489,56 @@ bool mutt_select_sort(bool reverse)
+       return false;
+ 
+     case 1: /* (d)ate */
+-      sort = SORT_DATE;
++      sort = EMAIL_SORT_DATE;
+       break;
+ 
+     case 2: /* (f)rm */
+-      sort = SORT_FROM;
++      sort = EMAIL_SORT_FROM;
+       break;
+ 
+     case 3: /* (r)ecv */
+-      sort = SORT_RECEIVED;
++      sort = EMAIL_SORT_DATE_RECEIVED;
+       break;
+ 
+     case 4: /* (s)ubj */
+-      sort = SORT_SUBJECT;
++      sort = EMAIL_SORT_SUBJECT;
+       break;
+ 
+     case 5: /* t(o) */
+-      sort = SORT_TO;
++      sort = EMAIL_SORT_TO;
+       break;
+ 
+     case 6: /* (t)hread */
+-      sort = SORT_THREADS;
++      sort = EMAIL_SORT_THREADS;
+       break;
+ 
+     case 7: /* (u)nsort */
+-      sort = SORT_ORDER;
++      sort = EMAIL_SORT_UNSORTED;
+       break;
+ 
+     case 8: /* si(z)e */
+-      sort = SORT_SIZE;
++      sort = EMAIL_SORT_SIZE;
+       break;
+ 
+     case 9: /* s(c)ore */
+-      sort = SORT_SCORE;
++      sort = EMAIL_SORT_SCORE;
+       break;
+ 
+     case 10: /* s(p)am */
+-      sort = SORT_SPAM;
++      sort = EMAIL_SORT_SPAM;
+       break;
+ 
+     case 11: /* (l)abel */
+-      sort = SORT_LABEL;
++      sort = EMAIL_SORT_LABEL;
+       break;
+   }
+ 
+   const unsigned char c_use_threads = cs_subset_enum(NeoMutt->sub, "use_threads");
+-  const enum SortType c_sort = cs_subset_sort(NeoMutt->sub, "sort");
++  const enum EmailSortType c_sort = cs_subset_sort(NeoMutt->sub, "sort");
+   int rc = CSR_ERR_CODE;
+-  if ((sort != SORT_THREADS) || (c_use_threads == UT_UNSET))
++  if ((sort != EMAIL_SORT_THREADS) || (c_use_threads == UT_UNSET))
+   {
+-    if ((sort != SORT_THREADS) && (c_sort & SORT_LAST))
++    if ((sort != EMAIL_SORT_THREADS) && (c_sort & SORT_LAST))
+       sort |= SORT_LAST;
+     if (reverse)
+       sort |= SORT_REVERSE;
+@@ -547,7 +547,7 @@ bool mutt_select_sort(bool reverse)
+   }
+   else
+   {
+-    ASSERT((c_sort & SORT_MASK) != SORT_THREADS); /* See index_config_observer() */
++    ASSERT((c_sort & SORT_MASK) != EMAIL_SORT_THREADS); /* See index_config_observer() */
+     /* Preserve the value of $sort, and toggle whether we are threaded. */
+     switch (c_use_threads)
+     {
+diff --git a/hdrline.c b/hdrline.c
+index b5dfd95e21c..21d49ba176e 100644
+--- a/hdrline.c
++++ b/hdrline.c
+@@ -56,7 +56,6 @@
+ #include "mutt_thread.h"
+ #include "muttlib.h"
+ #include "mx.h"
+-#include "sort.h"
+ #include "subjectrx.h"
+ #ifdef USE_NOTMUCH
+ #include "notmuch/lib.h"
+diff --git a/imap/command.c b/imap/command.c
+index 668c5622f51..91f69a1df3e 100644
+--- a/imap/command.c
++++ b/imap/command.c
+@@ -276,7 +276,7 @@ static void cmd_parse_expunge(struct ImapAccountData *adata, const char *s)
+   if (e)
+   {
+     /* imap_expunge_mailbox() will rewrite e->index.
+-     * It needs to resort using SORT_ORDER anyway, so setting to INT_MAX
++     * It needs to resort using EMAIL_SORT_UNSORTED anyway, so setting to INT_MAX
+      * makes the code simpler and possibly more efficient. */
+     e->index = INT_MAX;
+     imap_edata_get(e)->msn = 0;
+@@ -347,7 +347,7 @@ static void cmd_parse_vanished(struct ImapAccountData *adata, char *s)
+     unsigned int exp_msn = imap_edata_get(e)->msn;
+ 
+     /* imap_expunge_mailbox() will rewrite e->index.
+-     * It needs to resort using SORT_ORDER anyway, so setting to INT_MAX
++     * It needs to resort using EMAIL_SORT_UNSORTED anyway, so setting to INT_MAX
+      * makes the code simpler and possibly more efficient. */
+     e->index = INT_MAX;
+     imap_edata_get(e)->msn = 0;
+diff --git a/imap/imap.c b/imap/imap.c
+index 00d6ebc74ad..77f094c3ffd 100644
+--- a/imap/imap.c
++++ b/imap/imap.c
+@@ -72,7 +72,6 @@
+ #include "mutt_socket.h"
+ #include "muttlib.h"
+ #include "mx.h"
+-#include "sort.h"
+ #ifdef ENABLE_NLS
+ #include <libintl.h>
+ #endif
+diff --git a/imap/msg_set.c b/imap/msg_set.c
+index d313bbf1b15..55666f614c2 100644
+--- a/imap/msg_set.c
++++ b/imap/msg_set.c
+@@ -38,8 +38,8 @@
+ #include <stdio.h>
+ #include "private.h"
+ #include "mutt/lib.h"
++#include "config/lib.h"
+ #include "msg_set.h"
+-#include "sort.h"
+ 
+ /**
+  * ImapMaxCmdlen - Maximum length of IMAP commands before they must be split
+diff --git a/index/dlg_index.c b/index/dlg_index.c
+index fab50a91eb3..5ae613e8a22 100644
+--- a/index/dlg_index.c
++++ b/index/dlg_index.c
+@@ -90,7 +90,6 @@
+ #include "private_data.h"
+ #include "protos.h"
+ #include "shared_data.h"
+-#include "sort.h"
+ #include "status.h"
+ #ifdef USE_NOTMUCH
+ #include "notmuch/lib.h"
+@@ -337,8 +336,8 @@ int find_first_message(struct MailboxView *mv)
+    * message is first.  Otherwise, the latest message is first if exactly
+    * one of `$use_threads` and `$sort` are reverse.
+    */
+-  enum SortType c_sort = cs_subset_sort(m->sub, "sort");
+-  if ((c_sort & SORT_MASK) == SORT_THREADS)
++  enum EmailSortType c_sort = cs_subset_sort(m->sub, "sort");
++  if ((c_sort & SORT_MASK) == EMAIL_SORT_THREADS)
+     c_sort = cs_subset_sort(m->sub, "sort_aux");
+   bool reverse = false;
+   switch (mutt_thread_style())
+diff --git a/index/functions.c b/index/functions.c
+index 11cc663028d..f92f6cce47a 100644
+--- a/index/functions.c
++++ b/index/functions.c
+@@ -72,7 +72,6 @@
+ #include "private_data.h"
+ #include "protos.h"
+ #include "shared_data.h"
+-#include "sort.h"
+ #ifdef USE_AUTOCRYPT
+ #include "autocrypt/lib.h"
+ #endif
+diff --git a/index/index.c b/index/index.c
+index e2a72efe22a..3a2169fb8a9 100644
+--- a/index/index.c
++++ b/index/index.c
+@@ -111,10 +111,10 @@ static void sort_use_threads_warn(void)
+  */
+ static int config_sort(const struct ConfigSubset *sub)
+ {
+-  const enum SortType c_sort = cs_subset_sort(sub, "sort");
++  const enum EmailSortType c_sort = cs_subset_sort(sub, "sort");
+   const unsigned char c_use_threads = cs_subset_enum(sub, "use_threads");
+ 
+-  if (((c_sort & SORT_MASK) != SORT_THREADS) || (c_use_threads == UT_UNSET))
++  if (((c_sort & SORT_MASK) != EMAIL_SORT_THREADS) || (c_use_threads == UT_UNSET))
+     return 0;
+ 
+   sort_use_threads_warn();
+@@ -123,7 +123,7 @@ static int config_sort(const struct ConfigSubset *sub)
+    * observers before the first round has completed. Be careful that
+    * changes made here do not cause an infinite loop of toggling
+    * adjustments - the early exit above when $sort no longer uses
+-   * SORT_THREADS ends the recursion.
++   * EMAIL_SORT_THREADS ends the recursion.
+    */
+   int rc;
+   if ((c_use_threads == UT_FLAT) ||
+@@ -144,7 +144,7 @@ static int config_sort(const struct ConfigSubset *sub)
+      * direction. Adjust $sort based on $sort_aux, and the 2nd-level
+      * observer for $sort will be a no-op.
+      */
+-    enum SortType c_sort_aux = cs_subset_sort(sub, "sort_aux");
++    enum EmailSortType c_sort_aux = cs_subset_sort(sub, "sort_aux");
+     c_sort_aux ^= (c_sort & SORT_REVERSE);
+     rc = cs_subset_str_native_set(sub, "sort", c_sort_aux, NULL);
+   }
+@@ -159,10 +159,10 @@ static int config_sort(const struct ConfigSubset *sub)
+  */
+ static int config_use_threads(const struct ConfigSubset *sub)
+ {
+-  const enum SortType c_sort = cs_subset_sort(sub, "sort");
++  const enum EmailSortType c_sort = cs_subset_sort(sub, "sort");
+   const unsigned char c_use_threads = cs_subset_enum(sub, "use_threads");
+ 
+-  if (((c_sort & SORT_MASK) != SORT_THREADS) || (c_use_threads == UT_UNSET))
++  if (((c_sort & SORT_MASK) != EMAIL_SORT_THREADS) || (c_use_threads == UT_UNSET))
+     return 0;
+ 
+   sort_use_threads_warn();
+@@ -172,7 +172,7 @@ static int config_use_threads(const struct ConfigSubset *sub)
+    * aren't setting $sort to threads, the 2nd-level observer will be a
+    * no-op.
+    */
+-  const enum SortType c_sort_aux = cs_subset_sort(sub, "sort_aux");
++  const enum EmailSortType c_sort_aux = cs_subset_sort(sub, "sort_aux");
+   int rc = cs_subset_str_native_set(sub, "sort", c_sort_aux, NULL);
+   return (CSR_RESULT(rc) == CSR_SUCCESS) ? 0 : -1;
+ }
+diff --git a/init.h b/init.h
+index 2b3820485b1..5c657d51a57 100644
+--- a/init.h
++++ b/init.h
+@@ -26,9 +26,11 @@
+ #define MUTT_INIT_H
+ 
+ #include <stdbool.h>
++#include "mutt/lib.h"
+ 
+ struct ConfigSet;
+-struct ListHead;
++
++extern const struct Mapping SortMethods[];
+ 
+ void init_config         (struct ConfigSet *cs);
+ int  mutt_init           (struct ConfigSet *cs, const char *dlevel, const char *dfile, bool skip_sys_rc, struct ListHead *commands);
+diff --git a/maildir/mailbox.c b/maildir/mailbox.c
+index d47ba663d2b..c382d2547b3 100644
+--- a/maildir/mailbox.c
++++ b/maildir/mailbox.c
+@@ -45,7 +45,6 @@
+ #include "mdemail.h"
+ #include "mx.h"
+ #include "shared.h"
+-#include "sort.h"
+ #ifdef USE_INOTIFY
+ #include "monitor.h"
+ #endif
+diff --git a/maildir/message.c b/maildir/message.c
+index aef3b3fc0c4..3b42b6507b4 100644
+--- a/maildir/message.c
++++ b/maildir/message.c
+@@ -49,7 +49,6 @@
+ #include "hcache.h"
+ #include "mx.h"
+ #include "shared.h"
+-#include "sort.h"
+ 
+ struct HeaderCache;
+ 
+diff --git a/maillist.c b/maillist.c
+index 07ea93ef4ea..07b0cfbbc97 100644
+--- a/maillist.c
++++ b/maillist.c
+@@ -35,7 +35,6 @@
+ #include "email/lib.h"
+ #include "maillist.h"
+ #include "muttlib.h"
+-#include "sort.h"
+ 
+ /**
+  * mutt_is_mail_list - Is this the email address of a mailing list? - Implements ::addr_predicate_t - @ingroup addr_predicate_api
+diff --git a/main.c b/main.c
+index 6a1fa864ac3..163fe84547f 100644
+--- a/main.c
++++ b/main.c
+@@ -102,7 +102,6 @@
+  * | recvcmd.c       | @subpage neo_recvcmd       |
+  * | rfc3676.c       | @subpage neo_rfc3676       |
+  * | score.c         | @subpage neo_score         |
+- * | sort.c          | @subpage neo_sort          |
+  * | status.c        | @subpage neo_status        |
+  * | subjectrx.c     | @subpage neo_subjrx        |
+  * | system.c        | @subpage neo_system        |
+diff --git a/mbox/mbox.c b/mbox/mbox.c
+index 778d5be5afc..160f2f5e920 100644
+--- a/mbox/mbox.c
++++ b/mbox/mbox.c
+@@ -60,7 +60,6 @@
+ #include "muttlib.h"
+ #include "mx.h"
+ #include "protos.h"
+-#include "sort.h"
+ 
+ /**
+  * struct MUpdate - Store of new offsets, used by mutt_sync_mailbox()
+@@ -565,10 +564,10 @@ static int reopen_mailbox(struct Mailbox *m)
+   m->verbose = false;
+ 
+   /* our heuristics require the old mailbox to be unsorted */
+-  const enum SortType c_sort = cs_subset_sort(NeoMutt->sub, "sort");
+-  if (c_sort != SORT_ORDER)
++  const enum EmailSortType c_sort = cs_subset_sort(NeoMutt->sub, "sort");
++  if (c_sort != EMAIL_SORT_UNSORTED)
+   {
+-    cs_subset_str_native_set(NeoMutt->sub, "sort", SORT_ORDER, NULL);
++    cs_subset_str_native_set(NeoMutt->sub, "sort", EMAIL_SORT_UNSORTED, NULL);
+     mailbox_changed(m, NT_MAILBOX_RESORT);
+     cs_subset_str_native_set(NeoMutt->sub, "sort", c_sort, NULL);
+   }
+@@ -1082,10 +1081,10 @@ static enum MxStatus mbox_mbox_sync(struct Mailbox *m)
+   enum MxStatus rc = MX_STATUS_ERROR;
+ 
+   /* sort message by their position in the mailbox on disk */
+-  const enum SortType c_sort = cs_subset_sort(NeoMutt->sub, "sort");
+-  if (c_sort != SORT_ORDER)
++  const enum EmailSortType c_sort = cs_subset_sort(NeoMutt->sub, "sort");
++  if (c_sort != EMAIL_SORT_UNSORTED)
+   {
+-    mutt_sort_order(m);
++    mutt_sort_unsorted(m);
+     need_sort = true;
+   }
+ 
+diff --git a/mh/mh.c b/mh/mh.c
+index e0a8233db0c..b3da3a37aa6 100644
+--- a/mh/mh.c
++++ b/mh/mh.c
+@@ -602,8 +602,8 @@ static void mh_delayed_parsing(struct Mailbox *m, struct MhEmailArray *mha,
+   hcache_close(&hc);
+ #endif
+ 
+-  const enum SortType c_sort = cs_subset_sort(NeoMutt->sub, "sort");
+-  if (m && mha && (ARRAY_SIZE(mha) > 0) && (c_sort == SORT_ORDER))
++  const enum EmailSortType c_sort = cs_subset_sort(NeoMutt->sub, "sort");
++  if (m && mha && (ARRAY_SIZE(mha) > 0) && (c_sort == EMAIL_SORT_UNSORTED))
+   {
+     mutt_debug(LL_DEBUG3, "mh: sorting %s into natural order\n", mailbox_path(m));
+     ARRAY_SORT(mha, mh_sort_path, NULL);
+diff --git a/mutt_config.c b/mutt_config.c
+index 0b9c8529f0f..c9f26b0b12f 100644
+--- a/mutt_config.c
++++ b/mutt_config.c
+@@ -66,19 +66,20 @@ extern const struct ExpandoDefinition IndexFormatDef[];
+  */
+ static const struct Mapping SortAuxMethods[] = {
+   // clang-format off
+-  { "date",          SORT_DATE },
+-  { "date-sent",     SORT_DATE },
+-  { "threads",       SORT_DATE },
+-  { "date-received", SORT_RECEIVED },
+-  { "from",          SORT_FROM },
+-  { "label",         SORT_LABEL },
+-  { "unsorted",      SORT_ORDER },
+-  { "mailbox-order", SORT_ORDER },
+-  { "score",         SORT_SCORE },
+-  { "size",          SORT_SIZE },
+-  { "spam",          SORT_SPAM },
+-  { "subject",       SORT_SUBJECT },
+-  { "to",            SORT_TO },
++  { "date",          EMAIL_SORT_DATE },
++  { "date-received", EMAIL_SORT_DATE_RECEIVED },
++  { "from",          EMAIL_SORT_FROM },
++  { "label",         EMAIL_SORT_LABEL },
++  { "score",         EMAIL_SORT_SCORE },
++  { "size",          EMAIL_SORT_SIZE },
++  { "spam",          EMAIL_SORT_SPAM },
++  { "subject",       EMAIL_SORT_SUBJECT },
++  { "to",            EMAIL_SORT_TO },
++  { "unsorted",      EMAIL_SORT_UNSORTED },
++  // Compatibility
++  { "date-sent",     EMAIL_SORT_DATE },
++  { "mailbox-order", EMAIL_SORT_UNSORTED },
++  { "threads",       EMAIL_SORT_DATE },
+   { NULL, 0 },
+   // clang-format on
+ };
+@@ -88,19 +89,20 @@ static const struct Mapping SortAuxMethods[] = {
+  */
+ const struct Mapping SortMethods[] = {
+   // clang-format off
+-  { "date",          SORT_DATE },
+-  { "date-sent",     SORT_DATE },
+-  { "date-received", SORT_RECEIVED },
+-  { "from",          SORT_FROM },
+-  { "label",         SORT_LABEL },
+-  { "unsorted",      SORT_ORDER },
+-  { "mailbox-order", SORT_ORDER },
+-  { "score",         SORT_SCORE },
+-  { "size",          SORT_SIZE },
+-  { "spam",          SORT_SPAM },
+-  { "subject",       SORT_SUBJECT },
+-  { "threads",       SORT_THREADS },
+-  { "to",            SORT_TO },
++  { "date",          EMAIL_SORT_DATE },
++  { "date-received", EMAIL_SORT_DATE_RECEIVED },
++  { "from",          EMAIL_SORT_FROM },
++  { "label",         EMAIL_SORT_LABEL },
++  { "score",         EMAIL_SORT_SCORE },
++  { "size",          EMAIL_SORT_SIZE },
++  { "spam",          EMAIL_SORT_SPAM },
++  { "subject",       EMAIL_SORT_SUBJECT },
++  { "threads",       EMAIL_SORT_THREADS },
++  { "to",            EMAIL_SORT_TO },
++  { "unsorted",      EMAIL_SORT_UNSORTED },
++  // Compatibility
++  { "date-sent",     EMAIL_SORT_DATE },
++  { "mailbox-order", EMAIL_SORT_UNSORTED },
+   { NULL, 0 },
+   // clang-format on
+ };
+@@ -810,10 +812,10 @@ static struct ConfigDef MainVars[] = {
+   { "sleep_time", DT_NUMBER|D_INTEGER_NOT_NEGATIVE, 1, 0, NULL,
+     "Time to pause after certain info messages"
+   },
+-  { "sort", DT_SORT|D_SORT_REVERSE|D_SORT_LAST, SORT_DATE, IP SortMethods, sort_validator,
++  { "sort", DT_SORT|D_SORT_REVERSE|D_SORT_LAST, EMAIL_SORT_DATE, IP SortMethods, sort_validator,
+     "Sort method for the index"
+   },
+-  { "sort_aux", DT_SORT|D_SORT_REVERSE|D_SORT_LAST, SORT_DATE, IP SortAuxMethods, NULL,
++  { "sort_aux", DT_SORT|D_SORT_REVERSE|D_SORT_LAST, EMAIL_SORT_DATE, IP SortAuxMethods, NULL,
+     "Secondary sort method for the index"
+   },
+   { "sort_re", DT_BOOL, true, 0, NULL,
+diff --git a/mutt_thread.c b/mutt_thread.c
+index f9bc3cf346c..a915a7a74f1 100644
+--- a/mutt_thread.c
++++ b/mutt_thread.c
+@@ -45,7 +45,6 @@
+ #include "mview.h"
+ #include "mx.h"
+ #include "protos.h"
+-#include "sort.h"
+ 
+ /**
+  * UseThreadsMethods - Choices for '$use_threads' for the index
+@@ -82,10 +81,10 @@ const struct EnumDef UseThreadsTypeDef = {
+ enum UseThreads mutt_thread_style(void)
+ {
+   const unsigned char c_use_threads = cs_subset_enum(NeoMutt->sub, "use_threads");
+-  const enum SortType c_sort = cs_subset_sort(NeoMutt->sub, "sort");
++  const enum EmailSortType c_sort = cs_subset_sort(NeoMutt->sub, "sort");
+   if (c_use_threads > UT_FLAT)
+     return c_use_threads;
+-  if ((c_sort & SORT_MASK) != SORT_THREADS)
++  if ((c_sort & SORT_MASK) != EMAIL_SORT_THREADS)
+     return UT_FLAT;
+   if (c_sort & SORT_REVERSE)
+     return UT_REVERSE;
+@@ -108,7 +107,7 @@ const char *get_use_threads_str(enum UseThreads value)
+ int sort_validator(const struct ConfigSet *cs, const struct ConfigDef *cdef,
+                    intptr_t value, struct Buffer *err)
+ {
+-  if (((value & SORT_MASK) == SORT_THREADS) && (value & SORT_LAST))
++  if (((value & SORT_MASK) == EMAIL_SORT_THREADS) && (value & SORT_LAST))
+   {
+     buf_printf(err, _("Cannot use 'last-' prefix with 'threads' for %s"), cdef->name);
+     return CSR_ERR_INVALID;
+@@ -761,12 +760,12 @@ static int compare_threads(const void *a, const void *b, void *sdata)
+   if (ta->parent)
+   {
+     return mutt_compare_emails(ta->sort_aux_key, tb->sort_aux_key, mtype,
+-                               tctx->c_sort_aux, SORT_REVERSE | SORT_ORDER);
++                               tctx->c_sort_aux, SORT_REVERSE | EMAIL_SORT_UNSORTED);
+   }
+   else
+   {
+     return mutt_compare_emails(ta->sort_thread_key, tb->sort_thread_key, mtype,
+-                               tctx->c_sort, SORT_REVERSE | SORT_ORDER);
++                               tctx->c_sort, SORT_REVERSE | EMAIL_SORT_UNSORTED);
+   }
+ }
+ 
+@@ -792,9 +791,9 @@ static void mutt_sort_subthreads(struct ThreadsContext *tctx, bool init)
+    * resorting, so we sort backwards and then put them back
+    * in reverse order so they're forwards */
+   const bool reverse = (mutt_thread_style() == UT_REVERSE);
+-  enum SortType c_sort = cs_subset_sort(NeoMutt->sub, "sort");
+-  enum SortType c_sort_aux = cs_subset_sort(NeoMutt->sub, "sort_aux");
+-  if ((c_sort & SORT_MASK) == SORT_THREADS)
++  enum EmailSortType c_sort = cs_subset_sort(NeoMutt->sub, "sort");
++  enum EmailSortType c_sort_aux = cs_subset_sort(NeoMutt->sub, "sort_aux");
++  if ((c_sort & SORT_MASK) == EMAIL_SORT_THREADS)
+   {
+     ASSERT(!(c_sort & SORT_REVERSE) != reverse);
+     ASSERT(cs_subset_enum(NeoMutt->sub, "use_threads") == UT_UNSET);
+@@ -906,7 +905,7 @@ static void mutt_sort_subthreads(struct ThreadsContext *tctx, bool init)
+           {
+             if (!thread->sort_aux_key ||
+                 (mutt_compare_emails(thread->sort_aux_key, sort_aux_key, mtype,
+-                                     c_sort_aux | SORT_REVERSE, SORT_ORDER) > 0))
++                                     c_sort_aux | SORT_REVERSE, EMAIL_SORT_UNSORTED) > 0))
+             {
+               thread->sort_aux_key = sort_aux_key;
+             }
+@@ -942,8 +941,8 @@ static void mutt_sort_subthreads(struct ThreadsContext *tctx, bool init)
+               {
+                 if (tmp->sort_thread_key == thread->sort_thread_key)
+                   continue;
+-                if ((mutt_compare_emails(thread->sort_thread_key, tmp->sort_thread_key,
+-                                         mtype, c_sort | SORT_REVERSE, SORT_ORDER) > 0))
++                if ((mutt_compare_emails(thread->sort_thread_key, tmp->sort_thread_key, mtype,
++                                         c_sort | SORT_REVERSE, EMAIL_SORT_UNSORTED) > 0))
+                 {
+                   thread->sort_thread_key = tmp->sort_thread_key;
+                 }
+diff --git a/mutt_thread.h b/mutt_thread.h
+index 40a14b5b4af..4363977f85f 100644
+--- a/mutt_thread.h
++++ b/mutt_thread.h
+@@ -25,14 +25,14 @@
+ #ifndef MUTT_MUTT_THREAD_H
+ #define MUTT_MUTT_THREAD_H
+ 
++#include "email/lib.h"
+ #include <stdbool.h>
+ #include <stdint.h>
+ #include <sys/types.h>
+-#include "config/lib.h"
+ 
+ struct Buffer;
+-struct Email;
+-struct EmailArray;
++struct ConfigDef;
++struct ConfigSet;
+ struct Mailbox;
+ struct MailboxView;
+ 
+@@ -44,8 +44,8 @@ struct ThreadsContext
+   struct MailboxView *mailbox_view; ///< Current mailbox
+   struct MuttThread  *tree;         ///< Top of thread tree
+   struct HashTable   *hash;         ///< Hash Table: "message-id" -> MuttThread
+-  enum SortType       c_sort;       ///< Last sort method
+-  enum SortType       c_sort_aux;   ///< Last sort_aux method
++  enum EmailSortType       c_sort;       ///< Last sort method
++  enum EmailSortType       c_sort_aux;   ///< Last sort_aux method
+ };
+ 
+ /**
+diff --git a/mview.c b/mview.c
+index 50918195546..6ea84b1ba80 100644
+--- a/mview.c
++++ b/mview.c
+@@ -41,7 +41,6 @@
+ #include "mutt_thread.h"
+ #include "mx.h"
+ #include "score.h"
+-#include "sort.h"
+ 
+ /**
+  * mview_free - Free a MailboxView
+diff --git a/ncrypt/config.c b/ncrypt/config.c
+index f56922a19b5..13a47cbe201 100644
+--- a/ncrypt/config.c
++++ b/ncrypt/config.c
+@@ -39,17 +39,18 @@
+ #include "pgp.h"
+ #include "pgplib.h"
+ #include "smime.h"
++#include "sort.h"
+ 
+ /**
+- * SortKeyMethods - Sort methods for encryption keys
++ * KeySortMethods - Sort methods for encryption keys
+  */
+-static const struct Mapping SortKeyMethods[] = {
++static const struct Mapping KeySortMethods[] = {
+   // clang-format off
+-  { "address", SORT_ADDRESS },
+-  { "date",    SORT_DATE },
+-  { "keyid",   SORT_KEYID },
+-  { "trust",   SORT_TRUST },
+-  { NULL,      0 },
++  { "address", KEY_SORT_ADDRESS },
++  { "date",    KEY_SORT_DATE },
++  { "keyid",   KEY_SORT_KEYID },
++  { "trust",   KEY_SORT_TRUST },
++  { NULL, 0 },
+   // clang-format on
+ };
+ 
+@@ -168,7 +169,7 @@ static struct ConfigDef NcryptVars[] = {
+   { "pgp_sign_as", DT_STRING, 0, 0, NULL,
+     "Use this alternative key for signing messages"
+   },
+-  { "pgp_sort_keys", DT_SORT|D_SORT_REVERSE, SORT_ADDRESS, IP SortKeyMethods, NULL,
++  { "pgp_key_sort", DT_SORT|D_SORT_REVERSE, KEY_SORT_ADDRESS, IP KeySortMethods, NULL,
+     "Sort order for PGP keys"
+   },
+   { "pgp_strict_enc", DT_BOOL, true, 0, NULL,
+@@ -203,6 +204,7 @@ static struct ConfigDef NcryptVars[] = {
+   { "pgp_autoinline",         DT_SYNONYM, IP "pgp_auto_inline",    IP "2021-02-11" },
+   { "pgp_create_traditional", DT_SYNONYM, IP "pgp_auto_inline",    IP "2004-04-12" },
+   { "pgp_self_encrypt_as",    DT_SYNONYM, IP "pgp_default_key",    IP "2018-01-11" },
++  { "pgp_sort_keys",          DT_SYNONYM, IP "pgp_key_sort",       IP "2024-11-20" },
+   { "pgp_verify_sig",         DT_SYNONYM, IP "crypt_verify_sig",   IP "2002-01-24" },
+   { "smime_self_encrypt_as",  DT_SYNONYM, IP "smime_default_key",  IP "2018-01-11" },
+ 
+diff --git a/ncrypt/dlg_gpgme.c b/ncrypt/dlg_gpgme.c
+index 4a3777abf3d..da1a3df0e87 100644
+--- a/ncrypt/dlg_gpgme.c
++++ b/ncrypt/dlg_gpgme.c
+@@ -103,135 +103,6 @@ static const struct Mapping GpgmeHelp[] = {
+   // clang-format on
+ };
+ 
+-/**
+- * crypt_sort_address - Compare two keys by their addresses - Implements ::sort_t - @ingroup sort_api
+- */
+-static int crypt_sort_address(const void *a, const void *b, void *sdata)
+-{
+-  struct CryptKeyInfo *s = *(struct CryptKeyInfo **) a;
+-  struct CryptKeyInfo *t = *(struct CryptKeyInfo **) b;
+-  const bool sort_reverse = *(bool *) sdata;
+-
+-  int rc = mutt_istr_cmp(s->uid, t->uid);
+-  if (rc != 0)
+-    goto done;
+-
+-  rc = mutt_istr_cmp(crypt_fpr_or_lkeyid(s), crypt_fpr_or_lkeyid(t));
+-
+-done:
+-  return sort_reverse ? -rc : rc;
+-}
+-
+-/**
+- * crypt_sort_keyid - Compare two keys by their IDs - Implements ::sort_t - @ingroup sort_api
+- */
+-static int crypt_sort_keyid(const void *a, const void *b, void *sdata)
+-{
+-  struct CryptKeyInfo *s = *(struct CryptKeyInfo **) a;
+-  struct CryptKeyInfo *t = *(struct CryptKeyInfo **) b;
+-  const bool sort_reverse = *(bool *) sdata;
+-
+-  int rc = mutt_istr_cmp(crypt_fpr_or_lkeyid(s), crypt_fpr_or_lkeyid(t));
+-  if (rc != 0)
+-    goto done;
+-
+-  rc = mutt_istr_cmp(s->uid, t->uid);
+-
+-done:
+-  return sort_reverse ? -rc : rc;
+-}
+-
+-/**
+- * crypt_sort_date - Compare two keys by their dates - Implements ::sort_t - @ingroup sort_api
+- */
+-static int crypt_sort_date(const void *a, const void *b, void *sdata)
+-{
+-  struct CryptKeyInfo *s = *(struct CryptKeyInfo **) a;
+-  struct CryptKeyInfo *t = *(struct CryptKeyInfo **) b;
+-  const bool sort_reverse = *(bool *) sdata;
+-
+-  unsigned long ts = 0;
+-  unsigned long tt = 0;
+-  int rc = 0;
+-
+-  if (s->kobj->subkeys && (s->kobj->subkeys->timestamp > 0))
+-    ts = s->kobj->subkeys->timestamp;
+-  if (t->kobj->subkeys && (t->kobj->subkeys->timestamp > 0))
+-    tt = t->kobj->subkeys->timestamp;
+-
+-  if (ts > tt)
+-  {
+-    rc = 1;
+-    goto done;
+-  }
+-
+-  if (ts < tt)
+-  {
+-    rc = -1;
+-    goto done;
+-  }
+-
+-  rc = mutt_istr_cmp(s->uid, t->uid);
+-
+-done:
+-  return sort_reverse ? -rc : rc;
+-}
+-
+-/**
+- * crypt_sort_trust - Compare two keys by their trust levels - Implements ::sort_t - @ingroup sort_api
+- */
+-static int crypt_sort_trust(const void *a, const void *b, void *sdata)
+-{
+-  struct CryptKeyInfo *s = *(struct CryptKeyInfo **) a;
+-  struct CryptKeyInfo *t = *(struct CryptKeyInfo **) b;
+-  const bool sort_reverse = *(bool *) sdata;
+-
+-  unsigned long ts = 0;
+-  unsigned long tt = 0;
+-
+-  int rc = mutt_numeric_cmp(s->flags & KEYFLAG_RESTRICTIONS, t->flags & KEYFLAG_RESTRICTIONS);
+-  if (rc != 0)
+-    goto done;
+-
+-  // Note: reversed
+-  rc = mutt_numeric_cmp(t->validity, s->validity);
+-  if (rc != 0)
+-    return rc;
+-
+-  ts = 0;
+-  tt = 0;
+-  if (s->kobj->subkeys)
+-    ts = s->kobj->subkeys->length;
+-  if (t->kobj->subkeys)
+-    tt = t->kobj->subkeys->length;
+-
+-  // Note: reversed
+-  rc = mutt_numeric_cmp(tt, ts);
+-  if (rc != 0)
+-    goto done;
+-
+-  ts = 0;
+-  tt = 0;
+-  if (s->kobj->subkeys && (s->kobj->subkeys->timestamp > 0))
+-    ts = s->kobj->subkeys->timestamp;
+-  if (t->kobj->subkeys && (t->kobj->subkeys->timestamp > 0))
+-    tt = t->kobj->subkeys->timestamp;
+-
+-  // Note: reversed
+-  rc = mutt_numeric_cmp(tt, ts);
+-  if (rc != 0)
+-    goto done;
+-
+-  rc = mutt_istr_cmp(s->uid, t->uid);
+-  if (rc != 0)
+-    goto done;
+-
+-  rc = mutt_istr_cmp(crypt_fpr_or_lkeyid(s), crypt_fpr_or_lkeyid(t));
+-
+-done:
+-  return sort_reverse ? -rc : rc;
+-}
+-
+ /**
+  * crypt_key_abilities - Parse key flags into a string
+  * @param flags Flags, see #KeyFlags
+@@ -565,7 +436,7 @@ static int gpgme_key_config_observer(struct NotifyCallback *nc)
+   struct EventConfig *ev_c = nc->event_data;
+ 
+   if (!mutt_str_equal(ev_c->name, "pgp_entry_format") &&
+-      !mutt_str_equal(ev_c->name, "pgp_sort_keys"))
++      !mutt_str_equal(ev_c->name, "pgp_key_sort"))
+   {
+     return 0;
+   }
+@@ -642,30 +513,7 @@ struct CryptKeyInfo *dlg_gpgme(struct CryptKeyInfo *keys, struct Address *p,
+     return NULL;
+   }
+ 
+-  const short c_pgp_sort_keys = cs_subset_sort(NeoMutt->sub, "pgp_sort_keys");
+-  sort_t fn = NULL;
+-  switch (c_pgp_sort_keys & SORT_MASK)
+-  {
+-    case SORT_ADDRESS:
+-      fn = crypt_sort_address;
+-      break;
+-    case SORT_DATE:
+-      fn = crypt_sort_date;
+-      break;
+-    case SORT_KEYID:
+-      fn = crypt_sort_keyid;
+-      break;
+-    case SORT_TRUST:
+-    default:
+-      fn = crypt_sort_trust;
+-      break;
+-  }
+-
+-  if (ARRAY_SIZE(&ckia) > 1)
+-  {
+-    bool sort_reverse = c_pgp_sort_keys & SORT_REVERSE;
+-    ARRAY_SORT(&ckia, fn, &sort_reverse);
+-  }
++  gpgme_sort_keys(&ckia);
+ 
+   enum MenuType menu_to_use = MENU_GENERIC;
+   if (app & APPLICATION_PGP)
+diff --git a/ncrypt/dlg_pgp.c b/ncrypt/dlg_pgp.c
+index dc74e0057ab..33d81ee07cd 100644
+--- a/ncrypt/dlg_pgp.c
++++ b/ncrypt/dlg_pgp.c
+@@ -104,102 +104,6 @@ static const struct Mapping PgpHelp[] = {
+ /// Characters used to show the trust level for PGP keys
+ static const char TrustFlags[] = "?- +";
+ 
+-/**
+- * pgp_sort_address - Compare two keys by their addresses - Implements ::sort_t - @ingroup sort_api
+- */
+-static int pgp_sort_address(const void *a, const void *b, void *sdata)
+-{
+-  struct PgpUid const *s = *(struct PgpUid const *const *) a;
+-  struct PgpUid const *t = *(struct PgpUid const *const *) b;
+-  const bool sort_reverse = *(bool *) sdata;
+-
+-  int rc = mutt_istr_cmp(s->addr, t->addr);
+-  if (rc != 0)
+-    goto done;
+-
+-  rc = mutt_istr_cmp(pgp_fpr_or_lkeyid(s->parent), pgp_fpr_or_lkeyid(t->parent));
+-
+-done:
+-  return sort_reverse ? -rc : rc;
+-}
+-
+-/**
+- * pgp_sort_date - Compare two keys by their dates - Implements ::sort_t - @ingroup sort_api
+- */
+-static int pgp_sort_date(const void *a, const void *b, void *sdata)
+-{
+-  struct PgpUid const *s = *(struct PgpUid const *const *) a;
+-  struct PgpUid const *t = *(struct PgpUid const *const *) b;
+-  const bool sort_reverse = *(bool *) sdata;
+-
+-  int rc = mutt_numeric_cmp(s->parent->gen_time, t->parent->gen_time);
+-  if (rc != 0)
+-    goto done;
+-
+-  rc = mutt_istr_cmp(s->addr, t->addr);
+-
+-done:
+-  return sort_reverse ? -rc : rc;
+-}
+-
+-/**
+- * pgp_sort_keyid - Compare two keys by their IDs - Implements ::sort_t - @ingroup sort_api
+- */
+-static int pgp_sort_keyid(const void *a, const void *b, void *sdata)
+-{
+-  struct PgpUid const *s = *(struct PgpUid const *const *) a;
+-  struct PgpUid const *t = *(struct PgpUid const *const *) b;
+-  const bool sort_reverse = *(bool *) sdata;
+-
+-  int rc = mutt_istr_cmp(pgp_fpr_or_lkeyid(s->parent), pgp_fpr_or_lkeyid(t->parent));
+-  if (rc != 0)
+-    goto done;
+-
+-  rc = mutt_istr_cmp(s->addr, t->addr);
+-
+-done:
+-  return sort_reverse ? -rc : rc;
+-}
+-
+-/**
+- * pgp_sort_trust - Compare two keys by their trust levels - Implements ::sort_t - @ingroup sort_api
+- */
+-static int pgp_sort_trust(const void *a, const void *b, void *sdata)
+-{
+-  struct PgpUid const *s = *(struct PgpUid const *const *) a;
+-  struct PgpUid const *t = *(struct PgpUid const *const *) b;
+-  const bool sort_reverse = *(bool *) sdata;
+-
+-  int rc = mutt_numeric_cmp(s->parent->flags & KEYFLAG_RESTRICTIONS,
+-                            t->parent->flags & KEYFLAG_RESTRICTIONS);
+-  if (rc != 0)
+-    goto done;
+-
+-  // Note: reversed
+-  rc = mutt_numeric_cmp(t->trust, s->trust);
+-  if (rc != 0)
+-    goto done;
+-
+-  // Note: reversed
+-  rc = mutt_numeric_cmp(t->parent->keylen, s->parent->keylen);
+-  if (rc != 0)
+-    goto done;
+-
+-  // Note: reversed
+-  rc = mutt_numeric_cmp(t->parent->gen_time, s->parent->gen_time);
+-  if (rc != 0)
+-    goto done;
+-
+-  rc = mutt_istr_cmp(s->addr, t->addr);
+-  if (rc != 0)
+-    goto done;
+-
+-  rc = mutt_istr_cmp(pgp_fpr_or_lkeyid(s->parent), pgp_fpr_or_lkeyid(t->parent));
+-
+-done:
+-  return sort_reverse ? -rc : rc;
+-}
+-
+ /**
+  * pgp_key_abilities - Turn PGP key abilities into a string
+  * @param flags Flags, see #KeyFlags
+@@ -559,7 +463,7 @@ static int pgp_key_config_observer(struct NotifyCallback *nc)
+   struct EventConfig *ev_c = nc->event_data;
+ 
+   if (!mutt_str_equal(ev_c->name, "pgp_entry_format") &&
+-      !mutt_str_equal(ev_c->name, "pgp_sort_keys"))
++      !mutt_str_equal(ev_c->name, "pgp_key_sort"))
+   {
+     return 0;
+   }
+@@ -644,30 +548,7 @@ struct PgpKeyInfo *dlg_pgp(struct PgpKeyInfo *keys, struct Address *p, const cha
+     return NULL;
+   }
+ 
+-  sort_t fn = NULL;
+-  short c_pgp_sort_keys = cs_subset_sort(NeoMutt->sub, "pgp_sort_keys");
+-  switch (c_pgp_sort_keys & SORT_MASK)
+-  {
+-    case SORT_ADDRESS:
+-      fn = pgp_sort_address;
+-      break;
+-    case SORT_DATE:
+-      fn = pgp_sort_date;
+-      break;
+-    case SORT_KEYID:
+-      fn = pgp_sort_keyid;
+-      break;
+-    case SORT_TRUST:
+-    default:
+-      fn = pgp_sort_trust;
+-      break;
+-  }
+-
+-  if (ARRAY_SIZE(&pua) > 1)
+-  {
+-    bool sort_reverse = c_pgp_sort_keys & SORT_REVERSE;
+-    ARRAY_SORT(&pua, fn, &sort_reverse);
+-  }
++  pgp_sort_keys(&pua);
+ 
+   struct SimpleDialogWindows sdw = simple_dialog_new(MENU_PGP, WT_DLG_PGP, PgpHelp);
+   menu = sdw.menu;
+diff --git a/ncrypt/lib.h b/ncrypt/lib.h
+index e37d1c32949..6fdfffc69c5 100644
+--- a/ncrypt/lib.h
++++ b/ncrypt/lib.h
+@@ -52,6 +52,8 @@
+  * | ncrypt/pgppacket.c               | @subpage crypt_pgppacket             |
+  * | ncrypt/smime.c                   | @subpage crypt_smime                 |
+  * | ncrypt/smime_functions.c         | @subpage smime_functions             |
++ * | ncrypt/sort_gpgme.c              | @subpage crypt_sort_gpgme            |
++ * | ncrypt/sort_pgp.c                | @subpage crypt_sort_pgp              |
+  */
+ 
+ #ifndef MUTT_NCRYPT_LIB_H
+diff --git a/ncrypt/sort.h b/ncrypt/sort.h
+new file mode 100644
+index 00000000000..121393235ba
+--- /dev/null
++++ b/ncrypt/sort.h
+@@ -0,0 +1,43 @@
++/**
++ * @file
++ * Crypto Key sorting functions
++ *
++ * @authors
++ * Copyright (C) 2024 Richard Russon <rich@flatcap.org>
++ *
++ * @copyright
++ * This program is free software: you can redistribute it and/or modify it under
++ * the terms of the GNU General Public License as published by the Free Software
++ * Foundation, either version 2 of the License, or (at your option) any later
++ * version.
++ *
++ * This program is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
++ * FOR A PARTICULAR PURPOSE.  See the GNU General Public License for more
++ * details.
++ *
++ * You should have received a copy of the GNU General Public License along with
++ * this program.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++#ifndef MUTT_NCRYPT_SORT_H
++#define MUTT_NCRYPT_SORT_H
++
++struct CryptKeyInfoArray;
++struct PgpUidArray;
++
++/**
++ * enum KeySortType - Methods for sorting Crypto Keys
++ */
++enum KeySortType
++{
++  KEY_SORT_ADDRESS,    ///< Sort by address
++  KEY_SORT_DATE,       ///< Sort by date
++  KEY_SORT_KEYID,      ///< Sort by key id
++  KEY_SORT_TRUST,      ///< Sort by trust level
++};
++
++void gpgme_sort_keys(struct CryptKeyInfoArray *ckia);
++void pgp_sort_keys  (struct PgpUidArray *pua);
++
++#endif /* MUTT_NCRYPT_SORT_H */
+diff --git a/ncrypt/sort_gpgme.c b/ncrypt/sort_gpgme.c
+new file mode 100644
+index 00000000000..bd7e41d4f90
+--- /dev/null
++++ b/ncrypt/sort_gpgme.c
+@@ -0,0 +1,201 @@
++/**
++ * @file
++ *
++ * GPGME Key Sorting
++ *
++ * @authors
++ * Copyright (C) 2024 Richard Russon <rich@flatcap.org>
++ *
++ * @copyright
++ * This program is free software: you can redistribute it and/or modify it under
++ * the terms of the GNU General Public License as published by the Free Software
++ * Foundation, either version 2 of the License, or (at your option) any later
++ * version.
++ *
++ * This program is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
++ * FOR A PARTICULAR PURPOSE.  See the GNU General Public License for more
++ * details.
++ *
++ * You should have received a copy of the GNU General Public License along with
++ * this program.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++/**
++ * @page crypt_sort_gpgme GPGME Key Sorting
++ *
++ * GPGME Key Sorting
++ */
++
++#include "config.h"
++#include <locale.h>
++#include <stdbool.h>
++#include "mutt/lib.h"
++#include "config/lib.h"
++#include "core/lib.h"
++#include "lib.h"
++#include "crypt_gpgme.h"
++#include "sort.h"
++
++/**
++ * crypt_sort_address - Compare two keys by their addresses - Implements ::sort_t - @ingroup sort_api
++ */
++static int crypt_sort_address(const void *a, const void *b, void *sdata)
++{
++  struct CryptKeyInfo *s = *(struct CryptKeyInfo **) a;
++  struct CryptKeyInfo *t = *(struct CryptKeyInfo **) b;
++  const bool sort_reverse = *(bool *) sdata;
++
++  int rc = mutt_istr_cmp(s->uid, t->uid);
++  if (rc != 0)
++    goto done;
++
++  rc = mutt_istr_cmp(crypt_fpr_or_lkeyid(s), crypt_fpr_or_lkeyid(t));
++
++done:
++  return sort_reverse ? -rc : rc;
++}
++
++/**
++ * crypt_sort_keyid - Compare two keys by their IDs - Implements ::sort_t - @ingroup sort_api
++ */
++static int crypt_sort_keyid(const void *a, const void *b, void *sdata)
++{
++  struct CryptKeyInfo *s = *(struct CryptKeyInfo **) a;
++  struct CryptKeyInfo *t = *(struct CryptKeyInfo **) b;
++  const bool sort_reverse = *(bool *) sdata;
++
++  int rc = mutt_istr_cmp(crypt_fpr_or_lkeyid(s), crypt_fpr_or_lkeyid(t));
++  if (rc != 0)
++    goto done;
++
++  rc = mutt_istr_cmp(s->uid, t->uid);
++
++done:
++  return sort_reverse ? -rc : rc;
++}
++
++/**
++ * crypt_sort_date - Compare two keys by their dates - Implements ::sort_t - @ingroup sort_api
++ */
++static int crypt_sort_date(const void *a, const void *b, void *sdata)
++{
++  struct CryptKeyInfo *s = *(struct CryptKeyInfo **) a;
++  struct CryptKeyInfo *t = *(struct CryptKeyInfo **) b;
++  const bool sort_reverse = *(bool *) sdata;
++
++  unsigned long ts = 0;
++  unsigned long tt = 0;
++  int rc = 0;
++
++  if (s->kobj->subkeys && (s->kobj->subkeys->timestamp > 0))
++    ts = s->kobj->subkeys->timestamp;
++  if (t->kobj->subkeys && (t->kobj->subkeys->timestamp > 0))
++    tt = t->kobj->subkeys->timestamp;
++
++  if (ts > tt)
++  {
++    rc = 1;
++    goto done;
++  }
++
++  if (ts < tt)
++  {
++    rc = -1;
++    goto done;
++  }
++
++  rc = mutt_istr_cmp(s->uid, t->uid);
++
++done:
++  return sort_reverse ? -rc : rc;
++}
++
++/**
++ * crypt_sort_trust - Compare two keys by their trust levels - Implements ::sort_t - @ingroup sort_api
++ */
++static int crypt_sort_trust(const void *a, const void *b, void *sdata)
++{
++  struct CryptKeyInfo *s = *(struct CryptKeyInfo **) a;
++  struct CryptKeyInfo *t = *(struct CryptKeyInfo **) b;
++  const bool sort_reverse = *(bool *) sdata;
++
++  unsigned long ts = 0;
++  unsigned long tt = 0;
++
++  int rc = mutt_numeric_cmp(s->flags & KEYFLAG_RESTRICTIONS, t->flags & KEYFLAG_RESTRICTIONS);
++  if (rc != 0)
++    goto done;
++
++  // Note: reversed
++  rc = mutt_numeric_cmp(t->validity, s->validity);
++  if (rc != 0)
++    return rc;
++
++  ts = 0;
++  tt = 0;
++  if (s->kobj->subkeys)
++    ts = s->kobj->subkeys->length;
++  if (t->kobj->subkeys)
++    tt = t->kobj->subkeys->length;
++
++  // Note: reversed
++  rc = mutt_numeric_cmp(tt, ts);
++  if (rc != 0)
++    goto done;
++
++  ts = 0;
++  tt = 0;
++  if (s->kobj->subkeys && (s->kobj->subkeys->timestamp > 0))
++    ts = s->kobj->subkeys->timestamp;
++  if (t->kobj->subkeys && (t->kobj->subkeys->timestamp > 0))
++    tt = t->kobj->subkeys->timestamp;
++
++  // Note: reversed
++  rc = mutt_numeric_cmp(tt, ts);
++  if (rc != 0)
++    goto done;
++
++  rc = mutt_istr_cmp(s->uid, t->uid);
++  if (rc != 0)
++    goto done;
++
++  rc = mutt_istr_cmp(crypt_fpr_or_lkeyid(s), crypt_fpr_or_lkeyid(t));
++
++done:
++  return sort_reverse ? -rc : rc;
++}
++
++/**
++ * gpgme_sort_keys - Sort an array of GPGME keys
++ * @param ckia Array to sort
++ *
++ * Sort GPGME keys according to `$pgp_sort_keys`
++ */
++void gpgme_sort_keys(struct CryptKeyInfoArray *ckia)
++{
++  const short c_pgp_sort_keys = cs_subset_sort(NeoMutt->sub, "pgp_key_sort");
++  sort_t fn = NULL;
++  switch (c_pgp_sort_keys & SORT_MASK)
++  {
++    case KEY_SORT_ADDRESS:
++      fn = crypt_sort_address;
++      break;
++    case KEY_SORT_DATE:
++      fn = crypt_sort_date;
++      break;
++    case KEY_SORT_KEYID:
++      fn = crypt_sort_keyid;
++      break;
++    case KEY_SORT_TRUST:
++    default:
++      fn = crypt_sort_trust;
++      break;
++  }
++
++  if (ARRAY_SIZE(ckia) > 1)
++  {
++    bool sort_reverse = c_pgp_sort_keys & SORT_REVERSE;
++    ARRAY_SORT(ckia, fn, &sort_reverse);
++  }
++}
+diff --git a/ncrypt/sort_pgp.c b/ncrypt/sort_pgp.c
+new file mode 100644
+index 00000000000..2fa8b98d105
+--- /dev/null
++++ b/ncrypt/sort_pgp.c
+@@ -0,0 +1,171 @@
++/**
++ * @file
++ * PGP Key Sorting
++ *
++ * @authors
++ * Copyright (C) 2024 Richard Russon <rich@flatcap.org>
++ *
++ * @copyright
++ * This program is free software: you can redistribute it and/or modify it under
++ * the terms of the GNU General Public License as published by the Free Software
++ * Foundation, either version 2 of the License, or (at your option) any later
++ * version.
++ *
++ * This program is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
++ * FOR A PARTICULAR PURPOSE.  See the GNU General Public License for more
++ * details.
++ *
++ * You should have received a copy of the GNU General Public License along with
++ * this program.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++/**
++ * @page crypt_sort_pgp PGP Key Sorting
++ *
++ * PGP Key Sorting
++ */
++
++#include "config.h"
++#include <locale.h>
++#include <stdbool.h>
++#include "mutt/lib.h"
++#include "config/lib.h"
++#include "core/lib.h"
++#include "lib.h"
++#include "pgp.h"
++#include "pgplib.h"
++#include "sort.h"
++
++/**
++ * pgp_sort_address - Compare two keys by their addresses - Implements ::sort_t - @ingroup sort_api
++ */
++static int pgp_sort_address(const void *a, const void *b, void *sdata)
++{
++  struct PgpUid const *s = *(struct PgpUid const *const *) a;
++  struct PgpUid const *t = *(struct PgpUid const *const *) b;
++  const bool sort_reverse = *(bool *) sdata;
++
++  int rc = mutt_istr_cmp(s->addr, t->addr);
++  if (rc != 0)
++    goto done;
++
++  rc = mutt_istr_cmp(pgp_fpr_or_lkeyid(s->parent), pgp_fpr_or_lkeyid(t->parent));
++
++done:
++  return sort_reverse ? -rc : rc;
++}
++
++/**
++ * pgp_sort_date - Compare two keys by their dates - Implements ::sort_t - @ingroup sort_api
++ */
++static int pgp_sort_date(const void *a, const void *b, void *sdata)
++{
++  struct PgpUid const *s = *(struct PgpUid const *const *) a;
++  struct PgpUid const *t = *(struct PgpUid const *const *) b;
++  const bool sort_reverse = *(bool *) sdata;
++
++  int rc = mutt_numeric_cmp(s->parent->gen_time, t->parent->gen_time);
++  if (rc != 0)
++    goto done;
++
++  rc = mutt_istr_cmp(s->addr, t->addr);
++
++done:
++  return sort_reverse ? -rc : rc;
++}
++
++/**
++ * pgp_sort_keyid - Compare two keys by their IDs - Implements ::sort_t - @ingroup sort_api
++ */
++static int pgp_sort_keyid(const void *a, const void *b, void *sdata)
++{
++  struct PgpUid const *s = *(struct PgpUid const *const *) a;
++  struct PgpUid const *t = *(struct PgpUid const *const *) b;
++  const bool sort_reverse = *(bool *) sdata;
++
++  int rc = mutt_istr_cmp(pgp_fpr_or_lkeyid(s->parent), pgp_fpr_or_lkeyid(t->parent));
++  if (rc != 0)
++    goto done;
++
++  rc = mutt_istr_cmp(s->addr, t->addr);
++
++done:
++  return sort_reverse ? -rc : rc;
++}
++
++/**
++ * pgp_sort_trust - Compare two keys by their trust levels - Implements ::sort_t - @ingroup sort_api
++ */
++static int pgp_sort_trust(const void *a, const void *b, void *sdata)
++{
++  struct PgpUid const *s = *(struct PgpUid const *const *) a;
++  struct PgpUid const *t = *(struct PgpUid const *const *) b;
++  const bool sort_reverse = *(bool *) sdata;
++
++  int rc = mutt_numeric_cmp(s->parent->flags & KEYFLAG_RESTRICTIONS,
++                            t->parent->flags & KEYFLAG_RESTRICTIONS);
++  if (rc != 0)
++    goto done;
++
++  // Note: reversed
++  rc = mutt_numeric_cmp(t->trust, s->trust);
++  if (rc != 0)
++    goto done;
++
++  // Note: reversed
++  rc = mutt_numeric_cmp(t->parent->keylen, s->parent->keylen);
++  if (rc != 0)
++    goto done;
++
++  // Note: reversed
++  rc = mutt_numeric_cmp(t->parent->gen_time, s->parent->gen_time);
++  if (rc != 0)
++    goto done;
++
++  rc = mutt_istr_cmp(s->addr, t->addr);
++  if (rc != 0)
++    goto done;
++
++  rc = mutt_istr_cmp(pgp_fpr_or_lkeyid(s->parent), pgp_fpr_or_lkeyid(t->parent));
++
++done:
++  return sort_reverse ? -rc : rc;
++}
++
++/**
++ * pgp_sort_keys - Sort an array of PGP keys
++ * @param pua Array to sort
++ *
++ * Sort PGP keys according to `$pgp_sort_keys`
++ */
++void pgp_sort_keys(struct PgpUidArray *pua)
++{
++  if (!pua)
++    return;
++
++  sort_t fn = NULL;
++  short c_pgp_sort_keys = cs_subset_sort(NeoMutt->sub, "pgp_key_sort");
++  switch (c_pgp_sort_keys & SORT_MASK)
++  {
++    case KEY_SORT_ADDRESS:
++      fn = pgp_sort_address;
++      break;
++    case KEY_SORT_DATE:
++      fn = pgp_sort_date;
++      break;
++    case KEY_SORT_KEYID:
++      fn = pgp_sort_keyid;
++      break;
++    case KEY_SORT_TRUST:
++    default:
++      fn = pgp_sort_trust;
++      break;
++  }
++
++  if (ARRAY_SIZE(pua) > 1)
++  {
++    bool sort_reverse = c_pgp_sort_keys & SORT_REVERSE;
++    ARRAY_SORT(pua, fn, &sort_reverse);
++  }
++}
+diff --git a/nntp/lib.h b/nntp/lib.h
+index 94eee34e8b7..6d22d9ec02c 100644
+--- a/nntp/lib.h
++++ b/nntp/lib.h
+@@ -96,7 +96,7 @@ void nntp_newsrc_close(struct NntpAccountData *adata);
+ void nntp_mailbox(struct Mailbox *m, char *buf, size_t buflen);
+ void nntp_expand_path(char *buf, size_t buflen, struct ConnAccount *acct);
+ void nntp_clear_cache(struct NntpAccountData *adata);
+-int nntp_compare_order(const struct Email *a, const struct Email *b, bool reverse);
++int nntp_sort_unsorted(const struct Email *a, const struct Email *b, bool reverse);
+ enum MailboxType nntp_path_probe(const char *path, const struct stat *st);
+ int nntp_complete(struct Buffer *buf);
+ 
+diff --git a/nntp/newsrc.c b/nntp/newsrc.c
+index b6335c871f8..b2c78e0a57b 100644
+--- a/nntp/newsrc.c
++++ b/nntp/newsrc.c
+@@ -310,10 +310,10 @@ void nntp_newsrc_gen_entries(struct Mailbox *m)
+   bool series;
+   unsigned int entries;
+ 
+-  const enum SortType c_sort = cs_subset_sort(NeoMutt->sub, "sort");
+-  if (c_sort != SORT_ORDER)
++  const enum EmailSortType c_sort = cs_subset_sort(NeoMutt->sub, "sort");
++  if (c_sort != EMAIL_SORT_UNSORTED)
+   {
+-    cs_subset_str_native_set(NeoMutt->sub, "sort", SORT_ORDER, NULL);
++    cs_subset_str_native_set(NeoMutt->sub, "sort", EMAIL_SORT_UNSORTED, NULL);
+     mailbox_changed(m, NT_MAILBOX_RESORT);
+   }
+ 
+@@ -378,7 +378,7 @@ void nntp_newsrc_gen_entries(struct Mailbox *m)
+   }
+   MUTT_MEM_REALLOC(&mdata->newsrc_ent, mdata->newsrc_len, struct NewsrcEntry);
+ 
+-  if (c_sort != SORT_ORDER)
++  if (c_sort != EMAIL_SORT_UNSORTED)
+   {
+     cs_subset_str_native_set(NeoMutt->sub, "sort", c_sort, NULL);
+     mailbox_changed(m, NT_MAILBOX_RESORT);
+diff --git a/nntp/nntp.c b/nntp/nntp.c
+index 343b91aa5fc..ab229ef3a81 100644
+--- a/nntp/nntp.c
++++ b/nntp/nntp.c
+@@ -2351,9 +2351,9 @@ int nntp_check_children(struct Mailbox *m, const char *msgid)
+ }
+ 
+ /**
+- * nntp_compare_order - Restore the 'unsorted' order of emails - Implements ::sort_mail_t - @ingroup sort_mail_api
++ * nntp_sort_unsorted - Restore the 'unsorted' order of emails - Implements ::sort_email_t - @ingroup sort_email_api
+  */
+-int nntp_compare_order(const struct Email *a, const struct Email *b, bool reverse)
++int nntp_sort_unsorted(const struct Email *a, const struct Email *b, bool reverse)
+ {
+   anum_t na = nntp_edata_get((struct Email *) a)->article_num;
+   anum_t nb = nntp_edata_get((struct Email *) b)->article_num;
+diff --git a/postpone/dlg_postpone.c b/postpone/dlg_postpone.c
+index 8f19087ea54..b930f1e6583 100644
+--- a/postpone/dlg_postpone.c
++++ b/postpone/dlg_postpone.c
+@@ -233,8 +233,8 @@ struct Email *dlg_postponed(struct Mailbox *m)
+   /* The postponed mailbox is setup to have sorting disabled, but the global
+    * `$sort` variable may indicate something different.   Sorting has to be
+    * disabled while the postpone menu is being displayed. */
+-  const enum SortType c_sort = cs_subset_sort(NeoMutt->sub, "sort");
+-  cs_subset_str_native_set(NeoMutt->sub, "sort", SORT_ORDER, NULL);
++  const enum EmailSortType c_sort = cs_subset_sort(NeoMutt->sub, "sort");
++  cs_subset_str_native_set(NeoMutt->sub, "sort", EMAIL_SORT_UNSORTED, NULL);
+ 
+   struct MuttWindow *old_focus = window_set_focus(menu->win);
+   // ---------------------------------------------------------------------------
+diff --git a/score.c b/score.c
+index 18fd6a53d51..71d5ab524b6 100644
+--- a/score.c
++++ b/score.c
+@@ -69,9 +69,10 @@ void mutt_check_rescore(struct Mailbox *m)
+   const bool c_score = cs_subset_bool(NeoMutt->sub, "score");
+   if (OptNeedRescore && c_score)
+   {
+-    const enum SortType c_sort = cs_subset_sort(NeoMutt->sub, "sort");
+-    const enum SortType c_sort_aux = cs_subset_sort(NeoMutt->sub, "sort_aux");
+-    if (((c_sort & SORT_MASK) == SORT_SCORE) || ((c_sort_aux & SORT_MASK) == SORT_SCORE))
++    const enum EmailSortType c_sort = cs_subset_sort(NeoMutt->sub, "sort");
++    const enum EmailSortType c_sort_aux = cs_subset_sort(NeoMutt->sub, "sort_aux");
++    if (((c_sort & SORT_MASK) == EMAIL_SORT_SCORE) ||
++        ((c_sort_aux & SORT_MASK) == EMAIL_SORT_SCORE))
+     {
+       OptNeedResort = true;
+       if (mutt_using_threads())
+diff --git a/send/send.c b/send/send.c
+index ae774d1bb51..af07e4a45cc 100644
+--- a/send/send.c
++++ b/send/send.c
+@@ -90,7 +90,6 @@
+ #include "sendlib.h"
+ #include "sendmail.h"
+ #include "smtp.h"
+-#include "sort.h"
+ #ifdef USE_NOTMUCH
+ #include "notmuch/lib.h"
+ #endif
+diff --git a/sidebar/config.c b/sidebar/config.c
+index dc9568d475e..f5edf1d2e7c 100644
+--- a/sidebar/config.c
++++ b/sidebar/config.c
+@@ -35,22 +35,24 @@
+ #include "mutt/lib.h"
+ #include "config/lib.h"
+ #include "expando/lib.h"
++#include "sort.h"
+ 
+ /**
+- * SortSidebarMethods - Sort methods for the sidebar
++ * SidebarSortMethods - Sort methods for the sidebar
+  */
+-static const struct Mapping SortSidebarMethods[] = {
++static const struct Mapping SidebarSortMethods[] = {
+   // clang-format off
+-  { "path",          SORT_PATH },
+-  { "alpha",         SORT_PATH },
+-  { "name",          SORT_PATH },
+-  { "count",         SORT_COUNT },
+-  { "desc",          SORT_DESC },
+-  { "flagged",       SORT_FLAGGED },
+-  { "unsorted",      SORT_ORDER },
+-  { "mailbox-order", SORT_ORDER },
+-  { "unread",        SORT_UNREAD },
+-  { "new",           SORT_UNREAD },
++  { "count",         SB_SORT_COUNT },
++  { "desc",          SB_SORT_DESC },
++  { "flagged",       SB_SORT_FLAGGED },
++  { "path",          SB_SORT_PATH },
++  { "unread",        SB_SORT_UNREAD },
++  { "unsorted",      SB_SORT_UNSORTED },
++  // Compatibility
++  { "alpha",         SB_SORT_PATH },
++  { "mailbox-order", SB_SORT_UNSORTED },
++  { "name",          SB_SORT_PATH },
++  { "new",           SB_SORT_UNREAD },
+   { NULL, 0 },
+   // clang-format on
+ };
+@@ -123,7 +125,7 @@ static struct ConfigDef SidebarVars[] = {
+   { "sidebar_short_path", DT_BOOL, false, 0, NULL,
+     "(sidebar) Abbreviate the paths using the `$folder` variable"
+   },
+-  { "sidebar_sort_method", DT_SORT, SORT_ORDER, IP SortSidebarMethods, NULL,
++  { "sidebar_sort", DT_SORT, SB_SORT_UNSORTED, IP SidebarSortMethods, NULL,
+     "(sidebar) Method to sort the sidebar"
+   },
+   { "sidebar_visible", DT_BOOL, false, 0, NULL,
+@@ -132,6 +134,9 @@ static struct ConfigDef SidebarVars[] = {
+   { "sidebar_width", DT_NUMBER|D_INTEGER_NOT_NEGATIVE, 30, 0, NULL,
+     "(sidebar) Width of the sidebar"
+   },
++
++  { "sidebar_sort_method", DT_SYNONYM, IP "sidebar_sort", IP "2024-11-20" },
++
+   { NULL },
+   // clang-format on
+ };
+diff --git a/sidebar/private.h b/sidebar/private.h
+index 80587afa069..29097fcbbc5 100644
+--- a/sidebar/private.h
++++ b/sidebar/private.h
+@@ -27,6 +27,7 @@
+ #include <stdint.h>
+ #include "mutt/lib.h"
+ #include "config/lib.h"
++#include "email/lib.h"
+ #include "core/lib.h"
+ 
+ struct IndexSharedData;
+@@ -95,7 +96,7 @@ struct SidebarWindowData
+   int hil_index;             ///< Highlighted mailbox
+   int bot_index;             ///< Last mailbox visible in sidebar
+ 
+-  short previous_sort;       ///< Old `$sidebar_sort_method`
++  short previous_sort;       ///< Old `$sidebar_sort`
+   enum DivType divider_type; ///< Type of divider to use, e.g. #SB_DIV_ASCII
+   short divider_width;       ///< Width of the divider in screen columns
+ };
+@@ -119,7 +120,7 @@ int sb_insertion_window_observer(struct NotifyCallback *nc);
+ void sb_win_add_observers(struct MuttWindow *win);
+ 
+ // sort.c
+-void sb_sort_entries(struct SidebarWindowData *wdata, enum SortType sort);
++void sb_sort_entries(struct SidebarWindowData *wdata, enum EmailSortType sort);
+ 
+ // wdata.c
+ void                      sb_wdata_free(struct MuttWindow *win, void **ptr);
+diff --git a/sidebar/sort.c b/sidebar/sort.c
+index ef70539ccfb..a1dc34dc354 100644
+--- a/sidebar/sort.c
++++ b/sidebar/sort.c
+@@ -30,9 +30,11 @@
+ 
+ #include "config.h"
+ #include <stdbool.h>
++#include <stddef.h>
+ #include "private.h"
+ #include "mutt/lib.h"
+ #include "config/lib.h"
++#include "email/lib.h"
+ #include "core/lib.h"
+ #include "sort.h"
+ 
+@@ -131,9 +133,9 @@ static int sb_sort_unread(const void *a, const void *b, void *sdata)
+ }
+ 
+ /**
+- * sb_sort_order - Compare two Sidebar entries by order of creation - Implements ::sort_t - @ingroup sort_api
++ * sb_sort_unsorted - Compare two Sidebar entries by order of creation - Implements ::sort_t - @ingroup sort_api
+  */
+-static int sb_sort_order(const void *a, const void *b, void *sdata)
++static int sb_sort_unsorted(const void *a, const void *b, void *sdata)
+ {
+   const struct SbEntry *sbe1 = *(struct SbEntry const *const *) a;
+   const struct SbEntry *sbe2 = *(struct SbEntry const *const *) b;
+@@ -145,54 +147,41 @@ static int sb_sort_order(const void *a, const void *b, void *sdata)
+   return sort_reverse ? -rc : rc;
+ }
+ 
+-/**
+- * sb_sort_unsorted - Compare two Sidebar entries into their original order - Implements ::sort_t - @ingroup sort_api
+- */
+-static int sb_sort_unsorted(const void *a, const void *b, void *sdata)
+-{
+-  const struct SbEntry *sbe1 = *(struct SbEntry const *const *) a;
+-  const struct SbEntry *sbe2 = *(struct SbEntry const *const *) b;
+-
+-  // This sort method isn't affected by the reverse flag
+-  return (sbe1->mailbox->gen - sbe2->mailbox->gen);
+-}
+-
+ /**
+  * sb_sort_entries - Sort the Sidebar entries
+  * @param wdata Sidebar data
+- * @param sort  Sort order, e.g. #SORT_PATH
++ * @param sort  Sort order, e.g. #SB_SORT_PATH
+  *
+  * Sort the `wdata->entries` array according to the current sort config option
+- * `$sidebar_sort_method`. This calls qsort to do the work which calls our
++ * `$sidebar_sort`. This calls qsort to do the work which calls our
+  * callback function "cb_qsort_sbe".
+  *
+  * Once sorted, the prev/next links will be reconstructed.
+  */
+-void sb_sort_entries(struct SidebarWindowData *wdata, enum SortType sort)
++void sb_sort_entries(struct SidebarWindowData *wdata, enum EmailSortType sort)
+ {
+-  sort_t fn = sb_sort_unsorted;
++  sort_t fn = NULL;
+ 
+   switch (sort & SORT_MASK)
+   {
+-    case SORT_COUNT:
++    case SB_SORT_COUNT:
+       fn = sb_sort_count;
+       break;
+-    case SORT_DESC:
++    case SB_SORT_DESC:
+       fn = sb_sort_desc;
+       break;
+-    case SORT_FLAGGED:
++    case SB_SORT_FLAGGED:
+       fn = sb_sort_flagged;
+       break;
+-    case SORT_PATH:
++    case SB_SORT_PATH:
+       fn = sb_sort_path;
+       break;
+-    case SORT_UNREAD:
++    case SB_SORT_UNREAD:
+       fn = sb_sort_unread;
+       break;
+-    case SORT_ORDER:
+-      fn = sb_sort_order;
+-      FALLTHROUGH;
++    case SB_SORT_UNSORTED:
+     default:
++      fn = sb_sort_unsorted;
+       break;
+   }
+ 
+diff --git a/sidebar/sort.h b/sidebar/sort.h
+new file mode 100644
+index 00000000000..9fd9efdf618
+--- /dev/null
++++ b/sidebar/sort.h
+@@ -0,0 +1,40 @@
++/**
++ * @file
++ * Sidebar sorting functions
++ *
++ * @authors
++ * Copyright (C) 2024 Richard Russon <rich@flatcap.org>
++ *
++ * @copyright
++ * This program is free software: you can redistribute it and/or modify it under
++ * the terms of the GNU General Public License as published by the Free Software
++ * Foundation, either version 2 of the License, or (at your option) any later
++ * version.
++ *
++ * This program is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
++ * FOR A PARTICULAR PURPOSE.  See the GNU General Public License for more
++ * details.
++ *
++ * You should have received a copy of the GNU General Public License along with
++ * this program.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++#ifndef MUTT_SIDEBAR_SORT_H
++#define MUTT_SIDEBAR_SORT_H
++
++/**
++ * enum SidebarSortType - Methods for sorting the Sidebar
++ */
++enum SidebarSortType
++{
++  SB_SORT_COUNT,       ///< Sort by total message count
++  SB_SORT_DESC,        ///< Sort by mailbox description
++  SB_SORT_FLAGGED,     ///< Sort by count of flagged messages
++  SB_SORT_PATH,        ///< Sort by mailbox path (alphabetically)
++  SB_SORT_UNREAD,      ///< Sort by count of unread messages
++  SB_SORT_UNSORTED,    ///< Sort into the order the mailboxes were configured
++};
++
++#endif /* MUTT_SIDEBAR_SORT_H */
++
+diff --git a/sidebar/window.c b/sidebar/window.c
+index ab7f761dac7..388afcdaa51 100644
+--- a/sidebar/window.c
++++ b/sidebar/window.c
+@@ -704,8 +704,8 @@ static bool prepare_sidebar(struct SidebarWindowData *wdata, int page_size)
+   const struct SbEntry *hil_entry = sbep ? *sbep : NULL;
+ 
+   update_entries_visibility(wdata);
+-  const short c_sidebar_sort_method = cs_subset_sort(NeoMutt->sub, "sidebar_sort_method");
+-  sb_sort_entries(wdata, c_sidebar_sort_method);
++  const enum EmailSortType c_sidebar_sort = cs_subset_sort(NeoMutt->sub, "sidebar_sort");
++  sb_sort_entries(wdata, c_sidebar_sort);
+ 
+   if (opn_entry || hil_entry)
+   {
+@@ -719,7 +719,7 @@ static bool prepare_sidebar(struct SidebarWindowData *wdata, int page_size)
+   }
+ 
+   if ((wdata->hil_index < 0) || (hil_entry && hil_entry->is_hidden) ||
+-      (c_sidebar_sort_method != wdata->previous_sort))
++      (c_sidebar_sort != wdata->previous_sort))
+   {
+     if (wdata->opn_index >= 0)
+     {
+@@ -766,7 +766,7 @@ static bool prepare_sidebar(struct SidebarWindowData *wdata, int page_size)
+   if (wdata->bot_index > (ARRAY_SIZE(&wdata->entries) - 1))
+     wdata->bot_index = ARRAY_SIZE(&wdata->entries) - 1;
+ 
+-  wdata->previous_sort = c_sidebar_sort_method;
++  wdata->previous_sort = c_sidebar_sort;
+ 
+   return (wdata->hil_index >= 0);
+ }
+diff --git a/status.c b/status.c
+index a4606e2d7b9..cc39468bd72 100644
+--- a/status.c
++++ b/status.c
+@@ -38,6 +38,7 @@
+ #include <sys/types.h>
+ #include "mutt/lib.h"
+ #include "config/lib.h"
++#include "email/lib.h"
+ #include "core/lib.h"
+ #include "status.h"
+ #include "expando/lib.h"
+@@ -45,6 +46,7 @@
+ #include "menu/lib.h"
+ #include "postpone/lib.h"
+ #include "globals.h"
++#include "init.h"
+ #include "mutt_mailbox.h"
+ #include "mutt_thread.h"
+ #include "muttlib.h"
+@@ -59,10 +61,10 @@ const struct ExpandoRenderData StatusRenderData[];
+  * get_sort_str - Get the sort method as a string
+  * @param buf    Buffer for the sort string
+  * @param buflen Length of the buffer
+- * @param method Sort method, see #SortType
++ * @param method Sort method, see #EmailSortType
+  * @retval ptr Buffer pointer
+  */
+-static char *get_sort_str(char *buf, size_t buflen, enum SortType method)
++static char *get_sort_str(char *buf, size_t buflen, enum EmailSortType method)
+ {
+   snprintf(buf, buflen, "%s%s%s", (method & SORT_REVERSE) ? "reverse-" : "",
+            (method & SORT_LAST) ? "last-" : "",
+@@ -325,7 +327,7 @@ void status_s(const struct ExpandoNode *node, void *data, MuttFormatFlags flags,
+ {
+   char tmp[128] = { 0 };
+ 
+-  const enum SortType c_sort = cs_subset_sort(NeoMutt->sub, "sort");
++  const enum EmailSortType c_sort = cs_subset_sort(NeoMutt->sub, "sort");
+   const char *s = get_sort_str(tmp, sizeof(tmp), c_sort);
+   buf_strcpy(buf, s);
+ }
+@@ -338,7 +340,7 @@ void status_S(const struct ExpandoNode *node, void *data, MuttFormatFlags flags,
+ {
+   char tmp[128] = { 0 };
+ 
+-  const enum SortType c_sort_aux = cs_subset_sort(NeoMutt->sub, "sort_aux");
++  const enum EmailSortType c_sort_aux = cs_subset_sort(NeoMutt->sub, "sort_aux");
+   const char *s = get_sort_str(tmp, sizeof(tmp), c_sort_aux);
+   buf_strcpy(buf, s);
+ }
+diff --git a/test/config/dump.c b/test/config/dump.c
+index 946e775f6d2..f48e15d14dc 100644
+--- a/test/config/dump.c
++++ b/test/config/dump.c
+@@ -31,6 +31,7 @@
+ #include <stdio.h>
+ #include "mutt/lib.h"
+ #include "config/lib.h"
++#include "email/lib.h"
+ #include "core/lib.h"
+ #include "common.h" // IWYU pragma: keep
+ #include "test_common.h"
+@@ -48,19 +49,19 @@ static struct Mapping MboxTypeMap[] = {
+  * Test Lookup table
+  */
+ const struct Mapping SortMangoMethods[] = {
+-  { "date",          SORT_DATE },
+-  { "date-sent",     SORT_DATE },
+-  { "date-received", SORT_RECEIVED },
+-  { "from",          SORT_FROM },
+-  { "label",         SORT_LABEL },
+-  { "unsorted",      SORT_ORDER },
+-  { "mailbox-order", SORT_ORDER },
+-  { "score",         SORT_SCORE },
+-  { "size",          SORT_SIZE },
+-  { "spam",          SORT_SPAM },
+-  { "subject",       SORT_SUBJECT },
+-  { "threads",       SORT_THREADS },
+-  { "to",            SORT_TO },
++  { "date",          EMAIL_SORT_DATE },
++  { "date-sent",     EMAIL_SORT_DATE },
++  { "date-received", EMAIL_SORT_DATE_RECEIVED },
++  { "from",          EMAIL_SORT_FROM },
++  { "label",         EMAIL_SORT_LABEL },
++  { "unsorted",      EMAIL_SORT_UNSORTED },
++  { "mailbox-order", EMAIL_SORT_UNSORTED },
++  { "score",         EMAIL_SORT_SCORE },
++  { "size",          EMAIL_SORT_SIZE },
++  { "spam",          EMAIL_SORT_SPAM },
++  { "subject",       EMAIL_SORT_SUBJECT },
++  { "threads",       EMAIL_SORT_THREADS },
++  { "to",            EMAIL_SORT_TO },
+   { NULL,            0 },
+ };
+ // clang-format on
+@@ -85,7 +86,7 @@ static struct ConfigDef Vars[] = {
+   { "Jackfruit",  DT_PATH|D_PATH_FILE,               IP "/etc/passwd",            0,                   NULL, },
+   { "Kumquat",    DT_QUAD,                           0,                           0,                   NULL, },
+   { "Lemon",      DT_REGEX,                          0,                           0,                   NULL, },
+-  { "Mango",      DT_SORT,                           1,                           IP SortMangoMethods, NULL, },
++  { "Mango",      DT_SORT,                           EMAIL_SORT_DATE,             IP SortMangoMethods, NULL, },
+   { "Nectarine",  DT_STRING|D_SENSITIVE,            IP "nectarine",               0,                   NULL, },
+   { "Olive",      DT_STRING|D_INTERNAL_DEPRECATED,  IP "olive",                  0,                   NULL, },
+   { NULL },
+diff --git a/test/config/helpers.c b/test/config/helpers.c
+index 5b97a8aa7d1..23ebb7b4107 100644
+--- a/test/config/helpers.c
++++ b/test/config/helpers.c
+@@ -29,6 +29,7 @@
+ #include <stddef.h>
+ #include "mutt/lib.h"
+ #include "config/lib.h"
++#include "email/lib.h"
+ #include "core/lib.h"
+ #include "common.h" // IWYU pragma: keep
+ #include "test_common.h"
+@@ -46,19 +47,19 @@ static struct Mapping MboxTypeMap[] = {
+  * Test Lookup table
+  */
+ static const struct Mapping SortMangoMethods[] = {
+-  { "date",          SORT_DATE },
+-  { "date-sent",     SORT_DATE },
+-  { "date-received", SORT_RECEIVED },
+-  { "from",          SORT_FROM },
+-  { "label",         SORT_LABEL },
+-  { "unsorted",      SORT_ORDER },
+-  { "mailbox-order", SORT_ORDER },
+-  { "score",         SORT_SCORE },
+-  { "size",          SORT_SIZE },
+-  { "spam",          SORT_SPAM },
+-  { "subject",       SORT_SUBJECT },
+-  { "threads",       SORT_THREADS },
+-  { "to",            SORT_TO },
++  { "date",          EMAIL_SORT_DATE },
++  { "date-sent",     EMAIL_SORT_DATE },
++  { "date-received", EMAIL_SORT_DATE_RECEIVED },
++  { "from",          EMAIL_SORT_FROM },
++  { "label",         EMAIL_SORT_LABEL },
++  { "unsorted",      EMAIL_SORT_UNSORTED },
++  { "mailbox-order", EMAIL_SORT_UNSORTED },
++  { "score",         EMAIL_SORT_SCORE },
++  { "size",          EMAIL_SORT_SIZE },
++  { "spam",          EMAIL_SORT_SPAM },
++  { "subject",       EMAIL_SORT_SUBJECT },
++  { "threads",       EMAIL_SORT_THREADS },
++  { "to",            EMAIL_SORT_TO },
+   { NULL,            0 },
+ };
+ // clang-format on
+@@ -82,7 +83,7 @@ static struct ConfigDef Vars[] = {
+   { "Jackfruit",  DT_PATH|D_PATH_FILE,               IP "/etc/passwd",            0,                   NULL, },
+   { "Kumquat",    DT_QUAD,                           0,                           0,                   NULL, },
+   { "Lemon",      DT_REGEX,                          0,                           0,                   NULL, },
+-  { "Mango",      DT_SORT,                           1,                           IP SortMangoMethods, NULL, },
++  { "Mango",      DT_SORT,                           EMAIL_SORT_DATE,             IP SortMangoMethods, NULL, },
+   { "Nectarine",  DT_STRING|D_SENSITIVE,             IP "nectarine",              0,                   NULL, },
+   { "Olive",      DT_SLIST,                          IP "olive",                  IP "olive",          NULL, },
+   { NULL },
+@@ -104,6 +105,6 @@ void test_config_helpers(void)
+   TEST_CHECK(cs_subset_quad(sub, "Kumquat") == 0);
+   TEST_CHECK(cs_subset_regex(sub, "Lemon") == 0);
+   TEST_CHECK(cs_subset_slist(sub, "Olive") != NULL);
+-  TEST_CHECK(cs_subset_sort(sub, "Mango") == 1);
++  TEST_CHECK(cs_subset_sort(sub, "Mango") == EMAIL_SORT_DATE);
+   TEST_CHECK_STR_EQ(cs_subset_string(sub, "Nectarine"), "nectarine");
+ }
+diff --git a/test/config/sort.c b/test/config/sort.c
+index c7036f0934d..795018d22ed 100644
+--- a/test/config/sort.c
++++ b/test/config/sort.c
+@@ -31,6 +31,7 @@
+ #include <stdio.h>
+ #include "mutt/lib.h"
+ #include "config/lib.h"
++#include "email/lib.h"
+ #include "core/lib.h"
+ #include "common.h" // IWYU pragma: keep
+ #include "test_common.h"
+@@ -40,42 +41,43 @@
+  * Test Lookup Table, used by everything
+  */
+ static const struct Mapping SortTestMethods[] = {
+-  { "date",          SORT_DATE },
+-  { "date-sent",     SORT_DATE },
+-  { "date-received", SORT_RECEIVED },
+-  { "from",          SORT_FROM },
+-  { "label",         SORT_LABEL },
+-  { "unsorted",      SORT_ORDER },
+-  { "mailbox-order", SORT_ORDER },
+-  { "score",         SORT_SCORE },
+-  { "size",          SORT_SIZE },
+-  { "spam",          SORT_SPAM },
+-  { "subject",       SORT_SUBJECT },
+-  { "threads",       SORT_THREADS },
+-  { "to",            SORT_TO },
++  { "date",          EMAIL_SORT_DATE },
++  { "date-received", EMAIL_SORT_DATE_RECEIVED },
++  { "from",          EMAIL_SORT_FROM },
++  { "label",         EMAIL_SORT_LABEL },
++  { "score",         EMAIL_SORT_SCORE },
++  { "size",          EMAIL_SORT_SIZE },
++  { "spam",          EMAIL_SORT_SPAM },
++  { "subject",       EMAIL_SORT_SUBJECT },
++  { "threads",       EMAIL_SORT_THREADS },
++  { "to",            EMAIL_SORT_TO },
++  { "unsorted",      EMAIL_SORT_UNSORTED },
++  // Compatibility
++  { "date-sent",     EMAIL_SORT_DATE },
++  { "mailbox-order", EMAIL_SORT_UNSORTED },
+   { NULL,            0 },
+ };
+ 
+ static struct ConfigDef Vars[] = {
+-  { "Apple",      DT_SORT,                              1,  IP SortTestMethods, NULL,              }, /* test_initial_values */
+-  { "Banana",     DT_SORT,                              2,  IP SortTestMethods, NULL,              },
+-  { "Cherry",     DT_SORT,                              1,  IP SortTestMethods, NULL,              },
+-  { "Damson",     DT_SORT|D_SORT_REVERSE|D_SORT_LAST,   1,  IP SortTestMethods, NULL,              }, /* test_string_set */
+-  { "Elderberry", DT_SORT,                              11, IP SortTestMethods, NULL,              },
+-  { "Fig",        DT_SORT,                              1,  IP SortTestMethods, NULL,              },
+-  { "Guava",      DT_SORT,                              1,  IP SortTestMethods, NULL,              },
+-  { "Hawthorn",   DT_SORT,                              1,  IP SortTestMethods, NULL,              },
+-  { "Ilama",      DT_SORT,                              17, IP SortTestMethods, NULL,              },
+-  { "Jackfruit",  DT_SORT,                              1,  IP SortTestMethods, NULL,              }, /* test_string_get */
+-  { "Kumquat",    DT_SORT,                              1,  IP SortTestMethods, NULL,              }, /* test_native_set */
+-  { "Lemon",      DT_SORT,                              1,  IP SortTestMethods, NULL,              }, /* test_native_get */
+-  { "Mango",      DT_SORT,                              1,  IP SortTestMethods, NULL,              }, /* test_reset */
+-  { "Nectarine",  DT_SORT,                              1,  IP SortTestMethods, validator_fail,    },
+-  { "Olive",      DT_SORT,                              1,  IP SortTestMethods, validator_succeed, }, /* test_validator */
+-  { "Papaya",     DT_SORT,                              1,  IP SortTestMethods, validator_warn,    },
+-  { "Quince",     DT_SORT,                              1,  IP SortTestMethods, validator_fail,    },
+-  { "Strawberry", DT_SORT,                              1,  IP SortTestMethods, NULL,              }, /* test_inherit */
+-  { "Tangerine",  DT_SORT | D_ON_STARTUP,               1,  IP SortTestMethods, NULL,              }, /* startup */
++  { "Apple",      DT_SORT,                            EMAIL_SORT_DATE, IP SortTestMethods, NULL,              }, /* test_initial_values */
++  { "Banana",     DT_SORT,                            EMAIL_SORT_SIZE, IP SortTestMethods, NULL,              },
++  { "Cherry",     DT_SORT,                            EMAIL_SORT_DATE, IP SortTestMethods, NULL,              },
++  { "Damson",     DT_SORT|D_SORT_REVERSE|D_SORT_LAST, EMAIL_SORT_DATE, IP SortTestMethods, NULL,              }, /* test_string_set */
++  { "Elderberry", DT_SORT,                            EMAIL_SORT_SPAM, IP SortTestMethods, NULL,              },
++  { "Fig",        DT_SORT,                            EMAIL_SORT_DATE, IP SortTestMethods, NULL,              },
++  { "Guava",      DT_SORT,                            EMAIL_SORT_DATE, IP SortTestMethods, NULL,              },
++  { "Hawthorn",   DT_SORT,                            EMAIL_SORT_DATE, IP SortTestMethods, NULL,              },
++  { "Ilama",      DT_SORT,                            EMAIL_SORT_TO,   IP SortTestMethods, NULL,              },
++  { "Jackfruit",  DT_SORT,                            EMAIL_SORT_DATE, IP SortTestMethods, NULL,              }, /* test_string_get */
++  { "Kumquat",    DT_SORT,                            EMAIL_SORT_DATE, IP SortTestMethods, NULL,              }, /* test_native_set */
++  { "Lemon",      DT_SORT,                            EMAIL_SORT_DATE, IP SortTestMethods, NULL,              }, /* test_native_get */
++  { "Mango",      DT_SORT,                            EMAIL_SORT_DATE, IP SortTestMethods, NULL,              }, /* test_reset */
++  { "Nectarine",  DT_SORT,                            EMAIL_SORT_DATE, IP SortTestMethods, validator_fail,    },
++  { "Olive",      DT_SORT,                            EMAIL_SORT_DATE, IP SortTestMethods, validator_succeed, }, /* test_validator */
++  { "Papaya",     DT_SORT,                            EMAIL_SORT_DATE, IP SortTestMethods, validator_warn,    },
++  { "Quince",     DT_SORT,                            EMAIL_SORT_DATE, IP SortTestMethods, validator_fail,    },
++  { "Strawberry", DT_SORT,                            EMAIL_SORT_DATE, IP SortTestMethods, NULL,              }, /* test_inherit */
++  { "Tangerine",  DT_SORT | D_ON_STARTUP,             EMAIL_SORT_DATE, IP SortTestMethods, NULL,              }, /* startup */
+   { NULL },
+ };
+ 
+@@ -100,15 +102,15 @@ static bool test_initial_values(struct ConfigSubset *sub, struct Buffer *err)
+   TEST_MSG("Apple = %d", VarApple);
+   TEST_MSG("Banana = %d", VarBanana);
+ 
+-  if (!TEST_CHECK(VarApple == 1))
++  if (!TEST_CHECK(VarApple == EMAIL_SORT_DATE))
+   {
+-    TEST_MSG("Expected: %d", 1);
++    TEST_MSG("Expected: %d", EMAIL_SORT_DATE);
+     TEST_MSG("Actual  : %d", VarApple);
+   }
+ 
+-  if (!TEST_CHECK(VarBanana == 2))
++  if (!TEST_CHECK(VarBanana == EMAIL_SORT_SIZE))
+   {
+-    TEST_MSG("Expected: %d", 2);
++    TEST_MSG("Expected: %d", EMAIL_SORT_SIZE);
+     TEST_MSG("Actual  : %d", VarBanana);
+   }
+ 
+@@ -252,9 +254,9 @@ static bool test_string_set(struct ConfigSubset *sub, struct Buffer *err)
+   }
+ 
+   short VarDamson = cs_subset_sort(sub, "Damson");
+-  if (!TEST_CHECK(VarDamson == (SORT_DATE | SORT_LAST)))
++  if (!TEST_CHECK(VarDamson == (EMAIL_SORT_DATE | SORT_LAST)))
+   {
+-    TEST_MSG("Expected %d, got %d", (SORT_DATE | SORT_LAST), VarDamson);
++    TEST_MSG("Expected %d, got %d", (EMAIL_SORT_DATE | SORT_LAST), VarDamson);
+     return false;
+   }
+ 
+@@ -267,9 +269,9 @@ static bool test_string_set(struct ConfigSubset *sub, struct Buffer *err)
+   }
+ 
+   VarDamson = cs_subset_sort(sub, "Damson");
+-  if (!TEST_CHECK(VarDamson == (SORT_SCORE | SORT_REVERSE)))
++  if (!TEST_CHECK(VarDamson == (EMAIL_SORT_SCORE | SORT_REVERSE)))
+   {
+-    TEST_MSG("Expected %d, got %d", (SORT_DATE | SORT_LAST), VarDamson);
++    TEST_MSG("Expected %d, got %d", (EMAIL_SORT_DATE | SORT_LAST), VarDamson);
+     return false;
+   }
+ 
+@@ -290,7 +292,7 @@ static bool test_string_get(struct ConfigSubset *sub, struct Buffer *err)
+   struct ConfigSet *cs = sub->cs;
+   const char *name = "Jackfruit";
+ 
+-  cs_str_native_set(cs, name, SORT_SUBJECT, NULL);
++  cs_str_native_set(cs, name, EMAIL_SORT_SUBJECT, NULL);
+   buf_reset(err);
+   int rc = cs_str_string_get(cs, name, err);
+   if (!TEST_CHECK(CSR_RESULT(rc) == CSR_SUCCESS))
+@@ -301,7 +303,7 @@ static bool test_string_get(struct ConfigSubset *sub, struct Buffer *err)
+   short VarJackfruit = cs_subset_sort(sub, "Jackfruit");
+   TEST_MSG("%s = %d, %s", name, VarJackfruit, buf_string(err));
+ 
+-  cs_str_native_set(cs, name, SORT_THREADS, NULL);
++  cs_str_native_set(cs, name, EMAIL_SORT_THREADS, NULL);
+   buf_reset(err);
+   rc = cs_str_string_get(cs, name, err);
+   if (!TEST_CHECK(CSR_RESULT(rc) == CSR_SUCCESS))
+@@ -334,7 +336,7 @@ static bool test_string_get(struct ConfigSubset *sub, struct Buffer *err)
+ 
+   // Test prefixes
+   name = "Damson";
+-  cs_str_native_set(cs, name, SORT_DATE | SORT_REVERSE | SORT_LAST, NULL);
++  cs_str_native_set(cs, name, EMAIL_SORT_DATE | SORT_REVERSE | SORT_LAST, NULL);
+   buf_reset(err);
+   rc = cs_str_string_get(cs, name, err);
+   if (!TEST_CHECK(CSR_RESULT(rc) == CSR_SUCCESS))
+@@ -387,7 +389,7 @@ static bool test_native_set(struct ConfigSubset *sub, struct Buffer *err)
+   }
+ 
+   const char *name = "Kumquat";
+-  short value = SORT_THREADS;
++  short value = EMAIL_SORT_THREADS;
+   cs_str_native_set(cs, name, -1, NULL);
+   buf_reset(err);
+   rc = cs_str_native_set(cs, name, value, err);
+@@ -427,7 +429,7 @@ static bool test_native_set(struct ConfigSubset *sub, struct Buffer *err)
+ 
+   name = "Damson";
+   buf_reset(err);
+-  rc = cs_str_native_set(cs, name, (SORT_DATE | SORT_LAST), err);
++  rc = cs_str_native_set(cs, name, (EMAIL_SORT_DATE | SORT_LAST), err);
+   if (!TEST_CHECK(CSR_RESULT(rc) == CSR_SUCCESS))
+   {
+     TEST_MSG("%s", buf_string(err));
+@@ -435,14 +437,14 @@ static bool test_native_set(struct ConfigSubset *sub, struct Buffer *err)
+   }
+ 
+   short VarDamson = cs_subset_sort(sub, "Damson");
+-  if (!TEST_CHECK(VarDamson == (SORT_DATE | SORT_LAST)))
++  if (!TEST_CHECK(VarDamson == (EMAIL_SORT_DATE | SORT_LAST)))
+   {
+-    TEST_MSG("Expected %d, got %d", (SORT_DATE | SORT_LAST), VarDamson);
++    TEST_MSG("Expected %d, got %d", (EMAIL_SORT_DATE | SORT_LAST), VarDamson);
+     return false;
+   }
+ 
+   buf_reset(err);
+-  rc = cs_str_native_set(cs, name, (SORT_SCORE | SORT_REVERSE), err);
++  rc = cs_str_native_set(cs, name, (EMAIL_SORT_SCORE | SORT_REVERSE), err);
+   if (!TEST_CHECK(CSR_RESULT(rc) == CSR_SUCCESS))
+   {
+     TEST_MSG("%s", buf_string(err));
+@@ -450,17 +452,17 @@ static bool test_native_set(struct ConfigSubset *sub, struct Buffer *err)
+   }
+ 
+   VarDamson = cs_subset_sort(sub, "Damson");
+-  if (!TEST_CHECK(VarDamson == (SORT_SCORE | SORT_REVERSE)))
++  if (!TEST_CHECK(VarDamson == (EMAIL_SORT_SCORE | SORT_REVERSE)))
+   {
+-    TEST_MSG("Expected %d, got %d", (SORT_DATE | SORT_LAST), VarDamson);
++    TEST_MSG("Expected %d, got %d", (EMAIL_SORT_DATE | SORT_LAST), VarDamson);
+     return false;
+   }
+ 
+   name = "Tangerine";
+-  rc = cs_str_native_set(cs, name, SORT_DATE, err);
++  rc = cs_str_native_set(cs, name, EMAIL_SORT_DATE, err);
+   TEST_CHECK(CSR_RESULT(rc) == CSR_SUCCESS);
+ 
+-  rc = cs_str_native_set(cs, name, SORT_SIZE, err);
++  rc = cs_str_native_set(cs, name, EMAIL_SORT_SIZE, err);
+   TEST_CHECK(CSR_RESULT(rc) != CSR_SUCCESS);
+ 
+   log_line(__func__);
+@@ -473,10 +475,10 @@ static bool test_native_get(struct ConfigSubset *sub, struct Buffer *err)
+   struct ConfigSet *cs = sub->cs;
+   const char *name = "Lemon";
+ 
+-  cs_str_native_set(cs, name, SORT_THREADS, NULL);
++  cs_str_native_set(cs, name, EMAIL_SORT_THREADS, NULL);
+   buf_reset(err);
+   intptr_t value = cs_str_native_get(cs, name, err);
+-  if (!TEST_CHECK(value == SORT_THREADS))
++  if (!TEST_CHECK(value == EMAIL_SORT_THREADS))
+   {
+     TEST_MSG("Get failed: %s", buf_string(err));
+     return false;
+@@ -493,7 +495,7 @@ static bool test_reset(struct ConfigSubset *sub, struct Buffer *err)
+   struct ConfigSet *cs = sub->cs;
+ 
+   const char *name = "Mango";
+-  cs_str_native_set(cs, name, SORT_SUBJECT, NULL);
++  cs_str_native_set(cs, name, EMAIL_SORT_SUBJECT, NULL);
+   buf_reset(err);
+ 
+   int rc = cs_str_reset(cs, name, err);
+@@ -504,7 +506,7 @@ static bool test_reset(struct ConfigSubset *sub, struct Buffer *err)
+   }
+ 
+   short VarMango = cs_subset_sort(sub, "Mango");
+-  if (VarMango == SORT_SUBJECT)
++  if (VarMango == EMAIL_SORT_SUBJECT)
+   {
+     TEST_MSG("Value of %s wasn't changed", name);
+     return false;
+@@ -544,7 +546,7 @@ static bool test_reset(struct ConfigSubset *sub, struct Buffer *err)
+   }
+ 
+   VarNectarine = cs_subset_sort(sub, "Nectarine");
+-  if (!TEST_CHECK(VarNectarine == SORT_SIZE))
++  if (!TEST_CHECK(VarNectarine == EMAIL_SORT_SIZE))
+   {
+     TEST_MSG("Value of %s changed", name);
+     return false;
+@@ -557,7 +559,7 @@ static bool test_reset(struct ConfigSubset *sub, struct Buffer *err)
+   TEST_CHECK(CSR_RESULT(rc) == CSR_SUCCESS);
+ 
+   StartupComplete = false;
+-  rc = cs_str_native_set(cs, name, SORT_SIZE, err);
++  rc = cs_str_native_set(cs, name, EMAIL_SORT_SIZE, err);
+   TEST_CHECK(CSR_RESULT(rc) == CSR_SUCCESS);
+   StartupComplete = true;
+ 
+@@ -574,7 +576,7 @@ static bool test_validator(struct ConfigSubset *sub, struct Buffer *err)
+   struct ConfigSet *cs = sub->cs;
+ 
+   const char *name = "Olive";
+-  cs_str_native_set(cs, name, SORT_SUBJECT, NULL);
++  cs_str_native_set(cs, name, EMAIL_SORT_SUBJECT, NULL);
+   buf_reset(err);
+   int rc = cs_str_string_set(cs, name, "threads", err);
+   if (TEST_CHECK(CSR_RESULT(rc) == CSR_SUCCESS))
+@@ -589,9 +591,9 @@ static bool test_validator(struct ConfigSubset *sub, struct Buffer *err)
+   short VarOlive = cs_subset_sort(sub, "Olive");
+   TEST_MSG("String: %s = %d", name, VarOlive);
+ 
+-  cs_str_native_set(cs, name, SORT_SUBJECT, NULL);
++  cs_str_native_set(cs, name, EMAIL_SORT_SUBJECT, NULL);
+   buf_reset(err);
+-  rc = cs_str_native_set(cs, name, SORT_THREADS, err);
++  rc = cs_str_native_set(cs, name, EMAIL_SORT_THREADS, err);
+   if (TEST_CHECK(CSR_RESULT(rc) == CSR_SUCCESS))
+   {
+     TEST_MSG("%s", buf_string(err));
+@@ -605,7 +607,7 @@ static bool test_validator(struct ConfigSubset *sub, struct Buffer *err)
+   TEST_MSG("Native: %s = %d", name, VarOlive);
+ 
+   name = "Papaya";
+-  cs_str_native_set(cs, name, SORT_SUBJECT, NULL);
++  cs_str_native_set(cs, name, EMAIL_SORT_SUBJECT, NULL);
+   buf_reset(err);
+   rc = cs_str_string_set(cs, name, "threads", err);
+   if (TEST_CHECK(CSR_RESULT(rc) == CSR_SUCCESS))
+@@ -620,9 +622,9 @@ static bool test_validator(struct ConfigSubset *sub, struct Buffer *err)
+   short VarPapaya = cs_subset_sort(sub, "Papaya");
+   TEST_MSG("String: %s = %d", name, VarPapaya);
+ 
+-  cs_str_native_set(cs, name, SORT_SUBJECT, NULL);
++  cs_str_native_set(cs, name, EMAIL_SORT_SUBJECT, NULL);
+   buf_reset(err);
+-  rc = cs_str_native_set(cs, name, SORT_THREADS, err);
++  rc = cs_str_native_set(cs, name, EMAIL_SORT_THREADS, err);
+   if (TEST_CHECK(CSR_RESULT(rc) == CSR_SUCCESS))
+   {
+     TEST_MSG("%s", buf_string(err));
+@@ -636,7 +638,7 @@ static bool test_validator(struct ConfigSubset *sub, struct Buffer *err)
+   TEST_MSG("Native: %s = %d", name, VarPapaya);
+ 
+   name = "Quince";
+-  cs_str_native_set(cs, name, SORT_SUBJECT, NULL);
++  cs_str_native_set(cs, name, EMAIL_SORT_SUBJECT, NULL);
+   buf_reset(err);
+   rc = cs_str_string_set(cs, name, "threads", err);
+   if (TEST_CHECK(CSR_RESULT(rc) != CSR_SUCCESS))
+@@ -651,9 +653,9 @@ static bool test_validator(struct ConfigSubset *sub, struct Buffer *err)
+   short VarQuince = cs_subset_sort(sub, "Quince");
+   TEST_MSG("String: %s = %d", name, VarQuince);
+ 
+-  cs_str_native_set(cs, name, SORT_SUBJECT, NULL);
++  cs_str_native_set(cs, name, EMAIL_SORT_SUBJECT, NULL);
+   buf_reset(err);
+-  rc = cs_str_native_set(cs, name, SORT_THREADS, err);
++  rc = cs_str_native_set(cs, name, EMAIL_SORT_THREADS, err);
+   if (TEST_CHECK(CSR_RESULT(rc) != CSR_SUCCESS))
+   {
+     TEST_MSG("Expected error: %s", buf_string(err));
+@@ -701,7 +703,7 @@ static bool test_inherit(struct ConfigSet *cs, struct Buffer *err)
+   }
+ 
+   // set parent
+-  cs_str_native_set(cs, parent, SORT_SUBJECT, NULL);
++  cs_str_native_set(cs, parent, EMAIL_SORT_SUBJECT, NULL);
+   buf_reset(err);
+   int rc = cs_str_string_set(cs, parent, "threads", err);
+   if (!TEST_CHECK(CSR_RESULT(rc) == CSR_SUCCESS))
+@@ -770,11 +772,11 @@ static bool test_sort_type(struct ConfigSubset *sub, struct Buffer *err)
+ 
+   buf_reset(err);
+   TEST_MSG("Expect error for next test");
+-  rc = cs_str_native_set(cs, name, SORT_THREADS, err);
++  rc = cs_str_native_set(cs, name, EMAIL_SORT_THREADS, err);
+   if (!TEST_CHECK(CSR_RESULT(rc) != CSR_SUCCESS))
+   {
+     short VarRaspberry = cs_subset_sort(sub, "Raspberry");
+-    TEST_MSG("%s = %d, set by %d", name, VarRaspberry, SORT_THREADS);
++    TEST_MSG("%s = %d, set by %d", name, VarRaspberry, EMAIL_SORT_THREADS);
+     TEST_MSG("This test should have failed");
+     return false;
+   }
+diff --git a/test/parse/parse_rc.c b/test/parse/parse_rc.c
+index ea783653e70..9c6c32bbe5a 100644
+--- a/test/parse/parse_rc.c
++++ b/test/parse/parse_rc.c
+@@ -29,6 +29,7 @@
+ #include <stdio.h>
+ #include "mutt/lib.h"
+ #include "config/lib.h"
++#include "email/lib.h"
+ #include "core/lib.h"
+ #include "parse/lib.h"
+ #include "test_common.h" // IWYU pragma: keep
+@@ -41,13 +42,13 @@ extern struct EnumDef MboxTypeDef;
+  */
+ const struct Mapping SortMethods[] = {
+   // clang-format off
+-  { "date",    SORT_DATE },
+-  { "from",    SORT_FROM },
+-  { "label",   SORT_LABEL },
+-  { "size",    SORT_SIZE },
+-  { "spam",    SORT_SPAM },
+-  { "subject", SORT_SUBJECT },
+-  { "to",      SORT_TO },
++  { "date",    EMAIL_SORT_DATE },
++  { "from",    EMAIL_SORT_FROM },
++  { "label",   EMAIL_SORT_LABEL },
++  { "size",    EMAIL_SORT_SIZE },
++  { "spam",    EMAIL_SORT_SPAM },
++  { "subject", EMAIL_SORT_SUBJECT },
++  { "to",      EMAIL_SORT_TO },
+   { NULL, 0 },
+   // clang-format on
+ };
+@@ -63,7 +64,7 @@ static struct ConfigDef Vars[] = {
+   { "signature",         DT_PATH|D_PATH_FILE,              IP "~/.signature",     0,               NULL, },
+   { "print",             DT_QUAD,                          MUTT_ASKNO,            0,               NULL, },
+   { "mask",              DT_REGEX|D_REGEX_NOSUB,           IP "!^\\.[^.]",        0,               NULL, },
+-  { "sort",              DT_SORT|D_SORT_LAST,              SORT_DATE,             IP SortMethods,  NULL, },
++  { "sort",              DT_SORT|D_SORT_LAST,              EMAIL_SORT_DATE,             IP SortMethods,  NULL, },
+   { "attribution_intro", DT_STRING,                        IP "On %d, %n wrote:", 0,               NULL, },
+   { NULL },
+   // clang-format on

@@ -1,0 +1,3185 @@
+diff --git a/cilium-dbg/cmd/troubleshoot/troubleshoot.go b/cilium-dbg/cmd/troubleshoot/troubleshoot.go
+index 88317254a519c..e252e12fb7da3 100644
+--- a/cilium-dbg/cmd/troubleshoot/troubleshoot.go
++++ b/cilium-dbg/cmd/troubleshoot/troubleshoot.go
+@@ -7,10 +7,10 @@ import (
+ 	"context"
+ 	"fmt"
+ 	"io"
++	"log/slog"
+ 	"net"
+ 	"net/netip"
+ 
+-	"github.com/sirupsen/logrus"
+ 	"github.com/spf13/cobra"
+ 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+ 	"k8s.io/apimachinery/pkg/types"
+@@ -62,8 +62,7 @@ func newTroubleshootDialer(w io.Writer, disabled bool) kvstore.EtcdDbgDialer {
+ 		cache: make(map[types.NamespacedName]tdCacheEntry),
+ 	}
+ 
+-	logger := logrus.New()
+-	logger.SetOutput(io.Discard)
++	logger := slog.New(slog.DiscardHandler)
+ 	dialer.dial = dial.NewContextDialer(logger, dialer)
+ 	return dialer
+ }
+diff --git a/clustermesh-apiserver/clustermesh/health.go b/clustermesh-apiserver/clustermesh/health.go
+index b6ed839db5bf9..0c836a982f6ae 100644
+--- a/clustermesh-apiserver/clustermesh/health.go
++++ b/clustermesh-apiserver/clustermesh/health.go
+@@ -4,14 +4,15 @@
+ package clustermesh
+ 
+ import (
++	"log/slog"
+ 	"net/http"
+ 
+ 	"github.com/cilium/hive/cell"
+-	"github.com/sirupsen/logrus"
+ 
+ 	"github.com/cilium/cilium/clustermesh-apiserver/health"
+ 	"github.com/cilium/cilium/clustermesh-apiserver/syncstate"
+ 	k8sClient "github.com/cilium/cilium/pkg/k8s/client"
++	"github.com/cilium/cilium/pkg/logging/logfields"
+ )
+ 
+ var HealthAPIEndpointsCell = cell.Module(
+@@ -27,7 +28,7 @@ type healthParameters struct {
+ 
+ 	Clientset k8sClient.Clientset
+ 	SyncState syncstate.SyncState
+-	Logger    logrus.FieldLogger
++	Logger    *slog.Logger
+ }
+ 
+ func healthEndpoints(params healthParameters) []health.EndpointFunc {
+@@ -44,7 +45,7 @@ func healthEndpoints(params healthParameters) []health.EndpointFunc {
+ 				}
+ 				w.WriteHeader(statusCode)
+ 				if _, err := w.Write([]byte(reply)); err != nil {
+-					params.Logger.WithError(err).Error("Failed to respond to /readyz request")
++					params.Logger.Error("Failed to respond to /readyz request", logfields.Error, err)
+ 				}
+ 			},
+ 		},
+diff --git a/clustermesh-apiserver/clustermesh/root.go b/clustermesh-apiserver/clustermesh/root.go
+index 19560f15ab0d9..c46658576852a 100644
+--- a/clustermesh-apiserver/clustermesh/root.go
++++ b/clustermesh-apiserver/clustermesh/root.go
+@@ -12,7 +12,6 @@ import (
+ 	"sync"
+ 
+ 	"github.com/cilium/hive/cell"
+-	"github.com/sirupsen/logrus"
+ 	"github.com/spf13/cobra"
+ 	"k8s.io/apimachinery/pkg/runtime"
+ 
+@@ -44,17 +43,14 @@ import (
+ 	"github.com/cilium/cilium/pkg/version"
+ )
+ 
+-var (
+-	log = logging.DefaultLogger.WithField(logfields.LogSubsys, "clustermesh-apiserver")
+-)
+-
+ func NewCmd(h *hive.Hive) *cobra.Command {
+ 	rootCmd := &cobra.Command{
+ 		Use:   "clustermesh",
+ 		Short: "Run ClusterMesh",
+ 		Run: func(cmd *cobra.Command, args []string) {
+-			if err := h.Run(slog.Default()); err != nil {
+-				log.Fatal(err)
++			logger := logging.DefaultSlogLogger.With(logfields.LogSubsys, "clustermesh-apiserver")
++			if err := h.Run(logger); err != nil {
++				logging.Fatal(logger, err.Error())
+ 			}
+ 		},
+ 		PreRun: func(cmd *cobra.Command, args []string) {
+@@ -62,8 +58,8 @@ func NewCmd(h *hive.Hive) *cobra.Command {
+ 			metrics.Namespace = metrics.CiliumClusterMeshAPIServerNamespace
+ 			option.Config.SetupLogging(h.Viper(), "clustermesh-apiserver")
+ 			option.Config.Populate(h.Viper())
+-			option.LogRegisteredOptions(h.Viper(), log)
+-			log.Infof("Cilium ClusterMesh %s", version.Version)
++			option.LogRegisteredSlogOptions(h.Viper(), logging.DefaultSlogLogger)
++			logging.DefaultSlogLogger.Info("Cilium ClusterMesh", logfields.Version, version.Version)
+ 		},
+ 	}
+ 
+@@ -108,15 +104,16 @@ func registerHooks(lc cell.Lifecycle, params parameters) error {
+ type identitySynchronizer struct {
+ 	store        store.SyncStore
+ 	syncCallback func(context.Context)
++	logger       *slog.Logger
+ }
+ 
+-func newIdentitySynchronizer(ctx context.Context, cinfo cmtypes.ClusterInfo, backend kvstore.BackendOperations, factory store.Factory, syncCallback func(context.Context)) synchronizer {
++func newIdentitySynchronizer(ctx context.Context, logger *slog.Logger, cinfo cmtypes.ClusterInfo, backend kvstore.BackendOperations, factory store.Factory, syncCallback func(context.Context)) synchronizer {
+ 	identitiesStore := factory.NewSyncStore(cinfo.Name, backend,
+ 		path.Join(identityCache.IdentitiesPath, "id"),
+ 		store.WSSWithSyncedKeyOverride(identityCache.IdentitiesPath))
+ 	go identitiesStore.Run(ctx)
+ 
+-	return &identitySynchronizer{store: identitiesStore, syncCallback: syncCallback}
++	return &identitySynchronizer{store: identitiesStore, syncCallback: syncCallback, logger: logger}
+ }
+ 
+ func parseLabelArrayFromMap(base map[string]string) labels.LabelArray {
+@@ -129,9 +126,12 @@ func parseLabelArrayFromMap(base map[string]string) labels.LabelArray {
+ 
+ func (is *identitySynchronizer) upsert(ctx context.Context, _ resource.Key, obj runtime.Object) error {
+ 	identity := obj.(*ciliumv2.CiliumIdentity)
+-	scopedLog := log.WithField(logfields.Identity, identity.Name)
+ 	if len(identity.SecurityLabels) == 0 {
+-		scopedLog.WithError(errors.New("missing security labels")).Warning("Ignoring invalid identity")
++		is.logger.Warn(
++			"Ignoring invalid identity",
++			logfields.Error, errors.New("missing security labels"),
++			logfields.Identity, identity.Name,
++		)
+ 		// Do not return an error, since it is pointless to retry.
+ 		// We will receive a new update event if the security labels change.
+ 		return nil
+@@ -144,30 +144,32 @@ func (is *identitySynchronizer) upsert(ctx context.Context, _ resource.Key, obj
+ 		labels = append(labels, l.FormatForKVStore()...)
+ 	}
+ 
+-	scopedLog.Info("Upserting identity in etcd")
++	is.logger.Info("Upserting identity in etcd", logfields.Identity, identity.Name)
+ 	kv := store.NewKVPair(identity.Name, string(labels))
+ 	if err := is.store.UpsertKey(ctx, kv); err != nil {
+ 		// The only errors surfaced by WorkqueueSyncStore are the unrecoverable ones.
+-		log.WithError(err).Warning("Unable to upsert identity in etcd")
++		is.logger.Warn("Unable to upsert identity in etcd", logfields.Error, err)
+ 	}
+ 
+ 	return nil
+ }
+ 
+ func (is *identitySynchronizer) delete(ctx context.Context, key resource.Key) error {
+-	scopedLog := log.WithField(logfields.Identity, key.Name)
+-	scopedLog.Info("Deleting identity from etcd")
++	is.logger.Info("Deleting identity from etcd", logfields.Identity, key.Name)
+ 
+ 	if err := is.store.DeleteKey(ctx, store.NewKVPair(key.Name, "")); err != nil {
+ 		// The only errors surfaced by WorkqueueSyncStore are the unrecoverable ones.
+-		scopedLog.WithError(err).Warning("Unable to delete node from etcd")
++		is.logger.Warn("Unable to delete node from etcd",
++			logfields.Error, err,
++			logfields.Identity, key.Name,
++		)
+ 	}
+ 
+ 	return nil
+ }
+ 
+ func (is *identitySynchronizer) synced(ctx context.Context) error {
+-	log.Info("Initial list of identities successfully received from Kubernetes")
++	is.logger.Info("Initial list of identities successfully received from Kubernetes")
+ 	return is.store.Synced(ctx, is.syncCallback)
+ }
+ 
+@@ -184,13 +186,14 @@ type nodeSynchronizer struct {
+ 	clusterInfo  cmtypes.ClusterInfo
+ 	store        store.SyncStore
+ 	syncCallback func(context.Context)
++	logger       *slog.Logger
+ }
+ 
+-func newNodeSynchronizer(ctx context.Context, cinfo cmtypes.ClusterInfo, backend kvstore.BackendOperations, factory store.Factory, syncCallback func(context.Context)) synchronizer {
++func newNodeSynchronizer(ctx context.Context, logger *slog.Logger, cinfo cmtypes.ClusterInfo, backend kvstore.BackendOperations, factory store.Factory, syncCallback func(context.Context)) synchronizer {
+ 	nodesStore := factory.NewSyncStore(cinfo.Name, backend, nodeStore.NodeStorePrefix)
+ 	go nodesStore.Run(ctx)
+ 
+-	return &nodeSynchronizer{clusterInfo: cinfo, store: nodesStore, syncCallback: syncCallback}
++	return &nodeSynchronizer{clusterInfo: cinfo, store: nodesStore, syncCallback: syncCallback, logger: logger}
+ }
+ 
+ func (ns *nodeSynchronizer) upsert(ctx context.Context, _ resource.Key, obj runtime.Object) error {
+@@ -198,12 +201,11 @@ func (ns *nodeSynchronizer) upsert(ctx context.Context, _ resource.Key, obj runt
+ 	n.Cluster = ns.clusterInfo.Name
+ 	n.ClusterID = ns.clusterInfo.ID
+ 
+-	scopedLog := log.WithField(logfields.Node, n.Name)
+-	scopedLog.Info("Upserting node in etcd")
++	ns.logger.Info("Upserting node in etcd", logfields.Node, n.Name)
+ 
+ 	if err := ns.store.UpsertKey(ctx, &n); err != nil {
+ 		// The only errors surfaced by WorkqueueSyncStore are the unrecoverable ones.
+-		log.WithError(err).Warning("Unable to upsert node in etcd")
++		ns.logger.Warn("Unable to upsert node in etcd", logfields.Error, err)
+ 	}
+ 
+ 	return nil
+@@ -215,19 +217,21 @@ func (ns *nodeSynchronizer) delete(ctx context.Context, key resource.Key) error
+ 		name:    key.Name,
+ 	}
+ 
+-	scopedLog := log.WithFields(logrus.Fields{logfields.Node: key.Name})
+-	scopedLog.Info("Deleting node from etcd")
++	ns.logger.Info("Deleting node from etcd", logfields.Node, key.Name)
+ 
+ 	if err := ns.store.DeleteKey(ctx, &n); err != nil {
+ 		// The only errors surfaced by WorkqueueSyncStore are the unrecoverable ones.
+-		scopedLog.WithError(err).Warning("Unable to delete node from etcd")
++		ns.logger.Warn("Unable to delete node from etcd",
++			logfields.Error, err,
++			logfields.Node, key.Name,
++		)
+ 	}
+ 
+ 	return nil
+ }
+ 
+ func (ns *nodeSynchronizer) synced(ctx context.Context) error {
+-	log.Info("Initial list of nodes successfully received from Kubernetes")
++	ns.logger.Info("Initial list of nodes successfully received from Kubernetes")
+ 	return ns.store.Synced(ctx, ns.syncCallback)
+ }
+ 
+@@ -237,9 +241,10 @@ type endpointSynchronizer struct {
+ 	store        store.SyncStore
+ 	cache        map[string]ipmap
+ 	syncCallback func(context.Context)
++	logger       *slog.Logger
+ }
+ 
+-func newEndpointSynchronizer(ctx context.Context, cinfo cmtypes.ClusterInfo, backend kvstore.BackendOperations, factory store.Factory, syncCallback func(context.Context)) synchronizer {
++func newEndpointSynchronizer(ctx context.Context, logger *slog.Logger, cinfo cmtypes.ClusterInfo, backend kvstore.BackendOperations, factory store.Factory, syncCallback func(context.Context)) synchronizer {
+ 	endpointsStore := factory.NewSyncStore(cinfo.Name, backend,
+ 		path.Join(ipcache.IPIdentitiesPath, ipcache.DefaultAddressSpace),
+ 		store.WSSWithSyncedKeyOverride(ipcache.IPIdentitiesPath))
+@@ -249,6 +254,7 @@ func newEndpointSynchronizer(ctx context.Context, cinfo cmtypes.ClusterInfo, bac
+ 		store:        endpointsStore,
+ 		cache:        make(map[string]ipmap),
+ 		syncCallback: syncCallback,
++		logger:       logger,
+ 	}
+ }
+ 
+@@ -257,6 +263,8 @@ func (es *endpointSynchronizer) upsert(ctx context.Context, key resource.Key, ob
+ 	ips := make(ipmap)
+ 	stale := es.cache[key.String()]
+ 
++	log := es.logger.With(logfields.Endpoint, key)
++
+ 	if n := endpoint.Networking; n != nil {
+ 		for _, address := range n.Addressing {
+ 			for _, ip := range []string{address.IPV4, address.IPV6} {
+@@ -264,7 +272,6 @@ func (es *endpointSynchronizer) upsert(ctx context.Context, key resource.Key, ob
+ 					continue
+ 				}
+ 
+-				scopedLog := log.WithFields(logrus.Fields{logfields.Endpoint: key.String(), logfields.IPAddr: ip})
+ 				entry := identity.IPIdentityPair{
+ 					IP:           net.ParseIP(ip),
+ 					HostIP:       net.ParseIP(n.NodeIP),
+@@ -280,10 +287,13 @@ func (es *endpointSynchronizer) upsert(ctx context.Context, key resource.Key, ob
+ 					entry.Key = uint8(endpoint.Encryption.Key)
+ 				}
+ 
+-				scopedLog.Info("Upserting endpoint in etcd")
++				log.Info("Upserting endpoint in etcd", logfields.IPAddr, ip)
+ 				if err := es.store.UpsertKey(ctx, &entry); err != nil {
+ 					// The only errors surfaced by WorkqueueSyncStore are the unrecoverable ones.
+-					scopedLog.WithError(err).Warning("Unable to upsert endpoint in etcd")
++					log.Warn("Unable to upsert endpoint in etcd",
++						logfields.Error, err,
++						logfields.IPAddr, ip,
++					)
+ 					continue
+ 				}
+ 
+@@ -307,19 +317,22 @@ func (es *endpointSynchronizer) delete(ctx context.Context, key resource.Key) er
+ }
+ 
+ func (es *endpointSynchronizer) synced(ctx context.Context) error {
+-	log.Info("Initial list of endpoints successfully received from Kubernetes")
++	es.logger.Info("Initial list of endpoints successfully received from Kubernetes")
+ 	return es.store.Synced(ctx, es.syncCallback)
+ }
+ 
+ func (es *endpointSynchronizer) deleteEndpoints(ctx context.Context, key resource.Key, ips ipmap) {
++	log := es.logger.With(logfields.Endpoint, key)
+ 	for ip := range ips {
+-		scopedLog := log.WithFields(logrus.Fields{logfields.Endpoint: key.String(), logfields.IPAddr: ip})
+-		scopedLog.Info("Deleting endpoint from etcd")
++		log.Info("Deleting endpoint from etcd", logfields.IPAddr, ip)
+ 
+ 		entry := identity.IPIdentityPair{IP: net.ParseIP(ip)}
+ 		if err := es.store.DeleteKey(ctx, &entry); err != nil {
+ 			// The only errors surfaced by WorkqueueSyncStore are the unrecoverable ones.
+-			scopedLog.WithError(err).Warning("Unable to delete endpoint from etcd")
++			log.Warn("Unable to delete endpoint from etcd",
++				logfields.Error, err,
++				logfields.IPAddr, ip,
++			)
+ 		}
+ 	}
+ }
+@@ -353,10 +366,11 @@ func startServer(
+ 	clusterMeshEnableMCSAPI bool,
+ 	logger *slog.Logger,
+ ) {
+-	log.WithFields(logrus.Fields{
+-		"cluster-name": cinfo.Name,
+-		"cluster-id":   cinfo.ID,
+-	}).Info("Starting clustermesh-apiserver...")
++	logger.Info(
++		"Starting clustermesh-apiserver...",
++		logfields.ClusterName, cinfo.Name,
++		logfields.ClusterID, cinfo.ID,
++	)
+ 
+ 	config := cmtypes.CiliumClusterConfig{
+ 		ID: cinfo.ID,
+@@ -367,15 +381,15 @@ func startServer(
+ 		},
+ 	}
+ 
+-	_, err := cmutils.EnforceClusterConfig(context.Background(), cinfo.Name, config, backend, log)
++	_, err := cmutils.EnforceClusterConfig(context.Background(), cinfo.Name, config, backend, logger)
+ 	if err != nil {
+-		log.WithError(err).Fatal("Unable to set local cluster config on kvstore")
++		logging.Fatal(logger, "Unable to set local cluster config on kvstore", logfields.Error, err)
+ 	}
+ 
+ 	ctx := context.Background()
+-	go synchronize(ctx, resources.CiliumIdentities, newIdentitySynchronizer(ctx, cinfo, backend, factory, syncState.WaitForResource()))
+-	go synchronize(ctx, resources.CiliumNodes, newNodeSynchronizer(ctx, cinfo, backend, factory, syncState.WaitForResource()))
+-	go synchronize(ctx, resources.CiliumSlimEndpoints, newEndpointSynchronizer(ctx, cinfo, backend, factory, syncState.WaitForResource()))
++	go synchronize(ctx, resources.CiliumIdentities, newIdentitySynchronizer(ctx, logger, cinfo, backend, factory, syncState.WaitForResource()))
++	go synchronize(ctx, resources.CiliumNodes, newNodeSynchronizer(ctx, logger, cinfo, backend, factory, syncState.WaitForResource()))
++	go synchronize(ctx, resources.CiliumSlimEndpoints, newEndpointSynchronizer(ctx, logger, cinfo, backend, factory, syncState.WaitForResource()))
+ 	operatorWatchers.StartSynchronizingServices(ctx, &sync.WaitGroup{}, operatorWatchers.ServiceSyncParameters{
+ 		ClusterInfo:  cinfo,
+ 		Clientset:    clientset,
+@@ -386,6 +400,7 @@ func startServer(
+ 		SyncCallback: syncState.WaitForResource(),
+ 	}, logger)
+ 	go mcsapi.StartSynchronizingServiceExports(ctx, mcsapi.ServiceExportSyncParameters{
++		Logger:                  logger,
+ 		ClusterName:             cinfo.Name,
+ 		ClusterMeshEnableMCSAPI: clusterMeshEnableMCSAPI,
+ 		Clientset:               clientset,
+@@ -397,5 +412,5 @@ func startServer(
+ 	})
+ 	syncState.Stop()
+ 
+-	log.Info("Initialization complete")
++	logger.Info("Initialization complete")
+ }
+diff --git a/clustermesh-apiserver/clustermesh/users_mgmt.go b/clustermesh-apiserver/clustermesh/users_mgmt.go
+index a020f2d7a43e5..563487fcc7f7c 100644
+--- a/clustermesh-apiserver/clustermesh/users_mgmt.go
++++ b/clustermesh-apiserver/clustermesh/users_mgmt.go
+@@ -6,6 +6,7 @@ package clustermesh
+ import (
+ 	"context"
+ 	"fmt"
++	"log/slog"
+ 	"os"
+ 	"sync"
+ 
+@@ -65,8 +66,9 @@ type usersManager struct {
+ 	manager *controller.Manager
+ 	users   map[string]string
+ 
+-	stop chan struct{}
+-	wg   sync.WaitGroup
++	stop   chan struct{}
++	wg     sync.WaitGroup
++	logger *slog.Logger
+ }
+ 
+ func registerUsersManager(
+@@ -74,9 +76,10 @@ func registerUsersManager(
+ 	cfg UsersManagementConfig,
+ 	cinfo cmtypes.ClusterInfo,
+ 	clientPromise promise.Promise[kvstore.BackendOperationsUserMgmt],
++	logger *slog.Logger,
+ ) error {
+ 	if !cfg.ClusterUsersEnabled {
+-		log.Info("etcd users management disabled")
++		logger.Info("etcd users management disabled")
+ 		return nil
+ 	}
+ 
+@@ -88,6 +91,8 @@ func registerUsersManager(
+ 		users:   make(map[string]string),
+ 
+ 		stop: make(chan struct{}),
++
++		logger: logger,
+ 	}
+ 
+ 	lc.Append(&manager)
+@@ -95,12 +100,14 @@ func registerUsersManager(
+ }
+ 
+ func (us *usersManager) Start(cell.HookContext) error {
+-	log.WithField(logfields.Path, us.ClusterUsersConfigPath).
+-		Info("Starting managing etcd users based on configuration")
++	us.logger.Info(
++		"Starting managing etcd users based on configuration",
++		logfields.Path, us.ClusterUsersConfigPath,
++	)
+ 
+ 	configWatcher, err := fswatcher.New([]string{us.ClusterUsersConfigPath})
+ 	if err != nil {
+-		log.WithError(err).Error("Unable to setup config watcher")
++		us.logger.Error("Unable to setup config watcher", logfields.Error, err)
+ 		return fmt.Errorf("unable to setup config watcher: %w", err)
+ 	}
+ 
+@@ -119,10 +126,13 @@ func (us *usersManager) Start(cell.HookContext) error {
+ 			case <-configWatcher.Events:
+ 				us.manager.TriggerController(usersMgmtCtrl)
+ 			case err := <-configWatcher.Errors:
+-				log.WithError(err).WithField(logfields.Path, us.ClusterUsersConfigPath).
+-					Warning("Error encountered while watching file with fsnotify")
++				us.logger.Warn(
++					"Error encountered while watching file with fsnotify",
++					logfields.Error, err,
++					logfields.Path, us.ClusterUsersConfigPath,
++				)
+ 			case <-us.stop:
+-				log.Info("Closing")
++				us.logger.Info("Closing")
+ 				configWatcher.Close()
+ 				return
+ 			}
+@@ -133,8 +143,10 @@ func (us *usersManager) Start(cell.HookContext) error {
+ }
+ 
+ func (us *usersManager) Stop(cell.HookContext) error {
+-	log.WithField(logfields.Path, us.ClusterUsersConfigPath).
+-		Info("Stopping managing etcd users based on configuration")
++	us.logger.Info(
++		"Stopping managing etcd users based on configuration",
++		logfields.Path, us.ClusterUsersConfigPath,
++	)
+ 
+ 	us.manager.RemoveAllAndWait()
+ 	close(us.stop)
+@@ -146,7 +158,7 @@ func (us *usersManager) sync(ctx context.Context) error {
+ 	if us.client == nil {
+ 		client, err := us.clientPromise.Await(ctx)
+ 		if err != nil {
+-			log.WithError(err).Error("Unable to retrieve the kvstore client")
++			us.logger.Error("Unable to retrieve the kvstore client", logfields.Error, err)
+ 			return err
+ 		}
+ 		us.client = client
+@@ -154,15 +166,21 @@ func (us *usersManager) sync(ctx context.Context) error {
+ 
+ 	config, err := os.ReadFile(us.ClusterUsersConfigPath)
+ 	if err != nil {
+-		log.WithError(err).WithField(logfields.Path, us.ClusterUsersConfigPath).
+-			Error("Failed reading users configuration file")
++		us.logger.Error(
++			"Failed reading users configuration file",
++			logfields.Error, err,
++			logfields.Path, us.ClusterUsersConfigPath,
++		)
+ 		return err
+ 	}
+ 
+ 	var users usersConfigFile
+ 	if err := yaml.Unmarshal(config, &users); err != nil {
+-		log.WithError(err).WithField(logfields.Path, us.ClusterUsersConfigPath).
+-			Error("Failed un-marshalling users configuration file")
++		us.logger.Error(
++			"Failed un-marshalling users configuration file",
++			logfields.Error, err,
++			logfields.Path, us.ClusterUsersConfigPath,
++		)
+ 		return err
+ 	}
+ 
+@@ -180,11 +198,15 @@ func (us *usersManager) sync(ctx context.Context) error {
+ 		role, found := us.users[user.Name]
+ 		if !found || role != user.Role {
+ 			if err := us.client.UserEnforcePresence(ctx, user.Name, []string{user.Role}); err != nil {
+-				log.WithError(err).WithField(logfields.User, user.Name).Error("Failed configuring user")
++				us.logger.Error(
++					"Failed configuring user",
++					logfields.Error, err,
++					logfields.User, user.Name,
++				)
+ 				return err
+ 			}
+ 
+-			log.WithField(logfields.User, user.Name).Info("User successfully configured")
++			us.logger.Info("User successfully configured", logfields.User, user.Name)
+ 		}
+ 
+ 		us.users[user.Name] = user.Role
+@@ -194,11 +216,15 @@ func (us *usersManager) sync(ctx context.Context) error {
+ 	// Delete all stale users
+ 	for user := range stale {
+ 		if err := us.client.UserEnforceAbsence(ctx, user); err != nil {
+-			log.WithError(err).WithField(logfields.User, user).Error("Failed removing user")
++			us.logger.Error(
++				"Failed removing user",
++				logfields.Error, err,
++				logfields.User, user,
++			)
+ 			return err
+ 		}
+ 
+-		log.WithField(logfields.User, user).Info("User successfully removed")
++		us.logger.Info("User successfully removed", logfields.User, user)
+ 		delete(us.users, user)
+ 	}
+ 
+diff --git a/clustermesh-apiserver/etcdinit/root.go b/clustermesh-apiserver/etcdinit/root.go
+index f0ec07d84e001..c31e525de9133 100644
+--- a/clustermesh-apiserver/etcdinit/root.go
++++ b/clustermesh-apiserver/etcdinit/root.go
+@@ -7,6 +7,7 @@ import (
+ 	"context"
+ 	"errors"
+ 	"fmt"
++	"log/slog"
+ 	"os"
+ 	"os/exec"
+ 	"path"
+@@ -14,7 +15,6 @@ import (
+ 	"syscall"
+ 	"time"
+ 
+-	"github.com/sirupsen/logrus"
+ 	"github.com/spf13/cobra"
+ 	"github.com/spf13/viper"
+ 	clientv3 "go.etcd.io/etcd/client/v3"
+@@ -32,8 +32,7 @@ import (
+ const EtcdBinaryLocation = "/usr/bin/etcd"
+ 
+ var (
+-	log = logging.DefaultLogger.WithField(logfields.LogSubsys, "etcdinit")
+-	vp  = viper.New()
++	vp = viper.New()
+ )
+ 
+ func NewCmd() *cobra.Command {
+@@ -41,11 +40,13 @@ func NewCmd() *cobra.Command {
+ 		Use:   "etcdinit",
+ 		Short: "Initialize an etcd data directory for use by the etcd sidecar of clustermesh-apiserver",
+ 		PreRun: func(cmd *cobra.Command, args []string) {
+-			option.LogRegisteredOptions(vp, log)
+-			log.Infof("Cilium ClusterMesh etcd init %s", version.Version)
++			log := logging.DefaultSlogLogger.With(logfields.LogSubsys, "etcdinit")
++			option.LogRegisteredSlogOptions(vp, log)
++			log.Info("Cilium ClusterMesh etcd init", logfields.Version, version.Version)
+ 		},
+ 		Run: func(cmd *cobra.Command, args []string) {
+-			err := InitEtcdLocal()
++			log := logging.DefaultSlogLogger.With(logfields.LogSubsys, "etcdinit")
++			err := InitEtcdLocal(log)
+ 			// The error has already been handled and logged by InitEtcdLocal. We just use it to determine the exit code
+ 			if err != nil {
+ 				os.Exit(-1)
+@@ -66,7 +67,7 @@ func NewCmd() *cobra.Command {
+ 	return rootCmd
+ }
+ 
+-func InitEtcdLocal() (returnErr error) {
++func InitEtcdLocal(log *slog.Logger) (returnErr error) {
+ 	// Get configuration values
+ 	etcdDataDir := vp.GetString("etcd-data-dir")
+ 	etcdInitialClusterToken := vp.GetString("etcd-initial-cluster-token")
+@@ -75,14 +76,14 @@ func InitEtcdLocal() (returnErr error) {
+ 	debug := vp.GetBool("debug")
+ 	timeout := vp.GetDuration("timeout")
+ 	// We have returnErr has a named variable, so we can set it in the deferred cleanup function if needed
+-	log.WithFields(logrus.Fields{
+-		"timeout":                 timeout,
+-		"etcdDataDir":             etcdDataDir,
+-		"etcdClusterName":         etcdClusterName,
+-		logfields.ClusterName:     ciliumClusterName,
+-		"etcdInitialClusterToken": etcdInitialClusterToken,
+-	}).
+-		Info("Starting first-time initialisation of etcd for Cilium Clustermesh")
++	log.Info(
++		"Starting first-time initialisation of etcd for Cilium Clustermesh",
++		logfields.Timeout, timeout,
++		logfields.EtcdDataDir, etcdDataDir,
++		logfields.EtcdClusterName, etcdClusterName,
++		logfields.ClusterName, ciliumClusterName,
++		logfields.EtcdInitialClusterToken, etcdInitialClusterToken,
++	)
+ 
+ 	ctx, cancelFn := context.WithTimeout(context.Background(), timeout)
+ 	defer cancelFn()
+@@ -96,27 +97,35 @@ func InitEtcdLocal() (returnErr error) {
+ 	// delete the contents of the data directory before we start. It should be empty as we use a Kubernetes emptyDir for
+ 	// this purpose, but if the initialization failed Kubernetes may re-run this operation and emptyDir is tied to the
+ 	// lifecycle of the whole pod. Therefore, it could contain files from a previously failed initialization attempt.
+-	log.WithField("etcdDataDir", etcdDataDir).
+-		Info("Deleting contents of data directory")
++	log.Info(
++		"Deleting contents of data directory",
++		logfields.EtcdDataDir, etcdDataDir,
++	)
+ 	// We don't use os.RemoveAll on the etcdDataDirectory because we don't want to remove the directory itself, just
+ 	// everything inside of it. In most cases that directory will be a mount anyway.
+ 	dir, err := os.ReadDir(etcdDataDir)
+ 	if err != nil {
+-		log.WithField("etcdDataDir", etcdDataDir).
+-			WithError(err).
+-			Error("Failed to read from the etcd data directory while attempting to delete existing files")
++		log.Info(
++			"Failed to read from the etcd data directory while attempting to delete existing files",
++			logfields.Error, err,
++			logfields.EtcdDataDir, etcdDataDir,
++		)
+ 		return err
+ 	}
+ 	for _, d := range dir {
+-		log.WithField("etcdDataDir", etcdDataDir).
+-			WithField("path", d.Name()).
+-			Debug("Removing file/directory in data dir")
++		log.Debug(
++			"Removing file/directory in data dir",
++			logfields.EtcdDataDir, etcdDataDir,
++			logfields.Path, d.Name(),
++		)
+ 		err = os.RemoveAll(path.Join(etcdDataDir, d.Name()))
+ 		if err != nil {
+-			log.WithField("etcdDataDir", etcdDataDir).
+-				WithField("path", d.Name()).
+-				WithError(err).
+-				Error("Failed to remove pre-existing file/directory in etcd data directory")
++			log.Error(
++				"Failed to remove pre-existing file/directory in etcd data directory",
++				logfields.Error, err,
++				logfields.EtcdDataDir, etcdDataDir,
++				logfields.Path, d.Name(),
++			)
+ 			return err
+ 		}
+ 	}
+@@ -124,13 +133,13 @@ func InitEtcdLocal() (returnErr error) {
+ 	// Use "localhost" (instead of "http://127.0.0.1:2379" or "http://[::1]:2379") so it works in both the IPv4 and
+ 	// IPv6 cases.
+ 	loopbackEndpoint := "http://localhost:2379"
+-	log.WithFields(logrus.Fields{
+-		"etcdDataDir":             etcdDataDir,
+-		"etcdListenClientUrl":     loopbackEndpoint,
+-		"etcdClusterName":         etcdClusterName,
+-		"etcdInitialClusterToken": etcdInitialClusterToken,
+-	}).
+-		Info("Starting localhost-only etcd process")
++	log.Info(
++		"Starting localhost-only etcd process",
++		logfields.EtcdDataDir, etcdDataDir,
++		logfields.EtcdListenClientUrl, loopbackEndpoint,
++		logfields.EtcdClusterName, etcdClusterName,
++		logfields.EtcdInitialClusterToken, etcdInitialClusterToken,
++	)
+ 	// Specify the full path to the etcd binary to avoid any PATH search binary replacement nonsense
+ 	etcdCmd := exec.CommandContext(ctx, EtcdBinaryLocation,
+ 		fmt.Sprintf("--data-dir=%s", etcdDataDir),
+@@ -139,42 +148,51 @@ func InitEtcdLocal() (returnErr error) {
+ 		fmt.Sprintf("--advertise-client-urls=%s", loopbackEndpoint),
+ 		fmt.Sprintf("--initial-cluster-token=%s", etcdInitialClusterToken),
+ 		"--initial-cluster-state=new")
+-	log.WithField("etcdBinary", EtcdBinaryLocation).
+-		WithField("etcdFlags", etcdCmd.Args).
+-		Debug("Executing etcd")
++
++	log.Debug(
++		"Executing etcd",
++		logfields.EtcdBinary, EtcdBinaryLocation,
++		logfields.EtcdFlags, etcdCmd.Args,
++	)
+ 
+ 	// Exec the etcd binary, which ultimately calls fork(2) under the hood. We don't wait on its completion, because
+ 	// it'll never complete of course.
+ 	err = etcdCmd.Start()
+ 	if err != nil {
+-		log.WithField("etcdBinary", EtcdBinaryLocation).
+-			WithField("etcdFlags", etcdCmd.Args).
+-			WithError(err).
+-			Error("Failed to launch etcd process")
++		log.Error(
++			"Failed to launch etcd process",
++			logfields.Error, err,
++			logfields.EtcdBinary, EtcdBinaryLocation,
++			logfields.EtcdFlags, etcdCmd.Args,
++		)
+ 		return err
+ 	}
+ 	etcdPid := etcdCmd.Process.Pid
+-	log.WithField("etcdPID", etcdPid).
+-		Info("Local etcd server process started")
++	log.Info(
++		"Local etcd server process started",
++		logfields.PID, etcdPid,
++	)
+ 
+ 	// Defer etcd process cleanup
+ 	defer func() {
+-		log := log.WithField("etcdPID", etcdPid)
+-		log.Debug("Cleaning up etcd process")
++		scopedLog := log.With(logfields.PID, etcdPid)
++		scopedLog.Debug("Cleaning up etcd process")
+ 		// Send the process a SIGTERM. SIGTERM is the "gentle" shutdown signal, and etcd should close down its resources
+ 		// cleanly and then exit.
+-		log.Info("Sending SIGTERM signal to etcd process")
++		scopedLog.Info("Sending SIGTERM signal to etcd process")
+ 		err := etcdCmd.Process.Signal(syscall.SIGTERM)
+ 		if err != nil {
+-			log.WithError(err).
+-				Error("Failed to send SIGTERM signal to etcd process")
++			scopedLog.Error(
++				"Failed to send SIGTERM signal to etcd process",
++				logfields.Error, err,
++			)
+ 			// Return both this error, and the main function's return error (if there is one).
+ 			returnErr = errors.Join(returnErr, err)
+ 			return
+ 		}
+ 
+ 		// Wait for the etcd process to finish, and cleanup resources.
+-		log.Info("Waiting for etcd process to exit")
++		scopedLog.Info("Waiting for etcd process to exit")
+ 		err = etcdCmd.Wait()
+ 		if err != nil {
+ 			exitError := &exec.ExitError{}
+@@ -187,8 +205,9 @@ func InitEtcdLocal() (returnErr error) {
+ 						// will just say "context cancelled" and not be useful — and possibly even misleading. It's
+ 						// possible that the timeout expires at the moment between etcd exiting normally and this check,
+ 						// which would report a false error. That's very unlikely, so we don't worry about it here.
+-						log.WithField("timeout", timeout).
+-							Error("etcd exited, but our context has expired. etcd may have been terminated due to timeout. Consider increasing the value of the timeout using the --timeout flag or CILIUM_TIMEOUT environment variable.")
++						scopedLog.Error("etcd exited, but our context has expired. etcd may have been terminated due to timeout. Consider increasing the value of the timeout using the --timeout flag or CILIUM_TIMEOUT environment variable.",
++							logfields.Timeout, timeout,
++						)
+ 						// Return both this error, and the main function's return error (if there is one). This is just
+ 						// to make sure that the calling code correctly detects that an error occurs.
+ 						returnErr = errors.Join(returnErr, ctx.Err())
+@@ -196,25 +215,29 @@ func InitEtcdLocal() (returnErr error) {
+ 					}
+ 					// This is the "good state", the context hasn't expired, the etcd process has exited, and we're
+ 					// okay with a nonzero exit code because we exited it with a SIGTERM.
+-					log.Info("etcd process exited")
++					scopedLog.Info("etcd process exited")
+ 					return
+ 				}
+-				log.WithError(err).
+-					WithField("etcdExitCode", exitError.ExitCode()).
+-					Error("etcd process exited improperly")
++				scopedLog.Error(
++					"etcd process exited improperly",
++					logfields.Error, err,
++					logfields.EtcdExitCode, exitError.ExitCode(),
++				)
+ 				// Return both this error, and the main function's return error (if there is one).
+ 				returnErr = errors.Join(returnErr, err)
+ 				return
+ 			} else {
+ 				// Some other kind of error
+-				log.WithError(err).
+-					Error("Failed to wait on etcd process finishing")
++				scopedLog.Error(
++					"Failed to wait on etcd process finishing",
++					logfields.Error, err,
++				)
+ 				// Return both this error, and the main function's return error (if there is one).
+ 				returnErr = errors.Join(returnErr, err)
+ 				return
+ 			}
+ 		}
+-		log.Info("etcd process exited")
++		scopedLog.Info("etcd process exited")
+ 	}()
+ 
+ 	// With the etcd server process launched, we need to construct an etcd client
+@@ -223,25 +246,30 @@ func InitEtcdLocal() (returnErr error) {
+ 		Context:   ctx,
+ 		Endpoints: []string{loopbackEndpoint},
+ 	}
+-	log.WithField("etcdClientConfig", fmt.Sprintf("%+v", config)).
+-		Debug("Constructed etcd client config")
++	log.Debug("Constructed etcd client config", logfields.EtcdClientConfig, config)
+ 	etcdClient, err := clientv3.New(config)
+ 	if err != nil {
+-		log.WithField("etcdClientConfig", fmt.Sprintf("%+v", config)).
+-			WithError(err).
+-			Error("Failed to construct etcd client from configuration")
++		log.Error(
++			"Failed to construct etcd client from configuration",
++			logfields.Error, err,
++			logfields.EtcdClientConfig, config,
++		)
+ 		return err
+ 	}
+ 	defer etcdClient.Close()
+ 
+ 	// Run the init commands
+-	log.WithField(logfields.ClusterName, ciliumClusterName).
+-		Info("Starting etcd init")
++	log.Info(
++		"Starting etcd init",
++		logfields.ClusterName, ciliumClusterName,
++	)
+ 	err = kvstoreEtcdInit.ClusterMeshEtcdInit(ctx, log, etcdClient, ciliumClusterName)
+ 	if err != nil {
+-		log.WithError(err).
+-			WithField(logfields.ClusterName, ciliumClusterName).
+-			Error("Failed to initialise etcd")
++		log.Error(
++			"Failed to initialise etcd",
++			logfields.Error, err,
++			logfields.ClusterName, ciliumClusterName,
++		)
+ 		return err
+ 	}
+ 	log.Info("Etcd init completed")
+diff --git a/clustermesh-apiserver/health/health.go b/clustermesh-apiserver/health/health.go
+index a1f41f9cd106b..f2ae06a120915 100644
+--- a/clustermesh-apiserver/health/health.go
++++ b/clustermesh-apiserver/health/health.go
+@@ -6,11 +6,14 @@ package health
+ import (
+ 	"errors"
+ 	"fmt"
++	"log/slog"
+ 	"net/http"
+ 
+ 	"github.com/cilium/hive/cell"
+-	"github.com/sirupsen/logrus"
+ 	"github.com/spf13/pflag"
++
++	"github.com/cilium/cilium/pkg/logging"
++	"github.com/cilium/cilium/pkg/logging/logfields"
+ )
+ 
+ type HealthAPIServerConfig struct {
+@@ -37,7 +40,7 @@ type parameters struct {
+ 	cell.In
+ 
+ 	Config        HealthAPIServerConfig
+-	Logger        logrus.FieldLogger
++	Logger        *slog.Logger
+ 	EndpointFuncs []EndpointFunc
+ }
+ 
+@@ -63,7 +66,7 @@ func registerHealthAPIServer(lc cell.Lifecycle, params parameters) {
+ 			go func() {
+ 				params.Logger.Info("Started health API")
+ 				if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+-					params.Logger.WithError(err).Fatal("Unable to start health API")
++					logging.Fatal(params.Logger, "Unable to start health API", logfields.Error, err)
+ 				}
+ 			}()
+ 			return nil
+diff --git a/clustermesh-apiserver/kvstoremesh/health.go b/clustermesh-apiserver/kvstoremesh/health.go
+index 95efb29a41b96..d0d827252f927 100644
+--- a/clustermesh-apiserver/kvstoremesh/health.go
++++ b/clustermesh-apiserver/kvstoremesh/health.go
+@@ -4,13 +4,14 @@
+ package kvstoremesh
+ 
+ import (
++	"log/slog"
+ 	"net/http"
+ 
+ 	"github.com/cilium/hive/cell"
+-	"github.com/sirupsen/logrus"
+ 
+ 	"github.com/cilium/cilium/clustermesh-apiserver/health"
+ 	"github.com/cilium/cilium/clustermesh-apiserver/syncstate"
++	"github.com/cilium/cilium/pkg/logging/logfields"
+ )
+ 
+ var HealthAPIEndpointsCell = cell.Module(
+@@ -25,7 +26,7 @@ type healthParameters struct {
+ 	cell.In
+ 
+ 	SyncState syncstate.SyncState
+-	Logger    logrus.FieldLogger
++	Logger    *slog.Logger
+ }
+ 
+ func healthEndpoints(params healthParameters) []health.EndpointFunc {
+@@ -42,7 +43,7 @@ func healthEndpoints(params healthParameters) []health.EndpointFunc {
+ 				}
+ 				w.WriteHeader(statusCode)
+ 				if _, err := w.Write([]byte(reply)); err != nil {
+-					params.Logger.WithError(err).Error("Failed to respond to /readyz request")
++					params.Logger.Error("Failed to respond to /readyz request", logfields.Error, err)
+ 				}
+ 			},
+ 		},
+diff --git a/clustermesh-apiserver/kvstoremesh/root.go b/clustermesh-apiserver/kvstoremesh/root.go
+index e0fde46962900..458e6e8dd3c2e 100644
+--- a/clustermesh-apiserver/kvstoremesh/root.go
++++ b/clustermesh-apiserver/kvstoremesh/root.go
+@@ -4,8 +4,6 @@
+ package kvstoremesh
+ 
+ import (
+-	"log/slog"
+-
+ 	"github.com/spf13/cobra"
+ 
+ 	"github.com/cilium/cilium/pkg/hive"
+@@ -16,17 +14,13 @@ import (
+ 	"github.com/cilium/cilium/pkg/version"
+ )
+ 
+-var (
+-	log = logging.DefaultLogger.WithField(logfields.LogSubsys, "kvstoremesh")
+-)
+-
+ func NewCmd(h *hive.Hive) *cobra.Command {
+ 	rootCmd := &cobra.Command{
+ 		Use:   "kvstoremesh",
+ 		Short: "Run KVStoreMesh",
+ 		Run: func(cmd *cobra.Command, args []string) {
+-			if err := h.Run(slog.Default()); err != nil {
+-				log.Fatal(err)
++			if err := h.Run(logging.DefaultSlogLogger); err != nil {
++				logging.Fatal(logging.DefaultSlogLogger, err.Error())
+ 			}
+ 		},
+ 		PreRun: func(cmd *cobra.Command, args []string) {
+@@ -34,8 +28,9 @@ func NewCmd(h *hive.Hive) *cobra.Command {
+ 			metrics.Namespace = metrics.CiliumKVStoreMeshNamespace
+ 			option.Config.SetupLogging(h.Viper(), "kvstoremesh")
+ 			option.Config.Populate(h.Viper())
+-			option.LogRegisteredOptions(h.Viper(), log)
+-			log.Infof("Cilium KVStoreMesh %s", version.Version)
++			log := logging.DefaultSlogLogger.With(logfields.LogSubsys, "kvstoremesh")
++			option.LogRegisteredSlogOptions(h.Viper(), log)
++			log.Info("Cilium KVStoreMesh", logfields.Version, version.Version)
+ 		},
+ 	}
+ 
+diff --git a/clustermesh-apiserver/metrics/metrics.go b/clustermesh-apiserver/metrics/metrics.go
+index 1844bda0cc32b..841b6236b8e10 100644
+--- a/clustermesh-apiserver/metrics/metrics.go
++++ b/clustermesh-apiserver/metrics/metrics.go
+@@ -5,6 +5,7 @@ package metrics
+ 
+ import (
+ 	"errors"
++	"log/slog"
+ 	"net/http"
+ 	"regexp"
+ 
+@@ -12,9 +13,10 @@ import (
+ 	"github.com/prometheus/client_golang/prometheus"
+ 	"github.com/prometheus/client_golang/prometheus/collectors"
+ 	"github.com/prometheus/client_golang/prometheus/promhttp"
+-	"github.com/sirupsen/logrus"
+ 	"github.com/spf13/pflag"
+ 
++	"github.com/cilium/cilium/pkg/logging"
++	"github.com/cilium/cilium/pkg/logging/logfields"
+ 	"github.com/cilium/cilium/pkg/metrics"
+ 	"github.com/cilium/cilium/pkg/metrics/metric"
+ 	"github.com/cilium/cilium/pkg/option"
+@@ -38,7 +40,7 @@ func (def MetricsConfig) Flags(flags *pflag.FlagSet) {
+ }
+ 
+ type metricsManager struct {
+-	logger   logrus.FieldLogger
++	logger   *slog.Logger
+ 	registry *prometheus.Registry
+ 	server   http.Server
+ 
+@@ -47,7 +49,7 @@ type metricsManager struct {
+ 
+ type params struct {
+ 	cell.In
+-	Logger logrus.FieldLogger
++	Logger *slog.Logger
+ 
+ 	MetricsConfig
+ 	Metrics []metric.WithMetadata `group:"hive-metrics"`
+@@ -103,9 +105,12 @@ func (mm *metricsManager) Start(cell.HookContext) error {
+ 	mm.server.Handler = mux
+ 
+ 	go func() {
+-		mm.logger.WithField("address", mm.server.Addr).Info("Starting metrics server")
++		mm.logger.Info(
++			"Starting metrics server",
++			logfields.Address, mm.server.Addr,
++		)
+ 		if err := mm.server.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+-			mm.logger.WithError(err).Fatal("Unable to start metrics server")
++			logging.Fatal(mm.logger, "Unable to start metrics server", logfields.Error, err)
+ 		}
+ 	}()
+ 
+@@ -116,7 +121,7 @@ func (mm *metricsManager) Stop(ctx cell.HookContext) error {
+ 	mm.logger.Info("Stopping metrics server")
+ 
+ 	if err := mm.server.Shutdown(ctx); err != nil {
+-		mm.logger.WithError(err).Error("Shutdown metrics server failed")
++		mm.logger.Error("Shutdown metrics server failed", logfields.Error, err)
+ 		return err
+ 	}
+ 
+diff --git a/daemon/cmd/daemon_main.go b/daemon/cmd/daemon_main.go
+index 7f7d4350de60d..63eefcc6b4605 100644
+--- a/daemon/cmd/daemon_main.go
++++ b/daemon/cmd/daemon_main.go
+@@ -1470,7 +1470,7 @@ func (d *Daemon) initKVStore(resolver *dial.ServiceResolver) {
+ 	// looking at services from k8s and retrieve the service IP from that.
+ 	// This makes cilium to not depend on kube dns to interact with etcd
+ 	if d.clientset.IsEnabled() {
+-		log := log.WithField(logfields.LogSubsys, "etcd")
++		log := logging.DefaultSlogLogger.With(logfields.LogSubsys, "etcd")
+ 		goopts.DialOption = []grpc.DialOption{
+ 			grpc.WithContextDialer(dial.NewContextDialer(log, resolver)),
+ 		}
+diff --git a/operator/cmd/root.go b/operator/cmd/root.go
+index cf68f51c5917e..aaef0699908f5 100644
+--- a/operator/cmd/root.go
++++ b/operator/cmd/root.go
+@@ -622,6 +622,7 @@ func (legacy *legacyOnLeader) onStart(_ cell.HookContext) error {
+ 			legacy.wg.Add(1)
+ 			go func() {
+ 				mcsapi.StartSynchronizingServiceExports(legacy.ctx, mcsapi.ServiceExportSyncParameters{
++					Logger:                  legacy.logger,
+ 					ClusterName:             clusterInfo.Name,
+ 					ClusterMeshEnableMCSAPI: legacy.cfgMCSAPI.ClusterMeshEnableMCSAPI,
+ 					Clientset:               legacy.clientset,
+@@ -638,7 +639,7 @@ func (legacy *legacyOnLeader) onStart(_ cell.HookContext) error {
+ 			// If K8s is enabled we can do the service translation automagically by
+ 			// looking at services from k8s and retrieve the service IP from that.
+ 			// This makes cilium to not depend on kube dns to interact with etcd
+-			log := log.WithField(logfields.LogSubsys, "etcd")
++			log := logging.DefaultSlogLogger.With(logfields.LogSubsys, "etcd")
+ 			goopts = &kvstore.ExtraOptions{
+ 				DialOption: []grpc.DialOption{
+ 					grpc.WithContextDialer(dial.NewContextDialer(log, legacy.svcResolver)),
+diff --git a/pkg/clustermesh/cell.go b/pkg/clustermesh/cell.go
+index 9bfc09d7b491d..53b6a4dea41c7 100644
+--- a/pkg/clustermesh/cell.go
++++ b/pkg/clustermesh/cell.go
+@@ -4,8 +4,9 @@
+ package clustermesh
+ 
+ import (
++	"log/slog"
++
+ 	"github.com/cilium/hive/cell"
+-	"github.com/sirupsen/logrus"
+ 
+ 	"github.com/cilium/cilium/daemon/cmd/cni"
+ 	"github.com/cilium/cilium/pkg/clustermesh/common"
+@@ -14,6 +15,7 @@ import (
+ 	"github.com/cilium/cilium/pkg/ipcache"
+ 	"github.com/cilium/cilium/pkg/k8s"
+ 	"github.com/cilium/cilium/pkg/kvstore"
++	"github.com/cilium/cilium/pkg/logging/logfields"
+ 	"github.com/cilium/cilium/pkg/metrics"
+ 	nodemanager "github.com/cilium/cilium/pkg/node/manager"
+ 	nodeStore "github.com/cilium/cilium/pkg/node/store"
+@@ -41,10 +43,10 @@ var Cell = cell.Module(
+ 	metrics.Metric(common.MetricsProvider(subsystem)),
+ 
+ 	cell.Config(types.DefaultQuirks),
+-	cell.Invoke(func(info types.ClusterInfo, dcfg *option.DaemonConfig, cnimgr cni.CNIConfigManager, log logrus.FieldLogger, quirks types.QuirksConfig) error {
++	cell.Invoke(func(info types.ClusterInfo, dcfg *option.DaemonConfig, cnimgr cni.CNIConfigManager, log *slog.Logger, quirks types.QuirksConfig) error {
+ 		err := info.ValidateBuggyClusterID(dcfg.IPAM, cnimgr.GetChainingMode())
+ 		if err != nil && quirks.AllowUnsafePolicySKBUsage {
+-			log.WithError(err).Error("Detected clustermesh ID configuration that may cause connection impact")
++			log.Error("Detected clustermesh ID configuration that may cause connection impact", logfields.Error, err)
+ 			return nil
+ 		}
+ 		return err
+diff --git a/pkg/clustermesh/clustermesh.go b/pkg/clustermesh/clustermesh.go
+index 61f007126ea43..9ee54c63dcc27 100644
+--- a/pkg/clustermesh/clustermesh.go
++++ b/pkg/clustermesh/clustermesh.go
+@@ -7,11 +7,11 @@ import (
+ 	"cmp"
+ 	"context"
+ 	"fmt"
++	"log/slog"
+ 	"slices"
+ 	"sync"
+ 
+ 	"github.com/cilium/hive/cell"
+-	"github.com/sirupsen/logrus"
+ 
+ 	"github.com/cilium/cilium/api/v1/models"
+ 	"github.com/cilium/cilium/pkg/allocator"
+@@ -75,7 +75,7 @@ type Configuration struct {
+ 
+ 	FeatureMetrics ClusterMeshMetrics
+ 
+-	Logger logrus.FieldLogger
++	Logger *slog.Logger
+ }
+ 
+ // ServiceMerger is the interface to be implemented by the owner of local
+@@ -140,12 +140,14 @@ func NewClusterMesh(lifecycle cell.Lifecycle, c Configuration) *ClusterMesh {
+ 		conf:     c,
+ 		nodeName: nodeName,
+ 		globalServices: common.NewGlobalServiceCache(
++			c.Logger,
+ 			c.Metrics.TotalGlobalServices.WithLabelValues(c.ClusterInfo.Name, nodeName),
+ 		),
+ 		FeatureMetrics: c.FeatureMetrics,
+ 	}
+ 
+ 	cm.common = common.NewClusterMesh(common.Configuration{
++		Logger:                       c.Logger,
+ 		Config:                       c.Config,
+ 		ClusterInfo:                  c.ClusterInfo,
+ 		ClusterSizeDependantInterval: c.ClusterSizeDependantInterval,
+@@ -171,7 +173,7 @@ func (cm *ClusterMesh) NewRemoteCluster(name string, status common.StatusFunc) c
+ 		storeFactory:             cm.conf.StoreFactory,
+ 		remoteIdentityWatcher:    cm.conf.RemoteIdentityWatcher,
+ 		synced:                   newSynced(),
+-		log:                      cm.conf.Logger.WithField(logfields.ClusterName, name),
++		log:                      cm.conf.Logger.With(logfields.ClusterName, name),
+ 		featureMetrics:           cm.FeatureMetrics,
+ 		featureMetricMaxClusters: fmt.Sprintf("%d", cm.conf.ClusterInfo.MaxConnectedClusters),
+ 	}
+@@ -264,7 +266,7 @@ func (cm *ClusterMesh) synced(ctx context.Context, toWaitFn func(*remoteCluster)
+ 		// and continue normally, as if the synchronization completed successfully.
+ 		// This ensures that we don't block forever in case of misconfigurations.
+ 		cm.syncTimeoutLogOnce.Do(func() {
+-			cm.conf.Logger.Warning("Failed waiting for clustermesh synchronization, expect possible disruption of cross-cluster connections")
++			cm.conf.Logger.Warn("Failed waiting for clustermesh synchronization, expect possible disruption of cross-cluster connections")
+ 		})
+ 
+ 		return nil
+diff --git a/pkg/clustermesh/clustermesh_test.go b/pkg/clustermesh/clustermesh_test.go
+index 8149e1386698c..c4a20bd7c7b3b 100644
+--- a/pkg/clustermesh/clustermesh_test.go
++++ b/pkg/clustermesh/clustermesh_test.go
+@@ -6,13 +6,13 @@ package clustermesh
+ import (
+ 	"context"
+ 	"fmt"
++	"log/slog"
+ 	"os"
+ 	"path"
+ 	"sync"
+ 	"testing"
+ 
+ 	"github.com/cilium/hive/hivetest"
+-	"github.com/sirupsen/logrus"
+ 	"github.com/stretchr/testify/assert"
+ 	"github.com/stretchr/testify/require"
+ 
+@@ -123,7 +123,7 @@ func TestClusterMesh(t *testing.T) {
+ 		CommonMetrics:         common.MetricsProvider(subsystem)(),
+ 		StoreFactory:          storeFactory,
+ 		FeatureMetrics:        NewClusterMeshMetricsNoop(),
+-		Logger:                logrus.New(),
++		Logger:                slog.Default(),
+ 	})
+ 	require.NotNil(t, cm, "Failed to initialize clustermesh")
+ 	// cluster2 is the cluster which is tested with sync canaries
+diff --git a/pkg/clustermesh/common/clustermesh.go b/pkg/clustermesh/common/clustermesh.go
+index 8b5f4f2f51ead..fb2e0c146ce50 100644
+--- a/pkg/clustermesh/common/clustermesh.go
++++ b/pkg/clustermesh/common/clustermesh.go
+@@ -6,6 +6,7 @@ package common
+ import (
+ 	"context"
+ 	"fmt"
++	"log/slog"
+ 	"sync"
+ 
+ 	"github.com/cilium/hive/cell"
+@@ -25,6 +26,8 @@ type RemoteClusterCreatorFunc func(name string, status StatusFunc) RemoteCluster
+ // Configuration is the configuration that must be provided to
+ // NewClusterMesh()
+ type Configuration struct {
++	Logger *slog.Logger
++
+ 	Config
+ 
+ 	// ClusterInfo is the id/name of the local cluster. This is used for logging and metrics
+@@ -94,7 +97,7 @@ func NewClusterMesh(c Configuration) ClusterMesh {
+ }
+ 
+ func (cm *clusterMesh) Start(cell.HookContext) error {
+-	w, err := createConfigDirectoryWatcher(cm.conf.ClusterMeshConfig, cm)
++	w, err := createConfigDirectoryWatcher(cm.conf.Logger, cm.conf.ClusterMeshConfig, cm)
+ 	if err != nil {
+ 		return fmt.Errorf("unable to create config directory watcher: %w", err)
+ 	}
+@@ -147,7 +150,7 @@ func (cm *clusterMesh) newRemoteCluster(name, path string) *remoteCluster {
+ 		controllers:                    controller.NewManager(),
+ 		remoteConnectionControllerName: fmt.Sprintf("remote-etcd-%s", name),
+ 
+-		logger: log.WithField(logfields.ClusterName, name),
++		logger: cm.conf.Logger.With(logfields.ClusterName, name),
+ 
+ 		backendFactory:     kvstore.NewClient,
+ 		clusterLockFactory: newClusterLock,
+@@ -163,14 +166,16 @@ func (cm *clusterMesh) newRemoteCluster(name, path string) *remoteCluster {
+ 
+ func (cm *clusterMesh) add(name, path string) {
+ 	if name == cm.conf.ClusterInfo.Name {
+-		log.WithField(fieldClusterName, name).Debug("Ignoring configuration for own cluster")
++		cm.conf.Logger.Debug("Ignoring configuration for own cluster", fieldClusterName, name)
+ 		return
+ 	}
+ 
+ 	if err := types.ValidateClusterName(name); err != nil {
+-		log.WithField(fieldClusterName, name).
+-			WithError(fmt.Errorf("invalid cluster name: %w", err)).
+-			Error("Cannot connect to remote cluster")
++		cm.conf.Logger.Error(
++			"Cannot connect to remote cluster",
++			logfields.Error, fmt.Errorf("invalid cluster name: %w", err),
++			fieldClusterName, name,
++		)
+ 		return
+ 	}
+ 
+@@ -184,7 +189,7 @@ func (cm *clusterMesh) addLocked(name, path string) {
+ 		// The configuration for this cluster has been recreated before the cleanup
+ 		// of the same cluster completed. Let's queue it for delayed processing.
+ 		cm.tombstones[name] = path
+-		log.WithField(fieldClusterName, name).Info("Delaying configuration of remote cluster, which is still being removed")
++		cm.conf.Logger.Info("Delaying configuration of remote cluster, which is still being removed", fieldClusterName, name)
+ 		return
+ 	}
+ 
+@@ -233,13 +238,13 @@ func (cm *clusterMesh) remove(name string) {
+ 
+ 		if path != removed {
+ 			// Let's replay the queued add event.
+-			log.WithField(fieldClusterName, name).Info("Replaying delayed configuration of new remote cluster after removal")
++			cm.conf.Logger.Info("Replaying delayed configuration of new remote cluster after removal", fieldClusterName, name)
+ 			cm.addLocked(name, path)
+ 		}
+ 		cm.mutex.Unlock()
+ 	}()
+ 
+-	log.WithField(fieldClusterName, name).Debug("Remote cluster configuration removed")
++	cm.conf.Logger.Debug("Remote cluster configuration removed", fieldClusterName, name)
+ }
+ 
+ // NumReadyClusters returns the number of remote clusters to which a connection
+diff --git a/pkg/clustermesh/common/clustermesh_test.go b/pkg/clustermesh/common/clustermesh_test.go
+index 51fea319426ab..de1f23d158705 100644
+--- a/pkg/clustermesh/common/clustermesh_test.go
++++ b/pkg/clustermesh/common/clustermesh_test.go
+@@ -88,6 +88,7 @@ func TestClusterMesh(t *testing.T) {
+ 	var clusters []*fakeRemoteCluster
+ 
+ 	cm := NewClusterMesh(Configuration{
++		Logger:      hivetest.Logger(t),
+ 		Config:      Config{ClusterMeshConfig: baseDir},
+ 		ClusterInfo: types.ClusterInfo{ID: 255, Name: "local"},
+ 		NewRemoteCluster: func(name string, sf StatusFunc) RemoteCluster {
+@@ -214,6 +215,7 @@ func TestClusterMeshMultipleAddRemove(t *testing.T) {
+ 	blockRemoval.Store("cluster4", make(chan struct{}))
+ 
+ 	gcm := NewClusterMesh(Configuration{
++		Logger:      hivetest.Logger(t),
+ 		Config:      Config{ClusterMeshConfig: baseDir},
+ 		ClusterInfo: types.ClusterInfo{ID: 255, Name: "local"},
+ 		NewRemoteCluster: func(name string, _ StatusFunc) RemoteCluster {
+diff --git a/pkg/clustermesh/common/config.go b/pkg/clustermesh/common/config.go
+index 6ca6ac151eaf4..e3876472d0ffb 100644
+--- a/pkg/clustermesh/common/config.go
++++ b/pkg/clustermesh/common/config.go
+@@ -6,14 +6,16 @@ package common
+ import (
+ 	"crypto/sha256"
+ 	"errors"
++	"log/slog"
+ 	"os"
+ 	"path/filepath"
+ 	"slices"
+ 	"strings"
+ 
+ 	"github.com/fsnotify/fsnotify"
+-	"github.com/sirupsen/logrus"
+ 	"github.com/spf13/pflag"
++
++	"github.com/cilium/cilium/pkg/logging/logfields"
+ )
+ 
+ type Config struct {
+@@ -39,6 +41,7 @@ type clusterLifecycle interface {
+ type fhash [sha256.Size]byte
+ 
+ type configDirectoryWatcher struct {
++	logger *slog.Logger
+ 	// Use two separate watchers, one for the directory itself, and one for the
+ 	// individual config files. We need to explicitly watch the config files
+ 	// to receive a notification when the underlying file gets updated, if the
+@@ -57,7 +60,7 @@ type configDirectoryWatcher struct {
+ 	stop       chan struct{}
+ }
+ 
+-func createConfigDirectoryWatcher(path string, lifecycle clusterLifecycle) (*configDirectoryWatcher, error) {
++func createConfigDirectoryWatcher(logger *slog.Logger, path string, lifecycle clusterLifecycle) (*configDirectoryWatcher, error) {
+ 	watcher, err := fsnotify.NewWatcher()
+ 	if err != nil {
+ 		return nil, err
+@@ -75,6 +78,7 @@ func createConfigDirectoryWatcher(path string, lifecycle clusterLifecycle) (*con
+ 	}
+ 
+ 	return &configDirectoryWatcher{
++		logger:     logger,
+ 		watcher:    watcher,
+ 		cfgWatcher: cfgWatcher,
+ 		path:       path,
+@@ -112,10 +116,11 @@ func (cdw *configDirectoryWatcher) handle(abspath string) {
+ 		// If the corresponding cluster was tracked, then trigger the remove
+ 		// event, since the configuration file is no longer present/readable
+ 		if _, tracked := cdw.tracked[filename]; tracked {
+-			log.WithFields(logrus.Fields{
+-				fieldClusterName: filename,
+-				fieldConfig:      abspath,
+-			}).Debug("Removed cluster configuration")
++			cdw.logger.Debug(
++				"Removed cluster configuration",
++				fieldClusterName, filename,
++				fieldConfig, abspath,
++			)
+ 
+ 			// The remove operation returns an error if the file does no longer exists.
+ 			_ = cdw.cfgWatcher.Remove(abspath)
+@@ -132,8 +137,11 @@ func (cdw *configDirectoryWatcher) handle(abspath string) {
+ 		// This is required to correctly detect file modifications when the folder
+ 		// is mounted from a Kubernetes ConfigMap/Secret.
+ 		if err := cdw.cfgWatcher.Add(abspath); err != nil && !errors.Is(err, os.ErrNotExist) {
+-			log.WithError(err).WithField(fieldConfig, abspath).
+-				Warning("Failed adding explicit path watch for config")
++			cdw.logger.Warn(
++				"Failed adding explicit path watch for config",
++				logfields.Error, err,
++				fieldConfig, abspath,
++			)
+ 		} else {
+ 			// There is a small chance that the file content changed in the time
+ 			// window from reading it at the beginning of the function to establishing
+@@ -155,17 +163,21 @@ func (cdw *configDirectoryWatcher) handle(abspath string) {
+ 		return
+ 	}
+ 
+-	log.WithFields(logrus.Fields{
+-		fieldClusterName: filename,
+-		fieldConfig:      abspath,
+-	}).Debug("Added or updated cluster configuration")
++	cdw.logger.Debug(
++		"Added or updated cluster configuration",
++		fieldClusterName, filename,
++		fieldConfig, abspath,
++	)
+ 
+ 	cdw.tracked[filename] = newHash
+ 	cdw.lifecycle.add(filename, abspath)
+ }
+ 
+ func (cdw *configDirectoryWatcher) watch() error {
+-	log.WithField(fieldConfigDir, cdw.path).Debug("Starting config directory watcher")
++	cdw.logger.Debug(
++		"Starting config directory watcher",
++		fieldConfigDir, cdw.path,
++	)
+ 
+ 	files, err := os.ReadDir(cdw.path)
+ 	if err != nil {
+@@ -187,10 +199,11 @@ func (cdw *configDirectoryWatcher) watch() error {
+ 
+ func (cdw *configDirectoryWatcher) loop() {
+ 	handle := func(event fsnotify.Event) {
+-		log.WithFields(logrus.Fields{
+-			fieldConfigDir: cdw.path,
+-			fieldEvent:     event,
+-		}).Debug("Received fsnotify event")
++		cdw.logger.Debug(
++			"Received fsnotify event",
++			fieldConfigDir, cdw.path,
++			fieldEvent, event,
++		)
+ 		cdw.handle(event.Name)
+ 	}
+ 
+@@ -203,12 +216,18 @@ func (cdw *configDirectoryWatcher) loop() {
+ 			handle(event)
+ 
+ 		case err := <-cdw.watcher.Errors:
+-			log.WithError(err).WithField(fieldConfigDir, cdw.path).
+-				Warning("Error encountered while watching directory with fsnotify")
++			cdw.logger.Warn(
++				"Error encountered while watching directory with fsnotify",
++				logfields.Error, err,
++				fieldConfigDir, cdw.path,
++			)
+ 
+ 		case err := <-cdw.cfgWatcher.Errors:
+-			log.WithError(err).WithField(fieldConfigDir, cdw.path).
+-				Warning("Error encountered while watching individual configuration with fsnotify")
++			cdw.logger.Warn(
++				"Error encountered while watching individual configuration with fsnotify",
++				logfields.Error, err,
++				fieldConfigDir, cdw.path,
++			)
+ 
+ 		case <-cdw.stop:
+ 			return
+@@ -217,7 +236,10 @@ func (cdw *configDirectoryWatcher) loop() {
+ }
+ 
+ func (cdw *configDirectoryWatcher) close() {
+-	log.WithField(fieldConfigDir, cdw.path).Debug("Stopping config directory watcher")
++	cdw.logger.Debug(
++		"Stopping config directory watcher",
++		fieldConfigDir, cdw.path,
++	)
+ 	close(cdw.stop)
+ 	cdw.watcher.Close()
+ 	cdw.cfgWatcher.Close()
+diff --git a/pkg/clustermesh/common/config_test.go b/pkg/clustermesh/common/config_test.go
+index ccdd20efcafb8..939385200e8e6 100644
+--- a/pkg/clustermesh/common/config_test.go
++++ b/pkg/clustermesh/common/config_test.go
+@@ -12,6 +12,7 @@ import (
+ 	"testing"
+ 	"time"
+ 
++	"github.com/cilium/hive/hivetest"
+ 	"github.com/google/renameio/v2"
+ 	"github.com/stretchr/testify/assert"
+ 	"github.com/stretchr/testify/require"
+@@ -123,7 +124,7 @@ func TestWatchConfigDirectory(t *testing.T) {
+ 	require.NoError(t, os.Symlink(filepath.Join(dataDir, "cluster2"), file2))
+ 
+ 	cm := newFakeLifecycle()
+-	watcher, err := createConfigDirectoryWatcher(baseDir, cm)
++	watcher, err := createConfigDirectoryWatcher(hivetest.Logger(t), baseDir, cm)
+ 	require.NoError(t, err, "Failed to create configuration watcher")
+ 	t.Cleanup(watcher.close)
+ 
+@@ -196,7 +197,7 @@ func TestWatchConfigDirectory(t *testing.T) {
+ 	require.ElementsMatch(t, wl, []string{baseDir})
+ 
+ 	// Attempting to watch a non existing directory should return an error
+-	_, err = createConfigDirectoryWatcher(filepath.Join(baseDir, "non-existing"), cm)
++	_, err = createConfigDirectoryWatcher(hivetest.Logger(t), filepath.Join(baseDir, "non-existing"), cm)
+ 	require.Error(t, err, "Attempting to watch a non existing directory should return an error")
+ }
+ 
+diff --git a/pkg/clustermesh/common/logfields.go b/pkg/clustermesh/common/logfields.go
+index 2511be4518df9..78d8c0c9541f4 100644
+--- a/pkg/clustermesh/common/logfields.go
++++ b/pkg/clustermesh/common/logfields.go
+@@ -3,13 +3,6 @@
+ 
+ package common
+ 
+-import (
+-	"github.com/cilium/cilium/pkg/logging"
+-	"github.com/cilium/cilium/pkg/logging/logfields"
+-)
+-
+-var log = logging.DefaultLogger.WithField(logfields.LogSubsys, "clustermesh")
+-
+ const (
+ 	fieldClusterName = "clusterName"
+ 	fieldConfig      = "config"
+diff --git a/pkg/clustermesh/common/remote_cluster.go b/pkg/clustermesh/common/remote_cluster.go
+index 584e08d00f951..7978a3fa97597 100644
+--- a/pkg/clustermesh/common/remote_cluster.go
++++ b/pkg/clustermesh/common/remote_cluster.go
+@@ -7,12 +7,12 @@ import (
+ 	"context"
+ 	"errors"
+ 	"fmt"
++	"log/slog"
+ 	"sync"
+ 	"time"
+ 
+ 	"github.com/go-openapi/strfmt"
+ 	"github.com/prometheus/client_golang/prometheus"
+-	"github.com/sirupsen/logrus"
+ 	"google.golang.org/grpc"
+ 
+ 	"github.com/cilium/cilium/api/v1/models"
+@@ -98,7 +98,7 @@ type remoteCluster struct {
+ 	// lastFailure is the timestamp of the last failure
+ 	lastFailure time.Time
+ 
+-	logger logrus.FieldLogger
++	logger *slog.Logger
+ 
+ 	// backendFactory allows to override the function to create the etcd client
+ 	// for testing purposes.
+@@ -146,7 +146,7 @@ func (rc *remoteCluster) restartRemoteConnection() {
+ 				// Block until either an error is returned or
+ 				// the channel is closed due to success of the
+ 				// connection
+-				rc.logger.Debugf("Waiting for connection to be established")
++				rc.logger.Debug("Waiting for connection to be established")
+ 
+ 				var err error
+ 				select {
+@@ -162,7 +162,7 @@ func (rc *remoteCluster) restartRemoteConnection() {
+ 					select {
+ 					case <-ctx.Done():
+ 					default:
+-						rc.logger.WithError(err).Warning("Unable to establish etcd connection to remote cluster")
++						rc.logger.Warn("Unable to establish etcd connection to remote cluster", logfields.Error, err)
+ 					}
+ 					return err
+ 				}
+@@ -182,7 +182,10 @@ func (rc *remoteCluster) restartRemoteConnection() {
+ 					rc.wg.Done()
+ 				}()
+ 
+-				rc.logger.WithField(logfields.EtcdClusterID, etcdClusterID).Info("Connection to remote cluster established")
++				rc.logger.Info(
++					"Connection to remote cluster established",
++					logfields.EtcdClusterID, etcdClusterID,
++				)
+ 
+ 				config, err := rc.getClusterConfig(ctx, backend)
+ 				if err != nil {
+@@ -196,14 +199,18 @@ func (rc *remoteCluster) restartRemoteConnection() {
+ 					default:
+ 					}
+ 
+-					lgr := rc.logger
+ 					if errors.Is(err, cmutils.ErrClusterConfigNotFound) {
+-						lgr = lgr.WithField(logfields.Hint,
+-							"If KVStoreMesh is enabled, check whether it is connected to the target cluster."+
+-								" Additionally, ensure that the cluster name is correct.")
++						rc.logger.Warn("Unable to get remote cluster configuration",
++							logfields.Error, err,
++							logfields.Hint, "If KVStoreMesh is enabled, check whether it is connected to the target cluster."+
++								" Additionally, ensure that the cluster name is correct.",
++						)
++					} else {
++						rc.logger.Warn("Unable to get remote cluster configuration",
++							logfields.Error, err,
++						)
+ 					}
+ 
+-					lgr.WithError(err).Warning("Unable to get remote cluster configuration")
+ 					cancel()
+ 					return err
+ 				}
+@@ -227,7 +234,7 @@ func (rc *remoteCluster) restartRemoteConnection() {
+ 					case <-ctx.Done():
+ 						return ctx.Err()
+ 					default:
+-						rc.logger.WithError(err).Warning("Connection to remote cluster failed")
++						rc.logger.Warn("Connection to remote cluster failed", logfields.Error, err)
+ 					}
+ 
+ 					return err
+@@ -248,7 +255,7 @@ func (rc *remoteCluster) restartRemoteConnection() {
+ 
+ func (rc *remoteCluster) watchdog(ctx context.Context, backend kvstore.BackendOperations, clusterLock *clusterLock) {
+ 	handleErr := func(err error) {
+-		rc.logger.WithError(err).Warning("Error observed on etcd connection, reconnecting etcd")
++		rc.logger.Warn("Error observed on etcd connection, reconnecting etcd", logfields.Error, err)
+ 		rc.mutex.Lock()
+ 		rc.failures++
+ 		rc.lastFailure = time.Now()
+diff --git a/pkg/clustermesh/common/remote_cluster_test.go b/pkg/clustermesh/common/remote_cluster_test.go
+index eae5d2accea43..dad9fa2f9d632 100644
+--- a/pkg/clustermesh/common/remote_cluster_test.go
++++ b/pkg/clustermesh/common/remote_cluster_test.go
+@@ -11,6 +11,7 @@ import (
+ 	"testing"
+ 	"time"
+ 
++	"github.com/cilium/hive/hivetest"
+ 	"github.com/stretchr/testify/require"
+ 
+ 	"github.com/cilium/cilium/pkg/clustermesh/types"
+@@ -49,6 +50,7 @@ func TestRemoteClusterWatchdog(t *testing.T) {
+ 	var statusfn StatusFunc
+ 	ready := make(chan struct{}, 1)
+ 	cm := NewClusterMesh(Configuration{
++		Logger:      hivetest.Logger(t),
+ 		ClusterInfo: types.ClusterInfo{ID: 255, Name: "local"},
+ 		NewRemoteCluster: func(name string, sf StatusFunc) RemoteCluster {
+ 			statusfn = sf
+diff --git a/pkg/clustermesh/common/services.go b/pkg/clustermesh/common/services.go
+index f75de45010aa8..ba6cb8f84c773 100644
+--- a/pkg/clustermesh/common/services.go
++++ b/pkg/clustermesh/common/services.go
+@@ -4,9 +4,9 @@
+ package common
+ 
+ import (
++	"log/slog"
+ 	"maps"
+ 
+-	"github.com/sirupsen/logrus"
+ 	"k8s.io/apimachinery/pkg/types"
+ 
+ 	"github.com/cilium/cilium/pkg/kvstore/store"
+@@ -27,6 +27,7 @@ func newGlobalService() *GlobalService {
+ }
+ 
+ type GlobalServiceCache struct {
++	logger *slog.Logger
+ 	mutex  lock.RWMutex
+ 	byName map[types.NamespacedName]*GlobalService
+ 
+@@ -34,8 +35,9 @@ type GlobalServiceCache struct {
+ 	metricTotalGlobalServices metric.Gauge
+ }
+ 
+-func NewGlobalServiceCache(metricTotalGlobalServices metric.Gauge) *GlobalServiceCache {
++func NewGlobalServiceCache(logger *slog.Logger, metricTotalGlobalServices metric.Gauge) *GlobalServiceCache {
+ 	return &GlobalServiceCache{
++		logger:                    logger,
+ 		byName:                    map[types.NamespacedName]*GlobalService{},
+ 		metricTotalGlobalServices: metricTotalGlobalServices,
+ 	}
+@@ -87,11 +89,6 @@ func (c *GlobalServiceCache) GetGlobalService(serviceNN types.NamespacedName) *G
+ }
+ 
+ func (c *GlobalServiceCache) OnUpdate(svc *serviceStore.ClusterService) {
+-	scopedLog := log.WithFields(logrus.Fields{
+-		logfields.ServiceName: svc.String(),
+-		logfields.ClusterName: svc.Cluster,
+-	})
+-
+ 	c.mutex.Lock()
+ 
+ 	// Validate that the global service is known
+@@ -99,11 +96,19 @@ func (c *GlobalServiceCache) OnUpdate(svc *serviceStore.ClusterService) {
+ 	if !ok {
+ 		globalSvc = newGlobalService()
+ 		c.byName[svc.NamespaceServiceName()] = globalSvc
+-		scopedLog.Debugf("Created global service %s", svc.NamespaceServiceName())
++		c.logger.Debug(
++			"Created new global service",
++			logfields.ServiceName, svc,
++			logfields.ClusterName, svc.Cluster,
++		)
+ 		c.metricTotalGlobalServices.Set(float64(len(c.byName)))
+ 	}
+ 
+-	scopedLog.Debugf("Updated service definition of remote cluster %#v", svc)
++	c.logger.Debug(
++		"Updated service definition of remote cluster",
++		logfields.ServiceName, svc,
++		logfields.ClusterName, svc.Cluster,
++	)
+ 
+ 	globalSvc.ClusterServices[svc.Cluster] = svc
+ 	c.mutex.Unlock()
+@@ -111,22 +116,26 @@ func (c *GlobalServiceCache) OnUpdate(svc *serviceStore.ClusterService) {
+ 
+ // must be called with c.mutex held
+ func (c *GlobalServiceCache) delete(globalService *GlobalService, clusterName string, serviceNN types.NamespacedName) bool {
+-	scopedLog := log.WithFields(logrus.Fields{
+-		logfields.ServiceName: serviceNN.String(),
+-		logfields.ClusterName: clusterName,
+-	})
+-
+ 	if _, ok := globalService.ClusterServices[clusterName]; !ok {
+-		scopedLog.Debug("Ignoring delete request for unknown cluster")
++		c.logger.Debug("Ignoring delete request for unknown cluster",
++			logfields.ServiceName, serviceNN,
++			logfields.ClusterName, clusterName,
++		)
+ 		return false
+ 	}
+ 
+-	scopedLog.Debugf("Deleted service definition of remote cluster")
++	c.logger.Debug("Deleted service definition of remote cluster",
++		logfields.ServiceName, serviceNN,
++		logfields.ClusterName, clusterName,
++	)
+ 	delete(globalService.ClusterServices, clusterName)
+ 
+ 	// After the last cluster service is removed, remove the global service
+ 	if len(globalService.ClusterServices) == 0 {
+-		scopedLog.Debugf("Deleted global service %s", serviceNN.String())
++		c.logger.Debug("Deleted global service",
++			logfields.ServiceName, serviceNN,
++			logfields.ClusterName, clusterName,
++		)
+ 		delete(c.byName, serviceNN)
+ 		c.metricTotalGlobalServices.Set(float64(len(c.byName)))
+ 	}
+@@ -135,8 +144,7 @@ func (c *GlobalServiceCache) delete(globalService *GlobalService, clusterName st
+ }
+ 
+ func (c *GlobalServiceCache) OnDelete(svc *serviceStore.ClusterService) bool {
+-	scopedLog := log.WithFields(logrus.Fields{logfields.ServiceName: svc.String()})
+-	scopedLog.Debug("Delete event for service")
++	c.logger.Debug("Delete event for service", logfields.ServiceName, svc)
+ 
+ 	c.mutex.Lock()
+ 	defer c.mutex.Unlock()
+@@ -144,7 +152,7 @@ func (c *GlobalServiceCache) OnDelete(svc *serviceStore.ClusterService) bool {
+ 	if globalService, ok := c.byName[svc.NamespaceServiceName()]; ok {
+ 		return c.delete(globalService, svc.Cluster, svc.NamespaceServiceName())
+ 	} else {
+-		scopedLog.Debugf("Ignoring delete request for unknown global service")
++		c.logger.Debug("Ignoring delete request for unknown global service", logfields.ServiceName, svc)
+ 		return false
+ 	}
+ }
+@@ -158,7 +166,7 @@ func (c *GlobalServiceCache) Size() (num int) {
+ }
+ 
+ type remoteServiceObserver struct {
+-	log logrus.FieldLogger
++	log *slog.Logger
+ 
+ 	cache *GlobalServiceCache
+ 
+@@ -170,7 +178,7 @@ type remoteServiceObserver struct {
+ // and filter shared services notifications, update the global service cache and
+ // call the upstream handlers when appropriate.
+ func NewSharedServicesObserver(
+-	log logrus.FieldLogger, cache *GlobalServiceCache,
++	log *slog.Logger, cache *GlobalServiceCache,
+ 	onUpdate, onDelete func(*serviceStore.ClusterService),
+ ) store.Observer {
+ 	return &remoteServiceObserver{
+@@ -185,16 +193,15 @@ func NewSharedServicesObserver(
+ // OnUpdate is called when a service in a remote cluster is updated
+ func (r *remoteServiceObserver) OnUpdate(key store.Key) {
+ 	svc := &(key.(*serviceStore.ValidatingClusterService).ClusterService)
+-	scopedLog := r.log.WithFields(logrus.Fields{logfields.ServiceName: svc.String()})
+-	scopedLog.Debug("Received remote service update event")
++	r.log.Debug("Received remote service update event", logfields.ServiceName, svc)
+ 
+ 	// Short-circuit the handling of non-shared services
+ 	if !svc.Shared {
+ 		if r.cache.Has(svc) {
+-			scopedLog.Debug("Previously shared service is no longer shared: triggering deletion event")
++			r.log.Debug("Previously shared service is no longer shared: triggering deletion event", logfields.ServiceName, svc)
+ 			r.OnDelete(key)
+ 		} else {
+-			scopedLog.Debug("Ignoring remote service update: service is not shared")
++			r.log.Debug("Ignoring remote service update: service is not shared", logfields.ServiceName, svc)
+ 		}
+ 		return
+ 	}
+@@ -206,12 +213,11 @@ func (r *remoteServiceObserver) OnUpdate(key store.Key) {
+ // OnDelete is called when a service in a remote cluster is deleted
+ func (r *remoteServiceObserver) OnDelete(key store.NamedKey) {
+ 	svc := &(key.(*serviceStore.ValidatingClusterService).ClusterService)
+-	scopedLog := r.log.WithFields(logrus.Fields{logfields.ServiceName: svc.String()})
+-	scopedLog.Debug("Received remote service delete event")
++	r.log.Debug("Received remote service delete event", logfields.ServiceName, svc)
+ 
+ 	// Short-circuit the deletion logic if the service was not present (i.e., not shared)
+ 	if !r.cache.OnDelete(svc) {
+-		scopedLog.Debug("Ignoring remote service delete. Service was not shared")
++		r.log.Debug("Ignoring remote service delete. Service was not shared", logfields.ServiceName, svc)
+ 		return
+ 	}
+ 
+diff --git a/pkg/clustermesh/common/services_test.go b/pkg/clustermesh/common/services_test.go
+index f5faf5fdd310b..345f0c957a4e5 100644
+--- a/pkg/clustermesh/common/services_test.go
++++ b/pkg/clustermesh/common/services_test.go
+@@ -6,6 +6,7 @@ package common
+ import (
+ 	"testing"
+ 
++	"github.com/cilium/hive/hivetest"
+ 	"github.com/stretchr/testify/require"
+ 
+ 	"github.com/cilium/cilium/pkg/metrics"
+@@ -31,10 +32,10 @@ func TestRemoteServiceObserver(t *testing.T) {
+ 	}
+ 	svc1 := serviceStore.ClusterService{Cluster: "remote", Namespace: "namespace", Name: "name", IncludeExternal: false, Shared: true}
+ 	svc2 := serviceStore.ClusterService{Cluster: "remote", Namespace: "namespace", Name: "name"}
+-	cache := NewGlobalServiceCache(metrics.NoOpGauge)
++	cache := NewGlobalServiceCache(hivetest.Logger(t), metrics.NoOpGauge)
+ 
+ 	var upstream fakeUpstream
+-	observer := NewSharedServicesObserver(log, cache, upstream.OnUpdate, upstream.OnDelete)
++	observer := NewSharedServicesObserver(hivetest.Logger(t), cache, upstream.OnUpdate, upstream.OnDelete)
+ 
+ 	// Observe a new service update (for a non-shared service), and assert it is not added to the cache
+ 	upstream.init()
+diff --git a/pkg/clustermesh/endpointslicesync/cell.go b/pkg/clustermesh/endpointslicesync/cell.go
+index 77e136e519d71..2f318cdd6896b 100644
+--- a/pkg/clustermesh/endpointslicesync/cell.go
++++ b/pkg/clustermesh/endpointslicesync/cell.go
+@@ -4,11 +4,11 @@
+ package endpointslicesync
+ 
+ import (
++	"log/slog"
+ 	"time"
+ 
+ 	"github.com/cilium/hive/cell"
+ 	"github.com/cilium/hive/job"
+-	"github.com/sirupsen/logrus"
+ 	"github.com/spf13/pflag"
+ 
+ 	"github.com/cilium/cilium/pkg/clustermesh/operator"
+@@ -33,9 +33,10 @@ var Cell = cell.Module(
+ type endpointSliceSyncParams struct {
+ 	cell.In
+ 
++	Logger *slog.Logger
++
+ 	operator.ClusterMeshConfig
+ 	EndpointSliceSyncConfig
+-	Logger   logrus.FieldLogger
+ 	JobGroup job.Group
+ 
+ 	Clientset   k8sClient.Clientset
+diff --git a/pkg/clustermesh/endpointslicesync/dummy_informer.go b/pkg/clustermesh/endpointslicesync/dummy_informer.go
+index 90135cef810b4..f7273b4c8de73 100644
+--- a/pkg/clustermesh/endpointslicesync/dummy_informer.go
++++ b/pkg/clustermesh/endpointslicesync/dummy_informer.go
+@@ -4,57 +4,58 @@
+ package endpointslicesync
+ 
+ import (
++	"fmt"
++	"log/slog"
+ 	"time"
+ 
+-	"github.com/sirupsen/logrus"
+-	cache "k8s.io/client-go/tools/cache"
++	"k8s.io/client-go/tools/cache"
+ )
+ 
+ type dummyInformer struct {
+ 	name   string
+-	logger logrus.FieldLogger
++	logger *slog.Logger
+ }
+ 
+ func (i *dummyInformer) AddIndexers(indexers cache.Indexers) error {
+-	i.logger.Errorf("called not implemented function %s.AddIndexers", i.name)
++	i.logger.Error(fmt.Sprintf("called not implemented function %s.AddIndexers", i.name))
+ 	return nil
+ }
+ func (i *dummyInformer) GetIndexer() cache.Indexer {
+-	i.logger.Errorf("called not implemented function %s.GetIndexer", i.name)
++	i.logger.Error(fmt.Sprintf("called not implemented function %s.GetIndexer", i.name))
+ 	return nil
+ }
+ func (i *dummyInformer) AddEventHandlerWithResyncPeriod(handler cache.ResourceEventHandler, resyncPeriod time.Duration) (cache.ResourceEventHandlerRegistration, error) {
+-	i.logger.Errorf("called not implemented function %s.AddEventHandlerWithResyncPeriod", i.name)
++	i.logger.Error(fmt.Sprintf("called not implemented function %s.AddEventHandlerWithResyncPeriod", i.name))
+ 	return nil, nil
+ }
+ func (i *dummyInformer) RemoveEventHandler(handle cache.ResourceEventHandlerRegistration) error {
+-	i.logger.Errorf("called not implemented function %s.RemoveEventHandler", i.name)
++	i.logger.Error(fmt.Sprintf("called not implemented function %s.RemoveEventHandler", i.name))
+ 	return nil
+ }
+ func (i *dummyInformer) GetStore() cache.Store {
+-	i.logger.Errorf("called not implemented function %s.GetStore", i.name)
++	i.logger.Error(fmt.Sprintf("called not implemented function %s.GetStore", i.name))
+ 	return nil
+ }
+ func (i *dummyInformer) GetController() cache.Controller {
+-	i.logger.Errorf("called not implemented function %s.GetController", i.name)
++	i.logger.Error(fmt.Sprintf("called not implemented function %s.GetController", i.name))
+ 	return nil
+ }
+ func (i *dummyInformer) Run(stopCh <-chan struct{}) {
+-	i.logger.Errorf("called not implemented function %s.Run", i.name)
++	i.logger.Error(fmt.Sprintf("called not implemented function %s.Run", i.name))
+ }
+ func (i *dummyInformer) LastSyncResourceVersion() string {
+-	i.logger.Errorf("called not implemented function %s.LastSyncResourceVersion", i.name)
++	i.logger.Error(fmt.Sprintf("called not implemented function %s.LastSyncResourceVersion", i.name))
+ 	return ""
+ }
+ func (i *dummyInformer) SetWatchErrorHandler(handler cache.WatchErrorHandler) error {
+-	i.logger.Errorf("called not implemented function %s.SetWatchErrorHandler", i.name)
++	i.logger.Error(fmt.Sprintf("called not implemented function %s.SetWatchErrorHandler", i.name))
+ 	return nil
+ }
+ func (i *dummyInformer) SetTransform(handler cache.TransformFunc) error {
+-	i.logger.Errorf("called not implemented function %s.SetTransform", i.name)
++	i.logger.Error(fmt.Sprintf("called not implemented function %s.SetTransform", i.name))
+ 	return nil
+ }
+ func (i *dummyInformer) IsStopped() bool {
+-	i.logger.Errorf("called not implemented function %s.IsStopped", i.name)
++	i.logger.Error(fmt.Sprintf("called not implemented function %s.IsStopped", i.name))
+ 	return false
+ }
+diff --git a/pkg/clustermesh/endpointslicesync/endpointslice_meta_controller.go b/pkg/clustermesh/endpointslicesync/endpointslice_meta_controller.go
+index 77d444c926a4c..1af8fb3bac49b 100644
+--- a/pkg/clustermesh/endpointslicesync/endpointslice_meta_controller.go
++++ b/pkg/clustermesh/endpointslicesync/endpointslice_meta_controller.go
+@@ -5,10 +5,10 @@ package endpointslicesync
+ 
+ import (
+ 	"context"
++	"log/slog"
+ 	"time"
+ 
+ 	"github.com/cilium/endpointslice-controller/endpointslice"
+-	"github.com/sirupsen/logrus"
+ 	discovery "k8s.io/api/discovery/v1"
+ 	"k8s.io/apimachinery/pkg/api/errors"
+ 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+@@ -54,7 +54,7 @@ func endpointSliceCleanupFactory(ctx context.Context, discoveryClient discoveryv
+ }
+ 
+ func newEndpointSliceMeshController(
+-	ctx context.Context, logger logrus.FieldLogger, cfg EndpointSliceSyncConfig,
++	ctx context.Context, logger *slog.Logger, cfg EndpointSliceSyncConfig,
+ 	meshPodInformer *meshPodInformer, meshNodeInformer *meshNodeInformer,
+ 	clientset k8sClient.Clientset, services resource.Resource[*slim_corev1.Service],
+ 	globalServices *common.GlobalServiceCache,
+diff --git a/pkg/clustermesh/endpointslicesync/endpointslice_test.go b/pkg/clustermesh/endpointslicesync/endpointslice_test.go
+index 9fe76e8887143..11cac451aa8a7 100644
+--- a/pkg/clustermesh/endpointslicesync/endpointslice_test.go
++++ b/pkg/clustermesh/endpointslicesync/endpointslice_test.go
+@@ -10,13 +10,12 @@ import (
+ 
+ 	"github.com/cilium/hive/cell"
+ 	"github.com/cilium/hive/hivetest"
+-	"github.com/sirupsen/logrus"
+ 	"github.com/stretchr/testify/assert"
+ 	"github.com/stretchr/testify/require"
+ 	corev1 "k8s.io/api/core/v1"
+ 	discovery "k8s.io/api/discovery/v1"
+ 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+-	cache "k8s.io/client-go/tools/cache"
++	"k8s.io/client-go/tools/cache"
+ 	mcsapiv1alpha1 "sigs.k8s.io/mcs-api/pkg/apis/v1alpha1"
+ 
+ 	"github.com/cilium/cilium/operator/k8s"
+@@ -91,7 +90,7 @@ func getEndpointSlice(clientset k8sClient.Clientset, svcName string) (*discovery
+ func Test_meshEndpointSlice_Reconcile(t *testing.T) {
+ 	var fakeClient *k8sClient.FakeClientset
+ 	var services resource.Resource[*slim_corev1.Service]
+-	logger := logrus.New()
++	logger := hivetest.Logger(t)
+ 	hive := hive.New(
+ 		k8sClient.FakeClientCell,
+ 		k8s.ResourcesCell,
+@@ -111,7 +110,7 @@ func Test_meshEndpointSlice_Reconcile(t *testing.T) {
+ 	}
+ 	defer hive.Stop(tlog, context.Background())
+ 
+-	globalService := common.NewGlobalServiceCache(metric.NewGauge(metric.GaugeOpts{}))
++	globalService := common.NewGlobalServiceCache(hivetest.Logger(t), metric.NewGauge(metric.GaugeOpts{}))
+ 	podInformer := newMeshPodInformer(logger, globalService)
+ 	nodeInformer := newMeshNodeInformer(logger)
+ 	controller, serviceInformer, endpointsliceInformer := newEndpointSliceMeshController(
+diff --git a/pkg/clustermesh/endpointslicesync/node_informer.go b/pkg/clustermesh/endpointslicesync/node_informer.go
+index 6d3ace19775d5..86f82a19c9323 100644
+--- a/pkg/clustermesh/endpointslicesync/node_informer.go
++++ b/pkg/clustermesh/endpointslicesync/node_informer.go
+@@ -5,10 +5,10 @@ package endpointslicesync
+ 
+ import (
+ 	"fmt"
++	"log/slog"
+ 	"maps"
+ 	"slices"
+ 
+-	"github.com/sirupsen/logrus"
+ 	v1 "k8s.io/api/core/v1"
+ 	"k8s.io/apimachinery/pkg/api/resource"
+ 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+@@ -31,7 +31,7 @@ type meshNodeInformer struct {
+ 	mutex   lock.RWMutex
+ }
+ 
+-func newMeshNodeInformer(logger logrus.FieldLogger) *meshNodeInformer {
++func newMeshNodeInformer(logger *slog.Logger) *meshNodeInformer {
+ 	return &meshNodeInformer{
+ 		dummyInformer: dummyInformer{name: "meshNodeInformer", logger: logger},
+ 		nodes:         map[string]*v1.Node{},
+diff --git a/pkg/clustermesh/endpointslicesync/pod_informer.go b/pkg/clustermesh/endpointslicesync/pod_informer.go
+index a24b46cdd7bc8..e5ab2644985f4 100644
+--- a/pkg/clustermesh/endpointslicesync/pod_informer.go
++++ b/pkg/clustermesh/endpointslicesync/pod_informer.go
+@@ -5,15 +5,15 @@ package endpointslicesync
+ 
+ import (
+ 	"fmt"
++	"log/slog"
+ 
+-	"github.com/sirupsen/logrus"
+ 	v1 "k8s.io/api/core/v1"
+ 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+ 	"k8s.io/apimachinery/pkg/labels"
+ 	"k8s.io/apimachinery/pkg/selection"
+ 	"k8s.io/apimachinery/pkg/types"
+ 	listersv1 "k8s.io/client-go/listers/core/v1"
+-	cache "k8s.io/client-go/tools/cache"
++	"k8s.io/client-go/tools/cache"
+ 
+ 	"github.com/cilium/cilium/pkg/clustermesh/common"
+ 	"github.com/cilium/cilium/pkg/service/store"
+@@ -25,12 +25,12 @@ import (
+ type meshPodInformer struct {
+ 	dummyInformer
+ 
+-	logger             logrus.FieldLogger
++	logger             *slog.Logger
+ 	globalServiceCache *common.GlobalServiceCache
+ 	handler            cache.ResourceEventHandler
+ }
+ 
+-func newMeshPodInformer(logger logrus.FieldLogger, globalServiceCache *common.GlobalServiceCache) *meshPodInformer {
++func newMeshPodInformer(logger *slog.Logger, globalServiceCache *common.GlobalServiceCache) *meshPodInformer {
+ 	return &meshPodInformer{
+ 		dummyInformer:      dummyInformer{name: "meshPodInformer", logger: logger},
+ 		globalServiceCache: globalServiceCache,
+diff --git a/pkg/clustermesh/endpointslicesync/service_informer.go b/pkg/clustermesh/endpointslicesync/service_informer.go
+index 154bdbe989d0c..b4e3eb7955ac0 100644
+--- a/pkg/clustermesh/endpointslicesync/service_informer.go
++++ b/pkg/clustermesh/endpointslicesync/service_informer.go
+@@ -6,11 +6,11 @@ package endpointslicesync
+ import (
+ 	"context"
+ 	"fmt"
++	"log/slog"
+ 	"maps"
+ 	"strings"
+ 	"sync/atomic"
+ 
+-	"github.com/sirupsen/logrus"
+ 	v1 "k8s.io/api/core/v1"
+ 	"k8s.io/apimachinery/pkg/api/errors"
+ 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+@@ -45,7 +45,7 @@ const (
+ type meshServiceInformer struct {
+ 	dummyInformer
+ 
+-	logger             logrus.FieldLogger
++	logger             *slog.Logger
+ 	globalServiceCache *common.GlobalServiceCache
+ 	services           resource.Resource[*slim_corev1.Service]
+ 	serviceStore       resource.Store[*slim_corev1.Service]
+@@ -96,7 +96,7 @@ func (i *meshServiceInformer) refreshAllCluster(svc *slim_corev1.Service) {
+ }
+ 
+ func newMeshServiceInformer(
+-	logger logrus.FieldLogger,
++	logger *slog.Logger,
+ 	globalServiceCache *common.GlobalServiceCache,
+ 	services resource.Resource[*slim_corev1.Service],
+ 	meshNodeInformer *meshNodeInformer,
+diff --git a/pkg/clustermesh/kvstoremesh/kvstoremesh.go b/pkg/clustermesh/kvstoremesh/kvstoremesh.go
+index f25d10ef152a3..ce32364619360 100644
+--- a/pkg/clustermesh/kvstoremesh/kvstoremesh.go
++++ b/pkg/clustermesh/kvstoremesh/kvstoremesh.go
+@@ -6,12 +6,12 @@ package kvstoremesh
+ import (
+ 	"cmp"
+ 	"context"
++	"log/slog"
+ 	"slices"
+ 	"time"
+ 
+ 	"github.com/cilium/hive/cell"
+ 	"github.com/cilium/hive/job"
+-	"github.com/sirupsen/logrus"
+ 	"github.com/spf13/pflag"
+ 	"k8s.io/utils/clock"
+ 
+@@ -63,7 +63,7 @@ type KVStoreMesh struct {
+ 
+ 	storeFactory store.Factory
+ 
+-	logger logrus.FieldLogger
++	logger *slog.Logger
+ 
+ 	// clock allows to override the clock for testing purposes
+ 	clock clock.Clock
+@@ -82,7 +82,7 @@ type params struct {
+ 	Metrics      common.Metrics
+ 	StoreFactory store.Factory
+ 
+-	Logger logrus.FieldLogger
++	Logger *slog.Logger
+ }
+ 
+ func newKVStoreMesh(lc cell.Lifecycle, params params) *KVStoreMesh {
+@@ -94,6 +94,7 @@ func newKVStoreMesh(lc cell.Lifecycle, params params) *KVStoreMesh {
+ 		clock:          clock.RealClock{},
+ 	}
+ 	km.common = common.NewClusterMesh(common.Configuration{
++		Logger:           params.Logger,
+ 		Config:           params.CommonConfig,
+ 		ClusterInfo:      params.ClusterInfo,
+ 		NewRemoteCluster: km.newRemoteCluster,
+@@ -167,7 +168,7 @@ func (km *KVStoreMesh) newRemoteCluster(name string, status common.StatusFunc) c
+ 		storeFactory:   km.storeFactory,
+ 		synced:         synced,
+ 		readyTimeout:   km.config.PerClusterReadyTimeout,
+-		logger:         km.logger.WithField(logfields.ClusterName, name),
++		logger:         km.logger.With(logfields.ClusterName, name),
+ 		clock:          km.clock,
+ 
+ 		disableDrainOnDisconnection: km.config.DisableDrainOnDisconnection,
+@@ -210,7 +211,7 @@ func (km *KVStoreMesh) synced(ctx context.Context, syncCallback func(context.Con
+ 	})
+ 
+ 	if err := wait.ForAll(ctx, waiters); err != nil {
+-		km.logger.WithError(err).Info("Failed to wait for synchronization. KVStoreMesh will now handle requests, but some clusters may not have been synchronized.")
++		km.logger.Info("Failed to wait for synchronization. KVStoreMesh will now handle requests, but some clusters may not have been synchronized.", logfields.Error, err)
+ 		return err
+ 	}
+ 
+diff --git a/pkg/clustermesh/kvstoremesh/kvstoremesh_test.go b/pkg/clustermesh/kvstoremesh/kvstoremesh_test.go
+index 9518642d2d376..6177776fa604a 100644
+--- a/pkg/clustermesh/kvstoremesh/kvstoremesh_test.go
++++ b/pkg/clustermesh/kvstoremesh/kvstoremesh_test.go
+@@ -17,7 +17,6 @@ import (
+ 
+ 	"github.com/cilium/hive/cell"
+ 	"github.com/cilium/hive/hivetest"
+-	"github.com/sirupsen/logrus"
+ 	"github.com/stretchr/testify/assert"
+ 	"github.com/stretchr/testify/require"
+ 	baseclocktest "k8s.io/utils/clock/testing"
+@@ -244,7 +243,7 @@ func TestRemoteClusterRun(t *testing.T) {
+ 
+ 			st := store.NewFactory(store.MetricsProvider())
+ 			fakeclock := baseclocktest.NewFakeClock(time.Now())
+-			km := KVStoreMesh{backend: kvstore.Client(), storeFactory: st, logger: logrus.New(), clock: fakeclock}
++			km := KVStoreMesh{backend: kvstore.Client(), storeFactory: st, logger: hivetest.Logger(t), clock: fakeclock}
+ 
+ 			rc := km.newRemoteCluster("foo", nil)
+ 			ready := make(chan error)
+@@ -382,7 +381,7 @@ func TestRemoteClusterRemove(t *testing.T) {
+ 
+ 	st := store.NewFactory(store.MetricsProvider())
+ 	fakeclock := baseclocktest.NewFakeClock(time.Now())
+-	km := KVStoreMesh{backend: wrapper, storeFactory: st, logger: logrus.New(), clock: fakeclock}
++	km := KVStoreMesh{backend: wrapper, storeFactory: st, logger: hivetest.Logger(t), clock: fakeclock}
+ 	rcs := make(map[string]*remoteCluster)
+ 	for _, cluster := range []string{"foo", "foobar", "baz"} {
+ 		rcs[cluster] = km.newRemoteCluster(cluster, nil).(*remoteCluster)
+@@ -622,7 +621,7 @@ func TestRemoteClusterStatus(t *testing.T) {
+ 		},
+ 	}
+ 	st := store.NewFactory(store.MetricsProvider())
+-	km := KVStoreMesh{backend: kvstore.Client(), storeFactory: st, logger: logrus.New()}
++	km := KVStoreMesh{backend: kvstore.Client(), storeFactory: st, logger: hivetest.Logger(t)}
+ 
+ 	rc := km.newRemoteCluster("foo", func() *models.RemoteCluster {
+ 		return &models.RemoteCluster{
+@@ -756,14 +755,14 @@ func TestRemoteClusterSync(t *testing.T) {
+ 			km := KVStoreMesh{
+ 				config: tt.config,
+ 				common: mockClusterMesh,
+-				logger: logrus.New(),
++				logger: hivetest.Logger(t),
+ 			}
+ 
+ 			rc := &remoteCluster{
+ 				name:         "foo",
+ 				synced:       newSynced(),
+ 				readyTimeout: tt.config.PerClusterReadyTimeout,
+-				logger:       km.logger.WithField(logfields.ClusterName, "foo"),
++				logger:       km.logger.With(logfields.ClusterName, "foo"),
+ 			}
+ 			swgDone := rc.synced.resources.Add()
+ 			rc.synced.resources.Stop()
+diff --git a/pkg/clustermesh/kvstoremesh/remote_cluster.go b/pkg/clustermesh/kvstoremesh/remote_cluster.go
+index dd0db6f08d2e5..cd67e5e2cd758 100644
+--- a/pkg/clustermesh/kvstoremesh/remote_cluster.go
++++ b/pkg/clustermesh/kvstoremesh/remote_cluster.go
+@@ -6,12 +6,12 @@ package kvstoremesh
+ import (
+ 	"context"
+ 	"fmt"
++	"log/slog"
+ 	"path"
+ 	"sync"
+ 	"sync/atomic"
+ 	"time"
+ 
+-	"github.com/sirupsen/logrus"
+ 	"k8s.io/utils/clock"
+ 	"k8s.io/utils/ptr"
+ 
+@@ -62,7 +62,7 @@ type remoteCluster struct {
+ 	// cluster disconnection.
+ 	disableDrainOnDisconnection bool
+ 
+-	logger logrus.FieldLogger
++	logger *slog.Logger
+ 	clock  clock.Clock
+ }
+ 
+@@ -158,7 +158,7 @@ func (rc *remoteCluster) Stop() {
+ 
+ func (rc *remoteCluster) Remove(ctx context.Context) {
+ 	if rc.disableDrainOnDisconnection {
+-		rc.logger.Warning("Remote cluster disconnected, but cached data removal is disabled. " +
++		rc.logger.Warn("Remote cluster disconnected, but cached data removal is disabled. " +
+ 			"Reconnecting to the same cluster without first restarting KVStoreMesh may lead to inconsistencies")
+ 		return
+ 	}
+@@ -179,13 +179,15 @@ func (rc *remoteCluster) Remove(ctx context.Context) {
+ 		case ctx.Err() != nil:
+ 			return
+ 		case retry == retries:
+-			rc.logger.WithError(err).Error(
+-				"Failed to remove cached data from kvstore, despite retries. Reconnecting to the " +
+-					"same cluster without first restarting KVStoreMesh may lead to inconsistencies")
++			rc.logger.Error(
++				"Failed to remove cached data from kvstore, despite retries. Reconnecting to the "+
++					"same cluster without first restarting KVStoreMesh may lead to inconsistencies",
++				logfields.Error, err,
++			)
+ 			return
+ 		}
+ 
+-		rc.logger.WithError(err).Warning("Failed to remove cached data from kvstore, retrying")
++		rc.logger.Warn("Failed to remove cached data from kvstore, retrying", logfields.Error, err)
+ 		select {
+ 		case <-rc.clock.After(backoff):
+ 			retry++
+@@ -227,8 +229,10 @@ func (rc *remoteCluster) drain(ctx context.Context, withGracePeriod bool) (err e
+ 		// well). The cluster configuration is deleted before waiting to prevent
+ 		// new agents from connecting in this time window.
+ 		const drainGracePeriod = 3 * time.Minute
+-		rc.logger.WithField(logfields.Duration, drainGracePeriod).
+-			Info("Waiting before removing cached data from kvstore, to allow Cilium agents to disconnect")
++		rc.logger.Info(
++			"Waiting before removing cached data from kvstore, to allow Cilium agents to disconnect",
++			logfields.Duration, drainGracePeriod,
++		)
+ 		select {
+ 		case <-ctx.Done():
+ 			return ctx.Err()
+diff --git a/pkg/clustermesh/mcsapi/cell.go b/pkg/clustermesh/mcsapi/cell.go
+index b6c89f5809bf3..9190d136d4c18 100644
+--- a/pkg/clustermesh/mcsapi/cell.go
++++ b/pkg/clustermesh/mcsapi/cell.go
+@@ -7,10 +7,10 @@ import (
+ 	"context"
+ 	"errors"
+ 	"fmt"
++	"log/slog"
+ 
+ 	"github.com/cilium/hive/cell"
+ 	"github.com/cilium/hive/job"
+-	"github.com/sirupsen/logrus"
+ 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+ 	"k8s.io/apimachinery/pkg/runtime"
+ 	"k8s.io/apimachinery/pkg/runtime/schema"
+@@ -21,6 +21,7 @@ import (
+ 	"github.com/cilium/cilium/pkg/clustermesh/operator"
+ 	"github.com/cilium/cilium/pkg/clustermesh/types"
+ 	k8sClient "github.com/cilium/cilium/pkg/k8s/client"
++	"github.com/cilium/cilium/pkg/logging/logfields"
+ )
+ 
+ var Cell = cell.Module(
+@@ -43,7 +44,7 @@ type mcsAPIParams struct {
+ 	CtrlRuntimeManager ctrlRuntime.Manager
+ 	Scheme             *runtime.Scheme
+ 
+-	Logger   logrus.FieldLogger
++	Logger   *slog.Logger
+ 	JobGroup job.Group
+ }
+ 
+@@ -91,9 +92,15 @@ func registerMCSAPIController(params mcsAPIParams) error {
+ 		return nil
+ 	}
+ 
+-	params.Logger.WithField("requiredGVK", requiredGVK).Info("Checking for required MCS-API resources")
++	params.Logger.Info(
++		"Checking for required MCS-API resources",
++		logfields.RequiredGVK, requiredGVK,
++	)
+ 	if err := checkRequiredCRDs(context.Background(), params.Clientset); err != nil {
+-		params.Logger.WithError(err).Error("Required MCS-API resources are not found, please refer to docs for installation instructions")
++		params.Logger.Error(
++			"Required MCS-API resources are not found, please refer to docs for installation instructions",
++			logfields.Error, err,
++		)
+ 		return err
+ 	}
+ 	if err := mcsapiv1alpha1.AddToScheme(params.Scheme); err != nil {
+diff --git a/pkg/clustermesh/mcsapi/service_controller.go b/pkg/clustermesh/mcsapi/service_controller.go
+index 9d8ae20285f7b..8cdf181c693ea 100644
+--- a/pkg/clustermesh/mcsapi/service_controller.go
++++ b/pkg/clustermesh/mcsapi/service_controller.go
+@@ -7,10 +7,10 @@ import (
+ 	"context"
+ 	"crypto/sha256"
+ 	"encoding/base32"
++	"log/slog"
+ 	"maps"
+ 	"strings"
+ 
+-	"github.com/sirupsen/logrus"
+ 	corev1 "k8s.io/api/core/v1"
+ 	k8sApiErrors "k8s.io/apimachinery/pkg/api/errors"
+ 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+@@ -37,12 +37,12 @@ const (
+ // the existing clustermesh features for the MCS API Support.
+ type mcsAPIServiceReconciler struct {
+ 	client.Client
+-	Logger logrus.FieldLogger
++	Logger *slog.Logger
+ 
+ 	clusterName string
+ }
+ 
+-func newMCSAPIServiceReconciler(mgr ctrl.Manager, logger logrus.FieldLogger, clusterName string) *mcsAPIServiceReconciler {
++func newMCSAPIServiceReconciler(mgr ctrl.Manager, logger *slog.Logger, clusterName string) *mcsAPIServiceReconciler {
+ 	return &mcsAPIServiceReconciler{
+ 		Client:      mgr.GetClient(),
+ 		Logger:      logger,
+diff --git a/pkg/clustermesh/mcsapi/service_controller_test.go b/pkg/clustermesh/mcsapi/service_controller_test.go
+index a8a3f4a5819b7..7c0c0ef5d9b1c 100644
+--- a/pkg/clustermesh/mcsapi/service_controller_test.go
++++ b/pkg/clustermesh/mcsapi/service_controller_test.go
+@@ -7,6 +7,7 @@ import (
+ 	"context"
+ 	"testing"
+ 
++	"github.com/cilium/hive/hivetest"
+ 	"github.com/stretchr/testify/require"
+ 	corev1 "k8s.io/api/core/v1"
+ 	k8sApiErrors "k8s.io/apimachinery/pkg/api/errors"
+@@ -23,7 +24,6 @@ import (
+ 	mcsapiv1alpha1 "sigs.k8s.io/mcs-api/pkg/apis/v1alpha1"
+ 
+ 	"github.com/cilium/cilium/pkg/annotation"
+-	"github.com/cilium/cilium/pkg/logging"
+ )
+ 
+ var (
+@@ -250,7 +250,7 @@ func Test_mcsDerivedService_Reconcile(t *testing.T) {
+ 		Build()
+ 	r := &mcsAPIServiceReconciler{
+ 		Client:      c,
+-		Logger:      logging.DefaultLogger,
++		Logger:      hivetest.Logger(t),
+ 		clusterName: "cluster1",
+ 	}
+ 
+diff --git a/pkg/clustermesh/mcsapi/serviceexportsync.go b/pkg/clustermesh/mcsapi/serviceexportsync.go
+index 875ece8216493..042411dbd2b06 100644
+--- a/pkg/clustermesh/mcsapi/serviceexportsync.go
++++ b/pkg/clustermesh/mcsapi/serviceexportsync.go
+@@ -5,6 +5,7 @@ package mcsapi
+ 
+ import (
+ 	"context"
++	"log/slog"
+ 	"sync"
+ 
+ 	"github.com/cilium/hive/cell"
+@@ -18,12 +19,9 @@ import (
+ 	"github.com/cilium/cilium/pkg/k8s/utils"
+ 	"github.com/cilium/cilium/pkg/kvstore"
+ 	"github.com/cilium/cilium/pkg/kvstore/store"
+-	"github.com/cilium/cilium/pkg/logging"
+ 	"github.com/cilium/cilium/pkg/logging/logfields"
+ )
+ 
+-var log = logging.DefaultLogger.WithField(logfields.LogSubsys, "mcsapi")
+-
+ // ServiceExportResource builds the Resource[ServiceExport] object.
+ func ServiceExportResource(lc cell.Lifecycle, cs client.Clientset, opts ...func(*metav1.ListOptions)) resource.Resource[*mcsapiv1alpha1.ServiceExport] {
+ 	if !cs.IsEnabled() {
+@@ -38,6 +36,7 @@ func ServiceExportResource(lc cell.Lifecycle, cs client.Clientset, opts ...func(
+ }
+ 
+ type ServiceExportSyncParameters struct {
++	Logger                  *slog.Logger
+ 	ClusterName             string
+ 	ClusterMeshEnableMCSAPI bool
+ 	Clientset               client.Clientset
+@@ -53,6 +52,7 @@ type ServiceExportSyncParameters struct {
+ }
+ 
+ func StartSynchronizingServiceExports(ctx context.Context, cfg ServiceExportSyncParameters) {
++	logger := cfg.Logger.With(logfields.LogSubsys, "mcsapi")
+ 	if cfg.store == nil {
+ 		if cfg.Backend == nil {
+ 			cfg.Backend = kvstore.Client()
+@@ -81,7 +81,7 @@ func StartSynchronizingServiceExports(ctx context.Context, cfg ServiceExportSync
+ 	if !cfg.skipCrdCheck {
+ 		err := checkCRD(ctx, cfg.Clientset, mcsapiv1alpha1.SchemeGroupVersion.WithKind("serviceexports"))
+ 		if err != nil {
+-			log.WithError(err).Warn("starting synchronizing service exports without the required CRD installed")
++			logger.Warn("starting synchronizing service exports without the required CRD installed", logfields.Error, err)
+ 			// Also pretend that the service exports are synced for the same reason
+ 			// as above.
+ 			cfg.store.Synced(ctx, cfg.SyncCallback)
+@@ -92,13 +92,13 @@ func StartSynchronizingServiceExports(ctx context.Context, cfg ServiceExportSync
+ 	serviceEvents := cfg.Services.Events(ctx)
+ 	serviceStore, err := cfg.Services.Store(ctx)
+ 	if err != nil {
+-		log.WithError(err).Error("can't init service store")
++		logger.Error("can't init service store", logfields.Error, err)
+ 		return
+ 	}
+ 	serviceExportsEvents := cfg.ServiceExports.Events(ctx)
+ 	serviceExportStore, err := cfg.ServiceExports.Store(ctx)
+ 	if err != nil {
+-		log.WithError(err).Error("can't init service export store")
++		logger.Error("can't init service export store", logfields.Error, err)
+ 		return
+ 	}
+ 
+diff --git a/pkg/clustermesh/mcsapi/serviceexportsync_test.go b/pkg/clustermesh/mcsapi/serviceexportsync_test.go
+index b4679420602f1..7e6f3272c3fc2 100644
+--- a/pkg/clustermesh/mcsapi/serviceexportsync_test.go
++++ b/pkg/clustermesh/mcsapi/serviceexportsync_test.go
+@@ -165,6 +165,7 @@ func Test_mcsServiceExportSync_Reconcile(t *testing.T) {
+ 		ExportCreationTimestamp: exportTime,
+ 	}))
+ 	go StartSynchronizingServiceExports(ctx, ServiceExportSyncParameters{
++		Logger:                  hivetest.Logger(t),
+ 		ClusterName:             "cluster1",
+ 		ClusterMeshEnableMCSAPI: true,
+ 		Clientset:               clientset,
+diff --git a/pkg/clustermesh/mcsapi/serviceimport_controller.go b/pkg/clustermesh/mcsapi/serviceimport_controller.go
+index 8993793bcc8eb..5447ce0026512 100644
+--- a/pkg/clustermesh/mcsapi/serviceimport_controller.go
++++ b/pkg/clustermesh/mcsapi/serviceimport_controller.go
+@@ -6,12 +6,12 @@ package mcsapi
+ import (
+ 	"context"
+ 	"fmt"
++	"log/slog"
+ 	"maps"
+ 	"reflect"
+ 	"slices"
+ 	"strings"
+ 
+-	"github.com/sirupsen/logrus"
+ 	corev1 "k8s.io/api/core/v1"
+ 	k8sApiErrors "k8s.io/apimachinery/pkg/api/errors"
+ 	"k8s.io/apimachinery/pkg/api/meta"
+@@ -42,14 +42,14 @@ const (
+ // since we have all the info here to do so.
+ type mcsAPIServiceImportReconciler struct {
+ 	client.Client
+-	Logger logrus.FieldLogger
++	Logger *slog.Logger
+ 
+ 	cluster                    string
+ 	globalServiceExports       *operator.GlobalServiceExportCache
+ 	remoteClusterServiceSource *remoteClusterServiceExportSource
+ }
+ 
+-func newMCSAPIServiceImportReconciler(mgr ctrl.Manager, logger logrus.FieldLogger, cluster string, globalServiceExports *operator.GlobalServiceExportCache, remoteClusterServiceSource *remoteClusterServiceExportSource) *mcsAPIServiceImportReconciler {
++func newMCSAPIServiceImportReconciler(mgr ctrl.Manager, logger *slog.Logger, cluster string, globalServiceExports *operator.GlobalServiceExportCache, remoteClusterServiceSource *remoteClusterServiceExportSource) *mcsAPIServiceImportReconciler {
+ 	return &mcsAPIServiceImportReconciler{
+ 		Client:                     mgr.GetClient(),
+ 		Logger:                     logger,
+@@ -534,7 +534,7 @@ func (r *mcsAPIServiceImportReconciler) SetupWithManager(mgr ctrl.Manager) error
+ // needed by a regular controller-runtime controller. This prevents us from
+ // implementing a more complicated/hands-on pattern of controller.
+ type remoteClusterServiceExportSource struct {
+-	Logger logrus.FieldLogger
++	Logger *slog.Logger
+ 
+ 	ctx   context.Context
+ 	queue workqueue.TypedRateLimitingInterface[ctrl.Request]
+@@ -549,9 +549,11 @@ func (s *remoteClusterServiceExportSource) onClusterServiceExportEvent(svcExport
+ 	}
+ 
+ 	s.Logger.
+-		WithField(logfields.K8sNamespace, svcExport.Namespace).
+-		WithField("ServiceExport", svcExport.Name).
+-		Debug("Queueing update from remote cluster")
++		Debug(
++			"Queueing update from remote cluster",
++			logfields.K8sNamespace, svcExport.Namespace,
++			logfields.K8sExportName, svcExport.Name,
++		)
+ 	s.queue.Add(ctrl.Request{NamespacedName: types.NamespacedName{
+ 		Name:      svcExport.Name,
+ 		Namespace: svcExport.Namespace,
+diff --git a/pkg/clustermesh/mcsapi/serviceimport_controller_test.go b/pkg/clustermesh/mcsapi/serviceimport_controller_test.go
+index 16b22efbf052d..6507e4c0f691d 100644
+--- a/pkg/clustermesh/mcsapi/serviceimport_controller_test.go
++++ b/pkg/clustermesh/mcsapi/serviceimport_controller_test.go
+@@ -10,6 +10,7 @@ import (
+ 	"testing"
+ 	"time"
+ 
++	"github.com/cilium/hive/hivetest"
+ 	"github.com/stretchr/testify/require"
+ 	corev1 "k8s.io/api/core/v1"
+ 	k8sApiErrors "k8s.io/apimachinery/pkg/api/errors"
+@@ -25,7 +26,6 @@ import (
+ 
+ 	mcsapitypes "github.com/cilium/cilium/pkg/clustermesh/mcsapi/types"
+ 	"github.com/cilium/cilium/pkg/clustermesh/operator"
+-	"github.com/cilium/cilium/pkg/logging"
+ 	"github.com/cilium/cilium/pkg/metrics/metric"
+ )
+ 
+@@ -504,14 +504,14 @@ func Test_mcsServiceImport_Reconcile(t *testing.T) {
+ 		WithScheme(testScheme()).
+ 		Build()
+ 	globalServiceExports := operator.NewGlobalServiceExportCache(metric.NewGauge(metric.GaugeOpts{}))
+-	remoteClusterServiceSource := &remoteClusterServiceExportSource{Logger: logging.DefaultLogger}
++	remoteClusterServiceSource := &remoteClusterServiceExportSource{Logger: hivetest.Logger(t)}
+ 	for _, svcExport := range remoteSvcImportTestFixtures {
+ 		globalServiceExports.OnUpdate(svcExport)
+ 	}
+ 
+ 	r := &mcsAPIServiceImportReconciler{
+ 		Client:                     c,
+-		Logger:                     logging.DefaultLogger,
++		Logger:                     hivetest.Logger(t),
+ 		cluster:                    localClusterName,
+ 		globalServiceExports:       globalServiceExports,
+ 		remoteClusterServiceSource: remoteClusterServiceSource,
+diff --git a/pkg/clustermesh/operator/cell.go b/pkg/clustermesh/operator/cell.go
+index 3df49b38af175..872d7272620e3 100644
+--- a/pkg/clustermesh/operator/cell.go
++++ b/pkg/clustermesh/operator/cell.go
+@@ -4,8 +4,9 @@
+ package operator
+ 
+ import (
++	"log/slog"
++
+ 	"github.com/cilium/hive/cell"
+-	"github.com/sirupsen/logrus"
+ 	"github.com/spf13/pflag"
+ 
+ 	"github.com/cilium/cilium/pkg/clustermesh/common"
+@@ -43,7 +44,7 @@ type clusterMeshParams struct {
+ 	wait.TimeoutConfig
+ 	Cfg       ClusterMeshConfig
+ 	CfgMCSAPI MCSAPIConfig
+-	Logger    logrus.FieldLogger
++	Logger    *slog.Logger
+ 
+ 	// ClusterInfo is the id/name of the local cluster. This is used for logging and metrics
+ 	ClusterInfo types.ClusterInfo
+diff --git a/pkg/clustermesh/operator/clustermesh.go b/pkg/clustermesh/operator/clustermesh.go
+index cb7d849b44a2c..ad9d2f65e94f1 100644
+--- a/pkg/clustermesh/operator/clustermesh.go
++++ b/pkg/clustermesh/operator/clustermesh.go
+@@ -7,12 +7,12 @@ import (
+ 	"cmp"
+ 	"context"
+ 	"fmt"
++	"log/slog"
+ 	"slices"
+ 	"sync"
+ 	"sync/atomic"
+ 
+ 	"github.com/cilium/hive/cell"
+-	"github.com/sirupsen/logrus"
+ 
+ 	"github.com/cilium/cilium/api/v1/models"
+ 	"github.com/cilium/cilium/pkg/clustermesh/common"
+@@ -30,7 +30,7 @@ type clusterMesh struct {
+ 
+ 	cfg       ClusterMeshConfig
+ 	cfgMCSAPI MCSAPIConfig
+-	logger    logrus.FieldLogger
++	logger    *slog.Logger
+ 	Metrics   Metrics
+ 
+ 	// globalServices is a list of all global services. The datastructure
+@@ -96,12 +96,10 @@ func newClusterMesh(lc cell.Lifecycle, params clusterMeshParams) (*clusterMesh,
+ 	params.Logger.Info("Operator ClusterMesh component enabled")
+ 
+ 	cm := clusterMesh{
+-		cfg:       params.Cfg,
+-		cfgMCSAPI: params.CfgMCSAPI,
+-		logger:    params.Logger,
+-		globalServices: common.NewGlobalServiceCache(
+-			params.Metrics.TotalGlobalServices.WithLabelValues(params.ClusterInfo.Name),
+-		),
++		cfg:            params.Cfg,
++		cfgMCSAPI:      params.CfgMCSAPI,
++		logger:         params.Logger,
++		globalServices: common.NewGlobalServiceCache(params.Logger, params.Metrics.TotalGlobalServices.WithLabelValues(params.ClusterInfo.Name)),
+ 		globalServiceExports: NewGlobalServiceExportCache(
+ 			params.Metrics.TotalGlobalServiceExports.WithLabelValues(params.ClusterInfo.Name),
+ 		),
+@@ -109,6 +107,7 @@ func newClusterMesh(lc cell.Lifecycle, params clusterMeshParams) (*clusterMesh,
+ 		syncTimeoutConfig: params.TimeoutConfig,
+ 	}
+ 	cm.common = common.NewClusterMesh(common.Configuration{
++		Logger:           params.Logger,
+ 		Config:           params.Config,
+ 		ClusterInfo:      params.ClusterInfo,
+ 		NewRemoteCluster: cm.newRemoteCluster,
+@@ -202,7 +201,7 @@ func (cm *clusterMesh) newRemoteCluster(name string, status common.StatusFunc) c
+ 			serviceStore.NamespacedNameValidator(),
+ 		),
+ 		common.NewSharedServicesObserver(
+-			cm.logger.WithField(logfields.ClusterName, name),
++			cm.logger.With(logfields.ClusterName, name),
+ 			cm.globalServices,
+ 			func(svc *serviceStore.ClusterService) {
+ 				for _, hook := range cm.clusterServiceUpdateHooks {
+@@ -284,7 +283,7 @@ func (cm *clusterMesh) synced(ctx context.Context, toWaitFn func(*remoteCluster)
+ 		// and continue normally, as if the synchronization completed successfully.
+ 		// This ensures that we don't block forever in case of misconfigurations.
+ 		cm.syncTimeoutLogOnce.Do(func() {
+-			cm.logger.Warning("Failed waiting for clustermesh synchronization, expect possible disruption of cross-cluster connections")
++			cm.logger.Warn("Failed waiting for clustermesh synchronization, expect possible disruption of cross-cluster connections")
+ 		})
+ 
+ 		return nil
+diff --git a/pkg/clustermesh/operator/remote_cluster_test.go b/pkg/clustermesh/operator/remote_cluster_test.go
+index f71607671c39b..3941ed631b1aa 100644
+--- a/pkg/clustermesh/operator/remote_cluster_test.go
++++ b/pkg/clustermesh/operator/remote_cluster_test.go
+@@ -10,7 +10,7 @@ import (
+ 	"testing"
+ 	"time"
+ 
+-	"github.com/sirupsen/logrus"
++	"github.com/cilium/hive/hivetest"
+ 	"github.com/stretchr/testify/assert"
+ 	"github.com/stretchr/testify/require"
+ 	"k8s.io/utils/ptr"
+@@ -88,13 +88,11 @@ func TestRemoteClusterStatus(t *testing.T) {
+ 			})
+ 
+ 			metrics := NewMetrics()
+-			logger := logrus.New()
++			logger := hivetest.Logger(t)
+ 			cm := clusterMesh{
+-				logger:       logger,
+-				storeFactory: st,
+-				globalServices: common.NewGlobalServiceCache(
+-					metrics.TotalGlobalServices.WithLabelValues("foo"),
+-				),
++				logger:         logger,
++				storeFactory:   st,
++				globalServices: common.NewGlobalServiceCache(logger, metrics.TotalGlobalServices.WithLabelValues("foo")),
+ 				globalServiceExports: NewGlobalServiceExportCache(
+ 					metrics.TotalGlobalServiceExports.WithLabelValues("foo"),
+ 				),
+@@ -191,13 +189,11 @@ func TestRemoteClusterHooks(t *testing.T) {
+ 	})
+ 	st := store.NewFactory(store.MetricsProvider())
+ 	metrics := NewMetrics()
+-	logger := logrus.New()
++	logger := hivetest.Logger(t)
+ 	cm := clusterMesh{
+-		logger:       logger,
+-		storeFactory: st,
+-		globalServices: common.NewGlobalServiceCache(
+-			metrics.TotalGlobalServices.WithLabelValues("foo"),
+-		),
++		logger:         logger,
++		storeFactory:   st,
++		globalServices: common.NewGlobalServiceCache(logger, metrics.TotalGlobalServices.WithLabelValues("foo")),
+ 		globalServiceExports: NewGlobalServiceExportCache(
+ 			metrics.TotalGlobalServiceExports.WithLabelValues("foo"),
+ 		),
+diff --git a/pkg/clustermesh/remote_cluster.go b/pkg/clustermesh/remote_cluster.go
+index dd6723c1224d0..2bb06586fbb64 100644
+--- a/pkg/clustermesh/remote_cluster.go
++++ b/pkg/clustermesh/remote_cluster.go
+@@ -5,10 +5,9 @@ package clustermesh
+ 
+ import (
+ 	"context"
++	"log/slog"
+ 	"path"
+ 
+-	"github.com/sirupsen/logrus"
+-
+ 	"github.com/cilium/cilium/api/v1/models"
+ 	"github.com/cilium/cilium/pkg/allocator"
+ 	"github.com/cilium/cilium/pkg/clustermesh/common"
+@@ -73,7 +72,7 @@ type remoteCluster struct {
+ 	// synced tracks the initial synchronization with the remote cluster.
+ 	synced synced
+ 
+-	log logrus.FieldLogger
++	log *slog.Logger
+ 
+ 	// featureMetrics will track which features are enabled with in clustermesh.
+ 	featureMetrics ClusterMeshMetrics
+@@ -200,9 +199,11 @@ func (rc *remoteCluster) onUpdateConfig(newConfig cmtypes.CiliumClusterConfig) e
+ 	// stale entries for a Cluster ID that has already been released, potentially
+ 	// leading to inconsistencies if the same ID is acquired again in the meanwhile.
+ 	if rc.clusterID != cmtypes.ClusterIDUnset {
+-		rc.log.WithField(logfields.ClusterID, newConfig.ID).
+-			Info("Remote Cluster ID changed: draining all known entries before reconnecting. ",
+-				"Expect connectivity disruption towards this cluster")
++		rc.log.Info(
++			"Remote Cluster ID changed: draining all known entries before reconnecting. "+
++				"Expect connectivity disruption towards this cluster",
++			logfields.ClusterID, newConfig.ID,
++		)
+ 		rc.remoteNodes.Drain()
+ 		rc.remoteServices.Drain()
+ 		rc.ipCacheWatcher.Drain()
+diff --git a/pkg/clustermesh/remote_cluster_test.go b/pkg/clustermesh/remote_cluster_test.go
+index 0d162ee0f303b..a5c3568137eb2 100644
+--- a/pkg/clustermesh/remote_cluster_test.go
++++ b/pkg/clustermesh/remote_cluster_test.go
+@@ -12,7 +12,7 @@ import (
+ 	"testing"
+ 	"time"
+ 
+-	"github.com/sirupsen/logrus"
++	"github.com/cilium/hive/hivetest"
+ 	"github.com/stretchr/testify/assert"
+ 	"github.com/stretchr/testify/require"
+ 
+@@ -132,6 +132,7 @@ func TestRemoteClusterRun(t *testing.T) {
+ 	store := store.NewFactory(store.MetricsProvider())
+ 	for _, tt := range tests {
+ 		t.Run(tt.name, func(t *testing.T) {
++			logger := hivetest.Logger(t)
+ 			var wg sync.WaitGroup
+ 			ctx, cancel := context.WithCancel(context.Background())
+ 
+@@ -163,9 +164,9 @@ func TestRemoteClusterRun(t *testing.T) {
+ 					StoreFactory:          store,
+ 					ClusterInfo:           types.ClusterInfo{ID: localClusterID, Name: localClusterName, MaxConnectedClusters: 255},
+ 					FeatureMetrics:        NewClusterMeshMetricsNoop(),
+-					Logger:                logrus.New(),
++					Logger:                logger,
+ 				},
+-				globalServices: common.NewGlobalServiceCache(metrics.NoOpGauge),
++				globalServices: common.NewGlobalServiceCache(logger, metrics.NoOpGauge),
+ 				FeatureMetrics: NewClusterMeshMetricsNoop(),
+ 			}
+ 			rc := cm.NewRemoteCluster("foo", nil).(*remoteCluster)
+@@ -270,6 +271,7 @@ func TestRemoteClusterClusterIDChange(t *testing.T) {
+ 		}
+ 	}
+ 
++	logger := hivetest.Logger(t)
+ 	store := store.NewFactory(store.MetricsProvider())
+ 	var wg sync.WaitGroup
+ 	ctx := context.Background()
+@@ -295,10 +297,10 @@ func TestRemoteClusterClusterIDChange(t *testing.T) {
+ 			StoreFactory:          store,
+ 			ClusterInfo:           types.ClusterInfo{ID: localClusterID, Name: localClusterName, MaxConnectedClusters: 255},
+ 			FeatureMetrics:        NewClusterMeshMetricsNoop(),
+-			Logger:                logrus.New(),
++			Logger:                logger,
+ 		},
+ 		FeatureMetrics: NewClusterMeshMetricsNoop(),
+-		globalServices: common.NewGlobalServiceCache(metrics.NoOpGauge),
++		globalServices: common.NewGlobalServiceCache(logger, metrics.NoOpGauge),
+ 	}
+ 	rc := cm.NewRemoteCluster("foo", nil).(*remoteCluster)
+ 
+diff --git a/pkg/clustermesh/services_test.go b/pkg/clustermesh/services_test.go
+index 2ddf1ef3b9f9e..6856fe7f1260e 100644
+--- a/pkg/clustermesh/services_test.go
++++ b/pkg/clustermesh/services_test.go
+@@ -13,7 +13,6 @@ import (
+ 
+ 	"github.com/cilium/hive/hivetest"
+ 	"github.com/cilium/statedb"
+-	"github.com/sirupsen/logrus"
+ 	"github.com/stretchr/testify/assert"
+ 	"github.com/stretchr/testify/require"
+ 	"k8s.io/apimachinery/pkg/util/rand"
+@@ -70,6 +69,8 @@ type ClusterMeshServicesTestSuite struct {
+ func setup(tb testing.TB) *ClusterMeshServicesTestSuite {
+ 	testutils.IntegrationTest(tb)
+ 
++	logger := hivetest.Logger(tb)
++
+ 	ctx, cancel := context.WithCancel(context.Background())
+ 	defer cancel()
+ 
+@@ -133,7 +134,7 @@ func setup(tb testing.TB) *ClusterMeshServicesTestSuite {
+ 		CommonMetrics:         common.MetricsProvider(subsystem)(),
+ 		StoreFactory:          store,
+ 		FeatureMetrics:        NewClusterMeshMetricsNoop(),
+-		Logger:                logrus.New(),
++		Logger:                logger,
+ 	})
+ 	require.NotNil(tb, s.mesh)
+ 
+diff --git a/pkg/clustermesh/utils/clustercfg.go b/pkg/clustermesh/utils/clustercfg.go
+index 63ff6d21261f8..91104a71e7c63 100644
+--- a/pkg/clustermesh/utils/clustercfg.go
++++ b/pkg/clustermesh/utils/clustercfg.go
+@@ -8,14 +8,14 @@ import (
+ 	"encoding/json"
+ 	"errors"
+ 	"fmt"
++	"log/slog"
+ 	"path"
+ 	"time"
+ 
+-	"github.com/sirupsen/logrus"
+-
+ 	cmtypes "github.com/cilium/cilium/pkg/clustermesh/types"
+ 	"github.com/cilium/cilium/pkg/controller"
+ 	"github.com/cilium/cilium/pkg/kvstore"
++	"github.com/cilium/cilium/pkg/logging/logfields"
+ )
+ 
+ var (
+@@ -59,7 +59,7 @@ func SetClusterConfig(ctx context.Context, clusterName string, config cmtypes.Ci
+ // (e.g., in case the associated lease unexpectedly expired).
+ func EnforceClusterConfig(
+ 	ctx context.Context, clusterName string, config cmtypes.CiliumClusterConfig,
+-	backend ClusterConfigBackend, log logrus.FieldLogger,
++	backend ClusterConfigBackend, log *slog.Logger,
+ ) (stopAndWait func(), err error) {
+ 	var (
+ 		mgr = controller.NewManager()
+@@ -83,7 +83,7 @@ func EnforceClusterConfig(
+ 
+ 				default:
+ 					if err != nil {
+-						log.WithError(err).Warning("Failed to write cluster configuration")
++						log.Warn("Failed to write cluster configuration", logfields.Error, err)
+ 					}
+ 
+ 					return err
+diff --git a/pkg/clustermesh/utils/clustercfg_test.go b/pkg/clustermesh/utils/clustercfg_test.go
+index fbedffdf857d1..d80415c7dc633 100644
+--- a/pkg/clustermesh/utils/clustercfg_test.go
++++ b/pkg/clustermesh/utils/clustercfg_test.go
+@@ -10,7 +10,7 @@ import (
+ 	"testing"
+ 	"time"
+ 
+-	"github.com/sirupsen/logrus"
++	"github.com/cilium/hive/hivetest"
+ 	"github.com/stretchr/testify/assert"
+ 	"go.uber.org/goleak"
+ 
+@@ -102,7 +102,7 @@ func TestEnforceClusterConfig(t *testing.T) {
+ 
+ 	ctx := context.Background()
+ 	mb := mockBackend{}
+-	log := logrus.New()
++	log := hivetest.Logger(t)
+ 
+ 	cfg1 := cmtypes.CiliumClusterConfig{ID: 11, Capabilities: cmtypes.CiliumClusterConfigCapabilities{SyncedCanaries: true}}
+ 	cfg2 := cmtypes.CiliumClusterConfig{ID: 22, Capabilities: cmtypes.CiliumClusterConfigCapabilities{Cached: true}}
+diff --git a/pkg/dial/dialer.go b/pkg/dial/dialer.go
+index 595575d4ee25d..e74626d0a3284 100644
+--- a/pkg/dial/dialer.go
++++ b/pkg/dial/dialer.go
+@@ -5,10 +5,9 @@ package dial
+ 
+ import (
+ 	"context"
++	"log/slog"
+ 	"net"
+ 
+-	"github.com/sirupsen/logrus"
+-
+ 	"github.com/cilium/cilium/pkg/logging/logfields"
+ )
+ 
+@@ -24,13 +23,13 @@ type dialContextFn func(context.Context, string) (net.Conn, error)
+ // that map the target hostname into the corresponding IP address (or a possible
+ // alias DNS name). The dialer eventually calls (&net.Dialer{}).DialContext with
+ // the first successfully translated address, or the original one otherwise.
+-func NewContextDialer(log logrus.FieldLogger, resolvers ...Resolver) dialContextFn {
++func NewContextDialer(log *slog.Logger, resolvers ...Resolver) dialContextFn {
+ 	return newContextDialer(log, func(ctx context.Context, address string) (net.Conn, error) {
+ 		return (&net.Dialer{}).DialContext(ctx, "tcp", address)
+ 	}, resolvers...)
+ }
+ 
+-func newContextDialer(log logrus.FieldLogger, dialContext dialContextFn, resolvers ...Resolver) dialContextFn {
++func newContextDialer(log *slog.Logger, dialContext dialContextFn, resolvers ...Resolver) dialContextFn {
+ 	return func(ctx context.Context, hostport string) (conn net.Conn, e error) {
+ 		host, port, err := net.SplitHostPort(hostport)
+ 		if err != nil {
+@@ -40,11 +39,12 @@ func newContextDialer(log logrus.FieldLogger, dialContext dialContextFn, resolve
+ 
+ 		for _, resolver := range resolvers {
+ 			if resolved, err := resolver.Resolve(ctx, host); err == nil {
+-				log.WithFields(logrus.Fields{
+-					logfields.Address: host,
+-					logfields.Port:    port,
+-					logfields.Target:  resolved,
+-				}).Debug("Resolved hostname via custom dialer")
++				log.Debug(
++					"Resolved hostname via custom dialer",
++					logfields.Address, host,
++					logfields.Port, port,
++					logfields.Target, resolved,
++				)
+ 
+ 				hostport = net.JoinHostPort(resolved, port)
+ 				break
+diff --git a/pkg/dial/dialer_test.go b/pkg/dial/dialer_test.go
+index ce17f964c13d2..95fe70241dfd6 100644
+--- a/pkg/dial/dialer_test.go
++++ b/pkg/dial/dialer_test.go
+@@ -6,10 +6,10 @@ package dial
+ import (
+ 	"context"
+ 	"errors"
++	"log/slog"
+ 	"net"
+ 	"testing"
+ 
+-	"github.com/sirupsen/logrus"
+ 	"github.com/stretchr/testify/assert"
+ )
+ 
+@@ -70,7 +70,7 @@ func TestNewContextDialer(t *testing.T) {
+ 	}
+ 
+ 	dialer := newContextDialer(
+-		logrus.New(),
++		slog.Default(),
+ 		upstream,
+ 		mockResolver{"resolve.foo", "1.2.3.4"},
+ 		mockResolver{"resolve.bar", "fd00::8888"},
+diff --git a/pkg/kvstore/etcdinit/init.go b/pkg/kvstore/etcdinit/init.go
+index 43ce635dff94e..cbc6cf4a3e9a2 100644
+--- a/pkg/kvstore/etcdinit/init.go
++++ b/pkg/kvstore/etcdinit/init.go
+@@ -6,15 +6,16 @@ package init
+ import (
+ 	"context"
+ 	"fmt"
++	"log/slog"
+ 	"path"
+ 	"slices"
+ 	"strings"
+ 
+-	"github.com/sirupsen/logrus"
+ 	"go.etcd.io/etcd/api/v3/authpb"
+ 	clientv3 "go.etcd.io/etcd/client/v3"
+ 
+ 	"github.com/cilium/cilium/pkg/kvstore"
++	"github.com/cilium/cilium/pkg/logging/logfields"
+ )
+ 
+ // ClusterMeshEtcdInit initializes etcd for use by Cilium Clustermesh via the provided client. It creates a number of
+@@ -32,7 +33,7 @@ import (
+ //
+ // Note that this function is **not idempotent**. It expects a completely blank etcd server with no non-default users,
+ // roles, permissions, or keys.
+-func ClusterMeshEtcdInit(ctx context.Context, log *logrus.Entry, client *clientv3.Client, ciliumClusterName string) error {
++func ClusterMeshEtcdInit(ctx context.Context, log *slog.Logger, client *clientv3.Client, ciliumClusterName string) error {
+ 	ic := initClient{
+ 		log:    log,
+ 		client: client,
+@@ -44,8 +45,10 @@ func ClusterMeshEtcdInit(ctx context.Context, log *logrus.Entry, client *clientv
+ 
+ 	// Root user
+ 	rootUsername := username("root")
+-	log.WithField("etcdUsername", rootUsername).
+-		Info("Configuring root user")
++	log.Info(
++		"Configuring root user",
++		logfields.EtcdUsername, rootUsername,
++	)
+ 	err := ic.addNoPasswordUser(ctx, rootUsername)
+ 	if err != nil {
+ 		return err
+@@ -57,8 +60,10 @@ func ClusterMeshEtcdInit(ctx context.Context, log *logrus.Entry, client *clientv
+ 
+ 	// Admin user
+ 	adminUsername := usernameForClusterName("admin", ciliumClusterName)
+-	log.WithField("etcdUsername", adminUsername).
+-		Info("Configuring admin user")
++	log.Info(
++		"Configuring admin user",
++		logfields.EtcdUsername, adminUsername,
++	)
+ 	err = ic.addNoPasswordUser(ctx, adminUsername)
+ 	if err != nil {
+ 		return err
+@@ -70,8 +75,10 @@ func ClusterMeshEtcdInit(ctx context.Context, log *logrus.Entry, client *clientv
+ 
+ 	// Local user (i.e., local agents accessing information cached by KVStoreMesh)
+ 	localUsername := usernameForClusterName("local", ciliumClusterName)
+-	log.WithField("etcdUsername", localUsername).
+-		Info("Configuring local user")
++	log.Info(
++		"Configuring local user",
++		logfields.EtcdUsername, localUsername,
++	)
+ 	localRolename := rolename("local")
+ 	err = ic.addNoPasswordUser(ctx, localUsername)
+ 	if err != nil {
+@@ -94,8 +101,10 @@ func ClusterMeshEtcdInit(ctx context.Context, log *logrus.Entry, client *clientv
+ 
+ 	// Remote user (i.e., remote clusters accessing state information)
+ 	remoteUsername := username("remote")
+-	log.WithField("etcdUsername", remoteUsername).
+-		Info("Configuring remote user")
++	log.Info(
++		"Configuring remote user",
++		logfields.EtcdUsername, remoteUsername,
++	)
+ 	remoteRolename := rolename("remote")
+ 	err = ic.addNoPasswordUser(ctx, remoteUsername)
+ 	if err != nil {
+@@ -140,7 +149,7 @@ func usernameForClusterName(base, clusterName string) username {
+ // package. It's entirely an internal implementation detail.
+ type initClient struct {
+ 	client *clientv3.Client
+-	log    *logrus.Entry
++	log    *slog.Logger
+ }
+ 
+ // The username and rolename types exist to make it harder to mix up usernames and rolenames, which are both strings
+@@ -155,8 +164,10 @@ const rootRolename = rolename("root")
+ // addNoPasswordUser adds a new user to etcd with no password. This is expected as later on we'll enable auth which will
+ // require other forms of authentication. This is a wrapper around the client's UserAddWithOptions method.
+ func (ic initClient) addNoPasswordUser(ctx context.Context, username username) error {
+-	ic.log.WithField("etcdUsername", username).
+-		Debug("Adding etcd user")
++	ic.log.Debug(
++		"Adding etcd user",
++		logfields.EtcdUsername, username,
++	)
+ 	_, err := ic.client.UserAddWithOptions(ctx, string(username), "", &clientv3.UserAddOptions{NoPassword: true})
+ 	if err != nil {
+ 		return fmt.Errorf("adding user '%s': %w", username, err)
+@@ -166,8 +177,10 @@ func (ic initClient) addNoPasswordUser(ctx context.Context, username username) e
+ 
+ // addRole adds a new role to etcd. This is a wrapper around the client's RoleAdd method.
+ func (ic initClient) addRole(ctx context.Context, rolename rolename) error {
+-	ic.log.WithField("etcdRolename", rolename).
+-		Debug("Adding etcd role")
++	ic.log.Debug(
++		"Adding etcd role",
++		logfields.EtcdRoleName, rolename,
++	)
+ 	_, err := ic.client.RoleAdd(ctx, string(rolename))
+ 	if err != nil {
+ 		return fmt.Errorf("adding role '%s': %w", rolename, err)
+@@ -178,9 +191,11 @@ func (ic initClient) addRole(ctx context.Context, rolename rolename) error {
+ // grantRoleToUser grants a role to a user, enabling that user access to the permissions of that role. This is a wrapper
+ // around the client's UserGrantRole method.
+ func (ic initClient) grantRoleToUser(ctx context.Context, rolename rolename, username username) error {
+-	ic.log.WithField("etcdUsername", username).
+-		WithField("etcdRolename", rolename).
+-		Debug("Granting role to etcd user")
++	ic.log.Debug(
++		"Granting role to etcd user",
++		logfields.EtcdUsername, username,
++		logfields.EtcdRoleName, rolename,
++	)
+ 	_, err := ic.client.UserGrantRole(ctx, string(username), string(rolename))
+ 	if err != nil {
+ 		return fmt.Errorf("granting role '%s' to user '%s': %w", rolename, username, err)
+@@ -231,13 +246,13 @@ func (p permission) string() string {
+ // grantPermissionToRole grants permissions on a range of keys to a role. This is a wrapper around the client's
+ // RoleGrantPermission method.
+ func (ic initClient) grantPermissionToRole(ctx context.Context, permission permission, keyRange keyRange, rolename rolename) error {
+-	ic.log.WithFields(logrus.Fields{
+-		"etcdRolename":   rolename,
+-		"etcdPermission": permission.string(),
+-		"etcdRangeStart": keyRange.start,
+-		"etcdRangeEnd":   keyRange.end,
+-	}).
+-		Debug("Granting permission on a range of keys to an etcd role")
++	ic.log.Debug(
++		"Granting permission on a range of keys to an etcd role",
++		logfields.EtcdRoleName, rolename,
++		logfields.EtcdPermission, permission,
++		logfields.EtcdRangeStart, keyRange.start,
++		logfields.EtcdRangeEnd, keyRange.end,
++	)
+ 	_, err := ic.client.RoleGrantPermission(ctx, string(rolename), keyRange.start, keyRange.end, clientv3.PermissionType(permission))
+ 	if err != nil {
+ 		return fmt.Errorf("granting role '%s' permission '%s' on range '%s' to '%s': %w", rolename, permission.string(), keyRange.start, keyRange.end, err)
+diff --git a/pkg/logging/logfields/logfields.go b/pkg/logging/logfields/logfields.go
+index 349cce2abed82..f3e2fd29075f3 100644
+--- a/pkg/logging/logfields/logfields.go
++++ b/pkg/logging/logfields/logfields.go
+@@ -1332,4 +1332,34 @@ const (
+ 	Operation = "operation"
+ 
+ 	KeyPairSN = "keyPairSN"
++
++	Timeout = "timeout"
++
++	EtcdDataDir = "etcdDataDir"
++
++	EtcdClusterName = "etcdClusterName"
++
++	EtcdInitialClusterToken = "etcdInitialClusterToken"
++
++	EtcdListenClientUrl = "loopbackEndpoint"
++
++	EtcdBinary = "etcdBinaryLocation"
++
++	EtcdFlags = "etcdCmd"
++
++	EtcdExitCode = "etcdExitCode"
++
++	EtcdClientConfig = "etcdClientConfig"
++
++	EtcdUsername = "etcdUsername"
++
++	EtcdRoleName = "etcdRoleName"
++
++	EtcdPermission = "etcdPermission"
++
++	EtcdRangeStart = "etcdRangeStart"
++
++	EtcdRangeEnd = "etcdRangeEnd"
++
++	K8sExportName = "K8sExportName"
+ )
+diff --git a/pkg/option/config.go b/pkg/option/config.go
+index 0ccbd14f20a12..b1b4dd0bcadac 100644
+--- a/pkg/option/config.go
++++ b/pkg/option/config.go
+@@ -9,6 +9,7 @@ import (
+ 	"encoding/json"
+ 	"errors"
+ 	"fmt"
++	"log/slog"
+ 	"math"
+ 	"net"
+ 	"net/netip"
+@@ -1298,6 +1299,27 @@ func BindEnvWithLegacyEnvFallback(vp *viper.Viper, optName, legacyEnvName string
+ 	vp.BindEnv(optName, envName)
+ }
+ 
++// LogRegisteredSlogOptions logs all options that where bound to viper.
++func LogRegisteredSlogOptions(vp *viper.Viper, entry *slog.Logger) {
++	keys := vp.AllKeys()
++	slices.Sort(keys)
++	for _, k := range keys {
++		ss := vp.GetStringSlice(k)
++		if len(ss) == 0 {
++			sm := vp.GetStringMap(k)
++			for k, v := range sm {
++				ss = append(ss, fmt.Sprintf("%s=%s", k, v))
++			}
++		}
++
++		if len(ss) > 0 {
++			entry.Info(fmt.Sprintf("  --%s='%s'", k, strings.Join(ss, ",")))
++		} else {
++			entry.Info(fmt.Sprintf("  --%s='%s'", k, vp.GetString(k)))
++		}
++	}
++}
++
+ // LogRegisteredOptions logs all options that where bound to viper.
+ func LogRegisteredOptions(vp *viper.Viper, entry *logrus.Entry) {
+ 	keys := vp.AllKeys()

@@ -1,0 +1,3978 @@
+diff --git a/.github/workflows/test-template.yml b/.github/workflows/test-template.yml
+index 488ae5ea48f9..e7e0f09b335b 100644
+--- a/.github/workflows/test-template.yml
++++ b/.github/workflows/test-template.yml
+@@ -862,17 +862,6 @@ jobs:
+         name: 'engines'
+         working-directory: packages/engines
+ 
+-      - run: pnpm run test
+-        name: 'adapter-planetscale'
+-        working-directory: packages/adapter-planetscale
+-
+-      - run: pnpm run test
+-        name: 'adapter-neon'
+-        working-directory: packages/adapter-neon
+-
+-      - run: pnpm run test
+-        name: 'adapter-pg'
+-        working-directory: packages/adapter-pg
+       - run: pnpm run test
+         name: 'instrumentation'
+         working-directory: packages/instrumentation
+diff --git a/packages/adapter-d1/src/d1.ts b/packages/adapter-d1/src/d1.ts
+index 9321c3d99083..c91cee55e405 100644
+--- a/packages/adapter-d1/src/d1.ts
++++ b/packages/adapter-d1/src/d1.ts
+@@ -5,13 +5,13 @@ import {
+   ConnectionInfo,
+   Debug,
+   DriverAdapterError,
+-  SqlConnection,
+-  SqlMigrationAwareDriverAdapter,
++  IsolationLevel,
++  SqlDriverAdapter,
++  SqlMigrationAwareDriverAdapterFactory,
+   SqlQuery,
+   SqlQueryable,
+   SqlResultSet,
+   Transaction,
+-  TransactionContext,
+   TransactionOptions,
+ } from '@prisma/driver-adapter-utils'
+ import { blue, cyan, red, yellow } from 'kleur/colors'
+@@ -115,25 +115,7 @@ class D1Transaction extends D1Queryable<StdClient> implements Transaction {
+   }
+ }
+ 
+-class D1TransactionContext extends D1Queryable<StdClient> implements TransactionContext {
+-  constructor(readonly client: StdClient) {
+-    super(client)
+-  }
+-
+-  async startTransaction(): Promise<Transaction> {
+-    const options: TransactionOptions = {
+-      // TODO: D1 does not have a Transaction API.
+-      usePhantomQuery: true,
+-    }
+-
+-    const tag = '[js::startTransaction]'
+-    debug('%s options: %O', tag, options)
+-
+-    return new D1Transaction(this.client, options)
+-  }
+-}
+-
+-export class PrismaD1 extends D1Queryable<StdClient> implements SqlConnection {
++export class PrismaD1Adapter extends D1Queryable<StdClient> implements SqlDriverAdapter {
+   readonly tags = {
+     error: red('prisma:error'),
+     warn: yellow('prisma:warn'),
+@@ -178,13 +160,27 @@ export class PrismaD1 extends D1Queryable<StdClient> implements SqlConnection {
+     }
+   }
+ 
+-  async transactionContext(): Promise<TransactionContext> {
++  async startTransaction(isolationLevel?: IsolationLevel): Promise<Transaction> {
++    if (isolationLevel && isolationLevel !== 'SERIALIZABLE') {
++      throw new DriverAdapterError({
++        kind: 'InvalidIsolationLevel',
++        level: isolationLevel,
++      })
++    }
++
+     this.warnOnce(
+       'D1 Transaction',
+       "Cloudflare D1 does not support transactions yet. When using Prisma's D1 adapter, implicit & explicit transactions will be ignored and run as individual queries, which breaks the guarantees of the ACID properties of transactions. For more details see https://pris.ly/d/d1-transactions",
+     )
+ 
+-    return new D1TransactionContext(this.client)
++    const options: TransactionOptions = {
++      usePhantomQuery: true,
++    }
++
++    const tag = '[js::startTransaction]'
++    debug('%s options: %O', tag, options)
++
++    return new D1Transaction(this.client, options)
+   }
+ 
+   async dispose(): Promise<void> {
+@@ -192,17 +188,17 @@ export class PrismaD1 extends D1Queryable<StdClient> implements SqlConnection {
+   }
+ }
+ 
+-export class PrismaD1WithMigration implements SqlMigrationAwareDriverAdapter {
++export class PrismaD1AdapterFactory implements SqlMigrationAwareDriverAdapterFactory {
+   readonly provider = 'sqlite'
+   readonly adapterName = packageName
+ 
+   constructor(private client: StdClient) {}
+ 
+-  async connect(): Promise<SqlConnection> {
+-    return new PrismaD1(this.client, async () => {})
++  async connect(): Promise<SqlDriverAdapter> {
++    return new PrismaD1Adapter(this.client, async () => {})
+   }
+ 
+-  async connectToShadowDb(): Promise<SqlConnection> {
++  async connectToShadowDb(): Promise<SqlDriverAdapter> {
+     const { Miniflare } = await import('miniflare')
+ 
+     const mf = new Miniflare({
+@@ -217,7 +213,7 @@ export class PrismaD1WithMigration implements SqlMigrationAwareDriverAdapter {
+       `,
+     })
+     const db = await mf.getD1Database('db')
+-    return new PrismaD1(db, () => mf.dispose())
++    return new PrismaD1Adapter(db, () => mf.dispose())
+   }
+ }
+ 
+diff --git a/packages/adapter-d1/src/index.ts b/packages/adapter-d1/src/index.ts
+index c7bc057b3d09..5254f1b3c629 100644
+--- a/packages/adapter-d1/src/index.ts
++++ b/packages/adapter-d1/src/index.ts
+@@ -1 +1 @@
+-export { PrismaD1 } from './d1'
++export { PrismaD1AdapterFactory as PrismaD1 } from './d1'
+diff --git a/packages/adapter-libsql/README.md b/packages/adapter-libsql/README.md
+index 518d8943b54e..c69759dc5c16 100644
+--- a/packages/adapter-libsql/README.md
++++ b/packages/adapter-libsql/README.md
+@@ -40,18 +40,16 @@ Update your Prisma Client instance to use the libSQL database Client:
+ // Import needed packages
+ import { PrismaClient } from '@prisma/client'
+ import { PrismaLibSQL } from '@prisma/adapter-libsql'
+-import { createClient } from '@libsql/client'
+ 
+ // Setup
+ const connectionString = `${process.env.TURSO_DATABASE_URL}`
+ const authToken = `${process.env.TURSO_AUTH_TOKEN}`
+ 
+ // Init prisma client
+-const libsql = createClient({
++const adapter = new PrismaLibSQL({
+   url: connectionString,
+   authToken,
+ })
+-const adapter = new PrismaLibSQL(libsql)
+ const prisma = new PrismaClient({ adapter })
+ ```
+ 
+diff --git a/packages/adapter-libsql/src/index.ts b/packages/adapter-libsql/src/index.ts
+index 04a95cc4cfcd..e5a921691f75 100644
+--- a/packages/adapter-libsql/src/index.ts
++++ b/packages/adapter-libsql/src/index.ts
+@@ -1 +1 @@
+-export { PrismaLibSQL } from './libsql'
++export { PrismaLibSQLAdapterFactory as PrismaLibSQL } from './libsql'
+diff --git a/packages/adapter-libsql/src/libsql.ts b/packages/adapter-libsql/src/libsql.ts
+index b608ea896cdd..c232ad97279c 100644
+--- a/packages/adapter-libsql/src/libsql.ts
++++ b/packages/adapter-libsql/src/libsql.ts
+@@ -5,14 +5,15 @@ import type {
+   ResultSet as LibSqlResultSet,
+   Transaction as LibSqlTransactionRaw,
+ } from '@libsql/client'
++import { createClient } from '@libsql/client'
+ import type {
+-  SqlConnection,
+-  SqlMigrationAwareDriverAdapter,
++  IsolationLevel,
++  SqlDriverAdapter,
++  SqlMigrationAwareDriverAdapterFactory,
+   SqlQuery,
+   SqlQueryable,
+   SqlResultSet,
+   Transaction,
+-  TransactionContext,
+   TransactionOptions,
+ } from '@prisma/driver-adapter-utils'
+ import { Debug, DriverAdapterError } from '@prisma/driver-adapter-utils'
+@@ -125,12 +126,30 @@ class LibSqlTransaction extends LibSqlQueryable<TransactionClient> implements Tr
+   }
+ }
+ 
+-class LibSqlTransactionContext extends LibSqlQueryable<StdClient> implements TransactionContext {
+-  constructor(readonly client: StdClient, readonly release: () => void) {
++export class PrismaLibSQLAdapter extends LibSqlQueryable<StdClient> implements SqlDriverAdapter {
++  constructor(client: StdClient) {
+     super(client)
+   }
+ 
+-  async startTransaction(): Promise<Transaction> {
++  async executeScript(script: string): Promise<void> {
++    const release = await this[LOCK_TAG].acquire()
++    try {
++      await this.client.executeMultiple(script)
++    } catch (e) {
++      this.onError(e)
++    } finally {
++      release()
++    }
++  }
++
++  async startTransaction(isolationLevel?: IsolationLevel): Promise<Transaction> {
++    if (isolationLevel && isolationLevel !== 'SERIALIZABLE') {
++      throw new DriverAdapterError({
++        kind: 'InvalidIsolationLevel',
++        level: isolationLevel,
++      })
++    }
++
+     const options: TransactionOptions = {
+       usePhantomQuery: true,
+     }
+@@ -138,70 +157,41 @@ class LibSqlTransactionContext extends LibSqlQueryable<StdClient> implements Tra
+     const tag = '[js::startTransaction]'
+     debug('%s options: %O', tag, options)
+ 
++    const release = await this[LOCK_TAG].acquire()
++
+     try {
+       const tx = await this.client.transaction('deferred')
+-      return new LibSqlTransaction(tx, options, this.release)
++      return new LibSqlTransaction(tx, options, release)
+     } catch (e) {
+       // note: we only release the lock if creating the transaction fails, it must stay locked otherwise,
+       // hence `catch` and rethrowing the error and not `finally`.
+-      this.release()
+-      throw e
+-    }
+-  }
+-}
+-
+-export class PrismaLibSQL extends LibSqlQueryable<StdClient> implements SqlConnection {
+-  constructor(client: StdClient) {
+-    super(client)
+-  }
+-
+-  async executeScript(script: string): Promise<void> {
+-    const release = await this[LOCK_TAG].acquire()
+-    try {
+-      await this.client.executeMultiple(script)
+-    } catch (e) {
+-      this.onError(e)
+-    } finally {
+       release()
++      throw e
+     }
+   }
+ 
+-  async transactionContext(): Promise<TransactionContext> {
+-    const release = await this[LOCK_TAG].acquire()
+-    return new LibSqlTransactionContext(this.client, release)
+-  }
+-
+   dispose(): Promise<void> {
+     this.client.close()
+     return Promise.resolve()
+   }
+ }
+ 
+-export class PrismaLibSQLWithMigration implements SqlMigrationAwareDriverAdapter {
++export class PrismaLibSQLAdapterFactory implements SqlMigrationAwareDriverAdapterFactory {
+   readonly provider = 'sqlite'
+   readonly adapterName = packageName
+ 
+   constructor(private readonly config: LibSqlConfig) {}
+ 
+-  async connect(): Promise<SqlConnection> {
+-    return new PrismaLibSQL(await createLibSQLClient(this.config))
++  connect(): Promise<SqlDriverAdapter> {
++    return Promise.resolve(new PrismaLibSQLAdapter(createLibSQLClient(this.config)))
+   }
+ 
+-  async connectToShadowDb(): Promise<SqlConnection> {
++  connectToShadowDb(): Promise<SqlDriverAdapter> {
+     // TODO: the user should be able to provide a custom URL for the shadow database
+-    return new PrismaLibSQL(await createLibSQLClient({ ...this.config, url: ':memory:' }))
++    return Promise.resolve(new PrismaLibSQLAdapter(createLibSQLClient({ ...this.config, url: ':memory:' })))
+   }
+ }
+ 
+-async function createLibSQLClient(config: LibSqlConfig): Promise<StdClient> {
+-  try {
+-    // The import below fails in AWS Lambda when bundled with esbuild.
+-    // We fall back to the web version of the client if the native version fails.
+-    // https://github.com/tursodatabase/libsql-client-ts/issues/112
+-    const { createClient } = await import('@libsql/client')
+-    return createClient(config)
+-  } catch (e) {
+-    const { createClient } = await import('@libsql/client/web')
+-    return createClient(config)
+-  }
++function createLibSQLClient(config: LibSqlConfig): StdClient {
++  return createClient(config)
+ }
+diff --git a/packages/adapter-neon/README.md b/packages/adapter-neon/README.md
+index b4c053817a7e..9f94c9ea79f2 100644
+--- a/packages/adapter-neon/README.md
++++ b/packages/adapter-neon/README.md
+@@ -47,7 +47,7 @@ Update your Prisma Client instance to use the Neon serverless driver using a Web
+ 
+ ```ts
+ // Import needed packages
+-import { Pool, neonConfig } from '@neondatabase/serverless'
++import { neonConfig } from '@neondatabase/serverless'
+ import { PrismaNeon } from '@prisma/adapter-neon'
+ import { PrismaClient } from '@prisma/client'
+ import ws from 'ws'
+@@ -57,8 +57,7 @@ neonConfig.webSocketConstructor = ws
+ const connectionString = `${process.env.DATABASE_URL}`
+ 
+ // Init prisma client
+-const pool = new Pool({ connectionString })
+-const adapter = new PrismaNeon(pool)
++const adapter = new PrismaNeon({ connectionString })
+ const prisma = new PrismaClient({ adapter })
+ 
+ // Use Prisma Client as normal
+diff --git a/packages/adapter-neon/src/index.ts b/packages/adapter-neon/src/index.ts
+index f160d413ade0..5cbc47c14c4a 100644
+--- a/packages/adapter-neon/src/index.ts
++++ b/packages/adapter-neon/src/index.ts
+@@ -1 +1 @@
+-export { PrismaNeon, PrismaNeonHTTP } from './neon'
++export { PrismaNeonAdapterFactory as PrismaNeon, PrismaNeonHTTPAdapterFactory as PrismaNeonHTTP } from './neon'
+diff --git a/packages/adapter-neon/src/neon.test.ts b/packages/adapter-neon/src/neon.test.ts
+deleted file mode 100644
+index 75e930f8b138..000000000000
+--- a/packages/adapter-neon/src/neon.test.ts
++++ /dev/null
+@@ -1,69 +0,0 @@
+-import { Client, Pool } from '@neondatabase/serverless'
+-
+-import { PrismaNeon, PrismaNeonHTTP } from './neon'
+-
+-describe('validation', () => {
+-  test('throws if passed Client instance', () => {
+-    const client = new Client()
+-
+-    expect(() => {
+-      // @ts-ignore
+-      new PrismaNeon(client)
+-    }).toThrowErrorMatchingInlineSnapshot(`
+-      "PrismaNeon must be initialized with an instance of Pool:
+-      import { Pool } from '@neondatabase/serverless'
+-      const pool = new Pool({ connectionString: url })
+-      const adapter = new PrismaNeon(pool)
+-      "
+-    `)
+-  })
+-
+-  test('accepts Pool instance', () => {
+-    const pool = new Pool()
+-
+-    expect(() => {
+-      new PrismaNeon(pool)
+-    }).not.toThrow()
+-  })
+-})
+-
+-describe('neon version support', () => {
+-  it('supports @neondatabase/serverless < 1.0.0', async () => {
+-    // Before v0 client is directly callable to execute the SQL
+-    const v0NeonClientMock = jest
+-      .fn()
+-      .mockResolvedValue({ fields: [], command: '', rowCount: 0, rows: [], rowAsArray: false })
+-
+-    // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
+-    const adapter = new PrismaNeonHTTP(v0NeonClientMock as any)
+-
+-    await adapter.queryRaw({ sql: 'SELECT 1', args: [], argTypes: [] })
+-
+-    expect(v0NeonClientMock).toHaveBeenCalledWith('SELECT 1', [], {
+-      arrayMode: true,
+-      fullResults: true,
+-      types: { getTypeParser: expect.anything() },
+-    })
+-  })
+-
+-  it('supports @neondatabase/serverless >= 1.0.0', async () => {
+-    // With v1 client is only callable via the `query` method
+-    const mockQueryFn = jest
+-      .fn()
+-      .mockResolvedValue({ fields: [], command: '', rowCount: 0, rows: [], rowAsArray: false })
+-    const v1NeonClientMock = {
+-      query: mockQueryFn,
+-    }
+-
+-    // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
+-    const adapter = new PrismaNeonHTTP(v1NeonClientMock as any)
+-
+-    await adapter.queryRaw({ sql: 'SELECT 1', args: [], argTypes: [] })
+-
+-    expect(mockQueryFn).toHaveBeenCalledWith('SELECT 1', [], {
+-      arrayMode: true,
+-      fullResults: true,
+-      types: { getTypeParser: expect.anything() },
+-    })
+-  })
+-})
+diff --git a/packages/adapter-neon/src/neon.ts b/packages/adapter-neon/src/neon.ts
+index 29c8f78065be..cb8fafe6ac47 100644
+--- a/packages/adapter-neon/src/neon.ts
++++ b/packages/adapter-neon/src/neon.ts
+@@ -4,12 +4,13 @@ import * as neon from '@neondatabase/serverless'
+ import type {
+   ColumnType,
+   ConnectionInfo,
+-  SqlConnection,
++  IsolationLevel,
++  SqlDriverAdapter,
++  SqlDriverAdapterFactory,
+   SqlQuery,
+   SqlQueryable,
+   SqlResultSet,
+   Transaction,
+-  TransactionContext,
+   TransactionOptions,
+ } from '@prisma/driver-adapter-utils'
+ import { Debug, DriverAdapterError } from '@prisma/driver-adapter-utils'
+@@ -164,38 +165,14 @@ class NeonTransaction extends NeonWsQueryable<neon.PoolClient> implements Transa
+   }
+ }
+ 
+-class NeonTransactionContext extends NeonWsQueryable<neon.PoolClient> implements TransactionContext {
+-  constructor(readonly conn: neon.PoolClient) {
+-    super(conn)
+-  }
+-
+-  async startTransaction(): Promise<Transaction> {
+-    const options: TransactionOptions = {
+-      usePhantomQuery: false,
+-    }
+-
+-    const tag = '[js::startTransaction]'
+-    debug('%s options: %O', tag, options)
+-
+-    return new NeonTransaction(this.conn, options)
+-  }
+-}
+-
+ export type PrismaNeonOptions = {
+   schema?: string
+ }
+ 
+-export class PrismaNeon extends NeonWsQueryable<neon.Pool> implements SqlConnection {
++export class PrismaNeonAdapter extends NeonWsQueryable<neon.Pool> implements SqlDriverAdapter {
+   private isRunning = true
+ 
+   constructor(pool: neon.Pool, private options?: PrismaNeonOptions) {
+-    if (!(pool instanceof neon.Pool)) {
+-      throw new TypeError(`PrismaNeon must be initialized with an instance of Pool:
+-import { Pool } from '@neondatabase/serverless'
+-const pool = new Pool({ connectionString: url })
+-const adapter = new PrismaNeon(pool)
+-`)
+-    }
+     super(pool)
+   }
+ 
+@@ -203,17 +180,39 @@ const adapter = new PrismaNeon(pool)
+     throw new Error('Not implemented yet')
+   }
+ 
++  async startTransaction(isolationLevel?: IsolationLevel): Promise<Transaction> {
++    const options: TransactionOptions = {
++      usePhantomQuery: false,
++    }
++
++    const tag = '[js::startTransaction]'
++    debug('%s options: %O', tag, options)
++
++    const conn = await this.client.connect()
++    const tx = new NeonTransaction(conn, options)
++
++    try {
++      await tx.executeRaw({ sql: 'BEGIN', args: [], argTypes: [] })
++      if (isolationLevel) {
++        await tx.executeRaw({
++          sql: `SET TRANSACTION ISOLATION LEVEL ${isolationLevel}`,
++          args: [],
++          argTypes: [],
++        })
++      }
++      return tx
++    } catch (error) {
++      conn.release(error)
++      throw error
++    }
++  }
++
+   getConnectionInfo(): ConnectionInfo {
+     return {
+       schemaName: this.options?.schema,
+     }
+   }
+ 
+-  async transactionContext(): Promise<TransactionContext> {
+-    const conn = await this.client.connect()
+-    return new NeonTransactionContext(conn)
+-  }
+-
+   async dispose(): Promise<void> {
+     if (this.isRunning) {
+       await this.client.end()
+@@ -222,7 +221,18 @@ const adapter = new PrismaNeon(pool)
+   }
+ }
+ 
+-export class PrismaNeonHTTP extends NeonQueryable implements SqlConnection {
++export class PrismaNeonAdapterFactory implements SqlDriverAdapterFactory {
++  readonly provider = 'postgres'
++  readonly adapterName = packageName
++
++  constructor(private readonly config: neon.PoolConfig, private options?: PrismaNeonOptions) {}
++
++  async connect(): Promise<SqlDriverAdapter> {
++    return new PrismaNeonAdapter(new neon.Pool(this.config), this.options)
++  }
++}
++
++export class PrismaNeonHTTPAdapter extends NeonQueryable implements SqlDriverAdapter {
+   private client: (sql: string, params: any[], opts: Record<string, any>) => neon.NeonQueryPromise<any, any>
+ 
+   constructor(client: neon.NeonQueryFunction<any, any>) {
+@@ -237,6 +247,10 @@ export class PrismaNeonHTTP extends NeonQueryable implements SqlConnection {
+     throw new Error('Not implemented yet')
+   }
+ 
++  async startTransaction(): Promise<Transaction> {
++    return Promise.reject(new Error('Transactions are not supported in HTTP mode'))
++  }
++
+   override async performIO(query: SqlQuery): Promise<PerformIOResult> {
+     const { sql, args: values } = query
+     return await this.client(sql, values, {
+@@ -260,9 +274,19 @@ export class PrismaNeonHTTP extends NeonQueryable implements SqlConnection {
+     } as neon.HTTPQueryOptions<true, true>)
+   }
+ 
+-  transactionContext(): Promise<TransactionContext> {
+-    return Promise.reject(new Error('Transactions are not supported in HTTP mode'))
+-  }
+-
+   async dispose(): Promise<void> {}
+ }
++
++export class PrismaNeonHTTPAdapterFactory implements SqlDriverAdapterFactory {
++  readonly provider = 'postgres'
++  readonly adapterName = packageName
++
++  constructor(
++    private readonly connectionString: string,
++    private readonly options: neon.HTTPQueryOptions<boolean, boolean>,
++  ) {}
++
++  async connect(): Promise<SqlDriverAdapter> {
++    return new PrismaNeonHTTPAdapter(neon.neon(this.connectionString, this.options))
++  }
++}
+diff --git a/packages/adapter-pg-worker/README.md b/packages/adapter-pg-worker/README.md
+index cda8f45aee8f..ab643fe7160f 100644
+--- a/packages/adapter-pg-worker/README.md
++++ b/packages/adapter-pg-worker/README.md
+@@ -45,14 +45,12 @@ npm install @prisma/adapter-pg-worker
+ Finally, when you instantiate Prisma Client, you need to pass an instance of Prisma ORM's driver adapter to the `PrismaClient` constructor:
+ 
+ ```ts
+-import { Pool } from '@prisma/pg-worker'
+ import { PrismaPg } from '@prisma/adapter-pg-worker'
+ import { PrismaClient } from '@prisma/client'
+ 
+ const connectionString = `${process.env.DATABASE_URL}`
+ 
+-const pool = new Pool({ connectionString })
+-const adapter = new PrismaPg(pool)
++const adapter = new PrismaPg({ connectionString })
+ const prisma = new PrismaClient({ adapter })
+ ```
+ 
+diff --git a/packages/adapter-pg-worker/src/index.ts b/packages/adapter-pg-worker/src/index.ts
+index f8e51ac2685b..44835944b078 100644
+--- a/packages/adapter-pg-worker/src/index.ts
++++ b/packages/adapter-pg-worker/src/index.ts
+@@ -1 +1 @@
+-export { PrismaPg } from './pg'
++export { PrismaPgAdapterFactory as PrismaPg } from './pg'
+diff --git a/packages/adapter-pg-worker/src/pg.test.ts b/packages/adapter-pg-worker/src/pg.test.ts
+deleted file mode 100644
+index aa9aec391f79..000000000000
+--- a/packages/adapter-pg-worker/src/pg.test.ts
++++ /dev/null
+@@ -1,28 +0,0 @@
+-import { Client, Pool } from '@prisma/pg-worker'
+-
+-import { PrismaPg } from './pg'
+-
+-describe('validation', () => {
+-  test('throws if passed Client instance', () => {
+-    const client = new Client()
+-
+-    expect(() => {
+-      // @ts-ignore
+-      new PrismaPg(client)
+-    }).toThrowErrorMatchingInlineSnapshot(`
+-      "PrismaPg must be initialized with an instance of Pool:
+-      import { Pool } from 'pg'
+-      const pool = new Pool({ connectionString: url })
+-      const adapter = new PrismaPg(pool)
+-      "
+-    `)
+-  })
+-
+-  test('accepts Pool instance', () => {
+-    const pool = new Pool()
+-
+-    expect(() => {
+-      new PrismaPg(pool)
+-    }).not.toThrow()
+-  })
+-})
+diff --git a/packages/adapter-pg-worker/src/pg.ts b/packages/adapter-pg-worker/src/pg.ts
+index 8ad82777ee03..54fe189ef39a 100644
+--- a/packages/adapter-pg-worker/src/pg.ts
++++ b/packages/adapter-pg-worker/src/pg.ts
+@@ -3,12 +3,13 @@
+ import type {
+   ColumnType,
+   ConnectionInfo,
+-  SqlConnection,
++  IsolationLevel,
++  SqlDriverAdapter,
++  SqlDriverAdapterFactory,
+   SqlQuery,
+   SqlQueryable,
+   SqlResultSet,
+   Transaction,
+-  TransactionContext,
+   TransactionOptions,
+ } from '@prisma/driver-adapter-utils'
+ import { Debug, DriverAdapterError } from '@prisma/driver-adapter-utils'
+@@ -150,36 +151,12 @@ class PgTransaction extends PgQueryable<TransactionClient> implements Transactio
+   }
+ }
+ 
+-class PgTransactionContext extends PgQueryable<pg.PoolClient> implements TransactionContext {
+-  constructor(readonly conn: pg.PoolClient) {
+-    super(conn)
+-  }
+-
+-  async startTransaction(): Promise<Transaction> {
+-    const options: TransactionOptions = {
+-      usePhantomQuery: false,
+-    }
+-
+-    const tag = '[js::startTransaction]'
+-    debug('%s options: %O', tag, options)
+-
+-    return new PgTransaction(this.conn, options)
+-  }
+-}
+-
+ export type PrismaPgOptions = {
+   schema?: string
+ }
+ 
+-export class PrismaPg extends PgQueryable<StdClient> implements SqlConnection {
++export class PrismaPgAdapter extends PgQueryable<StdClient> implements SqlDriverAdapter {
+   constructor(client: pg.Pool, private options?: PrismaPgOptions) {
+-    if (!(client instanceof pg.Pool)) {
+-      throw new TypeError(`PrismaPg must be initialized with an instance of Pool:
+-import { Pool } from 'pg'
+-const pool = new Pool({ connectionString: url })
+-const adapter = new PrismaPg(pool)
+-`)
+-    }
+     super(client)
+   }
+ 
+@@ -193,12 +170,46 @@ const adapter = new PrismaPg(pool)
+     }
+   }
+ 
+-  async transactionContext(): Promise<TransactionContext> {
++  async startTransaction(isolationLevel?: IsolationLevel): Promise<Transaction> {
++    const options: TransactionOptions = {
++      usePhantomQuery: false,
++    }
++
++    const tag = '[js::startTransaction]'
++    debug('%s options: %O', tag, options)
++
+     const conn = await this.client.connect()
+-    return new PgTransactionContext(conn)
++    const tx = new PgTransaction(conn, options)
++
++    try {
++      await tx.executeRaw({ sql: 'BEGIN', args: [], argTypes: [] })
++      if (isolationLevel) {
++        await tx.executeRaw({
++          sql: `SET TRANSACTION ISOLATION LEVEL ${isolationLevel}`,
++          args: [],
++          argTypes: [],
++        })
++      }
++    } catch (error) {
++      conn.release(error)
++      throw error
++    }
++
++    return tx
+   }
+ 
+   dispose(): Promise<void> {
+     return this.client.end()
+   }
+ }
++
++export class PrismaPgAdapterFactory implements SqlDriverAdapterFactory {
++  readonly provider = 'postgres'
++  readonly adapterName = packageName
++
++  constructor(private readonly config: pg.PoolConfig, private readonly options?: PrismaPgOptions) {}
++
++  async connect(): Promise<SqlDriverAdapter> {
++    return new PrismaPgAdapter(new pg.Pool(this.config), this.options)
++  }
++}
+diff --git a/packages/adapter-pg/README.md b/packages/adapter-pg/README.md
+index 3904d26a849d..371df9076b36 100644
+--- a/packages/adapter-pg/README.md
++++ b/packages/adapter-pg/README.md
+@@ -47,14 +47,12 @@ npm install @prisma/adapter-pg
+ Finally, when you instantiate Prisma Client, you need to pass an instance of Prisma ORM's driver adapter to the `PrismaClient` constructor:
+ 
+ ```ts
+-import { Pool } from 'pg'
+ import { PrismaPg } from '@prisma/adapter-pg'
+ import { PrismaClient } from '@prisma/client'
+ 
+ const connectionString = `${process.env.DATABASE_URL}`
+ 
+-const pool = new Pool({ connectionString })
+-const adapter = new PrismaPg(pool)
++const adapter = new PrismaPg({ connectionString })
+ const prisma = new PrismaClient({ adapter })
+ ```
+ 
+diff --git a/packages/adapter-pg/src/index.ts b/packages/adapter-pg/src/index.ts
+index f8e51ac2685b..44835944b078 100644
+--- a/packages/adapter-pg/src/index.ts
++++ b/packages/adapter-pg/src/index.ts
+@@ -1 +1 @@
+-export { PrismaPg } from './pg'
++export { PrismaPgAdapterFactory as PrismaPg } from './pg'
+diff --git a/packages/adapter-pg/src/pg.test.ts b/packages/adapter-pg/src/pg.test.ts
+deleted file mode 100644
+index 006aeb7a102b..000000000000
+--- a/packages/adapter-pg/src/pg.test.ts
++++ /dev/null
+@@ -1,13 +0,0 @@
+-import { Pool } from 'pg'
+-
+-import { PrismaPg } from './pg'
+-
+-describe('validation', () => {
+-  test('accepts Pool instance', () => {
+-    const pool = new Pool()
+-
+-    expect(() => {
+-      new PrismaPg(pool)
+-    }).not.toThrow()
+-  })
+-})
+diff --git a/packages/adapter-pg/src/pg.ts b/packages/adapter-pg/src/pg.ts
+index 577d925627c2..b03f4570ec6f 100644
+--- a/packages/adapter-pg/src/pg.ts
++++ b/packages/adapter-pg/src/pg.ts
+@@ -3,13 +3,13 @@
+ import type {
+   ColumnType,
+   ConnectionInfo,
+-  SqlConnection,
+-  SqlMigrationAwareDriverAdapter,
++  IsolationLevel,
++  SqlDriverAdapter,
++  SqlMigrationAwareDriverAdapterFactory,
+   SqlQuery,
+   SqlQueryable,
+   SqlResultSet,
+   Transaction,
+-  TransactionContext,
+   TransactionOptions,
+ } from '@prisma/driver-adapter-utils'
+ import { Debug, DriverAdapterError } from '@prisma/driver-adapter-utils'
+@@ -161,12 +161,16 @@ class PgTransaction extends PgQueryable<TransactionClient> implements Transactio
+   }
+ }
+ 
+-class PgTransactionContext extends PgQueryable<pg.PoolClient> implements TransactionContext {
+-  constructor(readonly conn: pg.PoolClient) {
+-    super(conn)
++export type PrismaPgOptions = {
++  schema?: string
++}
++
++export class PrismaPgAdapter extends PgQueryable<StdClient> implements SqlDriverAdapter {
++  constructor(client: StdClient, private options?: PrismaPgOptions, private readonly release?: () => Promise<void>) {
++    super(client)
+   }
+ 
+-  async startTransaction(): Promise<Transaction> {
++  async startTransaction(isolationLevel?: IsolationLevel): Promise<Transaction> {
+     const options: TransactionOptions = {
+       usePhantomQuery: false,
+     }
+@@ -174,25 +178,23 @@ class PgTransactionContext extends PgQueryable<pg.PoolClient> implements Transac
+     const tag = '[js::startTransaction]'
+     debug('%s options: %O', tag, options)
+ 
+-    return new PgTransaction(this.conn, options)
+-  }
+-}
+-
+-export type PrismaPgOptions = {
+-  schema?: string
+-}
++    const conn = await this.client.connect()
++    const tx = new PgTransaction(conn, options)
+ 
+-export class PrismaPg extends PgQueryable<StdClient> implements SqlConnection {
+-  constructor(client: StdClient, private options?: PrismaPgOptions, private readonly release?: () => Promise<void>) {
+-    // Note: Full `client instanceof pg.Pool` check would sometimes give false negatives depending on the package resolution.
+-    if (!client) {
+-      throw new TypeError(`PrismaPg must be initialized with an instance of Pool:
+-import { Pool } from 'pg'
+-const pool = new Pool({ connectionString: url })
+-const adapter = new PrismaPg(pool)
+-`)
++    try {
++      await tx.executeRaw({ sql: 'BEGIN', args: [], argTypes: [] })
++      if (isolationLevel) {
++        await tx.executeRaw({
++          sql: `SET TRANSACTION ISOLATION LEVEL ${isolationLevel}`,
++          args: [],
++          argTypes: [],
++        })
++      }
++      return tx
++    } catch (error) {
++      conn.release(error)
++      throw error
+     }
+-    super(client)
+   }
+ 
+   async executeScript(script: string): Promise<void> {
+@@ -212,33 +214,28 @@ const adapter = new PrismaPg(pool)
+     }
+   }
+ 
+-  async transactionContext(): Promise<TransactionContext> {
+-    const conn = await this.client.connect()
+-    return new PgTransactionContext(conn)
+-  }
+-
+   async dispose(): Promise<void> {
+     await this.release?.()
+     return await this.client.end()
+   }
+ }
+ 
+-export class PrismaPgWithMigration implements SqlMigrationAwareDriverAdapter {
+-  readonly provider = 'sqlite'
++export class PrismaPgAdapterFactory implements SqlMigrationAwareDriverAdapterFactory {
++  readonly provider = 'postgres'
+   readonly adapterName = packageName
+ 
+   constructor(private readonly config: pg.PoolConfig, private readonly options?: PrismaPgOptions) {}
+ 
+-  async connect(): Promise<SqlConnection> {
+-    return new PrismaPg(new pg.Pool(this.config), this.options, async () => {})
++  async connect(): Promise<SqlDriverAdapter> {
++    return new PrismaPgAdapter(new pg.Pool(this.config), this.options, async () => {})
+   }
+ 
+-  async connectToShadowDb(): Promise<SqlConnection> {
++  async connectToShadowDb(): Promise<SqlDriverAdapter> {
+     const conn = await this.connect()
+     const database = `prisma_migrate_shadow_db_${globalThis.crypto.randomUUID()}`
+     await conn.executeScript(`CREATE DATABASE "${database}"`)
+ 
+-    return new PrismaPg(new pg.Pool({ ...this.config, database }), undefined, async () => {
++    return new PrismaPgAdapter(new pg.Pool({ ...this.config, database }), undefined, async () => {
+       await conn.executeScript(`DROP DATABASE "${database}"`)
+       await conn.dispose()
+     })
+diff --git a/packages/adapter-planetscale/README.md b/packages/adapter-planetscale/README.md
+index cf812fd65ff9..6559b9255565 100644
+--- a/packages/adapter-planetscale/README.md
++++ b/packages/adapter-planetscale/README.md
+@@ -50,7 +50,6 @@ Update your Prisma Client instance to use the PlanetsScale serverless driver:
+ 
+ ```ts
+ // Import needed packages
+-import { Client } from '@planetscale/database'
+ import { PrismaPlanetScale } from '@prisma/adapter-planetscale'
+ import { PrismaClient } from '@prisma/client'
+ import { fetch as undiciFetch } from 'undici'
+@@ -59,8 +58,7 @@ import { fetch as undiciFetch } from 'undici'
+ const connectionString = `${process.env.DATABASE_URL}`
+ 
+ // Init prisma client
+-const client = new Client({ url: connectionString, fetch: undiciFetch })
+-const adapter = new PrismaPlanetScale(client)
++const adapter = new PrismaPlanetScale({ url: connectionString, fetch: undiciFetch })
+ const prisma = new PrismaClient({ adapter })
+ 
+ // Use Prisma Client as normal
+diff --git a/packages/adapter-planetscale/src/index.ts b/packages/adapter-planetscale/src/index.ts
+index 5e8add856fbb..346e40fa69b7 100644
+--- a/packages/adapter-planetscale/src/index.ts
++++ b/packages/adapter-planetscale/src/index.ts
+@@ -1 +1 @@
+-export { PrismaPlanetScale } from './planetscale'
++export { PrismaPlanetScaleAdapterFactory as PrismaPlanetScale } from './planetscale'
+diff --git a/packages/adapter-planetscale/src/planetscale.test.ts b/packages/adapter-planetscale/src/planetscale.test.ts
+deleted file mode 100644
+index 39514c40c15e..000000000000
+--- a/packages/adapter-planetscale/src/planetscale.test.ts
++++ /dev/null
+@@ -1,29 +0,0 @@
+-import { Client, connect } from '@planetscale/database'
+-import { fetch as undiciFetch } from 'undici'
+-
+-import { PrismaPlanetScale } from './planetscale'
+-
+-describe('validation', () => {
+-  test('throws if passed Connection instance', () => {
+-    const connection = connect({ url: 'http://example.com', fetch: undiciFetch })
+-
+-    expect(() => {
+-      // @ts-ignore
+-      new PrismaPlanetScale(connection)
+-    }).toThrowErrorMatchingInlineSnapshot(`
+-      "PrismaPlanetScale must be initialized with an instance of Client:
+-      import { Client } from '@planetscale/database'
+-      const client = new Client({ url })
+-      const adapter = new PrismaPlanetScale(client)
+-      "
+-    `)
+-  })
+-
+-  test('accepts Client instance', () => {
+-    const client = new Client({ url: 'http://example.com' })
+-
+-    expect(() => {
+-      new PrismaPlanetScale(client)
+-    }).not.toThrow()
+-  })
+-})
+diff --git a/packages/adapter-planetscale/src/planetscale.ts b/packages/adapter-planetscale/src/planetscale.ts
+index 17938201da65..3777603d7947 100644
+--- a/packages/adapter-planetscale/src/planetscale.ts
++++ b/packages/adapter-planetscale/src/planetscale.ts
+@@ -5,12 +5,13 @@
+ import * as planetScale from '@planetscale/database'
+ import type {
+   ConnectionInfo,
+-  SqlConnection,
++  IsolationLevel,
++  SqlDriverAdapter,
++  SqlDriverAdapterFactory,
+   SqlQuery,
+   SqlQueryable,
+   SqlResultSet,
+   Transaction,
+-  TransactionContext,
+   TransactionOptions,
+ } from '@prisma/driver-adapter-utils'
+ import { Debug, DriverAdapterError } from '@prisma/driver-adapter-utils'
+@@ -85,21 +86,25 @@ class PlanetScaleQueryable<ClientT extends planetScale.Client | planetScale.Tran
+       return result
+     } catch (e) {
+       const error = e as Error
+-      if (error.name === 'DatabaseError') {
+-        const parsed = parseErrorMessage(error.message)
+-        if (parsed) {
+-          throw new DriverAdapterError({
+-            kind: 'mysql',
+-            ...parsed,
+-          })
+-        }
+-      }
+-      debug('Error in performIO: %O', error)
+-      throw error
++      onError(error)
+     }
+   }
+ }
+ 
++function onError(error: Error): never {
++  if (error.name === 'DatabaseError') {
++    const parsed = parseErrorMessage(error.message)
++    if (parsed) {
++      throw new DriverAdapterError({
++        kind: 'mysql',
++        ...parsed,
++      })
++    }
++  }
++  debug('Error in performIO: %O', error)
++  throw error
++}
++
+ function parseErrorMessage(message: string) {
+   const regex = /^(.*) \(errno (\d+)\) \(sqlstate ([A-Z0-9]+)\)/
+   const match = message.match(regex)
+@@ -143,12 +148,24 @@ class PlanetScaleTransaction extends PlanetScaleQueryable<planetScale.Transactio
+   }
+ }
+ 
+-class PlanetScaleTransactionContext extends PlanetScaleQueryable<planetScale.Connection> implements TransactionContext {
+-  constructor(private conn: planetScale.Connection) {
+-    super(conn)
++export class PrismaPlanetScaleAdapter extends PlanetScaleQueryable<planetScale.Client> implements SqlDriverAdapter {
++  constructor(client: planetScale.Client) {
++    super(client)
++  }
++
++  executeScript(_script: string): Promise<void> {
++    throw new Error('Not implemented yet')
+   }
+ 
+-  async startTransaction(): Promise<Transaction> {
++  getConnectionInfo(): ConnectionInfo {
++    const url = this.client.connection()['url'] as string
++    const dbName = new URL(url).pathname.slice(1) /* slice out forward slash */
++    return {
++      schemaName: dbName,
++    }
++  }
++
++  async startTransaction(isolationLevel?: IsolationLevel): Promise<Transaction> {
+     const options: TransactionOptions = {
+       usePhantomQuery: true,
+     }
+@@ -156,8 +173,16 @@ class PlanetScaleTransactionContext extends PlanetScaleQueryable<planetScale.Con
+     const tag = '[js::startTransaction]'
+     debug('%s options: %O', tag, options)
+ 
++    const conn = this.client.connection()
++    if (isolationLevel) {
++      await conn.execute(`SET TRANSACTION ISOLATION LEVEL ${isolationLevel}`).catch((error) => onError(error))
++    }
++    return this.startTransactionInner(conn, options)
++  }
++
++  async startTransactionInner(conn: planetScale.Connection, options: TransactionOptions): Promise<Transaction> {
+     return new Promise<Transaction>((resolve, reject) => {
+-      const txResultPromise = this.conn
++      const txResultPromise = conn
+         .transaction(async (tx) => {
+           const [txDeferred, deferredPromise] = createDeferred<void>()
+           const txWrapper = new PlanetScaleTransaction(tx, options, txDeferred, txResultPromise)
+@@ -176,39 +201,17 @@ class PlanetScaleTransactionContext extends PlanetScaleQueryable<planetScale.Con
+         })
+     })
+   }
+-}
+ 
+-export class PrismaPlanetScale extends PlanetScaleQueryable<planetScale.Client> implements SqlConnection {
+-  constructor(client: planetScale.Client) {
+-    // this used to be a check for constructor name at same point (more reliable when having multiple copies
+-    // of @planetscale/database), but that did not work with minifiers, so we reverted back to `instanceof`
+-    if (!(client instanceof planetScale.Client)) {
+-      throw new TypeError(`PrismaPlanetScale must be initialized with an instance of Client:
+-import { Client } from '@planetscale/database'
+-const client = new Client({ url })
+-const adapter = new PrismaPlanetScale(client)
+-`)
+-    }
+-    super(client)
+-  }
++  async dispose(): Promise<void> {}
++}
+ 
+-  executeScript(_script: string): Promise<void> {
+-    throw new Error('Not implemented yet')
+-  }
++export class PrismaPlanetScaleAdapterFactory implements SqlDriverAdapterFactory {
++  readonly provider = 'mysql'
++  readonly adapterName = packageName
+ 
+-  getConnectionInfo(): ConnectionInfo {
+-    const url = this.client.connection()['url'] as string
+-    const dbName = new URL(url).pathname.slice(1) /* slice out forward slash */
+-    return {
+-      schemaName: dbName,
+-    }
+-  }
++  constructor(private readonly config: planetScale.Config) {}
+ 
+-  async transactionContext(): Promise<TransactionContext> {
+-    const conn = this.client.connection()
+-    const ctx = new PlanetScaleTransactionContext(conn)
+-    return ctx
++  async connect(): Promise<SqlDriverAdapter> {
++    return new PrismaPlanetScaleAdapter(new planetScale.Client(this.config))
+   }
+-
+-  async dispose(): Promise<void> {}
+ }
+diff --git a/packages/bundle-size/create-gzip-files.ts b/packages/bundle-size/create-gzip-files.ts
+index 923f2b931125..088a1114f9c2 100644
+--- a/packages/bundle-size/create-gzip-files.ts
++++ b/packages/bundle-size/create-gzip-files.ts
+@@ -5,6 +5,13 @@ void (async () => {
+   const sqliteProjects = ['da-workers-libsql', 'da-workers-d1']
+   const mysqlProjects = ['da-workers-planetscale']
+ 
++  const nodeCompatProjects = new Set([
++    'da-workers-pg',
++    'da-workers-pg-worker',
++    'da-workers-d1',
++    'da-workers-planetscale',
++  ])
++
+   const projects = [...postgresProjects, ...sqliteProjects, ...mysqlProjects]
+ 
+   const getSchemaFile = (project: string) => {
+@@ -22,9 +29,7 @@ void (async () => {
+   await $`pnpm list -r --depth -2` // print the versions of the dependencies installed
+ 
+   for (const project of projects) {
+-    // `nodejs_compat` is only needed when using `pg`
+-    const compatFlags = project === 'da-workers-pg-worker' ? 'nodejs_compat' : ''
+-    const nodeCompat = project === 'da-workers-pg' ? '--node-compat' : ''
++    const compatFlags = nodeCompatProjects.has(project) ? 'nodejs_compat' : ''
+     const projectDir = `${__dirname}/${project}`
+ 
+     // Install deps & copy schema & generate Prisma Client
+@@ -39,8 +44,8 @@ void (async () => {
+     await $`pnpm wrangler deploy ${projectDir}/index.js \
+       --dry-run \
+       --outdir=${projectDir}/output \
+-      --compatibility-date 2024-01-26 \
+-      --compatibility-flags [${compatFlags}] ${nodeCompat} \
++      --compatibility-date 2024-09-23 \
++      --compatibility-flags "${compatFlags}" \
+       --name ${project} \
+       --tsconfig ${__dirname}/tsconfig.json`
+ 
+diff --git a/packages/bundle-size/da-workers-libsql/index.js b/packages/bundle-size/da-workers-libsql/index.js
+index f48166230863..1a8565d8a0b1 100644
+--- a/packages/bundle-size/da-workers-libsql/index.js
++++ b/packages/bundle-size/da-workers-libsql/index.js
+@@ -1,15 +1,13 @@
+-import { createClient } from '@libsql/client/web'
+ import { PrismaLibSQL } from '@prisma/adapter-libsql'
+ 
+ import { PrismaClient } from './client/wasm'
+ 
+ export default {
+   async fetch(request, env) {
+-    const client = createClient({
++    const adapter = new PrismaLibSQL({
+       url: env.DRIVER_ADAPTERS_TURSO_CF_BASIC_DATABASE_URL,
+       authToken: env.DRIVER_ADAPTERS_TURSO_CF_BASIC_TOKEN,
+     })
+-    const adapter = new PrismaLibSQL(client)
+     const prisma = new PrismaClient({ adapter })
+ 
+     const users = await prisma.user.findMany()
+diff --git a/packages/bundle-size/da-workers-neon/index.js b/packages/bundle-size/da-workers-neon/index.js
+index 982426326ab3..6c5802014ba8 100644
+--- a/packages/bundle-size/da-workers-neon/index.js
++++ b/packages/bundle-size/da-workers-neon/index.js
+@@ -1,12 +1,10 @@
+-import { Pool } from '@neondatabase/serverless'
+ import { PrismaNeon } from '@prisma/adapter-neon'
+ 
+ import { PrismaClient } from './client/wasm'
+ 
+ export default {
+   async fetch(request, env) {
+-    const neon = new Pool({ connectionString: env.DATABASE_URL })
+-    const adapter = new PrismaNeon(neon)
++    const adapter = new PrismaNeon({ connectionString: env.DATABASE_URL })
+     const prisma = new PrismaClient({ adapter })
+ 
+     const users = await prisma.user.findMany()
+diff --git a/packages/bundle-size/da-workers-pg-worker/index.js b/packages/bundle-size/da-workers-pg-worker/index.js
+index 0de47720cf4c..6229c56445ee 100644
+--- a/packages/bundle-size/da-workers-pg-worker/index.js
++++ b/packages/bundle-size/da-workers-pg-worker/index.js
+@@ -1,12 +1,10 @@
+ import { PrismaPg } from '@prisma/adapter-pg-worker'
+-import { Pool } from '@prisma/pg-worker'
+ 
+ import { PrismaClient } from './client/wasm'
+ 
+ export default {
+   async fetch(request, env) {
+-    const pool = new Pool({ connectionString: env.DATABASE_URL })
+-    const adapter = new PrismaPg(pool)
++    const adapter = new PrismaPg({ connectionString: env.DATABASE_URL })
+     const prisma = new PrismaClient({ adapter })
+ 
+     const users = await prisma.user.findMany()
+diff --git a/packages/bundle-size/da-workers-pg/index.js b/packages/bundle-size/da-workers-pg/index.js
+index 0a4873fa45b4..539eb219f5f9 100644
+--- a/packages/bundle-size/da-workers-pg/index.js
++++ b/packages/bundle-size/da-workers-pg/index.js
+@@ -1,12 +1,10 @@
+ import { PrismaPg } from '@prisma/adapter-pg'
+-import { Pool } from 'pg'
+ 
+ import { PrismaClient } from './client/wasm'
+ 
+ export default {
+   async fetch(request, env) {
+-    const pool = new Pool({ connectionString: env.DATABASE_URL })
+-    const adapter = new PrismaPg(pool)
++    const adapter = new PrismaPg({ connectionString: env.DATABASE_URL })
+     const prisma = new PrismaClient({ adapter })
+ 
+     const users = await prisma.user.findMany()
+diff --git a/packages/bundle-size/da-workers-planetscale/index.js b/packages/bundle-size/da-workers-planetscale/index.js
+index b30843494d91..a3738255accf 100644
+--- a/packages/bundle-size/da-workers-planetscale/index.js
++++ b/packages/bundle-size/da-workers-planetscale/index.js
+@@ -1,18 +1,16 @@
+-import { Client } from '@planetscale/database'
+ import { PrismaPlanetScale } from '@prisma/adapter-planetscale'
+ 
+ import { PrismaClient } from './client/wasm'
+ 
+ export default {
+   async fetch(request, env) {
+-    const client = new Client({
++    const adapter = new PrismaPlanetScale({
+       url: env.DATABASE_URL,
+       fetch(url, init) {
+         delete init['cache']
+         return fetch(url, init)
+       },
+     })
+-    const adapter = new PrismaPlanetScale(client)
+     const prisma = new PrismaClient({ adapter })
+ 
+     const users = await prisma.user.findMany()
+diff --git a/packages/cli/src/__tests__/fixtures/studio-test-project-driver-adapter/prisma.config.ts b/packages/cli/src/__tests__/fixtures/studio-test-project-driver-adapter/prisma.config.ts
+index ca83c7d02499..3fa7d2612a9e 100644
+--- a/packages/cli/src/__tests__/fixtures/studio-test-project-driver-adapter/prisma.config.ts
++++ b/packages/cli/src/__tests__/fixtures/studio-test-project-driver-adapter/prisma.config.ts
+@@ -17,12 +17,10 @@ export default defineConfig({
+   studio: {
+     adapter: async (env: Env) => {
+       const { PrismaLibSQL } = await import('@prisma/adapter-libsql')
+-      const { createClient } = await import('@libsql/client')
+ 
+-      const libsql = createClient({
++      return new PrismaLibSQL({
+         url: env.DOTENV_PRISMA_STUDIO_LIBSQL_DATABASE_URL,
+       })
+-      return new PrismaLibSQL(libsql)
+     },
+   },
+ })
+diff --git a/packages/client-engine-runtime/src/index.ts b/packages/client-engine-runtime/src/index.ts
+index 215053943926..6350b8b81c89 100644
+--- a/packages/client-engine-runtime/src/index.ts
++++ b/packages/client-engine-runtime/src/index.ts
+@@ -1,10 +1,6 @@
+ export type { QueryEvent } from './events'
+ export { QueryInterpreter, type QueryInterpreterOptions } from './interpreter/QueryInterpreter'
+ export * from './QueryPlan'
+-export {
+-  IsolationLevel,
+-  type TransactionInfo,
+-  type Options as TransactionOptions,
+-} from './transactionManager/Transaction'
++export { type TransactionInfo, type Options as TransactionOptions } from './transactionManager/Transaction'
+ export { TransactionManager } from './transactionManager/TransactionManager'
+ export { TransactionManagerError } from './transactionManager/TransactionManagerErrors'
+diff --git a/packages/client-engine-runtime/src/transactionManager/Transaction.ts b/packages/client-engine-runtime/src/transactionManager/Transaction.ts
+index fe6cc2dda8a9..d3bd2309406a 100644
+--- a/packages/client-engine-runtime/src/transactionManager/Transaction.ts
++++ b/packages/client-engine-runtime/src/transactionManager/Transaction.ts
+@@ -1,10 +1,4 @@
+-export const enum IsolationLevel {
+-  ReadUncommitted = 'ReadUncommitted',
+-  ReadCommitted = 'ReadCommitted',
+-  RepeatableRead = 'RepeatableRead',
+-  Snapshot = 'Snapshot',
+-  Serializable = 'Serializable',
+-}
++import type { IsolationLevel } from '@prisma/driver-adapter-utils'
+ 
+ export type Options = {
+   maxWait?: number
+diff --git a/packages/client-engine-runtime/src/transactionManager/TransactionManager.test.ts b/packages/client-engine-runtime/src/transactionManager/TransactionManager.test.ts
+index b2066e99687a..49c3d06b9b32 100644
+--- a/packages/client-engine-runtime/src/transactionManager/TransactionManager.test.ts
++++ b/packages/client-engine-runtime/src/transactionManager/TransactionManager.test.ts
+@@ -1,13 +1,7 @@
+-import type {
+-  SqlConnection,
+-  SqlQuery,
+-  SqlResultSet,
+-  Transaction,
+-  TransactionContext,
+-} from '@prisma/driver-adapter-utils'
++import type { SqlDriverAdapter, SqlQuery, SqlResultSet, Transaction } from '@prisma/driver-adapter-utils'
+ import { bindAdapter, ok } from '@prisma/driver-adapter-utils'
+ 
+-import { IsolationLevel, Options } from './Transaction'
++import { Options } from './Transaction'
+ import { TransactionManager } from './TransactionManager'
+ import {
+   InvalidTransactionIsolationLevelError,
+@@ -24,16 +18,16 @@ jest.useFakeTimers()
+ const START_TRANSACTION_TIME = 200
+ const TRANSACTION_EXECUTION_TIMEOUT = 500
+ 
+-class MockDriverAdapter implements SqlConnection {
++class MockDriverAdapter implements SqlDriverAdapter {
+   adapterName = 'mock-adapter'
+-  provider: SqlConnection['provider']
++  provider: SqlDriverAdapter['provider']
+   private readonly usePhantomQuery: boolean
+ 
+   executeRawMock: jest.MockedFn<(params: SqlQuery) => Promise<number>> = jest.fn().mockResolvedValue(ok(1))
+   commitMock: jest.MockedFn<() => Promise<void>> = jest.fn().mockResolvedValue(ok(undefined))
+   rollbackMock: jest.MockedFn<() => Promise<void>> = jest.fn().mockResolvedValue(ok(undefined))
+ 
+-  constructor({ provider = 'postgres' as SqlConnection['provider'], usePhantomQuery = false } = {}) {
++  constructor({ provider = 'postgres' as SqlDriverAdapter['provider'], usePhantomQuery = false } = {}) {
+     this.usePhantomQuery = usePhantomQuery
+     this.provider = provider
+   }
+@@ -54,36 +48,27 @@ class MockDriverAdapter implements SqlConnection {
+     throw new Error('Method not implemented.')
+   }
+ 
+-  transactionContext(): Promise<TransactionContext> {
++  startTransaction(): Promise<Transaction> {
+     const executeRawMock = this.executeRawMock
+     const commitMock = this.commitMock
+     const rollbackMock = this.rollbackMock
+     const usePhantomQuery = this.usePhantomQuery
+ 
+-    const mockTransactionContext: TransactionContext = {
+-      adapterName: this.adapterName,
+-      provider: this.provider,
++    const mockTransaction: Transaction = {
++      adapterName: 'mock-adapter',
++      provider: 'postgres',
++      options: { usePhantomQuery },
+       queryRaw: jest.fn().mockRejectedValue('Not implemented for test'),
+       executeRaw: executeRawMock,
+-      startTransaction(): Promise<Transaction> {
+-        const mockTransaction: Transaction = {
+-          adapterName: 'mock-adapter',
+-          provider: 'postgres',
+-          options: { usePhantomQuery },
+-          queryRaw: jest.fn().mockRejectedValue('Not implemented for test'),
+-          executeRaw: executeRawMock,
+-          commit: commitMock,
+-          rollback: rollbackMock,
+-        }
+-
+-        return new Promise((resolve) =>
+-          setTimeout(() => {
+-            resolve(mockTransaction)
+-          }, START_TRANSACTION_TIME),
+-        )
+-      },
++      commit: commitMock,
++      rollback: rollbackMock,
+     }
+-    return Promise.resolve(mockTransactionContext)
++
++    return new Promise((resolve) =>
++      setTimeout(() => {
++        resolve(mockTransaction)
++      }, START_TRANSACTION_TIME),
++    )
+   }
+ }
+ 
+@@ -107,12 +92,10 @@ test('transaction executes normally', async () => {
+ 
+   const id = await startTransaction(transactionManager)
+ 
+-  expect(driverAdapter.executeRawMock.mock.calls[0][0].sql).toEqual('BEGIN')
+-
+   await transactionManager.commitTransaction(id)
+ 
+   expect(driverAdapter.commitMock).toHaveBeenCalled()
+-  expect(driverAdapter.executeRawMock.mock.calls[1][0].sql).toEqual('COMMIT')
++  expect(driverAdapter.executeRawMock.mock.calls[0][0].sql).toEqual('COMMIT')
+   expect(driverAdapter.rollbackMock).not.toHaveBeenCalled()
+ 
+   await expect(transactionManager.commitTransaction(id)).rejects.toBeInstanceOf(TransactionClosedError)
+@@ -127,12 +110,10 @@ test('transaction is rolled back', async () => {
+ 
+   const id = await startTransaction(transactionManager)
+ 
+-  expect(driverAdapter.executeRawMock.mock.calls[0][0].sql).toEqual('BEGIN')
+-
+   await transactionManager.rollbackTransaction(id)
+ 
+   expect(driverAdapter.rollbackMock).toHaveBeenCalled()
+-  expect(driverAdapter.executeRawMock.mock.calls[1][0].sql).toEqual('ROLLBACK')
++  expect(driverAdapter.executeRawMock.mock.calls[0][0].sql).toEqual('ROLLBACK')
+   expect(driverAdapter.commitMock).not.toHaveBeenCalled()
+ 
+   await expect(transactionManager.commitTransaction(id)).rejects.toBeInstanceOf(TransactionRolledBackError)
+@@ -148,14 +129,11 @@ test('transactions are rolled back when shutting down', async () => {
+   const id1 = await startTransaction(transactionManager)
+   const id2 = await startTransaction(transactionManager)
+ 
+-  expect(driverAdapter.executeRawMock.mock.calls[0][0].sql).toEqual('BEGIN')
+-  expect(driverAdapter.executeRawMock.mock.calls[1][0].sql).toEqual('BEGIN')
+-
+   await transactionManager.cancelAllTransactions()
+ 
+   expect(driverAdapter.rollbackMock).toHaveBeenCalled()
+-  expect(driverAdapter.executeRawMock.mock.calls[2][0].sql).toEqual('ROLLBACK')
+-  expect(driverAdapter.executeRawMock.mock.calls[3][0].sql).toEqual('ROLLBACK')
++  expect(driverAdapter.executeRawMock.mock.calls[0][0].sql).toEqual('ROLLBACK')
++  expect(driverAdapter.executeRawMock.mock.calls[1][0].sql).toEqual('ROLLBACK')
+   expect(driverAdapter.commitMock).not.toHaveBeenCalled()
+ 
+   await expect(transactionManager.commitTransaction(id1)).rejects.toBeInstanceOf(TransactionRolledBackError)
+@@ -188,55 +166,27 @@ test('with explicit isolation level', async () => {
+     driverAdapter: bindAdapter(driverAdapter),
+   })
+ 
+-  const id = await startTransaction(transactionManager, { isolationLevel: IsolationLevel.Serializable })
+-
+-  expect(driverAdapter.executeRawMock.mock.calls[0][0].sql).toEqual('BEGIN')
+-  expect(driverAdapter.executeRawMock.mock.calls[1][0].sql).toEqual('SET TRANSACTION ISOLATION LEVEL SERIALIZABLE')
++  const id = await startTransaction(transactionManager, { isolationLevel: 'SERIALIZABLE' })
+ 
+   await transactionManager.commitTransaction(id)
+ 
+   expect(driverAdapter.commitMock).toHaveBeenCalled()
+-  expect(driverAdapter.executeRawMock.mock.calls[2][0].sql).toEqual('COMMIT')
++  expect(driverAdapter.executeRawMock.mock.calls[0][0].sql).toEqual('COMMIT')
+   expect(driverAdapter.rollbackMock).not.toHaveBeenCalled()
+ 
+   await expect(transactionManager.commitTransaction(id)).rejects.toBeInstanceOf(TransactionClosedError)
+   await expect(transactionManager.rollbackTransaction(id)).rejects.toBeInstanceOf(TransactionClosedError)
+ })
+ 
+-test('for MySQL with explicit isolation level requires isolation level set before BEGIN', async () => {
+-  const driverAdapter = new MockDriverAdapter({ provider: 'mysql' })
+-  const transactionManager = new TransactionManager({
+-    driverAdapter: bindAdapter(driverAdapter),
+-  })
+-
+-  const id = await startTransaction(transactionManager, { isolationLevel: IsolationLevel.Serializable })
+-
+-  expect(driverAdapter.executeRawMock.mock.calls[0][0].sql).toEqual('SET TRANSACTION ISOLATION LEVEL SERIALIZABLE')
+-  expect(driverAdapter.executeRawMock.mock.calls[1][0].sql).toEqual('BEGIN')
+-
+-  await transactionManager.commitTransaction(id)
+-})
+-
+-test('for SQLite with unsupported isolation level', async () => {
+-  const driverAdapter = new MockDriverAdapter({ provider: 'sqlite' })
+-  const transactionManager = new TransactionManager({
+-    driverAdapter: bindAdapter(driverAdapter),
+-  })
+-
+-  await expect(
+-    startTransaction(transactionManager, { isolationLevel: IsolationLevel.RepeatableRead }),
+-  ).rejects.toBeInstanceOf(InvalidTransactionIsolationLevelError)
+-})
+-
+ test('with isolation level only supported in MS SQL Server, "snapshot"', async () => {
+   const driverAdapter = new MockDriverAdapter()
+   const transactionManager = new TransactionManager({
+     driverAdapter: bindAdapter(driverAdapter),
+   })
+ 
+-  await expect(
+-    startTransaction(transactionManager, { isolationLevel: IsolationLevel.Snapshot }),
+-  ).rejects.toBeInstanceOf(InvalidTransactionIsolationLevelError)
++  await expect(startTransaction(transactionManager, { isolationLevel: 'SNAPSHOT' })).rejects.toBeInstanceOf(
++    InvalidTransactionIsolationLevelError,
++  )
+ })
+ 
+ test('transaction times out during starting', async () => {
+diff --git a/packages/client-engine-runtime/src/transactionManager/TransactionManager.ts b/packages/client-engine-runtime/src/transactionManager/TransactionManager.ts
+index 31812d5b6f14..eeba0bf332c8 100644
+--- a/packages/client-engine-runtime/src/transactionManager/TransactionManager.ts
++++ b/packages/client-engine-runtime/src/transactionManager/TransactionManager.ts
+@@ -1,9 +1,9 @@
+ import Debug from '@prisma/debug'
+-import { ErrorCapturingSqlConnection, ErrorCapturingTransaction, SqlQuery } from '@prisma/driver-adapter-utils'
++import { ErrorCapturingSqlDriverAdapter, ErrorCapturingTransaction, SqlQuery } from '@prisma/driver-adapter-utils'
+ 
+ import { randomUUID } from '../crypto'
+ import { assertNever } from '../utils'
+-import { IsolationLevel, Options, TransactionInfo } from './Transaction'
++import { Options, TransactionInfo } from './Transaction'
+ import {
+   InvalidTransactionIsolationLevelError,
+   TransactionClosedError,
+@@ -18,14 +18,6 @@ import {
+ 
+ const MAX_CLOSED_TRANSACTIONS = 100
+ 
+-const isolationLevelMap = {
+-  ReadUncommitted: 'READ UNCOMMITTED',
+-  ReadCommitted: 'READ COMMITTED',
+-  RepeatableRead: 'REPEATABLE READ',
+-  Snapshot: 'SNAPSHOT',
+-  Serializable: 'SERIALIZABLE',
+-}
+-
+ type TransactionWrapper = {
+   id: string
+   status: 'waiting' | 'running' | 'committed' | 'rolled_back' | 'timed_out'
+@@ -39,11 +31,6 @@ const debug = Debug('prisma:client:transactionManager')
+ 
+ const COMMIT_QUERY = (): SqlQuery => ({ sql: 'COMMIT', args: [], argTypes: [] })
+ const ROLLBACK_QUERY = (): SqlQuery => ({ sql: 'ROLLBACK', args: [], argTypes: [] })
+-const ISOLATION_LEVEL_QUERY = (isolationLevel: IsolationLevel): SqlQuery => ({
+-  sql: 'SET TRANSACTION ISOLATION LEVEL ' + isolationLevelMap[isolationLevel],
+-  args: [],
+-  argTypes: [],
+-})
+ 
+ export class TransactionManager {
+   // The map of active transactions.
+@@ -51,9 +38,9 @@ export class TransactionManager {
+   // List of last closed transactions. Max MAX_CLOSED_TRANSACTIONS entries.
+   // Used to provide better error messages than a generic "transaction not found".
+   private closedTransactions: TransactionWrapper[] = []
+-  private readonly driverAdapter: ErrorCapturingSqlConnection
++  private readonly driverAdapter: ErrorCapturingSqlDriverAdapter
+ 
+-  constructor({ driverAdapter }: { driverAdapter: ErrorCapturingSqlConnection }) {
++  constructor({ driverAdapter }: { driverAdapter: ErrorCapturingSqlDriverAdapter }) {
+     this.driverAdapter = driverAdapter
+   }
+ 
+@@ -73,30 +60,13 @@ export class TransactionManager {
+     // Start timeout to wait for transaction to be started.
+     transaction.timer = this.startTransactionTimeout(transaction.id, validatedOptions.maxWait)
+ 
+-    const txContext = await this.driverAdapter.transactionContext()
+-    if (!txContext.ok)
+-      throw new TransactionDriverAdapterError('Failed to start transaction.', {
+-        driverAdapterError: txContext.error,
+-      })
++    const startedTransaction = await this.driverAdapter.startTransaction(validatedOptions.isolationLevel)
+ 
+-    if (this.requiresSettingIsolationLevelFirst() && validatedOptions.isolationLevel) {
+-      await txContext.value.executeRaw(ISOLATION_LEVEL_QUERY(validatedOptions.isolationLevel))
+-    }
+-
+-    const startedTransaction = await txContext.value.startTransaction()
+     if (!startedTransaction.ok)
+       throw new TransactionDriverAdapterError('Failed to start transaction.', {
+         driverAdapterError: startedTransaction.error,
+       })
+ 
+-    if (!startedTransaction.value.options.usePhantomQuery) {
+-      await startedTransaction.value.executeRaw({ sql: 'BEGIN', args: [], argTypes: [] })
+-
+-      if (!this.requiresSettingIsolationLevelFirst() && validatedOptions.isolationLevel) {
+-        await txContext.value.executeRaw(ISOLATION_LEVEL_QUERY(validatedOptions.isolationLevel))
+-      }
+-    }
+-
+     // Transaction status might have changed to timed_out while waiting for transaction to start. => Check for it!
+     switch (transaction.status) {
+       case 'waiting':
+@@ -237,16 +207,7 @@ export class TransactionManager {
+     if (!options.maxWait) throw new TransactionManagerError('maxWait is required')
+ 
+     // Snapshot level only supported for MS SQL Server, which is not supported via driver adapters so far.
+-    if (options.isolationLevel === IsolationLevel.Snapshot)
+-      throw new InvalidTransactionIsolationLevelError(options.isolationLevel)
+-
+-    // SQLite only has serializable isolation level.
+-    if (
+-      this.driverAdapter.provider === 'sqlite' &&
+-      options.isolationLevel &&
+-      options.isolationLevel !== IsolationLevel.Serializable
+-    )
+-      throw new InvalidTransactionIsolationLevelError(options.isolationLevel)
++    if (options.isolationLevel === 'SNAPSHOT') throw new InvalidTransactionIsolationLevelError(options.isolationLevel)
+ 
+     return {
+       ...options,
+@@ -254,8 +215,4 @@ export class TransactionManager {
+       maxWait: options.maxWait,
+     }
+   }
+-
+-  private requiresSettingIsolationLevelFirst() {
+-    return this.driverAdapter.provider === 'mysql'
+-  }
+ }
+diff --git a/packages/client/package.json b/packages/client/package.json
+index be1f778ddcf6..e7ccdd332d81 100644
+--- a/packages/client/package.json
++++ b/packages/client/package.json
+@@ -210,7 +210,7 @@
+     "@prisma/debug": "workspace:*",
+     "@prisma/driver-adapter-utils": "workspace:*",
+     "@prisma/engines": "workspace:*",
+-    "@prisma/engines-version": "6.6.0-21.d1dbe8880430b6f753dffc4264de1a7f39e4a15a",
++    "@prisma/engines-version": "6.6.0-24.933fc09bcbebf77a522ae2ac61fb5203f656749f",
+     "@prisma/fetch-engine": "workspace:*",
+     "@prisma/generator-helper": "workspace:*",
+     "@prisma/get-platform": "workspace:*",
+@@ -219,8 +219,8 @@
+     "@prisma/migrate": "workspace:*",
+     "@prisma/mini-proxy": "0.9.5",
+     "@prisma/pg-worker": "workspace:*",
+-    "@prisma/query-compiler-wasm": "6.6.0-21.d1dbe8880430b6f753dffc4264de1a7f39e4a15a",
+-    "@prisma/query-engine-wasm": "6.6.0-21.d1dbe8880430b6f753dffc4264de1a7f39e4a15a",
++    "@prisma/query-compiler-wasm": "6.6.0-24.933fc09bcbebf77a522ae2ac61fb5203f656749f",
++    "@prisma/query-engine-wasm": "6.6.0-24.933fc09bcbebf77a522ae2ac61fb5203f656749f",
+     "@snaplet/copycat": "6.0.0",
+     "@swc-node/register": "1.10.9",
+     "@swc/core": "1.11.5",
+diff --git a/packages/client/src/generation/TSClient/PrismaClient.ts b/packages/client/src/generation/TSClient/PrismaClient.ts
+index 1a264c2a697b..e9166a3fda4f 100644
+--- a/packages/client/src/generation/TSClient/PrismaClient.ts
++++ b/packages/client/src/generation/TSClient/PrismaClient.ts
+@@ -683,7 +683,7 @@ export type TransactionClient = Omit<Prisma.DefaultPrismaClient, runtime.ITXClie
+     if (['library.js', 'client.js'].includes(this.runtimeNameTs) && this.context.isPreviewFeatureOn('driverAdapters')) {
+       clientOptions.add(
+         ts
+-          .property('adapter', ts.unionType([ts.namedType('runtime.DriverAdapter'), ts.namedType('null')]))
++          .property('adapter', ts.unionType([ts.namedType('runtime.SqlDriverAdapterFactory'), ts.namedType('null')]))
+           .optional()
+           .setDocComment(
+             ts.docComment('Instance of a Driver Adapter, e.g., like one provided by `@prisma/adapter-planetscale`'),
+diff --git a/packages/client/src/runtime/core/engines/client/ClientEngine.ts b/packages/client/src/runtime/core/engines/client/ClientEngine.ts
+index 4da0eee2181b..67d658f70456 100644
+--- a/packages/client/src/runtime/core/engines/client/ClientEngine.ts
++++ b/packages/client/src/runtime/core/engines/client/ClientEngine.ts
+@@ -7,7 +7,7 @@ import {
+   TransactionManagerError,
+ } from '@prisma/client-engine-runtime'
+ import Debug from '@prisma/debug'
+-import { type ErrorCapturingDriverAdapter } from '@prisma/driver-adapter-utils'
++import { bindAdapter, type ErrorCapturingSqlDriverAdapter, Provider } from '@prisma/driver-adapter-utils'
+ import { assertNever, TracingHelper } from '@prisma/internals'
+ 
+ import { PrismaClientInitializationError } from '../../errors/PrismaClientInitializationError'
+@@ -43,12 +43,13 @@ export class ClientEngine implements Engine<undefined> {
+   QueryCompilerConstructor?: QueryCompilerConstructor
+   queryCompilerLoader: QueryCompilerLoader
+ 
++  adapterPromise: Promise<ErrorCapturingSqlDriverAdapter>
++  transactionManagerPromise: Promise<TransactionManager>
++
+   config: EngineConfig
++  provider: Provider
+   datamodel: string
+ 
+-  driverAdapter: ErrorCapturingDriverAdapter
+-  transactionManager: TransactionManager
+-
+   logEmitter: LogEmitter
+   logQueries: boolean // TODO: actually implement
+   logLevel: QueryEngineLogLevel
+@@ -65,16 +66,16 @@ export class ClientEngine implements Engine<undefined> {
+         CLIENT_ENGINE_ERROR,
+       )
+     }
+-    const { adapter } = config
+-    if (!adapter) {
++    if (!config.adapter) {
+       throw new PrismaClientInitializationError(
+         'Missing configured driver adapter. Engine type `client` requires an active driver adapter. Please check your PrismaClient initialization code.',
+         config.clientVersion!,
+         CLIENT_ENGINE_ERROR,
+       )
+     } else {
+-      this.driverAdapter = adapter
+-      debug('Using driver adapter: %O', adapter)
++      this.adapterPromise = config.adapter.connect().then(bindAdapter)
++      this.provider = config.adapter.provider
++      debug('Using driver adapter: %O', config.adapter)
+     }
+ 
+     if (TARGET_BUILD_TYPE === 'client') {
+@@ -112,9 +113,9 @@ export class ClientEngine implements Engine<undefined> {
+       }
+     }
+ 
+-    this.transactionManager = new TransactionManager({
+-      driverAdapter: this.driverAdapter,
+-    })
++    this.transactionManagerPromise = this.adapterPromise.then(
++      (driverAdapter) => new TransactionManager({ driverAdapter }),
++    )
+ 
+     this.instantiateQueryCompilerPromise = this.instantiateQueryCompiler()
+   }
+@@ -135,7 +136,7 @@ export class ClientEngine implements Engine<undefined> {
+     try {
+       this.queryCompiler = new this.QueryCompilerConstructor({
+         datamodel: this.datamodel,
+-        provider: this.driverAdapter.provider,
++        provider: this.provider,
+         connectionInfo: {},
+       })
+     } catch (e) {
+@@ -183,12 +184,21 @@ export class ClientEngine implements Engine<undefined> {
+   }
+ 
+   async start(): Promise<void> {
+-    await this.instantiateQueryCompilerPromise
++    await this.ensureStarted()
+   }
+ 
+   async stop(): Promise<void> {
+     await this.instantiateQueryCompilerPromise
+-    await this.transactionManager.cancelAllTransactions()
++    await (await this.transactionManagerPromise)?.cancelAllTransactions()
++    await (await this.adapterPromise).dispose()
++  }
++
++  async ensureStarted(): Promise<[ErrorCapturingSqlDriverAdapter, TransactionManager]> {
++    const adapter = await this.adapterPromise
++    const transactionManager = await this.transactionManagerPromise
++    await this.instantiateQueryCompilerPromise
++
++    return [adapter, transactionManager]
+   }
+ 
+   version(): string {
+@@ -217,16 +227,17 @@ export class ClientEngine implements Engine<undefined> {
+   ): Promise<Tx.InteractiveTransactionInfo<undefined> | undefined> {
+     let result: TransactionInfo | undefined
+ 
++    const transactionManager = await this.transactionManagerPromise
+     try {
+       if (action === 'start') {
+         const options: Tx.Options = arg
+-        result = await this.transactionManager.startTransaction(options)
++        result = await transactionManager.startTransaction(options)
+       } else if (action === 'commit') {
+         const txInfo: Tx.InteractiveTransactionInfo<undefined> = arg
+-        await this.transactionManager.commitTransaction(txInfo.id)
++        await transactionManager.commitTransaction(txInfo.id)
+       } else if (action === 'rollback') {
+         const txInfo: Tx.InteractiveTransactionInfo<undefined> = arg
+-        await this.transactionManager.rollbackTransaction(txInfo.id)
++        await transactionManager.rollbackTransaction(txInfo.id)
+       } else {
+         assertNever(action, 'Invalid transaction action.')
+       }
+@@ -247,7 +258,7 @@ export class ClientEngine implements Engine<undefined> {
+     this.lastStartedQuery = queryStr
+ 
+     try {
+-      await this.start()
++      const [adapter, transactionManager] = await this.ensureStarted()
+ 
+       const queryPlanString = await this.queryCompiler!.compile(queryStr)
+       const queryPlan: QueryPlanNode = JSON.parse(queryPlanString)
+@@ -255,8 +266,8 @@ export class ClientEngine implements Engine<undefined> {
+       debug(`query plan created`, queryPlanString)
+ 
+       const queryable = interactiveTransaction
+-        ? this.transactionManager.getTransaction(interactiveTransaction, query.action)
+-        : this.driverAdapter
++        ? transactionManager.getTransaction(interactiveTransaction, query.action)
++        : adapter
+ 
+       // TODO: ORM-508 - Implement query plan caching by replacing all scalar values in the query with params automatically.
+       const placeholderValues = {}
+@@ -282,7 +293,7 @@ export class ClientEngine implements Engine<undefined> {
+     this.lastStartedQuery = JSON.stringify(queries)
+ 
+     try {
+-      await this.start()
++      const [, transactionManager] = await this.ensureStarted()
+ 
+       const queriesWithPlans = await Promise.all(
+         queries.map(async (query) => {
+@@ -306,7 +317,7 @@ export class ClientEngine implements Engine<undefined> {
+       // TODO: potentially could run batch queries in parallel if it's for sure not in a transaction
+       const results: BatchQueryEngineResult<T>[] = []
+       for (const { query, plan } of queriesWithPlans) {
+-        const queryable = this.transactionManager.getTransaction(txInfo, query.action)
++        const queryable = transactionManager.getTransaction(txInfo, query.action)
+         const interpreter = new QueryInterpreter({
+           queryable,
+           placeholderValues: {},
+diff --git a/packages/client/src/runtime/core/engines/common/Engine.ts b/packages/client/src/runtime/core/engines/common/Engine.ts
+index a7ce9b519c9c..c85d8ae3881a 100644
+--- a/packages/client/src/runtime/core/engines/common/Engine.ts
++++ b/packages/client/src/runtime/core/engines/common/Engine.ts
+@@ -1,4 +1,4 @@
+-import type { ErrorCapturingDriverAdapter } from '@prisma/driver-adapter-utils'
++import type { IsolationLevel, SqlDriverAdapterFactory } from '@prisma/driver-adapter-utils'
+ import type { DataSource, GeneratorConfig } from '@prisma/generator-helper'
+ import { TracingHelper } from '@prisma/internals'
+ 
+@@ -18,7 +18,7 @@ import type * as Transaction from './types/Transaction'
+ import type { getBatchRequestPayload } from './utils/getBatchRequestPayload'
+ 
+ export type BatchTransactionOptions = {
+-  isolationLevel?: Transaction.IsolationLevel
++  isolationLevel?: IsolationLevel
+ }
+ 
+ export type TransactionOptions<InteractiveTransactionPayload> =
+@@ -158,7 +158,7 @@ export interface EngineConfig {
+    * rather than Prisma's Rust drivers.
+    * @remarks only used by LibraryEngine.ts
+    */
+-  adapter?: ErrorCapturingDriverAdapter
++  adapter?: SqlDriverAdapterFactory
+ 
+   /**
+    * The contents of the schema encoded into a string
+diff --git a/packages/client/src/runtime/core/engines/common/types/JsonProtocol.ts b/packages/client/src/runtime/core/engines/common/types/JsonProtocol.ts
+index e3c0dfdcca19..d496446c3a8e 100644
+--- a/packages/client/src/runtime/core/engines/common/types/JsonProtocol.ts
++++ b/packages/client/src/runtime/core/engines/common/types/JsonProtocol.ts
+@@ -1,4 +1,4 @@
+-import * as Transaction from './Transaction'
++import type { IsolationLevel } from '@prisma/driver-adapter-utils'
+ 
+ export type JsonQuery = {
+   modelName?: string
+@@ -8,7 +8,7 @@ export type JsonQuery = {
+ 
+ export type JsonBatchQuery = {
+   batch: JsonQuery[]
+-  transaction?: { isolationLevel?: Transaction.IsolationLevel }
++  transaction?: { isolationLevel?: IsolationLevel }
+ }
+ 
+ export type JsonQueryAction =
+diff --git a/packages/client/src/runtime/core/engines/common/types/QueryEngine.ts b/packages/client/src/runtime/core/engines/common/types/QueryEngine.ts
+index 7a7416c6024a..a2eeaad5bc60 100644
+--- a/packages/client/src/runtime/core/engines/common/types/QueryEngine.ts
++++ b/packages/client/src/runtime/core/engines/common/types/QueryEngine.ts
+@@ -1,10 +1,10 @@
++import type { IsolationLevel } from '@prisma/driver-adapter-utils'
+ import type { DataSource, GeneratorConfig } from '@prisma/generator-helper'
+ import { EngineSpan, EngineTraceEvent } from '@prisma/internals'
+ 
+ import { EngineProtocol } from '../Engine'
+ import { JsonBatchQuery } from './JsonProtocol'
+ import { RequestError } from './RequestError'
+-import * as Transaction from './Transaction'
+ 
+ // Events
+ export type QueryEngineEvent = QueryEngineLogEvent | QueryEngineQueryEvent | QueryEnginePanicEvent
+@@ -94,7 +94,7 @@ export type QueryEngineBatchRequest = QueryEngineBatchGraphQLRequest | JsonBatch
+ export type QueryEngineBatchGraphQLRequest = {
+   batch: QueryEngineRequest[]
+   transaction?: boolean
+-  isolationLevel?: Transaction.IsolationLevel
++  isolationLevel?: IsolationLevel
+ }
+ 
+ export type GetConfigOptions = {
+diff --git a/packages/client/src/runtime/core/engines/common/types/Transaction.ts b/packages/client/src/runtime/core/engines/common/types/Transaction.ts
+index fa3062835f49..4072492de0ca 100644
+--- a/packages/client/src/runtime/core/engines/common/types/Transaction.ts
++++ b/packages/client/src/runtime/core/engines/common/types/Transaction.ts
+@@ -1,4 +1,4 @@
+-export { IsolationLevel, type TransactionOptions as Options } from '@prisma/client-engine-runtime'
++export { type TransactionOptions as Options } from '@prisma/client-engine-runtime'
+ 
+ export type InteractiveTransactionInfo<Payload = unknown> = {
+   /**
+diff --git a/packages/client/src/runtime/core/engines/index.ts b/packages/client/src/runtime/core/engines/index.ts
+index 2e610dd2e508..46872f90f317 100644
+--- a/packages/client/src/runtime/core/engines/index.ts
++++ b/packages/client/src/runtime/core/engines/index.ts
+@@ -13,7 +13,7 @@ export * from './common/types/EngineValidationError'
+ export type { LogEmitter } from './common/types/Events'
+ export * from './common/types/JsonProtocol'
+ export type { Metric, MetricHistogram, MetricHistogramBucket, Metrics } from './common/types/Metrics'
+-export type { IsolationLevel, Options, TransactionHeaders } from './common/types/Transaction'
++export type { Options, TransactionHeaders } from './common/types/Transaction'
+ export { DataProxyEngine } from './data-proxy/DataProxyEngine'
+ export { LibraryEngine } from './library/LibraryEngine'
+ export * as NodeAPILibraryTypes from './library/types/Library'
+diff --git a/packages/client/src/runtime/core/engines/library/LibraryEngine.ts b/packages/client/src/runtime/core/engines/library/LibraryEngine.ts
+index a3cc03615406..751d24552aa1 100644
+--- a/packages/client/src/runtime/core/engines/library/LibraryEngine.ts
++++ b/packages/client/src/runtime/core/engines/library/LibraryEngine.ts
+@@ -1,5 +1,5 @@
+ import Debug from '@prisma/debug'
+-import { ErrorRecord } from '@prisma/driver-adapter-utils'
++import { bindAdapter, ErrorCapturingSqlDriverAdapter, ErrorRecord, ErrorRegistry } from '@prisma/driver-adapter-utils'
+ import type { BinaryTarget } from '@prisma/get-platform'
+ import { assertNodeAPISupported, binaryTargets, getBinaryTargetForCurrentPlatform } from '@prisma/get-platform'
+ import { assertAlways, EngineTrace, TracingHelper } from '@prisma/internals'
+@@ -82,6 +82,7 @@ export class LibraryEngine implements Engine<undefined> {
+   lastQuery?: string
+   loggerRustPanic?: any
+   tracingHelper: TracingHelper
++  adapterPromise: Promise<ErrorCapturingSqlDriverAdapter> | undefined
+ 
+   versionInfo?: {
+     commit: string
+@@ -186,6 +187,7 @@ export class LibraryEngine implements Engine<undefined> {
+   ): Promise<undefined>
+   async transaction(action: any, headers: Tx.TransactionHeaders, arg?: any) {
+     await this.start()
++    const adapter = await this.adapterPromise
+ 
+     const headerStr = JSON.stringify(headers)
+ 
+@@ -207,7 +209,7 @@ export class LibraryEngine implements Engine<undefined> {
+     const response = this.parseEngineResponse<{ [K: string]: unknown }>(result)
+ 
+     if (isUserFacingError(response)) {
+-      const externalError = this.getExternalAdapterError(response)
++      const externalError = this.getExternalAdapterError(response, adapter?.errorRegistry)
+       if (externalError) {
+         throw externalError.error
+       }
+@@ -295,7 +297,11 @@ You may have to run ${green('prisma generate')} for your changes to take effect.
+       // same time, `this.engine` field will prevent native instance from
+       // being GCed. Using weak ref helps to avoid this cycle
+       const weakThis = new WeakRef(this)
+-      const { adapter } = this.config
++
++      if (!this.adapterPromise) {
++        this.adapterPromise = this.config.adapter?.connect()?.then(bindAdapter)
++      }
++      const adapter = await this.adapterPromise
+ 
+       if (adapter) {
+         debug('Using driver adapter: %O', adapter)
+@@ -461,6 +467,9 @@ You may have to run ${green('prisma generate')} for your changes to take effect.
+       this.libraryStarted = false
+       this.libraryStoppingPromise = undefined
+ 
++      await (await this.adapterPromise)?.dispose()
++      this.adapterPromise = undefined
++
+       debug('library stopped')
+     }
+ 
+@@ -490,6 +499,7 @@ You may have to run ${green('prisma generate')} for your changes to take effect.
+ 
+     try {
+       await this.start()
++      const adapter = await this.adapterPromise
+ 
+       this.executingQueryPromise = this.engine?.query(queryStr, headerStr, interactiveTransaction?.id)
+ 
+@@ -498,7 +508,7 @@ You may have to run ${green('prisma generate')} for your changes to take effect.
+ 
+       if (data.errors) {
+         if (data.errors.length === 1) {
+-          throw this.buildQueryError(data.errors[0])
++          throw this.buildQueryError(data.errors[0], adapter?.errorRegistry)
+         }
+         // this case should not happen, as the query engine only returns one error
+         throw new PrismaClientUnknownRequestError(JSON.stringify(data.errors), {
+@@ -533,6 +543,7 @@ You may have to run ${green('prisma generate')} for your changes to take effect.
+     debug('requestBatch')
+     const request = getBatchRequestPayload(queries, transaction)
+     await this.start()
++    const adapter = await this.adapterPromise
+ 
+     this.lastQuery = JSON.stringify(request)
+ 
+@@ -547,7 +558,7 @@ You may have to run ${green('prisma generate')} for your changes to take effect.
+ 
+     if (data.errors) {
+       if (data.errors.length === 1) {
+-        throw this.buildQueryError(data.errors[0])
++        throw this.buildQueryError(data.errors[0], adapter?.errorRegistry)
+       }
+       // this case should not happen, as the query engine only returns one error
+       throw new PrismaClientUnknownRequestError(JSON.stringify(data.errors), {
+@@ -559,7 +570,7 @@ You may have to run ${green('prisma generate')} for your changes to take effect.
+     if (Array.isArray(batchResult)) {
+       return batchResult.map((result) => {
+         if (result.errors && result.errors.length > 0) {
+-          return this.loggerRustPanic ?? this.buildQueryError(result.errors[0])
++          return this.loggerRustPanic ?? this.buildQueryError(result.errors[0], adapter?.errorRegistry)
+         }
+         return {
+           data: result,
+@@ -573,7 +584,7 @@ You may have to run ${green('prisma generate')} for your changes to take effect.
+     }
+   }
+ 
+-  private buildQueryError(error: RequestError) {
++  private buildQueryError(error: RequestError, registry?: ErrorRegistry) {
+     if (error.user_facing_error.is_panic && TARGET_BUILD_TYPE !== 'wasm') {
+       return new PrismaClientRustPanicError(
+         getErrorMessageWithLink(this, error.user_facing_error.message),
+@@ -581,18 +592,21 @@ You may have to run ${green('prisma generate')} for your changes to take effect.
+       )
+     }
+ 
+-    const externalError = this.getExternalAdapterError(error.user_facing_error)
++    const externalError = this.getExternalAdapterError(error.user_facing_error, registry)
+ 
+     return externalError
+       ? externalError.error
+       : prismaGraphQLToJSError(error, this.config.clientVersion!, this.config.activeProvider!)
+   }
+ 
+-  private getExternalAdapterError(error: RequestError['user_facing_error']): ErrorRecord | undefined {
+-    if (error.error_code === DRIVER_ADAPTER_EXTERNAL_ERROR && this.config.adapter) {
++  private getExternalAdapterError(
++    error: RequestError['user_facing_error'],
++    registry?: ErrorRegistry,
++  ): ErrorRecord | undefined {
++    if (error.error_code === DRIVER_ADAPTER_EXTERNAL_ERROR && registry) {
+       const id = error.meta?.id
+       assertAlways(typeof id === 'number', 'Malformed external JS error received from the engine')
+-      const errorRecord = this.config.adapter.errorRegistry.consumeError(id)
++      const errorRecord = registry.consumeError(id)
+       assertAlways(errorRecord, `External error with reported id was not registered`)
+       return errorRecord
+     }
+diff --git a/packages/client/src/runtime/core/engines/library/types/Library.ts b/packages/client/src/runtime/core/engines/library/types/Library.ts
+index f0f5784a4384..ee194bd32c33 100644
+--- a/packages/client/src/runtime/core/engines/library/types/Library.ts
++++ b/packages/client/src/runtime/core/engines/library/types/Library.ts
+@@ -1,4 +1,4 @@
+-import type { ErrorCapturingDriverAdapter } from '@prisma/driver-adapter-utils'
++import type { ErrorCapturingSqlDriverAdapter } from '@prisma/driver-adapter-utils'
+ 
+ import { EngineConfig } from '../../common/Engine'
+ import type { QueryEngineConfig } from '../../common/types/QueryEngine'
+@@ -24,7 +24,7 @@ export interface QueryEngineConstructor {
+   new (
+     config: QueryEngineConfig,
+     logger: (log: string) => void,
+-    adapter?: ErrorCapturingDriverAdapter,
++    adapter?: ErrorCapturingSqlDriverAdapter,
+   ): QueryEngineInstance
+ }
+ 
+diff --git a/packages/client/src/runtime/core/request/PrismaPromise.ts b/packages/client/src/runtime/core/request/PrismaPromise.ts
+index fac72d7d009c..6ba23eab2f59 100644
+--- a/packages/client/src/runtime/core/request/PrismaPromise.ts
++++ b/packages/client/src/runtime/core/request/PrismaPromise.ts
+@@ -1,4 +1,4 @@
+-import { IsolationLevel } from '../engines'
++import type { IsolationLevel } from '@prisma/driver-adapter-utils'
+ 
+ export type PrismaOperationSpec<TArgs, TAction = string> = {
+   args: TArgs
+diff --git a/packages/client/src/runtime/core/types/internal/ExtensionsInternalArgs.ts b/packages/client/src/runtime/core/types/internal/ExtensionsInternalArgs.ts
+index acb54768baad..e4a30d3558fa 100644
+--- a/packages/client/src/runtime/core/types/internal/ExtensionsInternalArgs.ts
++++ b/packages/client/src/runtime/core/types/internal/ExtensionsInternalArgs.ts
+@@ -1,6 +1,7 @@
++import type { IsolationLevel } from '@prisma/driver-adapter-utils'
++
+ import { RequestParams } from '../../../RequestHandler'
+ import { CustomDataProxyFetch } from '../../engines'
+-import { IsolationLevel } from '../../engines/common/types/Transaction'
+ import { QueryOptions } from '../exported/ExtensionArgs'
+ import { JsArgs } from '../exported/JsApi'
+ import { RawQueryArgs } from '../exported/RawQueryArgs'
+diff --git a/packages/client/src/runtime/getPrismaClient.ts b/packages/client/src/runtime/getPrismaClient.ts
+index 032bab2eac24..a1b9ff1deae9 100644
+--- a/packages/client/src/runtime/getPrismaClient.ts
++++ b/packages/client/src/runtime/getPrismaClient.ts
+@@ -1,6 +1,6 @@
+ import type { Context } from '@opentelemetry/api'
+ import Debug, { clearLogs } from '@prisma/debug'
+-import { bindAdapter, type DriverAdapter, type ErrorCapturingDriverAdapter } from '@prisma/driver-adapter-utils'
++import type { SqlDriverAdapterFactory } from '@prisma/driver-adapter-utils'
+ import { version as enginesVersion } from '@prisma/engines-version/package.json'
+ import type { ActiveConnectorType, EnvValue, GeneratorConfig } from '@prisma/generator-helper'
+ import type { LoadedEnv } from '@prisma/internals'
+@@ -95,7 +95,7 @@ export type PrismaClientOptions = {
+   /**
+    * Instance of a Driver Adapter, e.g., like one provided by `@prisma/adapter-planetscale.
+    */
+-  adapter?: DriverAdapter | null
++  adapter?: SqlDriverAdapterFactory | null
+ 
+   /**
+    * Overwrites the datasource url from your schema.prisma file
+@@ -373,9 +373,9 @@ export function getPrismaClient(config: GetPrismaClientConfig) {
+        * Initialise and validate the Driver Adapter, if provided.
+        */
+ 
+-      let adapter: ErrorCapturingDriverAdapter | undefined
++      let adapter: SqlDriverAdapterFactory | undefined
+       if (optionsArg?.adapter) {
+-        adapter = bindAdapter(optionsArg.adapter)
++        adapter = optionsArg.adapter
+ 
+         // Note:
+         // - `getConfig(..).datasources[0].provider` can be `postgresql`, `postgres`, `mysql`, or other known providers
+diff --git a/packages/client/src/runtime/index.ts b/packages/client/src/runtime/index.ts
+index 053865045c34..f5a62c3598c0 100644
+--- a/packages/client/src/runtime/index.ts
++++ b/packages/client/src/runtime/index.ts
+@@ -37,7 +37,7 @@ export { deserializeRawResult } from './utils/deserializeRawResults'
+ export { getRuntime } from './utils/getRuntime'
+ export { warnEnvConflicts } from './warnEnvConflicts'
+ export { Debug } from '@prisma/debug'
+-export type { DriverAdapter } from '@prisma/driver-adapter-utils'
++export type { SqlDriverAdapterFactory } from '@prisma/driver-adapter-utils'
+ export { warnOnce } from '@prisma/internals'
+ export { default as Decimal } from 'decimal.js'
+ export type { RawValue, Value } from 'sql-template-tag'
+diff --git a/packages/client/tests/e2e/_utils/mock-adapter.ts b/packages/client/tests/e2e/_utils/mock-adapter.ts
+index 2b6d7da39f19..e28280f69171 100644
+--- a/packages/client/tests/e2e/_utils/mock-adapter.ts
++++ b/packages/client/tests/e2e/_utils/mock-adapter.ts
+@@ -1,9 +1,9 @@
+-import { DriverAdapter } from '@prisma/driver-adapter-utils'
++import { SqlDriverAdapter, SqlDriverAdapterFactory } from '@prisma/driver-adapter-utils'
+ 
+ export const mockAdapterErrors = {
+   queryRaw: new Error('Not implemented: queryRaw'),
+   executeRaw: new Error('Not implemented: executeRaw'),
+-  transactionContext: new Error('Not implemented: transactionContext'),
++  startTransaction: new Error('Not implemented: startTransaction'),
+   executeScript: new Error('Not implemented: executeScript'),
+   dispose: new Error('Not implemented: dispose'),
+ }
+@@ -11,14 +11,25 @@ export const mockAdapterErrors = {
+ /**
+  * Create an adapter stub for testing.
+  */
+-export function mockAdapter(provider: 'mysql' | 'sqlite' | 'postgres'): DriverAdapter {
++export function mockAdapter(provider: 'mysql' | 'sqlite' | 'postgres'): SqlDriverAdapter {
+   return {
+     provider,
+     adapterName: '@prisma/adapter-mock',
+     queryRaw: () => Promise.reject(mockAdapterErrors.queryRaw),
+     executeRaw: () => Promise.reject(mockAdapterErrors.executeRaw),
+-    transactionContext: () => Promise.reject(mockAdapterErrors.transactionContext),
++    startTransaction: () => Promise.reject(mockAdapterErrors.startTransaction),
+     executeScript: () => Promise.reject(mockAdapterErrors.executeScript),
+     dispose: () => Promise.reject(mockAdapterErrors.dispose),
+   }
+ }
++
++/**
++ * Create an adapter factory stub for testing.
++ */
++export function mockAdapterFactory(provider: 'mysql' | 'sqlite' | 'postgres'): SqlDriverAdapterFactory {
++  return {
++    provider,
++    adapterName: '@prisma/adapter-mock',
++    connect: () => Promise.resolve(mockAdapter(provider)),
++  }
++}
+diff --git a/packages/client/tests/e2e/driver-adapters-accelerate/tests/edge.ts b/packages/client/tests/e2e/driver-adapters-accelerate/tests/edge.ts
+index eb9e999f9abb..a30c8ee0649b 100644
+--- a/packages/client/tests/e2e/driver-adapters-accelerate/tests/edge.ts
++++ b/packages/client/tests/e2e/driver-adapters-accelerate/tests/edge.ts
+@@ -1,4 +1,4 @@
+-import { mockAdapter } from '../../_utils/mock-adapter'
++import { mockAdapterFactory } from '../../_utils/mock-adapter'
+ 
+ test('driver adapters cannot be used via @prisma/client/edge', () => {
+   jest.isolateModules(() => {
+@@ -6,7 +6,7 @@ test('driver adapters cannot be used via @prisma/client/edge', () => {
+ 
+     const newClient = () =>
+       new PrismaClient({
+-        adapter: mockAdapter('postgres'),
++        adapter: mockAdapterFactory('postgres'),
+       })
+ 
+     expect(newClient).toThrowErrorMatchingInlineSnapshot(`
+diff --git a/packages/client/tests/e2e/driver-adapters-accelerate/tests/no-engine.ts b/packages/client/tests/e2e/driver-adapters-accelerate/tests/no-engine.ts
+index 2274f4ca14cd..0e8dd7d37638 100644
+--- a/packages/client/tests/e2e/driver-adapters-accelerate/tests/no-engine.ts
++++ b/packages/client/tests/e2e/driver-adapters-accelerate/tests/no-engine.ts
+@@ -1,4 +1,4 @@
+-import { mockAdapter } from '../../_utils/mock-adapter'
++import { mockAdapterFactory } from '../../_utils/mock-adapter'
+ 
+ test('driver adapters be used without an engine via @prisma/client/wasm', () => {
+   jest.isolateModules(() => {
+@@ -6,7 +6,7 @@ test('driver adapters be used without an engine via @prisma/client/wasm', () =>
+ 
+     const newClient = () =>
+       new PrismaClient({
+-        adapter: mockAdapter('postgres'),
++        adapter: mockAdapterFactory('postgres'),
+       })
+ 
+     expect(newClient).toThrowErrorMatchingInlineSnapshot(`
+@@ -22,7 +22,7 @@ test('driver adapters cannot be used without an engine via @prisma/client/defaul
+ 
+     const newClient = () =>
+       new PrismaClient({
+-        adapter: mockAdapter('postgres'),
++        adapter: mockAdapterFactory('postgres'),
+       })
+ 
+     expect(newClient).toThrowErrorMatchingInlineSnapshot(`
+diff --git a/packages/client/tests/e2e/driver-adapters-accelerate/tests/url.ts b/packages/client/tests/e2e/driver-adapters-accelerate/tests/url.ts
+index 31160f755108..5548fac58096 100644
+--- a/packages/client/tests/e2e/driver-adapters-accelerate/tests/url.ts
++++ b/packages/client/tests/e2e/driver-adapters-accelerate/tests/url.ts
+@@ -1,4 +1,4 @@
+-import { mockAdapter } from '../../_utils/mock-adapter'
++import { mockAdapterFactory } from '../../_utils/mock-adapter'
+ 
+ describe('driver adapters cannot be used with accelerate', () => {
+   let dbURL: string | undefined
+@@ -18,7 +18,7 @@ describe('driver adapters cannot be used with accelerate', () => {
+ 
+       const newClient = () =>
+         new PrismaClient({
+-          adapter: mockAdapter('postgres'),
++          adapter: mockAdapterFactory('postgres'),
+         })
+ 
+       expect(newClient).toThrowErrorMatchingInlineSnapshot(`
+@@ -34,7 +34,7 @@ describe('driver adapters cannot be used with accelerate', () => {
+ 
+       const newClient = () =>
+         new PrismaClient({
+-          adapter: mockAdapter('postgres'),
++          adapter: mockAdapterFactory('postgres'),
+         })
+ 
+       expect(newClient).toThrowErrorMatchingInlineSnapshot(`
+diff --git a/packages/client/tests/e2e/driver-adapters-custom-db-schema/adapter-neon/tests/main.ts b/packages/client/tests/e2e/driver-adapters-custom-db-schema/adapter-neon/tests/main.ts
+index 064e01190f7e..83900e1d5ef8 100644
+--- a/packages/client/tests/e2e/driver-adapters-custom-db-schema/adapter-neon/tests/main.ts
++++ b/packages/client/tests/e2e/driver-adapters-custom-db-schema/adapter-neon/tests/main.ts
+@@ -1,17 +1,15 @@
+-import { neonConfig, Pool } from '@neondatabase/serverless'
++import { neonConfig } from '@neondatabase/serverless'
+ import { PrismaNeon } from '@prisma/adapter-neon'
+ import { PrismaClient } from '@prisma/client'
+ import { WebSocket } from 'undici'
+ 
+ test('neon supports custom database schema (default is: "public".<TABLE>)', async () => {
+-  const pool = new Pool({ connectionString: process.env.POSTGRES_URL })
+-
+   neonConfig.wsProxy = () => process.env.NEON_WS_PROXY
+   neonConfig.webSocketConstructor = WebSocket
+   neonConfig.useSecureWebSocket = false // disable tls
+   neonConfig.pipelineConnect = false
+ 
+-  const adapter = new PrismaNeon(pool, { schema: 'base' })
++  const adapter = new PrismaNeon({ connectionString: process.env.POSTGRES_URL }, { schema: 'base' })
+ 
+   const prisma = new PrismaClient({
+     errorFormat: 'minimal',
+@@ -29,5 +27,5 @@ test('neon supports custom database schema (default is: "public".<TABLE>)', asyn
+   const baseUsers = await prisma.$queryRawUnsafe(`SELECT * FROM "base"."User" WHERE id = $1`, USER_ID)
+   expect(baseUsers).toMatchObject([{ id: USER_ID }])
+ 
+-  await pool.end()
++  await prisma.$disconnect()
+ })
+diff --git a/packages/client/tests/e2e/driver-adapters-custom-db-schema/adapter-pg/tests/main.ts b/packages/client/tests/e2e/driver-adapters-custom-db-schema/adapter-pg/tests/main.ts
+index 8b9dbc17c735..af8f06372f4d 100644
+--- a/packages/client/tests/e2e/driver-adapters-custom-db-schema/adapter-pg/tests/main.ts
++++ b/packages/client/tests/e2e/driver-adapters-custom-db-schema/adapter-pg/tests/main.ts
+@@ -1,10 +1,8 @@
+ import { PrismaPg } from '@prisma/adapter-pg'
+ import { PrismaClient } from '@prisma/client'
+-import { Pool } from 'pg'
+ 
+ test('pg supports custom database schema (default is: "public".<TABLE>)', async () => {
+-  const pool = new Pool({ connectionString: process.env.POSTGRES_URL })
+-  const adapter = new PrismaPg(pool, { schema: 'base' })
++  const adapter = new PrismaPg({ connectionString: process.env.POSTGRES_URL, schema: 'base' })
+   const prisma = new PrismaClient({
+     errorFormat: 'minimal',
+     adapter,
+@@ -21,5 +19,5 @@ test('pg supports custom database schema (default is: "public".<TABLE>)', async
+   const baseUsers = await prisma.$queryRawUnsafe(`SELECT * FROM "base"."User" WHERE id = $1`, USER_ID)
+   expect(baseUsers).toMatchObject([{ id: USER_ID }])
+ 
+-  await pool.end()
++  await prisma.$disconnect()
+ })
+diff --git a/packages/client/tests/e2e/pg-self-signed-cert-error/tests/main.ts b/packages/client/tests/e2e/pg-self-signed-cert-error/tests/main.ts
+index 31070141d90d..0c418f7eeb2a 100644
+--- a/packages/client/tests/e2e/pg-self-signed-cert-error/tests/main.ts
++++ b/packages/client/tests/e2e/pg-self-signed-cert-error/tests/main.ts
+@@ -1,10 +1,9 @@
+ import { PrismaPg } from '@prisma/adapter-pg'
+ import { PrismaClient } from '@prisma/client'
+-import pg from 'pg'
+ 
+ const prisma = new PrismaClient({
+   errorFormat: 'minimal',
+-  adapter: new PrismaPg(new pg.Pool({ connectionString: process.env.POSTGRES_URL })),
++  adapter: new PrismaPg({ connectionString: process.env.POSTGRES_URL }),
+ })
+ 
+ test('reports correct self-signed certificate message', async () => {
+diff --git a/packages/client/tests/e2e/prisma-client-imports-mysql/src/default.ts b/packages/client/tests/e2e/prisma-client-imports-mysql/src/default.ts
+index fc4276b02b61..4d47a91e1af8 100644
+--- a/packages/client/tests/e2e/prisma-client-imports-mysql/src/default.ts
++++ b/packages/client/tests/e2e/prisma-client-imports-mysql/src/default.ts
+@@ -1,5 +1,4 @@
+ /* eslint-disable import/no-duplicates */
+-import { Client as PlanetScaleClient } from '@planetscale/database'
+ import { PrismaPlanetScale } from '@prisma/adapter-planetscale'
+ import { PrismaClient } from '@prisma/client'
+ // @ts-ignore no types available
+@@ -28,8 +27,7 @@ void replicaClient.user.findMany()
+ export const generators = [G1, G2]
+ 
+ /* Driver Adapters */
+-const planetScaleClient = new PlanetScaleClient({ url: connectionString })
+ export const planetScalePrismaClient = new PrismaClient({
+-  adapter: new PrismaPlanetScale(planetScaleClient),
++  adapter: new PrismaPlanetScale({ url: connectionString }),
+ })
+ void planetScalePrismaClient.user.findMany()
+diff --git a/packages/client/tests/e2e/prisma-client-imports-mysql/src/dep.ts b/packages/client/tests/e2e/prisma-client-imports-mysql/src/dep.ts
+index bc58de5eefa9..7a63832eda1d 100644
+--- a/packages/client/tests/e2e/prisma-client-imports-mysql/src/dep.ts
++++ b/packages/client/tests/e2e/prisma-client-imports-mysql/src/dep.ts
+@@ -1,4 +1,3 @@
+-import { Client as PlanetScaleClient } from '@planetscale/database'
+ import { PrismaPlanetScale } from '@prisma/adapter-planetscale'
+ import { withAccelerate } from '@prisma/extension-accelerate'
+ import { readReplicas } from '@prisma/extension-read-replicas'
+@@ -21,8 +20,7 @@ export const replicaClient = client.$extends(readReplicas({ url: '' }))
+ void replicaClient.user.findMany()
+ 
+ /* Driver Adapters */
+-const planetScaleClient = new PlanetScaleClient({ url: connectionString })
+ export const planetScalePrismaClient = new PrismaClient({
+-  adapter: new PrismaPlanetScale(planetScaleClient),
++  adapter: new PrismaPlanetScale({ url: connectionString }),
+ })
+ void planetScalePrismaClient.user.findMany()
+diff --git a/packages/client/tests/e2e/prisma-client-imports-mysql/src/no-dep.ts b/packages/client/tests/e2e/prisma-client-imports-mysql/src/no-dep.ts
+index 202513d38ad1..cf0f117d02c8 100644
+--- a/packages/client/tests/e2e/prisma-client-imports-mysql/src/no-dep.ts
++++ b/packages/client/tests/e2e/prisma-client-imports-mysql/src/no-dep.ts
+@@ -1,4 +1,3 @@
+-import { Client as PlanetScaleClient } from '@planetscale/database'
+ import { PrismaPlanetScale } from '@prisma/adapter-planetscale'
+ import { withAccelerate } from '@prisma/extension-accelerate'
+ import { readReplicas } from '@prisma/extension-read-replicas'
+@@ -21,8 +20,7 @@ export const replicaClient = client.$extends(readReplicas({ url: '' }))
+ void replicaClient.user.findMany()
+ 
+ /* Driver Adapters */
+-const planetScaleClient = new PlanetScaleClient({ url: connectionString })
+ export const planetScalePrismaClient = new PrismaClient({
+-  adapter: new PrismaPlanetScale(planetScaleClient),
++  adapter: new PrismaPlanetScale({ url: connectionString }),
+ })
+ void planetScalePrismaClient.user.findMany()
+diff --git a/packages/client/tests/e2e/prisma-client-imports-postgres/src/default.ts b/packages/client/tests/e2e/prisma-client-imports-postgres/src/default.ts
+index ef10ad8623b1..860ff5133679 100644
+--- a/packages/client/tests/e2e/prisma-client-imports-postgres/src/default.ts
++++ b/packages/client/tests/e2e/prisma-client-imports-postgres/src/default.ts
+@@ -1,5 +1,5 @@
+ /* eslint-disable import/no-duplicates */
+-import { neon, neonConfig, Pool as NeonPool } from '@neondatabase/serverless'
++import { neonConfig } from '@neondatabase/serverless'
+ import { PrismaNeon, PrismaNeonHTTP } from '@prisma/adapter-neon'
+ import { PrismaPg } from '@prisma/adapter-pg'
+ import { PrismaPg as PrismaPgWorker } from '@prisma/adapter-pg-worker'
+@@ -12,8 +12,6 @@ import { PrismaClientKnownRequestError as E1 } from '@prisma/client/runtime/libr
+ import { PrismaClientKnownRequestError as E2 } from '@prisma/client/runtime/library.js'
+ import { withAccelerate } from '@prisma/extension-accelerate'
+ import { readReplicas } from '@prisma/extension-read-replicas'
+-import { Pool as PgWorkerPool } from '@prisma/pg-worker'
+-import { Pool as PgPool } from 'pg'
+ import ws from 'ws'
+ 
+ // Setup
+@@ -36,29 +34,25 @@ export const generators = [G1, G2]
+ /* Driver Adapters */
+ 
+ /* Driver Adapters */
+-const neonPool = new NeonPool({ connectionString })
+ export const neonPrismaClient = new PrismaClient({
+-  adapter: new PrismaNeon(neonPool),
++  adapter: new PrismaNeon({ connectionString }),
+ })
+ void neonPrismaClient.user.findMany()
+ 
+-const neonConnection = neon('postgresql://user:password@example.com/dbname', {
+-  arrayMode: false,
+-  fullResults: true,
+-})
+ export const neonHttpPrismaClient = new PrismaClient({
+-  adapter: new PrismaNeonHTTP(neonConnection),
++  adapter: new PrismaNeonHTTP('postgresql://user:password@example.com/dbname', {
++    arrayMode: false,
++    fullResults: true,
++  }),
+ })
+ void neonHttpPrismaClient.user.findMany()
+ 
+-const pgPool = new PgPool({ connectionString })
+ export const pgPrismaClient = new PrismaClient({
+-  adapter: new PrismaPg(pgPool),
++  adapter: new PrismaPg({ connectionString }),
+ })
+ void pgPrismaClient.user.findMany()
+ 
+-const pgWorkerPool = new PgWorkerPool({ connectionString })
+ export const pgWorkerPrismaClient = new PrismaClient({
+-  adapter: new PrismaPgWorker(pgWorkerPool),
++  adapter: new PrismaPgWorker({ connectionString }),
+ })
+ void pgWorkerPrismaClient.user.findMany()
+diff --git a/packages/client/tests/e2e/prisma-client-imports-postgres/src/dep.ts b/packages/client/tests/e2e/prisma-client-imports-postgres/src/dep.ts
+index 7620a94e964b..38679892c2d1 100644
+--- a/packages/client/tests/e2e/prisma-client-imports-postgres/src/dep.ts
++++ b/packages/client/tests/e2e/prisma-client-imports-postgres/src/dep.ts
+@@ -1,14 +1,12 @@
+-import { neon, neonConfig, Pool as NeonPool } from '@neondatabase/serverless'
++import { neonConfig } from '@neondatabase/serverless'
+ import { PrismaNeon, PrismaNeonHTTP } from '@prisma/adapter-neon'
+ import { PrismaPg } from '@prisma/adapter-pg'
+ import { PrismaPg as PrismaPgWorker } from '@prisma/adapter-pg-worker'
+ import { withAccelerate } from '@prisma/extension-accelerate'
+ import { readReplicas } from '@prisma/extension-read-replicas'
+-import { Pool as PgWorkerPool } from '@prisma/pg-worker'
+ import { PrismaClient } from 'db'
+ import { PrismaClientKnownRequestError as E1 } from 'db/runtime/library'
+ import { PrismaClientKnownRequestError as E2 } from 'db/runtime/library.js'
+-import { Pool as PgPool } from 'pg'
+ import ws from 'ws'
+ 
+ // Setup
+@@ -28,29 +26,25 @@ export const replicaClient = client.$extends(readReplicas({ url: '' }))
+ void replicaClient.user.findMany()
+ 
+ /* Driver Adapters */
+-const neonPool = new NeonPool({ connectionString })
+ export const neonPrismaClient = new PrismaClient({
+-  adapter: new PrismaNeon(neonPool),
++  adapter: new PrismaNeon({ connectionString }),
+ })
+ void neonPrismaClient.user.findMany()
+ 
+-const neonConnection = neon('postgresql://user:password@example.com/dbname', {
+-  arrayMode: false,
+-  fullResults: true,
+-})
+ export const neonHttpPrismaClient = new PrismaClient({
+-  adapter: new PrismaNeonHTTP(neonConnection),
++  adapter: new PrismaNeonHTTP('postgresql://user:password@example.com/dbname', {
++    arrayMode: false,
++    fullResults: true,
++  }),
+ })
+ void neonHttpPrismaClient.user.findMany()
+ 
+-const pgPool = new PgPool({ connectionString })
+ export const pgPrismaClient = new PrismaClient({
+-  adapter: new PrismaPg(pgPool),
++  adapter: new PrismaPg({ connectionString }),
+ })
+ void pgPrismaClient.user.findMany()
+ 
+-const pgWorkerPool = new PgWorkerPool({ connectionString })
+ export const pgWorkerPrismaClient = new PrismaClient({
+-  adapter: new PrismaPgWorker(pgWorkerPool),
++  adapter: new PrismaPgWorker({ connectionString }),
+ })
+ void pgWorkerPrismaClient.user.findMany()
+diff --git a/packages/client/tests/e2e/prisma-client-imports-postgres/src/no-dep.ts b/packages/client/tests/e2e/prisma-client-imports-postgres/src/no-dep.ts
+index 128a4288e310..bbddde9cd7b2 100644
+--- a/packages/client/tests/e2e/prisma-client-imports-postgres/src/no-dep.ts
++++ b/packages/client/tests/e2e/prisma-client-imports-postgres/src/no-dep.ts
+@@ -1,12 +1,10 @@
+-import { neon, neonConfig, Pool as NeonPool } from '@neondatabase/serverless'
++import { neonConfig } from '@neondatabase/serverless'
+ // import { PrismaLibSQL } from '@prisma/adapter-libsql'
+ import { PrismaNeon, PrismaNeonHTTP } from '@prisma/adapter-neon'
+ import { PrismaPg } from '@prisma/adapter-pg'
+ import { PrismaPg as PrismaPgWorker } from '@prisma/adapter-pg-worker'
+ import { withAccelerate } from '@prisma/extension-accelerate'
+ import { readReplicas } from '@prisma/extension-read-replicas'
+-import { Pool as PgWorkerPool } from '@prisma/pg-worker'
+-import { Pool as PgPool } from 'pg'
+ import ws from 'ws'
+ 
+ import { PrismaClient } from '../custom'
+@@ -29,29 +27,25 @@ export const replicaClient = client.$extends(readReplicas({ url: '' }))
+ void replicaClient.user.findMany()
+ 
+ /* Driver Adapters */
+-const neonPool = new NeonPool({ connectionString })
+ export const neonPrismaClient = new PrismaClient({
+-  adapter: new PrismaNeon(neonPool),
++  adapter: new PrismaNeon({ connectionString }),
+ })
+ void neonPrismaClient.user.findMany()
+ 
+-const neonConnection = neon('postgresql://user:password@example.com/dbname', {
+-  arrayMode: false,
+-  fullResults: true,
+-})
+ export const neonHttpPrismaClient = new PrismaClient({
+-  adapter: new PrismaNeonHTTP(neonConnection),
++  adapter: new PrismaNeonHTTP('postgresql://user:password@example.com/dbname', {
++    arrayMode: false,
++    fullResults: true,
++  }),
+ })
+ void neonHttpPrismaClient.user.findMany()
+ 
+-const pgPool = new PgPool({ connectionString })
+ export const pgPrismaClient = new PrismaClient({
+-  adapter: new PrismaPg(pgPool),
++  adapter: new PrismaPg({ connectionString }),
+ })
+ void pgPrismaClient.user.findMany()
+ 
+-const pgWorkerPool = new PgWorkerPool({ connectionString })
+ export const pgWorkerPrismaClient = new PrismaClient({
+-  adapter: new PrismaPgWorker(pgWorkerPool),
++  adapter: new PrismaPgWorker({ connectionString }),
+ })
+ void pgWorkerPrismaClient.user.findMany()
+diff --git a/packages/client/tests/e2e/prisma-client-imports-sqlite/src/esm-only-pkgs/default.ts b/packages/client/tests/e2e/prisma-client-imports-sqlite/src/esm-only-pkgs/default.ts
+index f4c870cf4fd4..9b7fadd550c6 100644
+--- a/packages/client/tests/e2e/prisma-client-imports-sqlite/src/esm-only-pkgs/default.ts
++++ b/packages/client/tests/e2e/prisma-client-imports-sqlite/src/esm-only-pkgs/default.ts
+@@ -1,12 +1,10 @@
+-import { createClient } from '@libsql/client'
+ import { PrismaLibSQL } from '@prisma/adapter-libsql'
+ import { PrismaClient } from '@prisma/client'
+ 
+-const libsqlClient = createClient({
+-  url: 'libsql://test-prisma.turso.io',
+-  authToken: '',
+-})
+ export const libsqlPrismaClient = new PrismaClient({
+-  adapter: new PrismaLibSQL(libsqlClient),
++  adapter: new PrismaLibSQL({
++    url: 'libsql://test-prisma.turso.io',
++    authToken: '',
++  }),
+ })
+ void libsqlPrismaClient.user.findMany()
+diff --git a/packages/client/tests/e2e/prisma-client-imports-sqlite/src/esm-only-pkgs/dep.ts b/packages/client/tests/e2e/prisma-client-imports-sqlite/src/esm-only-pkgs/dep.ts
+index 765527d6da21..3cc98b674536 100644
+--- a/packages/client/tests/e2e/prisma-client-imports-sqlite/src/esm-only-pkgs/dep.ts
++++ b/packages/client/tests/e2e/prisma-client-imports-sqlite/src/esm-only-pkgs/dep.ts
+@@ -1,12 +1,10 @@
+-import { createClient } from '@libsql/client'
+ import { PrismaLibSQL } from '@prisma/adapter-libsql'
+ import { PrismaClient } from 'db'
+ 
+-const libsqlClient = createClient({
+-  url: 'libsql://test-prisma.turso.io',
+-  authToken: '',
+-})
+ export const libsqlPrismaClient = new PrismaClient({
+-  adapter: new PrismaLibSQL(libsqlClient),
++  adapter: new PrismaLibSQL({
++    url: 'libsql://test-prisma.turso.io',
++    authToken: '',
++  }),
+ })
+ void libsqlPrismaClient.user.findMany()
+diff --git a/packages/client/tests/e2e/prisma-client-imports-sqlite/src/esm-only-pkgs/no-dep.ts b/packages/client/tests/e2e/prisma-client-imports-sqlite/src/esm-only-pkgs/no-dep.ts
+index 08059a885ae0..e0ff41ef8879 100644
+--- a/packages/client/tests/e2e/prisma-client-imports-sqlite/src/esm-only-pkgs/no-dep.ts
++++ b/packages/client/tests/e2e/prisma-client-imports-sqlite/src/esm-only-pkgs/no-dep.ts
+@@ -1,13 +1,11 @@
+-import { createClient } from '@libsql/client'
+ import { PrismaLibSQL } from '@prisma/adapter-libsql'
+ 
+ import { PrismaClient } from '../../custom'
+ 
+-const libsqlClient = createClient({
+-  url: 'libsql://test-prisma.turso.io',
+-  authToken: '',
+-})
+ export const libsqlPrismaClient = new PrismaClient({
+-  adapter: new PrismaLibSQL(libsqlClient),
++  adapter: new PrismaLibSQL({
++    url: 'libsql://test-prisma.turso.io',
++    authToken: '',
++  }),
+ })
+ void libsqlPrismaClient.user.findMany()
+diff --git a/packages/client/tests/functional/_utils/setupTestSuiteClient.ts b/packages/client/tests/functional/_utils/setupTestSuiteClient.ts
+index 2f91f0dba09d..dad62f431c23 100644
+--- a/packages/client/tests/functional/_utils/setupTestSuiteClient.ts
++++ b/packages/client/tests/functional/_utils/setupTestSuiteClient.ts
+@@ -177,18 +177,18 @@ export function setupTestSuiteClientDriverAdapter({
+   }
+ 
+   if (driverAdapter === AdapterProviders.JS_PG) {
+-    const { Pool } = require('pg') as typeof import('pg')
+     const { PrismaPg } = require('@prisma/adapter-pg') as typeof import('@prisma/adapter-pg')
+ 
+-    const pool = new Pool({
+-      connectionString: datasourceInfo.databaseUrl,
+-    })
+-
+-    return { adapter: new PrismaPg(pool), __internal }
++    return {
++      adapter: new PrismaPg({
++        connectionString: datasourceInfo.databaseUrl,
++      }),
++      __internal,
++    }
+   }
+ 
+   if (driverAdapter === AdapterProviders.JS_NEON) {
+-    const { neonConfig, Pool } = require('@neondatabase/serverless') as typeof import('@neondatabase/serverless')
++    const { neonConfig } = require('@neondatabase/serverless') as typeof import('@neondatabase/serverless')
+     const { PrismaNeon } = require('@prisma/adapter-neon') as typeof import('@prisma/adapter-neon')
+ 
+     neonConfig.wsProxy = () => `127.0.0.1:5488/v1`
+@@ -196,38 +196,39 @@ export function setupTestSuiteClientDriverAdapter({
+     neonConfig.useSecureWebSocket = false // disable tls
+     neonConfig.pipelineConnect = false
+ 
+-    const pool = new Pool({
+-      connectionString: datasourceInfo.databaseUrl,
+-    })
+-
+-    return { adapter: new PrismaNeon(pool), __internal }
++    return {
++      adapter: new PrismaNeon({
++        connectionString: datasourceInfo.databaseUrl,
++      }),
++      __internal,
++    }
+   }
+ 
+   if (driverAdapter === AdapterProviders.JS_PLANETSCALE) {
+-    const { Client } = require('@planetscale/database') as typeof import('@planetscale/database')
+     const { PrismaPlanetScale } = require('@prisma/adapter-planetscale') as typeof import('@prisma/adapter-planetscale')
+ 
+     const url = new URL('http://root:root@127.0.0.1:8085')
+     url.pathname = new URL(datasourceInfo.databaseUrl).pathname
+ 
+-    const client = new Client({
+-      url: url.toString(),
+-      fetch, // TODO remove when Node 16 is deprecated
+-    })
+-
+-    return { adapter: new PrismaPlanetScale(client), __internal }
++    return {
++      adapter: new PrismaPlanetScale({
++        url: url.toString(),
++        fetch, // TODO remove when Node 16 is deprecated
++      }),
++      __internal,
++    }
+   }
+ 
+   if (driverAdapter === AdapterProviders.JS_LIBSQL) {
+-    const { createClient } = require('@libsql/client') as typeof import('@libsql/client')
+     const { PrismaLibSQL } = require('@prisma/adapter-libsql') as typeof import('@prisma/adapter-libsql')
+ 
+-    const client = createClient({
+-      url: datasourceInfo.databaseUrl,
+-      intMode: 'bigint',
+-    })
+-
+-    return { adapter: new PrismaLibSQL(client), __internal }
++    return {
++      adapter: new PrismaLibSQL({
++        url: datasourceInfo.databaseUrl,
++        intMode: 'bigint',
++      }),
++      __internal,
++    }
+   }
+ 
+   if (driverAdapter === AdapterProviders.JS_D1) {
+diff --git a/packages/client/tests/functional/batch-transaction-isolation-level/tests.ts b/packages/client/tests/functional/batch-transaction-isolation-level/tests.ts
+index d52bb0621bc2..6b94f9671b67 100644
+--- a/packages/client/tests/functional/batch-transaction-isolation-level/tests.ts
++++ b/packages/client/tests/functional/batch-transaction-isolation-level/tests.ts
+@@ -9,7 +9,7 @@ declare let newPrismaClient: NewPrismaClient<typeof PrismaClient>
+ declare let Prisma: typeof PrismaNamespace
+ 
+ testMatrix.setupTestSuite(
+-  ({ provider }, _suiteMeta, _clientMeta) => {
++  ({ provider, driverAdapter }, _suiteMeta, _clientMeta) => {
+     const isSqlServer = provider === Providers.SQLSERVER
+ 
+     const queries: string[] = []
+@@ -38,7 +38,8 @@ testMatrix.setupTestSuite(
+       name: string,
+       { level, expectSql }: { level: () => PrismaNamespace.TransactionIsolationLevel; expectSql: string },
+     ) => {
+-      test(name, async () => {
++      // Driver adapters do not issue SET TRANSACTION ISOLATION LEVEL through the query engine.
++      testIf(driverAdapter === undefined)(name, async () => {
+         await prisma.$transaction([prisma.user.findFirst({}), prisma.user.findFirst({})], {
+           isolationLevel: level(),
+         })
+diff --git a/packages/client/tests/functional/datasource-overrides/tests.ts b/packages/client/tests/functional/datasource-overrides/tests.ts
+index 4afceefafdad..ef9c3b999b33 100644
+--- a/packages/client/tests/functional/datasource-overrides/tests.ts
++++ b/packages/client/tests/functional/datasource-overrides/tests.ts
+@@ -1,5 +1,4 @@
+ import { PrismaPg } from '@prisma/adapter-pg'
+-import { Pool } from 'pg'
+ 
+ import { NewPrismaClient } from '../_utils/types'
+ import testMatrix from './_matrix'
+@@ -63,12 +62,10 @@ testMatrix.setupTestSuite(
+     })
+ 
+     describeIf(driverAdapter === 'js_pg')('custom datasource should not be used with driver adapter', () => {
+-      const pool = new Pool({
++      const adapter = new PrismaPg({
+         connectionString: dbURL,
+       })
+ 
+-      const adapter = new PrismaPg(pool)
+-
+       test('throws when both `datasourceUrl` and `adapter` are used at the same time', () => {
+         expect(() => {
+           newPrismaClient({
+diff --git a/packages/client/tests/functional/driver-adapters/_utils/mock-adapter.ts b/packages/client/tests/functional/driver-adapters/_utils/mock-adapter.ts
+index fe62ef49cede..f67188f97294 100644
+--- a/packages/client/tests/functional/driver-adapters/_utils/mock-adapter.ts
++++ b/packages/client/tests/functional/driver-adapters/_utils/mock-adapter.ts
+@@ -1,4 +1,4 @@
+-import { DriverAdapter } from '@prisma/driver-adapter-utils'
++import { SqlDriverAdapter, SqlDriverAdapterFactory } from '@prisma/driver-adapter-utils'
+ 
+ import { Providers as Provider } from '../../_utils/providers'
+ import { getDriverAdaptersProvider } from './provider'
+@@ -6,7 +6,7 @@ import { getDriverAdaptersProvider } from './provider'
+ export const mockAdapterErrors = {
+   queryRaw: new Error('Not implemented: queryRaw'),
+   executeRaw: new Error('Not implemented: executeRaw'),
+-  transactionContext: new Error('Not implemented: transactionContext'),
++  startTransaction: new Error('Not implemented: startTransaction'),
+   executeScript: new Error('Not implemented: executeScript'),
+   dispose: new Error('Not implemented: dispose'),
+ }
+@@ -14,14 +14,25 @@ export const mockAdapterErrors = {
+ /**
+  * Create an adapter stub for testing.
+  */
+-export function mockAdapter(provider: Provider): DriverAdapter {
++export function mockAdapter(provider: Provider): SqlDriverAdapter {
+   return {
+     provider: getDriverAdaptersProvider(provider),
+     adapterName: getDriverAdaptersProvider(provider),
+     queryRaw: () => Promise.reject(mockAdapterErrors.queryRaw),
+     executeRaw: () => Promise.reject(mockAdapterErrors.executeRaw),
+-    transactionContext: () => Promise.reject(mockAdapterErrors.transactionContext),
++    startTransaction: () => Promise.reject(mockAdapterErrors.startTransaction),
+     executeScript: () => Promise.reject(mockAdapterErrors.executeScript),
+     dispose: () => Promise.reject(mockAdapterErrors.dispose),
+   }
+ }
++
++/**
++ * Create an adapter factory stub for testing.
++ */
++export function mockAdapterFactory(provider: Provider): SqlDriverAdapterFactory {
++  return {
++    provider: getDriverAdaptersProvider(provider),
++    adapterName: getDriverAdaptersProvider(provider),
++    connect: () => Promise.resolve(mockAdapter(provider)),
++  }
++}
+diff --git a/packages/client/tests/functional/driver-adapters/_utils/provider.ts b/packages/client/tests/functional/driver-adapters/_utils/provider.ts
+index a4cbd0ac672b..5f4a6e286252 100644
+--- a/packages/client/tests/functional/driver-adapters/_utils/provider.ts
++++ b/packages/client/tests/functional/driver-adapters/_utils/provider.ts
+@@ -1,11 +1,11 @@
+-import { DriverAdapter } from '@prisma/driver-adapter-utils'
++import { SqlDriverAdapter } from '@prisma/driver-adapter-utils'
+ 
+ import { Providers as Provider } from '../../_utils/providers'
+ 
+ /**
+  * Return the driver adapter provider name for a given provider, if it is supported.
+  */
+-export function getDriverAdaptersProvider(provider: Provider): DriverAdapter['provider'] {
++export function getDriverAdaptersProvider(provider: Provider): SqlDriverAdapter['provider'] {
+   switch (provider) {
+     case Provider.POSTGRESQL:
+     case Provider.COCKROACHDB:
+diff --git a/packages/client/tests/functional/driver-adapters/enforce-preview-feature/tests.ts b/packages/client/tests/functional/driver-adapters/enforce-preview-feature/tests.ts
+index e78b8f2b2947..9a31198dd00d 100644
+--- a/packages/client/tests/functional/driver-adapters/enforce-preview-feature/tests.ts
++++ b/packages/client/tests/functional/driver-adapters/enforce-preview-feature/tests.ts
+@@ -1,5 +1,5 @@
+ import { NewPrismaClient } from '../../_utils/types'
+-import { mockAdapter } from '../_utils/mock-adapter'
++import { mockAdapterFactory } from '../_utils/mock-adapter'
+ import { defaultTestSuiteOptions } from '../_utils/test-suite-options'
+ import testMatrix from './_matrix'
+ // @ts-ignore
+@@ -13,7 +13,7 @@ testMatrix.setupTestSuite((suiteConfig, _, clientMeta) => {
+   testIf(!clientMeta.driverAdapter)('enforce driverAdapters preview feature', () => {
+     const initialize = () => {
+       // @ts-test-if: previewFeatures.includes('driverAdapters')
+-      newPrismaClient({ adapter: mockAdapter(suiteConfig.provider) })
++      newPrismaClient({ adapter: mockAdapterFactory(suiteConfig.provider) })
+     }
+ 
+     if (suiteConfig.previewFeatures.includes('driverAdapters')) {
+diff --git a/packages/client/tests/functional/driver-adapters/error-forwarding/tests.ts b/packages/client/tests/functional/driver-adapters/error-forwarding/tests.ts
+index dd516842b595..3cf35f302dfa 100644
+--- a/packages/client/tests/functional/driver-adapters/error-forwarding/tests.ts
++++ b/packages/client/tests/functional/driver-adapters/error-forwarding/tests.ts
+@@ -2,7 +2,7 @@
+ import type { PrismaClient } from '@prisma/client'
+ 
+ import { NewPrismaClient } from '../../_utils/types'
+-import { mockAdapter, mockAdapterErrors } from '../_utils/mock-adapter'
++import { mockAdapterErrors, mockAdapterFactory } from '../_utils/mock-adapter'
+ import { defaultTestSuiteOptions } from '../_utils/test-suite-options'
+ import testMatrix from './_matrix'
+ 
+@@ -14,7 +14,7 @@ testMatrix.setupTestSuite(
+ 
+     beforeAll(() => {
+       prisma = newPrismaClient({
+-        adapter: mockAdapter(provider),
++        adapter: mockAdapterFactory(provider),
+       })
+     })
+     test('correctly forwards error for queryRaw', async () => {
+@@ -35,17 +35,17 @@ testMatrix.setupTestSuite(
+           },
+         },
+       })
+-      await expect(result).rejects.toBe(mockAdapterErrors.transactionContext)
++      await expect(result).rejects.toBe(mockAdapterErrors.startTransaction)
+     })
+ 
+     test('correctly forwards error for batch transactions', async () => {
+       const result = prisma.$transaction([prisma.user.create({}), prisma.user.create({})])
+-      await expect(result).rejects.toBe(mockAdapterErrors.transactionContext)
++      await expect(result).rejects.toBe(mockAdapterErrors.startTransaction)
+     })
+ 
+     test('correctly forwards error for itx', async () => {
+       const result = prisma.$transaction(() => Promise.resolve())
+-      await expect(result).rejects.toBe(mockAdapterErrors.transactionContext)
++      await expect(result).rejects.toBe(mockAdapterErrors.startTransaction)
+     })
+   },
+   {
+diff --git a/packages/client/tests/functional/driver-adapters/validate-active-provider/tests.ts b/packages/client/tests/functional/driver-adapters/validate-active-provider/tests.ts
+index 2e6a9b491c6c..13e46b4b2890 100644
+--- a/packages/client/tests/functional/driver-adapters/validate-active-provider/tests.ts
++++ b/packages/client/tests/functional/driver-adapters/validate-active-provider/tests.ts
+@@ -1,11 +1,9 @@
+ import path from 'node:path'
+ 
+ import type { D1Database } from '@cloudflare/workers-types'
+-import { Client as PlanetScaleClient } from '@planetscale/database'
+ import { PrismaD1 } from '@prisma/adapter-d1'
+ import { PrismaPg } from '@prisma/adapter-pg'
+ import { PrismaPlanetScale } from '@prisma/adapter-planetscale'
+-import { Pool } from 'pg'
+ import { getPlatformProxy } from 'wrangler'
+ 
+ import type { PrismaClientInitializationError } from '../../../../src/runtime/core/errors/PrismaClientInitializationError'
+@@ -27,8 +25,7 @@ testMatrix.setupTestSuite(
+       () => {
+         expect.assertions(2)
+ 
+-        const pool = new Pool({ connectionString: datasourceInfo.databaseUrl })
+-        const adapter = new PrismaPg(pool)
++        const adapter = new PrismaPg({ connectionString: datasourceInfo.databaseUrl })
+ 
+         try {
+           newPrismaClient({
+@@ -49,8 +46,7 @@ testMatrix.setupTestSuite(
+       () => {
+         expect.assertions(2)
+ 
+-        const planetscale = new PlanetScaleClient({ url: datasourceInfo.databaseUrl, fetch })
+-        const adapter = new PrismaPlanetScale(planetscale)
++        const adapter = new PrismaPlanetScale({ url: datasourceInfo.databaseUrl, fetch })
+ 
+         try {
+           newPrismaClient({
+diff --git a/packages/client/tests/functional/extensions/model.ts b/packages/client/tests/functional/extensions/model.ts
+index 6c358347080c..d81f18ff21d5 100644
+--- a/packages/client/tests/functional/extensions/model.ts
++++ b/packages/client/tests/functional/extensions/model.ts
+@@ -14,7 +14,7 @@ let prisma: PrismaClient
+ declare const newPrismaClient: NewPrismaClient<typeof PrismaClient>
+ 
+ testMatrix.setupTestSuite(
+-  ({ provider }, _suiteMeta, _clientMeta, cliMeta) => {
++  ({ provider, driverAdapter }, _suiteMeta, _clientMeta, cliMeta) => {
+     const isSqlServer = provider === Providers.SQLSERVER
+ 
+     beforeEach(() => {
+@@ -403,11 +403,14 @@ testMatrix.setupTestSuite(
+ 
+         await waitFor(() => {
+           const expectation = [
+-            [{ query: expect.stringContaining('BEGIN') }],
+             [{ query: expect.stringContaining('SELECT') }],
+             [{ query: expect.stringContaining('SELECT') }],
+             [{ query: expect.stringContaining('COMMIT') }],
+           ]
++          if (driverAdapter === undefined) {
++            // Driver adapters do not issue BEGIN through the query engine.
++            expectation.unshift([{ query: expect.stringContaining('BEGIN') }])
++          }
+           if (isSqlServer) {
+             expectation.unshift([{ query: expect.stringContaining('SET TRANSACTION') }])
+           }
+@@ -460,11 +463,14 @@ testMatrix.setupTestSuite(
+ 
+         await waitFor(() => {
+           const expectation = [
+-            [{ query: expect.stringContaining('BEGIN') }],
+             [{ query: expect.stringContaining('SELECT') }],
+             [{ query: expect.stringContaining('SELECT') }],
+             [{ query: expect.stringContaining('COMMIT') }],
+           ]
++          if (driverAdapter === undefined) {
++            // Driver adapters do not issue BEGIN through the query engine.
++            expectation.unshift([{ query: expect.stringContaining('BEGIN') }])
++          }
+           if (isSqlServer) {
+             expectation.unshift([{ query: expect.stringContaining('SET TRANSACTION') }])
+           }
+diff --git a/packages/client/tests/functional/extensions/query.ts b/packages/client/tests/functional/extensions/query.ts
+index 40bf7d11f166..5e34ad3cf78a 100644
+--- a/packages/client/tests/functional/extensions/query.ts
++++ b/packages/client/tests/functional/extensions/query.ts
+@@ -479,11 +479,14 @@ testMatrix.setupTestSuite(
+         `)
+         await waitFor(() => {
+           const expectation = [
+-            [{ query: expect.stringContaining('BEGIN') }],
+             [{ query: expect.stringContaining('SELECT') }],
+             [{ query: expect.stringContaining('SELECT') }],
+             [{ query: expect.stringContaining('COMMIT') }],
+           ]
++          if (driverAdapter === undefined) {
++            // Driver adapters do not issue BEGIN through the query engine.
++            expectation.unshift([{ query: expect.stringContaining('BEGIN') }])
++          }
+           if (isSqlServer) {
+             expectation.unshift([{ query: expect.stringContaining('SET TRANSACTION') }])
+           }
+@@ -524,11 +527,14 @@ testMatrix.setupTestSuite(
+         `)
+         await waitFor(() => {
+           const expectation = [
+-            [{ query: expect.stringContaining('BEGIN') }],
+             [{ query: expect.stringContaining('SELECT') }],
+             [{ query: expect.stringContaining('SELECT') }],
+             [{ query: expect.stringContaining('COMMIT') }],
+           ]
++          if (driverAdapter === undefined) {
++            // Driver adapters do not issue BEGIN through the query engine.
++            expectation.unshift([{ query: expect.stringContaining('BEGIN') }])
++          }
+           if (isSqlServer) {
+             expectation.unshift([{ query: expect.stringContaining('SET TRANSACTION') }])
+           }
+@@ -579,23 +585,24 @@ testMatrix.setupTestSuite(
+         ]
+       `)
+       await waitFor(() => {
+-        // user.findFirst 4 queries + post.findFirst 1 query
+-        expect(fnEmitter).toHaveBeenCalledTimes(isSqlServer ? 6 : 5)
+         const calls = [...fnEmitter.mock.calls]
+ 
+         // get rid of dandling post.findFirst query
+-        if (calls[0][0]['query'].includes('SELECT')) {
+-          calls.shift()
+-        } else {
++        if (calls[calls.length - 1][0]['query'].includes('SELECT')) {
+           calls.pop()
++        } else {
++          calls.shift()
+         }
+ 
+         const expectation = [
+-          [{ query: expect.stringContaining('BEGIN') }],
+           [{ query: expect.stringContaining('SELECT') }],
+           [{ query: expect.stringContaining('SELECT') }],
+           [{ query: expect.stringContaining('COMMIT') }],
+         ]
++        if (driverAdapter === undefined) {
++          // Driver adapters do not issue BEGIN through the query engine.
++          expectation.unshift([{ query: expect.stringContaining('BEGIN') }])
++        }
+         if (isSqlServer) {
+           expectation.unshift([{ query: expect.stringContaining('SET TRANSACTION') }])
+         }
+@@ -677,24 +684,26 @@ testMatrix.setupTestSuite(
+       `)
+ 
+       await waitFor(() => {
+-        // user.findFirst 4 queries + post.findFirst 1 query
+-        expect(fnEmitter).toHaveBeenCalledTimes(isSqlServer ? 6 : 5)
+         const calls = [...fnEmitter.mock.calls]
+ 
+         // get rid of dandling post.findFirst query
+-        if (calls[0][0]['query'].includes('SELECT')) {
+-          calls.shift()
+-        } else {
++        if (calls[calls.length - 1][0]['query'].includes('SELECT')) {
+           calls.pop()
++        } else {
++          calls.shift()
+         }
+ 
+         if (provider !== Providers.MONGODB) {
+           const expectation = [
+-            [{ query: expect.stringContaining('BEGIN') }],
+             [{ query: expect.stringContaining('SELECT') }],
+             [{ query: expect.stringContaining('SELECT') }],
+             [{ query: expect.stringContaining('COMMIT') }],
+           ]
++
++          if (driverAdapter === undefined) {
++            // Driver adapters do not issue BEGIN through the query engine.
++            expectation.unshift([{ query: expect.stringContaining('BEGIN') }])
++          }
+           if (isSqlServer) {
+             expectation.unshift([{ query: expect.stringContaining('SET TRANSACTION') }])
+           }
+diff --git a/packages/client/tests/functional/invalid-sqlite-isolation-level/_matrix.ts b/packages/client/tests/functional/invalid-sqlite-isolation-level/_matrix.ts
+new file mode 100644
+index 000000000000..0bd4eddafcf4
+--- /dev/null
++++ b/packages/client/tests/functional/invalid-sqlite-isolation-level/_matrix.ts
+@@ -0,0 +1,10 @@
++import { defineMatrix } from '../_utils/defineMatrix'
++import { Providers } from '../_utils/providers'
++
++export default defineMatrix(() => [
++  [
++    {
++      provider: Providers.SQLITE,
++    },
++  ],
++])
+diff --git a/packages/client/tests/functional/invalid-sqlite-isolation-level/prisma/_schema.ts b/packages/client/tests/functional/invalid-sqlite-isolation-level/prisma/_schema.ts
+new file mode 100644
+index 000000000000..a8a87261b1ea
+--- /dev/null
++++ b/packages/client/tests/functional/invalid-sqlite-isolation-level/prisma/_schema.ts
+@@ -0,0 +1,20 @@
++import { idForProvider } from '../../_utils/idForProvider'
++import testMatrix from '../_matrix'
++
++export default testMatrix.setupSchema(({ provider }) => {
++  return /* Prisma */ `
++  generator client {
++    provider = "prisma-client-js"
++  }
++
++  datasource db {
++    provider = "${provider}"
++    url      = env("DATABASE_URI_${provider}")
++  }
++
++  model User {
++    id ${idForProvider(provider)}
++    email String
++  }
++  `
++})
+diff --git a/packages/client/tests/functional/invalid-sqlite-isolation-level/tests.ts b/packages/client/tests/functional/invalid-sqlite-isolation-level/tests.ts
+new file mode 100644
+index 000000000000..b783f144eb44
+--- /dev/null
++++ b/packages/client/tests/functional/invalid-sqlite-isolation-level/tests.ts
+@@ -0,0 +1,36 @@
++import testMatrix from './_matrix'
++// @ts-ignore
++import type $ from './node_modules/@prisma/client'
++
++declare let prisma: $.PrismaClient
++
++testMatrix.setupTestSuite(
++  ({ driverAdapter }) => {
++    testIf(driverAdapter !== undefined)('invalid level generates run- and compile- time error', async () => {
++      // @ts-expect-error
++      const result = prisma.$transaction([prisma.user.findFirst({}), prisma.user.findFirst({})], {
++        isolationLevel: 'ReadUncommitted',
++      })
++
++      await expect(result).rejects.toMatchPrismaErrorInlineSnapshot(`
++        "
++        Invalid \`prisma.$transaction([prisma.user.findFirst()\` invocation in
++        /client/tests/functional/invalid-sqlite-isolation-level/tests.ts:0:0
++
++           XX ({ driverAdapter }) => {
++           XX   testIf(driverAdapter !== undefined)('invalid level generates run- and compile- time error', async () => {
++          XX     // @ts-expect-error
++        → XX     const result = prisma.$transaction([prisma.user.findFirst(
++        Error in connector: Conversion error: READ UNCOMMITTED"
++      `)
++    })
++  },
++  {
++    optOut: {
++      from: ['postgresql', 'mysql', 'mongodb', 'cockroachdb', 'sqlserver'],
++      reason: `
++        The isolation level check is specific to SQLite.
++      `,
++    },
++  },
++)
+diff --git a/packages/client/tests/functional/issues/16390-relation-mode-m-n-dangling-pivot/tests.ts b/packages/client/tests/functional/issues/16390-relation-mode-m-n-dangling-pivot/tests.ts
+index 0c7de0bb1605..a87fdd95b164 100644
+--- a/packages/client/tests/functional/issues/16390-relation-mode-m-n-dangling-pivot/tests.ts
++++ b/packages/client/tests/functional/issues/16390-relation-mode-m-n-dangling-pivot/tests.ts
+@@ -22,10 +22,6 @@ testMatrix.setupTestSuite(
+         }
+       })
+ 
+-      afterAll(async () => {
+-        await prisma.$disconnect()
+-      })
+-
+       test('when deleting an item, the corresponding entry in the implicit pivot table should be deleted', async () => {
+         // Create one category
+         const category = await prisma.category.create({
+diff --git a/packages/client/tests/functional/issues/18276-batch-order/tests.ts b/packages/client/tests/functional/issues/18276-batch-order/tests.ts
+index 8ac3a3048e30..744420167093 100644
+--- a/packages/client/tests/functional/issues/18276-batch-order/tests.ts
++++ b/packages/client/tests/functional/issues/18276-batch-order/tests.ts
+@@ -8,7 +8,7 @@ import type { PrismaClient } from './node_modules/@prisma/client'
+ declare const newPrismaClient: NewPrismaClient<typeof PrismaClient>
+ 
+ testMatrix.setupTestSuite(
+-  ({ provider }) => {
++  ({ provider, driverAdapter }) => {
+     const isSqlServer = provider === Providers.SQLSERVER
+ 
+     test('executes batch queries in the right order when using extensions + middleware', async () => {
+@@ -40,13 +40,11 @@ testMatrix.setupTestSuite(
+ 
+       await xprisma.$queryRawUnsafe('SELECT 2')
+ 
+-      const expectation = [
+-        expect.stringContaining('BEGIN'),
+-        'SELECT 1',
+-        'SELECT 2',
+-        'SELECT 3',
+-        expect.stringContaining('COMMIT'),
+-      ]
++      const expectation = ['SELECT 1', 'SELECT 2', 'SELECT 3', expect.stringContaining('COMMIT')]
++      if (driverAdapter === undefined) {
++        // Driver adapters do not issue BEGIN through the query engine.
++        expectation.unshift(expect.stringContaining('BEGIN'))
++      }
+       if (isSqlServer) {
+         expectation.unshift(expect.stringContaining('SET TRANSACTION'))
+       }
+@@ -74,13 +72,11 @@ testMatrix.setupTestSuite(
+         prisma.$queryRawUnsafe('SELECT 3'),
+       ])
+ 
+-      const expectation = [
+-        expect.stringContaining('BEGIN'),
+-        'SELECT 1',
+-        'SELECT 2',
+-        'SELECT 3',
+-        expect.stringContaining('COMMIT'),
+-      ]
++      const expectation = ['SELECT 1', 'SELECT 2', 'SELECT 3', expect.stringContaining('COMMIT')]
++      if (driverAdapter === undefined) {
++        // Driver adapters do not issue BEGIN through the query engine.
++        expectation.unshift(expect.stringContaining('BEGIN'))
++      }
+       if (isSqlServer) {
+         expectation.unshift(expect.stringContaining('SET TRANSACTION'))
+       }
+diff --git a/packages/client/tests/functional/logging/tests.ts b/packages/client/tests/functional/logging/tests.ts
+index e7264b6c6696..5ced651dfa50 100644
+--- a/packages/client/tests/functional/logging/tests.ts
++++ b/packages/client/tests/functional/logging/tests.ts
+@@ -106,18 +106,21 @@ testMatrix.setupTestSuite(({ provider, driverAdapter }) => {
+       //   we skip a read when possible, on CockroachDB and PostgreSQL.
+       // - Since https://github.com/prisma/prisma-engines/pull/4640,
+       //   we also skip a read when possible, on SQLite.
++
++      if (isSqlServer) {
++        expect(logs.shift()?.query).toContain('SET TRANSACTION')
++      }
++      if (driverAdapter === undefined) {
++        // Driver adapters do not issue BEGIN through the query engine.
++        expect(logs.shift()?.query).toContain('BEGIN')
++      }
+       if (['postgresql', 'cockroachdb', 'sqlite'].includes(provider)) {
+-        expect(logs).toHaveLength(4)
+-        expect(logs[0].query).toContain('BEGIN')
+-        expect(logs[1].query).toContain('INSERT')
+-        expect(logs[2].query).toContain('SELECT')
+-        expect(logs[3].query).toContain('COMMIT')
++        expect(logs).toHaveLength(3)
++        expect(logs.shift()?.query).toContain('INSERT')
++        expect(logs.shift()?.query).toContain('SELECT')
++        expect(logs.shift()?.query).toContain('COMMIT')
+       } else {
+-        expect(logs).toHaveLength(isSqlServer ? 6 : 5)
+-        if (isSqlServer) {
+-          expect(logs.shift()?.query).toContain('SET TRANSACTION')
+-        }
+-        expect(logs.shift()?.query).toContain('BEGIN')
++        expect(logs).toHaveLength(4)
+         expect(logs.shift()?.query).toContain('INSERT')
+         expect(logs.shift()?.query).toContain('SELECT')
+         expect(logs.shift()?.query).toContain('SELECT')
+@@ -180,11 +183,14 @@ testMatrix.setupTestSuite(({ provider, driverAdapter }) => {
+       expect(logs[0].query).toContain('User.aggregate')
+       expect(logs[0].query).toContain('User.aggregate')
+     } else {
+-      expect(logs).toHaveLength(isSqlServer ? 5 : 4)
+       if (isSqlServer) {
+         expect(logs.shift()?.query).toContain('SET TRANSACTION')
+       }
+-      expect(logs.shift()?.query).toContain('BEGIN')
++      if (driverAdapter === undefined) {
++        // Driver adapters do not issue BEGIN through the query engine.
++        expect(logs.shift()?.query).toContain('BEGIN')
++      }
++      expect(logs).toHaveLength(3)
+       expect(logs.shift()?.query).toContain('SELECT')
+       expect(logs.shift()?.query).toContain('SELECT')
+       expect(logs.shift()?.query).toContain('COMMIT')
+@@ -243,11 +249,14 @@ testMatrix.setupTestSuite(({ provider, driverAdapter }) => {
+       expect(logs[0].query).toContain('User.aggregate')
+       expect(logs[0].query).toContain('User.aggregate')
+     } else {
+-      expect(logs).toHaveLength(isSqlServer ? 5 : 4)
+       if (isSqlServer) {
+         expect(logs.shift()?.query).toContain('SET TRANSACTION')
+       }
+-      expect(logs.shift()?.query).toContain('BEGIN')
++      if (driverAdapter === undefined) {
++        // Driver adapters do not issue BEGIN through the query engine.
++        expect(logs.shift()?.query).toContain('BEGIN')
++      }
++      expect(logs).toHaveLength(3)
+       expect(logs.shift()?.query).toContain('SELECT')
+       expect(logs.shift()?.query).toContain('SELECT')
+       expect(logs.shift()?.query).toContain('COMMIT')
+diff --git a/packages/client/tests/functional/relation-load-strategy/supported-queries.ts b/packages/client/tests/functional/relation-load-strategy/supported-queries.ts
+index 188293d492e1..75aa3c3aa34f 100644
+--- a/packages/client/tests/functional/relation-load-strategy/supported-queries.ts
++++ b/packages/client/tests/functional/relation-load-strategy/supported-queries.ts
+@@ -34,7 +34,12 @@ testMatrix.setupTestSuite(
+ 
+         async function expectQueryCountAtLeast(count: Record<RelationLoadStrategy, number>) {
+           await waitFor(() => {
+-            expect(logs.length).toBeGreaterThanOrEqual(count[suiteConfig.strategy])
++            let expected = count[suiteConfig.strategy]
++            if (suiteConfig.driverAdapter !== undefined) {
++              // Driver adapters do not issue BEGIN through the query engine.
++              expected -= 1
++            }
++            expect(logs.length).toBeGreaterThanOrEqual(expected)
+           })
+         }
+ 
+diff --git a/packages/client/tests/functional/tracing/tests.ts b/packages/client/tests/functional/tracing/tests.ts
+index 993a10153710..7c33a55dd2e7 100644
+--- a/packages/client/tests/functional/tracing/tests.ts
++++ b/packages/client/tests/functional/tracing/tests.ts
+@@ -316,7 +316,10 @@ testMatrix.setupTestSuite(
+         if (isSqlServer) {
+           dbQueries.push(txSetIsolationLevel())
+         }
+-        dbQueries.push(txBegin())
++        if (driverAdapter === undefined) {
++          // Driver adapters do not issue BEGIN through the query engine.
++          dbQueries.push(txBegin())
++        }
+       }
+ 
+       dbQueries.push(dbQuery(expect.stringContaining('INSERT')), dbQuery(expect.stringContaining('SELECT')))
+@@ -386,12 +389,15 @@ testMatrix.setupTestSuite(
+           expectedDbQueries = [dbQuery(expect.stringContaining('UPDATE'))]
+         } else {
+           expectedDbQueries = [
+-            txBegin(),
+             dbQuery(expect.stringContaining('SELECT')),
+             dbQuery(expect.stringContaining('UPDATE'), AdapterQueryChildSpans.ArgsOnly),
+             dbQuery(expect.stringContaining('SELECT')),
+             txCommit(),
+           ]
++          if (driverAdapter === undefined) {
++            // Driver adapters do not issue BEGIN through the query engine.
++            expectedDbQueries.unshift(txBegin())
++          }
+           if (isSqlServer) {
+             expectedDbQueries.unshift(txSetIsolationLevel())
+           }
+@@ -418,11 +424,14 @@ testMatrix.setupTestSuite(
+           expectedDbQueries = [dbQuery(expect.stringContaining('db.User.findAndModify'))]
+         } else if (isMySql || isSqlServer) {
+           expectedDbQueries = [
+-            txBegin(),
+             dbQuery(expect.stringContaining('SELECT')),
+             dbQuery(expect.stringContaining('DELETE'), AdapterQueryChildSpans.ArgsOnly),
+             txCommit(),
+           ]
++          if (driverAdapter === undefined) {
++            // Driver adapters do not issue BEGIN through the query engine.
++            expectedDbQueries.unshift(txBegin())
++          }
+           if (isSqlServer) {
+             expectedDbQueries.unshift(txSetIsolationLevel())
+           }
+@@ -458,11 +467,14 @@ testMatrix.setupTestSuite(
+           ]
+         } else if (relationMode === RelationModes.PRISMA) {
+           expectedDbQueries = [
+-            txBegin(),
+             dbQuery(expect.stringContaining('SELECT')),
+             dbQuery(expect.stringContaining('DELETE'), AdapterQueryChildSpans.ArgsOnly),
+             txCommit(),
+           ]
++          if (driverAdapter === undefined) {
++            // Driver adapters do not issue BEGIN through the query engine.
++            expectedDbQueries.unshift(txBegin())
++          }
+           if (isSqlServer) {
+             expectedDbQueries.unshift(txSetIsolationLevel())
+           }
+@@ -546,7 +558,11 @@ testMatrix.setupTestSuite(
+         if (isMongoDb) {
+           expectedDbQueries = [...createDbQueries(false), findManyDbQuery()]
+         } else {
+-          expectedDbQueries = [txBegin(), ...createDbQueries(false), findManyDbQuery(), txCommit()]
++          expectedDbQueries = [...createDbQueries(false), findManyDbQuery(), txCommit()]
++          if (driverAdapter === undefined) {
++            // Driver adapters do not issue BEGIN through the query engine.
++            expectedDbQueries.unshift(txBegin())
++          }
+           if (isSqlServer) {
+             expectedDbQueries.unshift(txSetIsolationLevel())
+           }
+@@ -613,7 +629,9 @@ testMatrix.setupTestSuite(
+                 ? [engineConnection()]
+                 : isSqlServer
+                 ? [engineConnection(), txSetIsolationLevel(), txBegin()]
+-                : [engineConnection(), txBegin()],
++                : driverAdapter === undefined
++                ? [engineConnection(), txBegin()]
++                : [engineConnection()],
+             },
+           ],
+         })
+@@ -662,7 +680,9 @@ testMatrix.setupTestSuite(
+                 ? [engineConnection()]
+                 : isSqlServer
+                 ? [engineConnection(), txSetIsolationLevel(), txBegin()]
+-                : [engineConnection(), txBegin()],
++                : driverAdapter === undefined
++                ? [engineConnection(), txBegin()]
++                : [engineConnection()],
+             },
+           ],
+         })
+diff --git a/packages/config/src/PrismaConfig.ts b/packages/config/src/PrismaConfig.ts
+index 8050f6fcd4ef..216be4309cb4 100644
+--- a/packages/config/src/PrismaConfig.ts
++++ b/packages/config/src/PrismaConfig.ts
+@@ -1,4 +1,4 @@
+-import { Debug, DriverAdapter } from '@prisma/driver-adapter-utils'
++import { Debug, SqlDriverAdapter } from '@prisma/driver-adapter-utils'
+ import { Either, identity, Schema as Shape } from 'effect'
+ import { pipe } from 'effect/Function'
+ 
+@@ -10,7 +10,7 @@ type EnvVars = Record<string, string | undefined>
+ 
+ const adapterShape = <Env extends EnvVars = never>() =>
+   Shape.declare(
+-    (input: any): input is (env: Env) => Promise<DriverAdapter> => {
++    (input: any): input is (env: Env) => Promise<SqlDriverAdapter> => {
+       return input instanceof Function
+     },
+     {
+@@ -21,7 +21,7 @@ const adapterShape = <Env extends EnvVars = never>() =>
+   )
+ 
+ export type PrismaStudioConfigShape<Env extends EnvVars = never> = {
+-  adapter: (env: Env) => Promise<DriverAdapter>
++  adapter: (env: Env) => Promise<SqlDriverAdapter>
+ }
+ 
+ const createPrismaStudioConfigInternalShape = <Env extends EnvVars = never>() =>
+diff --git a/packages/config/src/__tests__/_utils/mock-adapter.ts b/packages/config/src/__tests__/_utils/mock-adapter.ts
+index 77e98b38f250..0a1d872c6d07 100644
+--- a/packages/config/src/__tests__/_utils/mock-adapter.ts
++++ b/packages/config/src/__tests__/_utils/mock-adapter.ts
+@@ -1,9 +1,9 @@
+-import type { DriverAdapter } from '@prisma/driver-adapter-utils'
++import type { SqlDriverAdapter, SqlDriverAdapterFactory } from '@prisma/driver-adapter-utils'
+ 
+ export const mockAdapterErrors = {
+   queryRaw: new Error('Not implemented: queryRaw'),
+   executeRaw: new Error('Not implemented: executeRaw'),
+-  transactionContext: new Error('Not implemented: transactionContext'),
++  startTransaction: new Error('Not implemented: startTransaction'),
+   executeScript: new Error('Not implemented: executeScript'),
+   dispose: new Error('Not implemented: dispose'),
+ }
+@@ -11,14 +11,25 @@ export const mockAdapterErrors = {
+ /**
+  * Create an adapter stub for testing.
+  */
+-export function mockAdapter(provider: 'mysql' | 'sqlite' | 'postgres'): DriverAdapter {
++export function mockAdapter(provider: 'mysql' | 'sqlite' | 'postgres'): SqlDriverAdapter {
+   return {
+     provider,
+     adapterName: '@prisma/adapter-mock',
+     queryRaw: () => Promise.reject(mockAdapterErrors.queryRaw),
+     executeRaw: () => Promise.reject(mockAdapterErrors.executeRaw),
+-    transactionContext: () => Promise.reject(mockAdapterErrors.transactionContext),
++    startTransaction: () => Promise.reject(mockAdapterErrors.startTransaction),
+     executeScript: () => Promise.reject(mockAdapterErrors.executeScript),
+     dispose: () => Promise.reject(mockAdapterErrors.dispose),
+   }
+ }
++
++/**
++ * Create an adapter factory stub for testing.
++ */
++export function mockAdapterFactory(provider: 'mysql' | 'sqlite' | 'postgres'): SqlDriverAdapterFactory {
++  return {
++    provider,
++    adapterName: '@prisma/adapter-mock',
++    connect: () => Promise.resolve(mockAdapter(provider)),
++  }
++}
+diff --git a/packages/driver-adapter-utils/src/binder.ts b/packages/driver-adapter-utils/src/binder.ts
+index 913df393a6ff..264107ad3d13 100644
+--- a/packages/driver-adapter-utils/src/binder.ts
++++ b/packages/driver-adapter-utils/src/binder.ts
+@@ -1,14 +1,12 @@
+ import { isDriverAdapterError } from './error'
+ import { err, ok, Result } from './result'
+ import type {
+-  ErrorCapturingSqlConnection,
++  ErrorCapturingSqlDriverAdapter,
+   ErrorCapturingTransaction,
+-  ErrorCapturingTransactionContext,
+   ErrorRecord,
+   ErrorRegistry,
+-  SqlConnection,
++  SqlDriverAdapter,
+   Transaction,
+-  TransactionContext,
+ } from './types'
+ 
+ class ErrorRegistryInternal implements ErrorRegistry {
+@@ -30,12 +28,10 @@ class ErrorRegistryInternal implements ErrorRegistry {
+ 
+ // *.bind(adapter) is required to preserve the `this` context of functions whose
+ // execution is delegated to napi.rs.
+-export const bindAdapter = (adapter: SqlConnection): ErrorCapturingSqlConnection => {
++export const bindAdapter = (adapter: SqlDriverAdapter): ErrorCapturingSqlDriverAdapter => {
+   const errorRegistry = new ErrorRegistryInternal()
+ 
+-  const createTransactionContext = wrapAsync(errorRegistry, adapter.transactionContext.bind(adapter))
+-
+-  const boundAdapter: ErrorCapturingSqlConnection = {
++  const boundAdapter: ErrorCapturingSqlDriverAdapter = {
+     adapterName: adapter.adapterName,
+     errorRegistry,
+     queryRaw: wrapAsync(errorRegistry, adapter.queryRaw.bind(adapter)),
+@@ -43,9 +39,9 @@ export const bindAdapter = (adapter: SqlConnection): ErrorCapturingSqlConnection
+     executeScript: wrapAsync(errorRegistry, adapter.executeScript.bind(adapter)),
+     dispose: wrapAsync(errorRegistry, adapter.dispose.bind(adapter)),
+     provider: adapter.provider,
+-    transactionContext: async (...args) => {
+-      const ctx = await createTransactionContext(...args)
+-      return ctx.map((ctx) => bindTransactionContext(errorRegistry, ctx))
++    startTransaction: async (...args) => {
++      const ctx = await wrapAsync(errorRegistry, adapter.startTransaction.bind(adapter))(...args)
++      return ctx.map((ctx) => bindTransaction(errorRegistry, ctx))
+     },
+   }
+ 
+@@ -56,26 +52,6 @@ export const bindAdapter = (adapter: SqlConnection): ErrorCapturingSqlConnection
+   return boundAdapter
+ }
+ 
+-// *.bind(ctx) is required to preserve the `this` context of functions whose
+-// execution is delegated to napi.rs.
+-const bindTransactionContext = (
+-  errorRegistry: ErrorRegistryInternal,
+-  ctx: TransactionContext,
+-): ErrorCapturingTransactionContext => {
+-  const startTransaction = wrapAsync(errorRegistry, ctx.startTransaction.bind(ctx))
+-
+-  return {
+-    adapterName: ctx.adapterName,
+-    provider: ctx.provider,
+-    queryRaw: wrapAsync(errorRegistry, ctx.queryRaw.bind(ctx)),
+-    executeRaw: wrapAsync(errorRegistry, ctx.executeRaw.bind(ctx)),
+-    startTransaction: async (...args) => {
+-      const result = await startTransaction(...args)
+-      return result.map((tx) => bindTransaction(errorRegistry, tx))
+-    },
+-  }
+-}
+-
+ // *.bind(transaction) is required to preserve the `this` context of functions whose
+ // execution is delegated to napi.rs.
+ const bindTransaction = (errorRegistry: ErrorRegistryInternal, transaction: Transaction): ErrorCapturingTransaction => {
+diff --git a/packages/driver-adapter-utils/src/index.ts b/packages/driver-adapter-utils/src/index.ts
+index 0e024c251cfb..fbebf1f3e2f5 100644
+--- a/packages/driver-adapter-utils/src/index.ts
++++ b/packages/driver-adapter-utils/src/index.ts
+@@ -7,24 +7,22 @@ export type {
+   ArgType,
+   ColumnType,
+   ConnectionInfo,
+-  // exported as DriverAdapter for backward compatibility
+-  SqlConnection as DriverAdapter,
++  DriverAdapterFactory,
+   Error,
+-  // exported as ErrorCapturingDriverAdapter for backward compatibility
+-  ErrorCapturingSqlConnection as ErrorCapturingDriverAdapter,
+-  ErrorCapturingSqlConnection,
++  ErrorCapturingSqlDriverAdapter,
+   ErrorCapturingSqlQueryable,
+   ErrorCapturingTransaction,
+-  ErrorCapturingTransactionContext,
+   ErrorRecord,
+   ErrorRegistry,
++  IsolationLevel,
+   Provider,
+-  SqlConnection,
+-  SqlMigrationAwareDriverAdapter,
++  Queryable,
++  SqlDriverAdapter,
++  SqlDriverAdapterFactory,
++  SqlMigrationAwareDriverAdapterFactory,
+   SqlQuery,
+   SqlQueryable,
+   SqlResultSet,
+   Transaction,
+-  TransactionContext,
+   TransactionOptions,
+ } from './types'
+diff --git a/packages/driver-adapter-utils/src/types.ts b/packages/driver-adapter-utils/src/types.ts
+index 454b31aef49a..cdaf2d86c8c9 100644
+--- a/packages/driver-adapter-utils/src/types.ts
++++ b/packages/driver-adapter-utils/src/types.ts
+@@ -71,6 +71,8 @@ export type ArgType =
+   // A time value.
+   | 'Time'
+ 
++export type IsolationLevel = 'READ UNCOMMITTED' | 'READ COMMITTED' | 'REPEATABLE READ' | 'SNAPSHOT' | 'SERIALIZABLE'
++
+ export type SqlQuery = {
+   sql: string
+   args: Array<unknown>
+@@ -86,6 +88,10 @@ export type Error =
+       kind: 'UnsupportedNativeDataType'
+       type: string
+     }
++  | {
++      kind: 'InvalidIsolationLevel'
++      level: string
++    }
+   | {
+       kind: 'postgres'
+       code: string
+@@ -130,26 +136,26 @@ const officialPrismaAdapters = [
+ ] as const
+ 
+ /**
+- * A generic driver adapter that allows the user to connect to a
+- * database. The query and result types are specific to the adapter.
++ * A generic driver adapter factory that allows the user to instantiate a
++ * driver adapter. The query and result types are specific to the adapter.
+  */
+-export interface DriverAdapter<Query, Result> extends AdapterInfo {
++export interface DriverAdapterFactory<Query, Result> extends AdapterInfo {
+   /**
+-   * Connect to the database.
++   * Instantiate a driver adapter.
+    */
+   connect(): Promise<Queryable<Query, Result>>
+ }
+ 
+-export interface SqlDriverAdapter extends DriverAdapter<SqlQuery, SqlResultSet> {
+-  connect(): Promise<SqlConnection>
++export interface SqlDriverAdapterFactory extends DriverAdapterFactory<SqlQuery, SqlResultSet> {
++  connect(): Promise<SqlDriverAdapter>
+ }
+ 
+ /**
+  * An SQL migration adapter that is aware of the notion of a shadow database
+  * and can create a connection to it.
+  */
+-export interface SqlMigrationAwareDriverAdapter extends SqlDriverAdapter {
+-  connectToShadowDb(): Promise<SqlConnection>
++export interface SqlMigrationAwareDriverAdapterFactory extends SqlDriverAdapterFactory {
++  connectToShadowDb(): Promise<SqlDriverAdapter>
+ }
+ 
+ export interface Queryable<Query, Result> extends AdapterInfo {
+@@ -166,7 +172,7 @@ export interface Queryable<Query, Result> extends AdapterInfo {
+ 
+ export interface SqlQueryable extends Queryable<SqlQuery, SqlResultSet> {}
+ 
+-export interface SqlConnection extends SqlQueryable {
++export interface SqlDriverAdapter extends SqlQueryable {
+   /**
+    * Execute multiple SQL statements separated by semicolon.
+    */
+@@ -175,7 +181,7 @@ export interface SqlConnection extends SqlQueryable {
+   /**
+    * Start new transaction.
+    */
+-  transactionContext(): Promise<TransactionContext>
++  startTransaction(isolationLevel?: IsolationLevel): Promise<Transaction>
+ 
+   /**
+    * Optional method that returns extra connection info
+@@ -188,13 +194,6 @@ export interface SqlConnection extends SqlQueryable {
+   dispose(): Promise<void>
+ }
+ 
+-export interface TransactionContext extends AdapterInfo, SqlQueryable {
+-  /**
+-   * Start new transaction.
+-   */
+-  startTransaction(): Promise<Transaction>
+-}
+-
+ export type TransactionOptions = {
+   usePhantomQuery: boolean
+ }
+@@ -233,12 +232,10 @@ type ErrorCapturingInterface<T> = {
+   [K in keyof T]: ErrorCapturingFunction<T[K]>
+ }
+ 
+-export interface ErrorCapturingSqlConnection extends ErrorCapturingInterface<SqlConnection> {
++export interface ErrorCapturingSqlDriverAdapter extends ErrorCapturingInterface<SqlDriverAdapter> {
+   readonly errorRegistry: ErrorRegistry
+ }
+ 
+-export type ErrorCapturingTransactionContext = ErrorCapturingInterface<TransactionContext>
+-
+ export type ErrorCapturingTransaction = ErrorCapturingInterface<Transaction>
+ 
+ export type ErrorCapturingSqlQueryable = ErrorCapturingInterface<SqlQueryable>
+diff --git a/packages/engines/package.json b/packages/engines/package.json
+index d553b60ba37b..768d787446d3 100644
+--- a/packages/engines/package.json
++++ b/packages/engines/package.json
+@@ -22,7 +22,7 @@
+   },
+   "dependencies": {
+     "@prisma/debug": "workspace:*",
+-    "@prisma/engines-version": "6.6.0-21.d1dbe8880430b6f753dffc4264de1a7f39e4a15a",
++    "@prisma/engines-version": "6.6.0-24.933fc09bcbebf77a522ae2ac61fb5203f656749f",
+     "@prisma/fetch-engine": "workspace:*",
+     "@prisma/get-platform": "workspace:*"
+   },
+diff --git a/packages/fetch-engine/package.json b/packages/fetch-engine/package.json
+index fe3c46f0599b..9afa25fc37a2 100644
+--- a/packages/fetch-engine/package.json
++++ b/packages/fetch-engine/package.json
+@@ -43,7 +43,7 @@
+   },
+   "dependencies": {
+     "@prisma/debug": "workspace:*",
+-    "@prisma/engines-version": "6.6.0-21.d1dbe8880430b6f753dffc4264de1a7f39e4a15a",
++    "@prisma/engines-version": "6.6.0-24.933fc09bcbebf77a522ae2ac61fb5203f656749f",
+     "@prisma/get-platform": "workspace:*"
+   },
+   "scripts": {
+diff --git a/packages/internals/package.json b/packages/internals/package.json
+index 6001093ba98e..2f3d341f3a30 100644
+--- a/packages/internals/package.json
++++ b/packages/internals/package.json
+@@ -85,7 +85,7 @@
+     "@prisma/fetch-engine": "workspace:*",
+     "@prisma/generator-helper": "workspace:*",
+     "@prisma/get-platform": "workspace:*",
+-    "@prisma/prisma-schema-wasm": "6.6.0-21.d1dbe8880430b6f753dffc4264de1a7f39e4a15a",
++    "@prisma/prisma-schema-wasm": "6.6.0-24.933fc09bcbebf77a522ae2ac61fb5203f656749f",
+     "@prisma/schema-files-loader": "workspace:*",
+     "arg": "5.0.2",
+     "prompts": "2.4.2"
+diff --git a/packages/migrate/package.json b/packages/migrate/package.json
+index 304e261d8b72..70787825d9d7 100644
+--- a/packages/migrate/package.json
++++ b/packages/migrate/package.json
+@@ -57,7 +57,7 @@
+   "dependencies": {
+     "@prisma/config": "workspace:*",
+     "@prisma/debug": "workspace:*",
+-    "@prisma/engines-version": "6.6.0-21.d1dbe8880430b6f753dffc4264de1a7f39e4a15a",
++    "@prisma/engines-version": "6.6.0-24.933fc09bcbebf77a522ae2ac61fb5203f656749f",
+     "@prisma/generator-helper": "workspace:*",
+     "@prisma/get-platform": "workspace:*",
+     "@prisma/internals": "workspace:*",
+diff --git a/packages/schema-files-loader/package.json b/packages/schema-files-loader/package.json
+index 573fa7d50580..13a917aebb93 100644
+--- a/packages/schema-files-loader/package.json
++++ b/packages/schema-files-loader/package.json
+@@ -22,7 +22,7 @@
+   ],
+   "sideEffects": false,
+   "dependencies": {
+-    "@prisma/prisma-schema-wasm": "6.6.0-21.d1dbe8880430b6f753dffc4264de1a7f39e4a15a",
++    "@prisma/prisma-schema-wasm": "6.6.0-24.933fc09bcbebf77a522ae2ac61fb5203f656749f",
+     "fs-extra": "11.3.0"
+   },
+   "devDependencies": {
+diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml
+index 14b0a4133c62..c05329b55896 100644
+--- a/pnpm-lock.yaml
++++ b/pnpm-lock.yaml
+@@ -643,8 +643,8 @@ importers:
+         specifier: workspace:*
+         version: link:../engines
+       '@prisma/engines-version':
+-        specifier: 6.6.0-21.d1dbe8880430b6f753dffc4264de1a7f39e4a15a
+-        version: 6.6.0-21.d1dbe8880430b6f753dffc4264de1a7f39e4a15a
++        specifier: 6.6.0-24.933fc09bcbebf77a522ae2ac61fb5203f656749f
++        version: 6.6.0-24.933fc09bcbebf77a522ae2ac61fb5203f656749f
+       '@prisma/fetch-engine':
+         specifier: workspace:*
+         version: link:../fetch-engine
+@@ -670,11 +670,11 @@ importers:
+         specifier: workspace:*
+         version: link:../pg-worker
+       '@prisma/query-compiler-wasm':
+-        specifier: 6.6.0-21.d1dbe8880430b6f753dffc4264de1a7f39e4a15a
+-        version: 6.6.0-21.d1dbe8880430b6f753dffc4264de1a7f39e4a15a
++        specifier: 6.6.0-24.933fc09bcbebf77a522ae2ac61fb5203f656749f
++        version: 6.6.0-24.933fc09bcbebf77a522ae2ac61fb5203f656749f
+       '@prisma/query-engine-wasm':
+-        specifier: 6.6.0-21.d1dbe8880430b6f753dffc4264de1a7f39e4a15a
+-        version: 6.6.0-21.d1dbe8880430b6f753dffc4264de1a7f39e4a15a
++        specifier: 6.6.0-24.933fc09bcbebf77a522ae2ac61fb5203f656749f
++        version: 6.6.0-24.933fc09bcbebf77a522ae2ac61fb5203f656749f
+       '@snaplet/copycat':
+         specifier: 6.0.0
+         version: 6.0.0
+@@ -942,8 +942,8 @@ importers:
+         specifier: workspace:*
+         version: link:../debug
+       '@prisma/engines-version':
+-        specifier: 6.6.0-21.d1dbe8880430b6f753dffc4264de1a7f39e4a15a
+-        version: 6.6.0-21.d1dbe8880430b6f753dffc4264de1a7f39e4a15a
++        specifier: 6.6.0-24.933fc09bcbebf77a522ae2ac61fb5203f656749f
++        version: 6.6.0-24.933fc09bcbebf77a522ae2ac61fb5203f656749f
+       '@prisma/fetch-engine':
+         specifier: workspace:*
+         version: link:../fetch-engine
+@@ -979,8 +979,8 @@ importers:
+         specifier: workspace:*
+         version: link:../debug
+       '@prisma/engines-version':
+-        specifier: 6.6.0-21.d1dbe8880430b6f753dffc4264de1a7f39e4a15a
+-        version: 6.6.0-21.d1dbe8880430b6f753dffc4264de1a7f39e4a15a
++        specifier: 6.6.0-24.933fc09bcbebf77a522ae2ac61fb5203f656749f
++        version: 6.6.0-24.933fc09bcbebf77a522ae2ac61fb5203f656749f
+       '@prisma/get-platform':
+         specifier: workspace:*
+         version: link:../get-platform
+@@ -1301,8 +1301,8 @@ importers:
+         specifier: workspace:*
+         version: link:../get-platform
+       '@prisma/prisma-schema-wasm':
+-        specifier: 6.6.0-21.d1dbe8880430b6f753dffc4264de1a7f39e4a15a
+-        version: 6.6.0-21.d1dbe8880430b6f753dffc4264de1a7f39e4a15a
++        specifier: 6.6.0-24.933fc09bcbebf77a522ae2ac61fb5203f656749f
++        version: 6.6.0-24.933fc09bcbebf77a522ae2ac61fb5203f656749f
+       '@prisma/schema-files-loader':
+         specifier: workspace:*
+         version: link:../schema-files-loader
+@@ -1473,8 +1473,8 @@ importers:
+         specifier: workspace:*
+         version: link:../debug
+       '@prisma/engines-version':
+-        specifier: 6.6.0-21.d1dbe8880430b6f753dffc4264de1a7f39e4a15a
+-        version: 6.6.0-21.d1dbe8880430b6f753dffc4264de1a7f39e4a15a
++        specifier: 6.6.0-24.933fc09bcbebf77a522ae2ac61fb5203f656749f
++        version: 6.6.0-24.933fc09bcbebf77a522ae2ac61fb5203f656749f
+       '@prisma/generator-helper':
+         specifier: workspace:*
+         version: link:../generator-helper
+@@ -1625,8 +1625,8 @@ importers:
+   packages/schema-files-loader:
+     dependencies:
+       '@prisma/prisma-schema-wasm':
+-        specifier: 6.6.0-21.d1dbe8880430b6f753dffc4264de1a7f39e4a15a
+-        version: 6.6.0-21.d1dbe8880430b6f753dffc4264de1a7f39e4a15a
++        specifier: 6.6.0-24.933fc09bcbebf77a522ae2ac61fb5203f656749f
++        version: 6.6.0-24.933fc09bcbebf77a522ae2ac61fb5203f656749f
+       fs-extra:
+         specifier: 11.3.0
+         version: 11.3.0
+@@ -3091,22 +3091,22 @@ packages:
+     resolution: {integrity: sha512-Tv4jcFUFAFjOWrGSio49H6R2ijALv0ZzVBfJKIdm+kl9X046Fh4LLawrF9OMsglVbK6ukqMJsUCeucGAFTBcMA==}
+     engines: {node: '>=16'}
+ 
+-  '@prisma/engines-version@6.6.0-21.d1dbe8880430b6f753dffc4264de1a7f39e4a15a':
+-    resolution: {integrity: sha512-dK6xHEE+lpbGBWdiKqo+jdQK1D/d5ugFBjYLRlUI4m4aRbpZnDDcocCtOaQgVnMYfu/4tcuZDCvM4MO7WI0G/Q==}
++  '@prisma/engines-version@6.6.0-24.933fc09bcbebf77a522ae2ac61fb5203f656749f':
++    resolution: {integrity: sha512-gs9Q8FAPuwp/0CqyOIq6ZQ+S+a5Sa6La9AHCQl+7DcJ6v9EUxCSG+Ac3Q4bAH24VpA3O0bcfvm4+a9Iudv+cJQ==}
+ 
+   '@prisma/mini-proxy@0.9.5':
+     resolution: {integrity: sha512-0MLaxUjGbZGJGx9fIy1kbAH65hcZHCP6yes8xCTVcWumo64uzAxuvZdf5l1EPCZrDnj+iZNAy0U364oOAN+gXQ==}
+     engines: {node: '>=16'}
+     hasBin: true
+ 
+-  '@prisma/prisma-schema-wasm@6.6.0-21.d1dbe8880430b6f753dffc4264de1a7f39e4a15a':
+-    resolution: {integrity: sha512-OgsAC7/E2DmN9N4xv5KwVJTgJ9vinb7+vHO8aXIm28NgBtxQlntV9qKmU9xjG/9CNTPqAJSn4+aQy1JQjq7A9A==}
++  '@prisma/prisma-schema-wasm@6.6.0-24.933fc09bcbebf77a522ae2ac61fb5203f656749f':
++    resolution: {integrity: sha512-fSEDx/ENEqtJqOZdnRH5T+JKs6Jam71QMUaVf+6yJQ7NVWvq9GjzsWViv+X3yJYWtui0H5+eLIOe9b7Rp/ELUg==}
+ 
+-  '@prisma/query-compiler-wasm@6.6.0-21.d1dbe8880430b6f753dffc4264de1a7f39e4a15a':
+-    resolution: {integrity: sha512-QfzTjSV7ShaVL8k1qvU4iUNpvFuuU2xhKN0ubFcrUtSCEhd8TZph8IR6LwtAxu6XjhZMxoz77cMKKZ0Hg3P9rQ==}
++  '@prisma/query-compiler-wasm@6.6.0-24.933fc09bcbebf77a522ae2ac61fb5203f656749f':
++    resolution: {integrity: sha512-ehaPVvmLl9h8W6vYv/pytg9KdxbZUnOYlyDtXpNJ0cAb3zhUZ5l2MJMFq1aJIwIiMFrvZBsbOxTAGN8Nxx/rVw==}
+ 
+-  '@prisma/query-engine-wasm@6.6.0-21.d1dbe8880430b6f753dffc4264de1a7f39e4a15a':
+-    resolution: {integrity: sha512-1Iqwynnx+ehr+yEyqV6UtEBx7oaGeQCzJq0M/C8TOoh8RZc030rr+SJvvSGtc9ny61nBRU4QZnc7UVG59y7rkw==}
++  '@prisma/query-engine-wasm@6.6.0-24.933fc09bcbebf77a522ae2ac61fb5203f656749f':
++    resolution: {integrity: sha512-kZ9b6UBRrkiqfj8ugveoyVmv4r8S0UA2w+EqXSv43LSQ7IQs9yOZd4bLAZxXAwy6QXxwkFnJwanMsnLX/HNMpg==}
+ 
+   '@prisma/studio-common@0.510.0':
+     resolution: {integrity: sha512-Fwq1r7vv/MzuUOGMi5JMwSpkCIpYbO+43dZTdoNLLylqkPvfuVnYVRpAVsANmY/UJ0heXup8a1s+OvSaYBMvUQ==}
+@@ -8669,15 +8669,15 @@ snapshots:
+ 
+   '@planetscale/database@1.19.0': {}
+ 
+-  '@prisma/engines-version@6.6.0-21.d1dbe8880430b6f753dffc4264de1a7f39e4a15a': {}
++  '@prisma/engines-version@6.6.0-24.933fc09bcbebf77a522ae2ac61fb5203f656749f': {}
+ 
+   '@prisma/mini-proxy@0.9.5': {}
+ 
+-  '@prisma/prisma-schema-wasm@6.6.0-21.d1dbe8880430b6f753dffc4264de1a7f39e4a15a': {}
++  '@prisma/prisma-schema-wasm@6.6.0-24.933fc09bcbebf77a522ae2ac61fb5203f656749f': {}
+ 
+-  '@prisma/query-compiler-wasm@6.6.0-21.d1dbe8880430b6f753dffc4264de1a7f39e4a15a': {}
++  '@prisma/query-compiler-wasm@6.6.0-24.933fc09bcbebf77a522ae2ac61fb5203f656749f': {}
+ 
+-  '@prisma/query-engine-wasm@6.6.0-21.d1dbe8880430b6f753dffc4264de1a7f39e4a15a': {}
++  '@prisma/query-engine-wasm@6.6.0-24.933fc09bcbebf77a522ae2ac61fb5203f656749f': {}
+ 
+   '@prisma/studio-common@0.510.0':
+     dependencies:
+diff --git a/sandbox/driver-adapters/src/neon.http.ts b/sandbox/driver-adapters/src/neon.http.ts
+index 8ad555c2097f..9b496c17bf6e 100644
+--- a/sandbox/driver-adapters/src/neon.http.ts
++++ b/sandbox/driver-adapters/src/neon.http.ts
+@@ -1,15 +1,13 @@
+-import { neon } from '@neondatabase/serverless'
+ import { PrismaNeonHTTP } from '@prisma/adapter-neon'
+ import { smokeTest } from './test'
+ 
+ async function main() {
+   const connectionString = `${process.env.JS_NEON_DATABASE_URL as string}`
+ 
+-  const connection = neon(connectionString, {
++  const adapter = new PrismaNeonHTTP(connectionString, {
+     arrayMode: false,
+     fullResults: true,
+   })
+-  const adapter = new PrismaNeonHTTP(connection)
+ 
+   await smokeTest(adapter)
+ }
+diff --git a/sandbox/driver-adapters/src/neon.ws.ts b/sandbox/driver-adapters/src/neon.ws.ts
+index 50cb90722f1c..0587492f2685 100644
+--- a/sandbox/driver-adapters/src/neon.ws.ts
++++ b/sandbox/driver-adapters/src/neon.ws.ts
+@@ -1,4 +1,4 @@
+-import { Pool, neonConfig } from '@neondatabase/serverless'
++import { neonConfig } from '@neondatabase/serverless'
+ import { PrismaNeon } from '@prisma/adapter-neon'
+ import { WebSocket } from 'undici'
+ import { smokeTest } from './test'
+@@ -12,10 +12,9 @@ async function main() {
+   const connectionString = `${process.env.JS_NEON_DATABASE_URL as string}`
+   console.log('connectionString', connectionString)
+ 
+-  const pool = new Pool({
++  const adapter = new PrismaNeon({
+     connectionString,
+   })
+-  const adapter = new PrismaNeon(pool)
+ 
+   await smokeTest(adapter)
+ }
+diff --git a/sandbox/driver-adapters/src/planetscale.ts b/sandbox/driver-adapters/src/planetscale.ts
+index 335b161bc138..a1e5ff5f1f7a 100644
+--- a/sandbox/driver-adapters/src/planetscale.ts
++++ b/sandbox/driver-adapters/src/planetscale.ts
+@@ -1,12 +1,10 @@
+-import { Client } from '@planetscale/database'
+ import { PrismaPlanetScale } from '@prisma/adapter-planetscale'
+ import { smokeTest } from './test'
+ 
+ async function main() {
+   const connectionString = `${process.env.JS_PLANETSCALE_DATABASE_URL}`
+ 
+-  const client = new Client({ url: connectionString })
+-  const adapter = new PrismaPlanetScale(client)
++  const adapter = new PrismaPlanetScale({ url: connectionString })
+ 
+   await smokeTest(adapter)
+ }
+diff --git a/sandbox/driver-adapters/src/test.ts b/sandbox/driver-adapters/src/test.ts
+index 46ed9464d1c6..65a77fb66a65 100644
+--- a/sandbox/driver-adapters/src/test.ts
++++ b/sandbox/driver-adapters/src/test.ts
+@@ -1,9 +1,9 @@
+ import superjson from 'superjson'
+ import { PrismaClient } from '.prisma/client'
+ import { setImmediate, setTimeout } from 'node:timers/promises'
+-import type { DriverAdapter } from '@prisma/driver-adapter-utils'
++import type { SqlDriverAdapterFactory } from '@prisma/driver-adapter-utils'
+ 
+-export async function smokeTest(adapter: DriverAdapter) {
++export async function smokeTest(adapter: SqlDriverAdapterFactory) {
+   // wait for the database pool to be initialized
+   await setImmediate(0)
+ 
+@@ -41,7 +41,7 @@ export async function smokeTest(adapter: DriverAdapter) {
+ }
+ 
+ class SmokeTest {
+-  constructor(private readonly prisma: PrismaClient, readonly provider: DriverAdapter['provider']) {}
++  constructor(private readonly prisma: PrismaClient, readonly provider: SqlDriverAdapterFactory['provider']) {}
+ 
+   async testJSON() {
+     const json = JSON.stringify({

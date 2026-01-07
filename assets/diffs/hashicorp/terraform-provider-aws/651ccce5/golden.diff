@@ -1,0 +1,1449 @@
+diff --git a/.ci/.semgrep.yml b/.ci/.semgrep.yml
+index f8dd73034946..0a02114b994e 100644
+--- a/.ci/.semgrep.yml
++++ b/.ci/.semgrep.yml
+@@ -659,3 +659,14 @@ rules:
+             $DIAGS = sdkdiag.AppendErrorf($DIAGS, ...)
+           }
+     severity: ERROR
++
++  - id: avoid-errs-Must
++    languages: [go]
++    message: Avoid use of `errs.Must()` in service packages, handle errors explicitly instead.
++    paths:
++      include:
++        - internal/service
++    patterns:
++      - pattern-either:
++          - pattern: errs.Must(...)
++    severity: WARNING
+diff --git a/internal/service/account/region.go b/internal/service/account/region.go
+index 75db7dd10c4d..622b2f3a902c 100644
+--- a/internal/service/account/region.go
++++ b/internal/service/account/region.go
+@@ -16,7 +16,6 @@ import (
+ 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
+ 	"github.com/hashicorp/terraform-provider-aws/internal/conns"
+ 	"github.com/hashicorp/terraform-provider-aws/internal/enum"
+-	"github.com/hashicorp/terraform-provider-aws/internal/errs"
+ 	"github.com/hashicorp/terraform-provider-aws/internal/errs/sdkdiag"
+ 	"github.com/hashicorp/terraform-provider-aws/internal/flex"
+ 	"github.com/hashicorp/terraform-provider-aws/internal/tfresource"
+@@ -74,11 +73,15 @@ func resourceRegionUpdate(ctx context.Context, d *schema.ResourceData, meta inte
+ 	conn := meta.(*conns.AWSClient).AccountClient(ctx)
+ 
+ 	var id string
++	var err error
+ 	region := d.Get("region_name").(string)
+ 	accountID := ""
+ 	if v, ok := d.GetOk(names.AttrAccountID); ok {
+ 		accountID = v.(string)
+-		id = errs.Must(flex.FlattenResourceId([]string{accountID, region}, regionResourceIDPartCount, false))
++		id, err = flex.FlattenResourceId([]string{accountID, region}, regionResourceIDPartCount, false)
++		if err != nil {
++			return sdkdiag.AppendFromErr(diags, err)
++		}
+ 	} else {
+ 		id = region
+ 	}
+diff --git a/internal/service/acmpca/permission.go b/internal/service/acmpca/permission.go
+index 89f26941aa04..8b665ebec408 100644
+--- a/internal/service/acmpca/permission.go
++++ b/internal/service/acmpca/permission.go
+@@ -81,7 +81,11 @@ func resourcePermissionCreate(ctx context.Context, d *schema.ResourceData, meta
+ 	caARN := d.Get("certificate_authority_arn").(string)
+ 	principal := d.Get(names.AttrPrincipal).(string)
+ 	sourceAccount := d.Get("source_account").(string)
+-	id := errs.Must(flex.FlattenResourceId([]string{caARN, principal, sourceAccount}, permissionResourceIDPartCount, true))
++	id, err := flex.FlattenResourceId([]string{caARN, principal, sourceAccount}, permissionResourceIDPartCount, true)
++	if err != nil {
++		return sdkdiag.AppendFromErr(diags, err)
++	}
++
+ 	input := &acmpca.CreatePermissionInput{
+ 		Actions:                 expandPermissionActions(d.Get(names.AttrActions).(*schema.Set)),
+ 		CertificateAuthorityArn: aws.String(caARN),
+@@ -92,9 +96,7 @@ func resourcePermissionCreate(ctx context.Context, d *schema.ResourceData, meta
+ 		input.SourceAccount = aws.String(sourceAccount)
+ 	}
+ 
+-	_, err := conn.CreatePermission(ctx, input)
+-
+-	if err != nil {
++	if _, err := conn.CreatePermission(ctx, input); err != nil {
+ 		return sdkdiag.AppendErrorf(diags, "creating ACM PCA Permission (%s): %s", id, err)
+ 	}
+ 
+diff --git a/internal/service/appfabric/app_authorization.go b/internal/service/appfabric/app_authorization.go
+index 6e6ba2926706..0252d5868312 100644
+--- a/internal/service/appfabric/app_authorization.go
++++ b/internal/service/appfabric/app_authorization.go
+@@ -217,8 +217,13 @@ func (r *appAuthorizationResource) Create(ctx context.Context, request resource.
+ 		return
+ 	}
+ 
++	uuid, err := uuid.GenerateUUID()
++	if err != nil {
++		response.Diagnostics.AddError(fmt.Sprintf("creating AppFabric App (%s) Authorization", data.App.ValueString()), err.Error())
++	}
++
+ 	input.AppBundleIdentifier = data.AppBundleARN.ValueStringPointer()
+-	input.ClientToken = aws.String(errs.Must(uuid.GenerateUUID()))
++	input.ClientToken = aws.String(uuid)
+ 	input.Tags = getTagsIn(ctx)
+ 
+ 	output, err := conn.CreateAppAuthorization(ctx, input)
+@@ -229,9 +234,15 @@ func (r *appAuthorizationResource) Create(ctx context.Context, request resource.
+ 		return
+ 	}
+ 
++	id, err := data.setID()
++	if err != nil {
++		response.Diagnostics.AddError(fmt.Sprintf("flattening resource ID AppFabric App (%s) Authorization", data.App.ValueString()), err.Error())
++		return
++	}
++	data.ID = types.StringValue(id)
++
+ 	// Set values for unknowns.
+ 	data.AppAuthorizationARN = fwflex.StringToFramework(ctx, output.AppAuthorization.AppAuthorizationArn)
+-	data.setID()
+ 
+ 	appAuthorization, err := waitAppAuthorizationCreated(ctx, conn, data.AppAuthorizationARN.ValueString(), data.AppBundleARN.ValueString(), r.CreateTimeout(ctx, data.Timeouts))
+ 
+@@ -525,8 +536,13 @@ func (m *appAuthorizationResourceModel) InitFromID() error {
+ 	return nil
+ }
+ 
+-func (m *appAuthorizationResourceModel) setID() {
+-	m.ID = types.StringValue(errs.Must(flex.FlattenResourceId([]string{m.AppAuthorizationARN.ValueString(), m.AppBundleARN.ValueString()}, appAuthorizationResourceIDPartCount, false)))
++func (m *appAuthorizationResourceModel) setID() (string, error) {
++	parts := []string{
++		m.AppAuthorizationARN.ValueString(),
++		m.AppBundleARN.ValueString(),
++	}
++
++	return flex.FlattenResourceId(parts, appAuthorizationResourceIDPartCount, false)
+ }
+ 
+ var (
+diff --git a/internal/service/appfabric/app_authorization_connection.go b/internal/service/appfabric/app_authorization_connection.go
+index 48290357c7a4..735ec526fbc2 100644
+--- a/internal/service/appfabric/app_authorization_connection.go
++++ b/internal/service/appfabric/app_authorization_connection.go
+@@ -135,8 +135,12 @@ func (r *appAuthorizationConnectionResource) Create(ctx context.Context, request
+ 		return
+ 	}
+ 
+-	// Set values for unknowns.
+-	data.setID()
++	id, err := data.setID()
++	if err != nil {
++		response.Diagnostics.AddError(fmt.Sprintf("flattening resource ID AppFabric App Authorization (%s) Connection", data.AppAuthorizationARN.ValueString()), err.Error())
++		return
++	}
++	data.ID = types.StringValue(id)
+ 
+ 	appAuthorization, err := waitConnectAppAuthorizationCreated(ctx, conn, data.AppAuthorizationARN.ValueString(), data.AppBundleARN.ValueString(), r.CreateTimeout(ctx, data.Timeouts))
+ 
+@@ -167,7 +171,7 @@ func (r *appAuthorizationConnectionResource) Read(ctx context.Context, request r
+ 		return
+ 	}
+ 
+-	if err := data.InitFromID(); err != nil {
++	if err := data.initFromID(); err != nil {
+ 		response.Diagnostics.AddError("parsing resource ID", err.Error())
+ 
+ 		return
+@@ -272,7 +276,7 @@ const (
+ 	appAuthorizationConnectionResourceIDPartCount = 2
+ )
+ 
+-func (m *appAuthorizationConnectionResourceModel) InitFromID() error {
++func (m *appAuthorizationConnectionResourceModel) initFromID() error {
+ 	parts, err := flex.ExpandResourceId(m.ID.ValueString(), appAuthorizationConnectionResourceIDPartCount, false)
+ 	if err != nil {
+ 		return err
+@@ -284,8 +288,13 @@ func (m *appAuthorizationConnectionResourceModel) InitFromID() error {
+ 	return nil
+ }
+ 
+-func (m *appAuthorizationConnectionResourceModel) setID() {
+-	m.ID = types.StringValue(errs.Must(flex.FlattenResourceId([]string{m.AppAuthorizationARN.ValueString(), m.AppBundleARN.ValueString()}, appAuthorizationConnectionResourceIDPartCount, false)))
++func (m *appAuthorizationConnectionResourceModel) setID() (string, error) {
++	parts := []string{
++		m.AppAuthorizationARN.ValueString(),
++		m.AppBundleARN.ValueString(),
++	}
++
++	return flex.FlattenResourceId(parts, appAuthorizationConnectionResourceIDPartCount, false)
+ }
+ 
+ type authRequestModel struct {
+diff --git a/internal/service/appfabric/app_bundle.go b/internal/service/appfabric/app_bundle.go
+index 0c9af1db2d28..3bca6523df8a 100644
+--- a/internal/service/appfabric/app_bundle.go
++++ b/internal/service/appfabric/app_bundle.go
+@@ -75,8 +75,13 @@ func (r *appBundleResource) Create(ctx context.Context, request resource.CreateR
+ 
+ 	conn := r.Meta().AppFabricClient(ctx)
+ 
++	uuid, err := uuid.GenerateUUID()
++	if err != nil {
++		response.Diagnostics.AddError("creating AppFabric App Bundle", err.Error())
++	}
++
+ 	input := &appfabric.CreateAppBundleInput{
+-		ClientToken:                  aws.String(errs.Must(uuid.GenerateUUID())),
++		ClientToken:                  aws.String(uuid),
+ 		CustomerManagedKeyIdentifier: fwflex.StringFromFramework(ctx, data.CustomerManagedKeyARN),
+ 		Tags:                         getTagsIn(ctx),
+ 	}
+diff --git a/internal/service/appfabric/ingestion.go b/internal/service/appfabric/ingestion.go
+index 5cffa7aa34bf..a8c231c98b5c 100644
+--- a/internal/service/appfabric/ingestion.go
++++ b/internal/service/appfabric/ingestion.go
+@@ -110,9 +110,14 @@ func (r *ingestionResource) Create(ctx context.Context, request resource.CreateR
+ 		return
+ 	}
+ 
++	uuid, err := uuid.GenerateUUID()
++	if err != nil {
++		response.Diagnostics.AddError("creating AppFabric Ingestion", err.Error())
++	}
++
+ 	// Additional fields.
+ 	input.AppBundleIdentifier = fwflex.StringFromFramework(ctx, data.AppBundleARN)
+-	input.ClientToken = aws.String(errs.Must(uuid.GenerateUUID()))
++	input.ClientToken = aws.String(uuid)
+ 	input.Tags = getTagsIn(ctx)
+ 
+ 	output, err := conn.CreateIngestion(ctx, input)
+@@ -130,7 +135,12 @@ func (r *ingestionResource) Create(ctx context.Context, request resource.CreateR
+ 
+ 	// Set values for unknowns.
+ 	data.ARN = fwflex.StringToFramework(ctx, output.Ingestion.Arn)
+-	data.setID()
++	id, err := data.setID()
++	if err != nil {
++		response.Diagnostics.AddError("flattening resource ID AppFabric Ingestion", err.Error())
++		return
++	}
++	data.ID = types.StringValue(id)
+ 
+ 	response.Diagnostics.Append(response.State.Set(ctx, &data)...)
+ }
+@@ -255,6 +265,11 @@ func (m *ingestionResourceModel) InitFromID() error {
+ 	return nil
+ }
+ 
+-func (m *ingestionResourceModel) setID() {
+-	m.ID = types.StringValue(errs.Must(flex.FlattenResourceId([]string{m.AppBundleARN.ValueString(), m.ARN.ValueString()}, ingestionResourceIDPartCount, false)))
++func (m *ingestionResourceModel) setID() (string, error) {
++	parts := []string{
++		m.AppBundleARN.ValueString(),
++		m.ARN.ValueString(),
++	}
++
++	return flex.FlattenResourceId(parts, ingestionResourceIDPartCount, false)
+ }
+diff --git a/internal/service/appfabric/ingestion_destination.go b/internal/service/appfabric/ingestion_destination.go
+index d2bed80052cc..1092204be30c 100644
+--- a/internal/service/appfabric/ingestion_destination.go
++++ b/internal/service/appfabric/ingestion_destination.go
+@@ -258,9 +258,14 @@ func (r *ingestionDestinationResource) Create(ctx context.Context, request resou
+ 		input.ProcessingConfiguration = processingConfiguration
+ 	}
+ 
++	uuid, err := uuid.GenerateUUID()
++	if err != nil {
++		response.Diagnostics.AddError("creating AppFabric Ingestion Destination", err.Error())
++	}
++
+ 	// Additional fields.
+ 	input.AppBundleIdentifier = data.AppBundleARN.ValueStringPointer()
+-	input.ClientToken = aws.String(errs.Must(uuid.GenerateUUID()))
++	input.ClientToken = aws.String(uuid)
+ 	input.IngestionIdentifier = data.IngestionARN.ValueStringPointer()
+ 	input.Tags = getTagsIn(ctx)
+ 
+@@ -274,7 +279,12 @@ func (r *ingestionDestinationResource) Create(ctx context.Context, request resou
+ 
+ 	// Set values for unknowns.
+ 	data.ARN = fwflex.StringToFramework(ctx, output.IngestionDestination.Arn)
+-	data.setID()
++	id, err := data.setID()
++	if err != nil {
++		response.Diagnostics.AddError("flattening resource ID AppFabric Ingestion Destination", err.Error())
++		return
++	}
++	data.ID = types.StringValue(id)
+ 
+ 	if _, err := waitIngestionDestinationActive(ctx, conn, data.AppBundleARN.ValueString(), data.IngestionARN.ValueString(), data.ARN.ValueString(), r.CreateTimeout(ctx, data.Timeouts)); err != nil {
+ 		response.State.SetAttribute(ctx, path.Root(names.AttrID), data.ID) // Set 'id' so as to taint the resource.
+@@ -561,8 +571,14 @@ func (m *ingestionDestinationResourceModel) InitFromID() error {
+ 	return nil
+ }
+ 
+-func (m *ingestionDestinationResourceModel) setID() {
+-	m.ID = types.StringValue(errs.Must(flex.FlattenResourceId([]string{m.AppBundleARN.ValueString(), m.IngestionARN.ValueString(), m.ARN.ValueString()}, ingestionDestinationResourceIDPartCount, false)))
++func (m *ingestionDestinationResourceModel) setID() (string, error) {
++	parts := []string{
++		m.AppBundleARN.ValueString(),
++		m.IngestionARN.ValueString(),
++		m.ARN.ValueString(),
++	}
++
++	return flex.FlattenResourceId(parts, ingestionDestinationResourceIDPartCount, false)
+ }
+ 
+ type destinationConfigurationModel struct {
+diff --git a/internal/service/appsync/source_api_association.go b/internal/service/appsync/source_api_association.go
+index b9594e94aa0d..ec5e70e85122 100644
+--- a/internal/service/appsync/source_api_association.go
++++ b/internal/service/appsync/source_api_association.go
+@@ -192,7 +192,15 @@ func (r *sourceAPIAssociationResource) Create(ctx context.Context, request resou
+ 
+ 	plan.AssociationId = flex.StringToFramework(ctx, out.SourceApiAssociation.AssociationId)
+ 	plan.MergedAPIId = flex.StringToFramework(ctx, out.SourceApiAssociation.MergedApiId)
+-	plan.setID()
++	id, err := plan.setID()
++	if err != nil {
++		response.Diagnostics.AddError(
++			create.ProblemStandardMessage(names.AppSync, create.ErrActionFlatteningResourceId, resNameSourceAPIAssociation, plan.MergedAPIId.String(), err),
++			err.Error(),
++		)
++		return
++	}
++	plan.ID = types.StringValue(id)
+ 
+ 	createTimeout := r.CreateTimeout(ctx, plan.Timeouts)
+ 	_, err = waitSourceAPIAssociationCreated(ctx, conn, plan.AssociationId.ValueString(), aws.ToString(out.SourceApiAssociation.MergedApiArn), createTimeout)
+@@ -485,6 +493,11 @@ func (m *sourceAPIAssociationResourceModel) InitFromID() error {
+ 	return nil
+ }
+ 
+-func (m *sourceAPIAssociationResourceModel) setID() {
+-	m.ID = types.StringValue(errs.Must(autoflex.FlattenResourceId([]string{m.MergedAPIId.ValueString(), m.AssociationId.ValueString()}, sourceAPIAssociationIDPartCount, false)))
++func (m *sourceAPIAssociationResourceModel) setID() (string, error) {
++	parts := []string{
++		m.MergedAPIId.ValueString(),
++		m.AssociationId.ValueString(),
++	}
++
++	return autoflex.FlattenResourceId(parts, sourceAPIAssociationIDPartCount, false)
+ }
+diff --git a/internal/service/bedrockagent/agent_action_group.go b/internal/service/bedrockagent/agent_action_group.go
+index 99e9d9e6be82..d6a1b6725732 100644
+--- a/internal/service/bedrockagent/agent_action_group.go
++++ b/internal/service/bedrockagent/agent_action_group.go
+@@ -252,7 +252,12 @@ func (r *agentActionGroupResource) Create(ctx context.Context, request resource.
+ 	// Set values for unknowns.
+ 	data.ActionGroupID = fwflex.StringToFramework(ctx, output.AgentActionGroup.ActionGroupId)
+ 	data.ActionGroupState = fwtypes.StringEnumValue(output.AgentActionGroup.ActionGroupState)
+-	data.setID()
++	id, err := data.setID()
++	if err != nil {
++		response.Diagnostics.AddError("flattening resource ID Bedrock Agent Action Group", err.Error())
++		return
++	}
++	data.ID = types.StringValue(id)
+ 
+ 	response.Diagnostics.Append(response.State.Set(ctx, &data)...)
+ }
+@@ -430,8 +435,14 @@ func (m *agentActionGroupResourceModel) InitFromID() error {
+ 	return nil
+ }
+ 
+-func (m *agentActionGroupResourceModel) setID() {
+-	m.ID = types.StringValue(errs.Must(flex.FlattenResourceId([]string{m.ActionGroupID.ValueString(), m.AgentID.ValueString(), m.AgentVersion.ValueString()}, agentActionGroupResourceIDPartCount, false)))
++func (m *agentActionGroupResourceModel) setID() (string, error) {
++	parts := []string{
++		m.ActionGroupID.ValueString(),
++		m.AgentID.ValueString(),
++		m.AgentVersion.ValueString(),
++	}
++
++	return flex.FlattenResourceId(parts, agentActionGroupResourceIDPartCount, false)
+ }
+ 
+ type actionGroupExecutorModel struct {
+diff --git a/internal/service/bedrockagent/agent_alias.go b/internal/service/bedrockagent/agent_alias.go
+index 9c9bb20111f0..2572b9419c96 100644
+--- a/internal/service/bedrockagent/agent_alias.go
++++ b/internal/service/bedrockagent/agent_alias.go
+@@ -137,7 +137,12 @@ func (r *agentAliasResource) Create(ctx context.Context, request resource.Create
+ 
+ 	// Set values for unknowns.
+ 	data.AgentAliasID = fwflex.StringToFramework(ctx, output.AgentAlias.AgentAliasId)
+-	data.setID()
++	id, err := data.setID()
++	if err != nil {
++		response.Diagnostics.AddError("creating Bedrock Agent Alias", err.Error())
++		return
++	}
++	data.ID = types.StringValue(id)
+ 
+ 	alias, err := waitAgentAliasCreated(ctx, conn, data.AgentAliasID.ValueString(), data.AgentID.ValueString(), r.CreateTimeout(ctx, data.Timeouts))
+ 
+@@ -376,8 +381,13 @@ func (m *agentAliasResourceModel) InitFromID() error {
+ 	return nil
+ }
+ 
+-func (m *agentAliasResourceModel) setID() {
+-	m.ID = types.StringValue(errs.Must(flex.FlattenResourceId([]string{m.AgentAliasID.ValueString(), m.AgentID.ValueString()}, agentAliasResourceIDPartCount, false)))
++func (m *agentAliasResourceModel) setID() (string, error) {
++	parts := []string{
++		m.AgentAliasID.ValueString(),
++		m.AgentID.ValueString(),
++	}
++
++	return flex.FlattenResourceId(parts, agentAliasResourceIDPartCount, false)
+ }
+ 
+ type agentAliasRoutingConfigurationListItemModel struct {
+diff --git a/internal/service/bedrockagent/agent_knowledge_base_association.go b/internal/service/bedrockagent/agent_knowledge_base_association.go
+index 92c787fdb93a..61e23081829f 100644
+--- a/internal/service/bedrockagent/agent_knowledge_base_association.go
++++ b/internal/service/bedrockagent/agent_knowledge_base_association.go
+@@ -121,7 +121,12 @@ func (r *agentKnowledgeBaseAssociationResource) Create(ctx context.Context, requ
+ 	}
+ 
+ 	// Set values for unknowns.
+-	data.setID()
++	id, err := data.setID()
++	if err != nil {
++		response.Diagnostics.AddError("flattening resource ID Bedrock Agent Knowledge Base Association", err.Error())
++		return
++	}
++	data.ID = types.StringValue(id)
+ 
+ 	_, err = prepareAgent(ctx, conn, data.AgentID.ValueString(), r.CreateTimeout(ctx, data.Timeouts))
+ 	if err != nil {
+@@ -288,6 +293,12 @@ func (m *agentKnowledgeBaseAssociationResourceModel) InitFromID() error {
+ 	return nil
+ }
+ 
+-func (m *agentKnowledgeBaseAssociationResourceModel) setID() {
+-	m.ID = types.StringValue(errs.Must(flex.FlattenResourceId([]string{m.AgentID.ValueString(), m.AgentVersion.ValueString(), m.KnowledgeBaseID.ValueString()}, agentKnowledgeBaseAssociationResourceIDPartCount, false)))
++func (m *agentKnowledgeBaseAssociationResourceModel) setID() (string, error) {
++	parts := []string{
++		m.AgentID.ValueString(),
++		m.AgentVersion.ValueString(),
++		m.KnowledgeBaseID.ValueString(),
++	}
++
++	return flex.FlattenResourceId(parts, agentKnowledgeBaseAssociationResourceIDPartCount, false)
+ }
+diff --git a/internal/service/bedrockagent/data_source.go b/internal/service/bedrockagent/data_source.go
+index 3c8b7bcdbc79..c98ce0a65ee7 100644
+--- a/internal/service/bedrockagent/data_source.go
++++ b/internal/service/bedrockagent/data_source.go
+@@ -402,7 +402,12 @@ func (r *dataSourceResource) Create(ctx context.Context, request resource.Create
+ 	}
+ 
+ 	data.DataSourceID = fwflex.StringToFramework(ctx, outputRaw.(*bedrockagent.CreateDataSourceOutput).DataSource.DataSourceId)
+-	data.setID()
++	id, err := data.setID()
++	if err != nil {
++		response.Diagnostics.AddError("flattening resource ID Bedrock Agent Data Source", err.Error())
++		return
++	}
++	data.ID = types.StringValue(id)
+ 
+ 	ds, err := waitDataSourceCreated(ctx, conn, data.DataSourceID.ValueString(), data.KnowledgeBaseID.ValueString(), r.CreateTimeout(ctx, data.Timeouts))
+ 
+@@ -627,8 +632,13 @@ func (m *dataSourceResourceModel) InitFromID() error {
+ 	return nil
+ }
+ 
+-func (m *dataSourceResourceModel) setID() {
+-	m.ID = types.StringValue(errs.Must(flex.FlattenResourceId([]string{m.DataSourceID.ValueString(), m.KnowledgeBaseID.ValueString()}, dataSourceResourceIDPartCount, false)))
++func (m *dataSourceResourceModel) setID() (string, error) {
++	parts := []string{
++		m.DataSourceID.ValueString(),
++		m.KnowledgeBaseID.ValueString(),
++	}
++
++	return flex.FlattenResourceId(parts, dataSourceResourceIDPartCount, false)
+ }
+ 
+ type dataSourceConfigurationModel struct {
+diff --git a/internal/service/cloudformation/stack_instances_test.go b/internal/service/cloudformation/stack_instances_test.go
+index b4a123ce6826..c2e1ef02ef83 100644
+--- a/internal/service/cloudformation/stack_instances_test.go
++++ b/internal/service/cloudformation/stack_instances_test.go
+@@ -573,7 +573,7 @@ func testAccCheckStackInstancesExists(ctx context.Context, resourceName string,
+ }
+ 
+ func attributeLength(attribute string) int {
+-	return errs.Must(strconv.Atoi(attribute))
++	return errs.Must(strconv.Atoi(attribute)) // nosemgrep: ci.avoid-errs-Must
+ }
+ 
+ // testAccCheckStackInstancesForOrganizationalUnitExists is a variant of the
+diff --git a/internal/service/cloudformation/sweep.go b/internal/service/cloudformation/sweep.go
+index 2efbbf1eaccb..ab9e4b608b6f 100644
+--- a/internal/service/cloudformation/sweep.go
++++ b/internal/service/cloudformation/sweep.go
+@@ -14,7 +14,6 @@ import (
+ 	"github.com/hashicorp/go-multierror"
+ 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
+ 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
+-	"github.com/hashicorp/terraform-provider-aws/internal/errs"
+ 	"github.com/hashicorp/terraform-provider-aws/internal/flex"
+ 	tforganizations "github.com/hashicorp/terraform-provider-aws/internal/service/organizations"
+ 	"github.com/hashicorp/terraform-provider-aws/internal/sweep"
+@@ -107,7 +106,10 @@ func sweepStackSetInstances(region string) error {
+ 
+ 					r := resourceStackSetInstance()
+ 					d := r.Data(nil)
+-					id := errs.Must(flex.FlattenResourceId([]string{stackSetID, accountOrOrgID, aws.ToString(v.Region)}, stackSetInstanceResourceIDPartCount, false))
++					id, err := flex.FlattenResourceId([]string{stackSetID, accountOrOrgID, aws.ToString(v.Region)}, stackSetInstanceResourceIDPartCount, false)
++					if err != nil {
++						sweeperErrs = multierror.Append(sweeperErrs, fmt.Errorf("error flattening resource ID CloudFormation StackSet Instances (%s): %w", region, err))
++					}
+ 					d.SetId(id)
+ 					d.Set("call_as", awstypes.CallAsSelf)
+ 					if ouID != "" {
+diff --git a/internal/service/cloudfrontkeyvaluestore/key.go b/internal/service/cloudfrontkeyvaluestore/key.go
+index aac864655655..6518d20a0b88 100644
+--- a/internal/service/cloudfrontkeyvaluestore/key.go
++++ b/internal/service/cloudfrontkeyvaluestore/key.go
+@@ -119,7 +119,12 @@ func (r *keyResource) Create(ctx context.Context, request resource.CreateRequest
+ 
+ 	// Set values for unknowns.
+ 	data.TotalSizeInBytes = fwflex.Int64ToFramework(ctx, output.TotalSizeInBytes)
+-	data.setID()
++	id, err := data.setID()
++	if err != nil {
++		response.Diagnostics.AddError(fmt.Sprintf("creating CloudFront KeyValueStore (%s) Key (%s)", kvsARN, data.Key.ValueString()), err.Error())
++		return
++	}
++	data.ID = types.StringValue(id)
+ 
+ 	response.Diagnostics.Append(response.State.Set(ctx, data)...)
+ }
+@@ -340,6 +345,11 @@ func (data *keyResourceModel) InitFromID() error {
+ 	return nil
+ }
+ 
+-func (data *keyResourceModel) setID() {
+-	data.ID = types.StringValue(errs.Must(flex.FlattenResourceId([]string{data.KvsARN.ValueString(), data.Key.ValueString()}, keyResourceIDPartCount, false)))
++func (data *keyResourceModel) setID() (string, error) {
++	parts := []string{
++		data.KvsARN.ValueString(),
++		data.Key.ValueString(),
++	}
++
++	return flex.FlattenResourceId(parts, keyResourceIDPartCount, false)
+ }
+diff --git a/internal/service/cognitoidp/user_pool_ui_customization.go b/internal/service/cognitoidp/user_pool_ui_customization.go
+index d44a5fd0d86a..3dd813a602e3 100644
+--- a/internal/service/cognitoidp/user_pool_ui_customization.go
++++ b/internal/service/cognitoidp/user_pool_ui_customization.go
+@@ -84,7 +84,11 @@ func resourceUserPoolUICustomizationPut(ctx context.Context, d *schema.ResourceD
+ 	conn := meta.(*conns.AWSClient).CognitoIDPClient(ctx)
+ 
+ 	userPoolID, clientID := d.Get(names.AttrUserPoolID).(string), d.Get(names.AttrClientID).(string)
+-	id := errs.Must(flex.FlattenResourceId([]string{userPoolID, clientID}, userPoolUICustomizationResourceIDPartCount, false))
++	id, err := flex.FlattenResourceId([]string{userPoolID, clientID}, userPoolUICustomizationResourceIDPartCount, false)
++	if err != nil {
++		return sdkdiag.AppendFromErr(diags, err)
++	}
++
+ 	input := &cognitoidentityprovider.SetUICustomizationInput{
+ 		ClientId:   aws.String(clientID),
+ 		UserPoolId: aws.String(userPoolID),
+@@ -102,9 +106,7 @@ func resourceUserPoolUICustomizationPut(ctx context.Context, d *schema.ResourceD
+ 		input.ImageFile = v
+ 	}
+ 
+-	_, err := conn.SetUICustomization(ctx, input)
+-
+-	if err != nil {
++	if _, err := conn.SetUICustomization(ctx, input); err != nil {
+ 		return sdkdiag.AppendErrorf(diags, "setting Cognito User Pool UI Customization (%s): %s", id, err)
+ 	}
+ 
+diff --git a/internal/service/computeoptimizer/recommendation_preferences.go b/internal/service/computeoptimizer/recommendation_preferences.go
+index 033a49c41492..dc1d71dfd45d 100644
+--- a/internal/service/computeoptimizer/recommendation_preferences.go
++++ b/internal/service/computeoptimizer/recommendation_preferences.go
+@@ -220,7 +220,12 @@ func (r *recommendationPreferencesResource) Create(ctx context.Context, request
+ 	}
+ 
+ 	// Set values for unknowns.
+-	data.setID(ctx)
++	id, err := data.setID(ctx)
++	if err != nil {
++		response.Diagnostics.AddError(fmt.Sprintf("flattening resource ID Compute Optimizer Recommendation Preferences (%s)", data.ID.ValueString()), err.Error())
++		return
++	}
++	data.ID = types.StringValue(id)
+ 
+ 	// Read the resource to get other Computed attribute values.
+ 	scope := fwdiag.Must(data.Scope.ToPtr(ctx))
+@@ -439,9 +444,15 @@ func (m *recommendationPreferencesResourceModel) InitFromID(ctx context.Context)
+ 	return nil
+ }
+ 
+-func (m *recommendationPreferencesResourceModel) setID(ctx context.Context) {
++func (m *recommendationPreferencesResourceModel) setID(ctx context.Context) (string, error) {
+ 	scope := fwdiag.Must(m.Scope.ToPtr(ctx))
+-	m.ID = types.StringValue(errs.Must(flex.FlattenResourceId([]string{m.ResourceType.ValueString(), scope.Name.ValueString(), scope.Value.ValueString()}, recommendationPreferencesResourceIDPartCount, false)))
++	parts := []string{
++		m.ResourceType.ValueString(),
++		scope.Name.ValueString(),
++		scope.Value.ValueString(),
++	}
++
++	return flex.FlattenResourceId(parts, recommendationPreferencesResourceIDPartCount, false)
+ }
+ 
+ type externalMetricsPreferenceModel struct {
+diff --git a/internal/service/connect/lambda_function_association.go b/internal/service/connect/lambda_function_association.go
+index 24e6acbdfb37..cd400bae6bb4 100644
+--- a/internal/service/connect/lambda_function_association.go
++++ b/internal/service/connect/lambda_function_association.go
+@@ -60,15 +60,17 @@ func resourceLambdaFunctionAssociationCreate(ctx context.Context, d *schema.Reso
+ 
+ 	instanceID := d.Get(names.AttrInstanceID).(string)
+ 	functionARN := d.Get(names.AttrFunctionARN).(string)
+-	id := errs.Must(flex.FlattenResourceId([]string{instanceID, functionARN}, lambdaFunctionAssociationResourceIDPartCount, true))
++	id, err := flex.FlattenResourceId([]string{instanceID, functionARN}, lambdaFunctionAssociationResourceIDPartCount, true)
++	if err != nil {
++		return sdkdiag.AppendFromErr(diags, err)
++	}
++
+ 	input := &connect.AssociateLambdaFunctionInput{
+ 		FunctionArn: aws.String(functionARN),
+ 		InstanceId:  aws.String(instanceID),
+ 	}
+ 
+-	_, err := conn.AssociateLambdaFunction(ctx, input)
+-
+-	if err != nil {
++	if _, err := conn.AssociateLambdaFunction(ctx, input); err != nil {
+ 		return sdkdiag.AppendErrorf(diags, "creating Connect Lambda Function Association (%s): %s", id, err)
+ 	}
+ 
+diff --git a/internal/service/controltower/control.go b/internal/service/controltower/control.go
+index 0559852690c1..73511d898492 100644
+--- a/internal/service/controltower/control.go
++++ b/internal/service/controltower/control.go
+@@ -108,7 +108,11 @@ func resourceControlCreate(ctx context.Context, d *schema.ResourceData, meta int
+ 
+ 	controlIdentifier := d.Get("control_identifier").(string)
+ 	targetIdentifier := d.Get("target_identifier").(string)
+-	id := errs.Must(flex.FlattenResourceId([]string{targetIdentifier, controlIdentifier}, controlResourceIDPartCount, false))
++	id, err := flex.FlattenResourceId([]string{targetIdentifier, controlIdentifier}, controlResourceIDPartCount, false)
++	if err != nil {
++		return sdkdiag.AppendFromErr(diags, err)
++	}
++
+ 	input := &controltower.EnableControlInput{
+ 		ControlIdentifier: aws.String(controlIdentifier),
+ 		TargetIdentifier:  aws.String(targetIdentifier),
+diff --git a/internal/service/dynamodb/kinesis_streaming_destination.go b/internal/service/dynamodb/kinesis_streaming_destination.go
+index c2577e6a4382..537670c300b2 100644
+--- a/internal/service/dynamodb/kinesis_streaming_destination.go
++++ b/internal/service/dynamodb/kinesis_streaming_destination.go
+@@ -63,15 +63,17 @@ func resourceKinesisStreamingDestinationCreate(ctx context.Context, d *schema.Re
+ 
+ 	streamARN := d.Get(names.AttrStreamARN).(string)
+ 	tableName := d.Get(names.AttrTableName).(string)
+-	id := errs.Must(flex.FlattenResourceId([]string{tableName, streamARN}, kinesisStreamingDestinationResourceIDPartCount, false))
++	id, err := flex.FlattenResourceId([]string{tableName, streamARN}, kinesisStreamingDestinationResourceIDPartCount, false)
++	if err != nil {
++		return sdkdiag.AppendFromErr(diags, err)
++	}
++
+ 	input := &dynamodb.EnableKinesisStreamingDestinationInput{
+ 		StreamArn: aws.String(streamARN),
+ 		TableName: aws.String(tableName),
+ 	}
+ 
+-	_, err := conn.EnableKinesisStreamingDestination(ctx, input)
+-
+-	if err != nil {
++	if _, err := conn.EnableKinesisStreamingDestination(ctx, input); err != nil {
+ 		return sdkdiag.AppendErrorf(diags, "enabling DynamoDB Kinesis Streaming Destination (%s): %s", id, err)
+ 	}
+ 
+diff --git a/internal/service/ec2/ebs_fast_snapshot_restore.go b/internal/service/ec2/ebs_fast_snapshot_restore.go
+index fd9f32c9ddf0..683f1a30c63d 100644
+--- a/internal/service/ec2/ebs_fast_snapshot_restore.go
++++ b/internal/service/ec2/ebs_fast_snapshot_restore.go
+@@ -15,7 +15,6 @@ import (
+ 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
+ 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
+ 	"github.com/hashicorp/terraform-plugin-framework/types"
+-	"github.com/hashicorp/terraform-provider-aws/internal/errs"
+ 	"github.com/hashicorp/terraform-provider-aws/internal/errs/fwdiag"
+ 	"github.com/hashicorp/terraform-provider-aws/internal/flex"
+ 	"github.com/hashicorp/terraform-provider-aws/internal/framework"
+@@ -103,7 +102,12 @@ func (r *ebsFastSnapshotRestoreResource) Create(ctx context.Context, request res
+ 	}
+ 
+ 	// Set values for unknowns.
+-	data.setID()
++	id, err := data.setID()
++	if err != nil {
++		response.Diagnostics.AddError("creating EC2 EBS Fast Snapshot Restore", err.Error())
++		return
++	}
++	data.ID = types.StringValue(id)
+ 
+ 	v, err := waitFastSnapshotRestoreCreated(ctx, conn, availabilityZone, snapshotID, r.CreateTimeout(ctx, data.Timeouts))
+ 
+@@ -208,6 +212,11 @@ func (data *ebsFastSnapshotRestoreResourceModel) InitFromID() error {
+ 	return nil
+ }
+ 
+-func (data *ebsFastSnapshotRestoreResourceModel) setID() {
+-	data.ID = types.StringValue(errs.Must(flex.FlattenResourceId([]string{data.AvailabilityZone.ValueString(), data.SnapshotID.ValueString()}, ebsFastSnapshotRestoreIDPartCount, false)))
++func (data *ebsFastSnapshotRestoreResourceModel) setID() (string, error) {
++	parts := []string{
++		data.AvailabilityZone.ValueString(),
++		data.SnapshotID.ValueString(),
++	}
++
++	return flex.FlattenResourceId(parts, ebsFastSnapshotRestoreIDPartCount, false)
+ }
+diff --git a/internal/service/elasticache/user_group_association.go b/internal/service/elasticache/user_group_association.go
+index 2f1827ef5d22..c32cebf16296 100644
+--- a/internal/service/elasticache/user_group_association.go
++++ b/internal/service/elasticache/user_group_association.go
+@@ -62,17 +62,18 @@ func resourceUserGroupAssociationCreate(ctx context.Context, d *schema.ResourceD
+ 
+ 	userGroupID := d.Get("user_group_id").(string)
+ 	userID := d.Get("user_id").(string)
+-	id := errs.Must(flex.FlattenResourceId([]string{userGroupID, userID}, userGroupAssociationResourceIDPartCount, true))
++	id, err := flex.FlattenResourceId([]string{userGroupID, userID}, userGroupAssociationResourceIDPartCount, true)
++	if err != nil {
++		return sdkdiag.AppendFromErr(diags, err)
++	}
+ 	input := &elasticache.ModifyUserGroupInput{
+ 		UserGroupId:  aws.String(userGroupID),
+ 		UserIdsToAdd: []string{userID},
+ 	}
+ 
+-	_, err := tfresource.RetryWhenIsA[*awstypes.InvalidUserGroupStateFault](ctx, d.Timeout(schema.TimeoutCreate), func() (interface{}, error) {
++	if _, err := tfresource.RetryWhenIsA[*awstypes.InvalidUserGroupStateFault](ctx, d.Timeout(schema.TimeoutCreate), func() (interface{}, error) {
+ 		return conn.ModifyUserGroup(ctx, input)
+-	})
+-
+-	if err != nil {
++	}); err != nil {
+ 		return sdkdiag.AppendErrorf(diags, "creating ElastiCache User Group Association (%s): %s", id, err)
+ 	}
+ 
+diff --git a/internal/service/elbv2/trust_store_revocation.go b/internal/service/elbv2/trust_store_revocation.go
+index cdf719276976..550a442ca47a 100644
+--- a/internal/service/elbv2/trust_store_revocation.go
++++ b/internal/service/elbv2/trust_store_revocation.go
+@@ -102,7 +102,10 @@ func resourceTrustStoreRevocationCreate(ctx context.Context, d *schema.ResourceD
+ 	}
+ 
+ 	revocationID := aws.ToInt64(output.TrustStoreRevocations[0].RevocationId)
+-	id := errs.Must(flex.FlattenResourceId([]string{trustStoreARN, strconv.FormatInt(revocationID, 10)}, trustStoreRevocationResourceIDPartCount, false))
++	id, err := flex.FlattenResourceId([]string{trustStoreARN, strconv.FormatInt(revocationID, 10)}, trustStoreRevocationResourceIDPartCount, false)
++	if err != nil {
++		return sdkdiag.AppendErrorf(diags, "creating ELBv2 Trust Store (%s) Revocation (s3://%s/%s): %s", trustStoreARN, s3Bucket, s3Key, err)
++	}
+ 
+ 	d.SetId(id)
+ 
+@@ -127,7 +130,11 @@ func resourceTrustStoreRevocationRead(ctx context.Context, d *schema.ResourceDat
+ 	}
+ 
+ 	trustStoreARN := parts[0]
+-	revocationID := errs.Must(strconv.ParseInt(parts[1], 10, 64))
++	revocationID, err := strconv.ParseInt(parts[1], 10, 64)
++	if err != nil {
++		return sdkdiag.AppendErrorf(diags, "reading ELBv2 Trust Store Revocation (%s): %s", d.Id(), err)
++	}
++
+ 	revocation, err := findTrustStoreRevocationByTwoPartKey(ctx, conn, trustStoreARN, revocationID)
+ 
+ 	if !d.IsNewResource() && tfresource.NotFound(err) {
+@@ -156,7 +163,10 @@ func resourceTrustStoreRevocationDelete(ctx context.Context, d *schema.ResourceD
+ 	}
+ 
+ 	trustStoreARN := parts[0]
+-	revocationID := errs.Must(strconv.ParseInt(parts[1], 10, 64))
++	revocationID, err := strconv.ParseInt(parts[1], 10, 64)
++	if err != nil {
++		return sdkdiag.AppendErrorf(diags, "deleting ELBv2 Trust Store Revocation (%s): %s", d.Id(), err)
++	}
+ 
+ 	log.Printf("[DEBUG] Deleting ELBv2 Trust Store Revocation: %s", d.Id())
+ 	_, err = conn.RemoveTrustStoreRevocations(ctx, &elasticloadbalancingv2.RemoveTrustStoreRevocationsInput{
+diff --git a/internal/service/fms/sweep.go b/internal/service/fms/sweep.go
+index ec9fda9b3af9..73e84e077576 100644
+--- a/internal/service/fms/sweep.go
++++ b/internal/service/fms/sweep.go
+@@ -1,4 +1,4 @@
+-// Copyright (c) HashiCorp, Inc.
++// Copyright (c) HashiCorp, Inc.fms/sweep
+ // SPDX-License-Identifier: MPL-2.0
+ 
+ package fms
+@@ -103,7 +103,7 @@ func (aas adminAccountSweeper) Delete(ctx context.Context, timeout time.Duration
+ 		})
+ 		return nil
+ 	}
+-	if err != nil && errs.Must(regexp.MatchString(`InvalidOperationException: This operation is not supported in the '[-a-z0-9]+' region`, err.Error())) {
++	if err != nil && errs.Must(regexp.MatchString(`InvalidOperationException: This operation is not supported in the '[-a-z0-9]+' region`, err.Error())) { // nosemgrep: ci.avoid-errs-Must
+ 		tflog.Warn(ctx, "Skipping resource", map[string]any{
+ 			"attr.account_id": aas.d.Get(names.AttrAccountID),
+ 			"error":           err.Error(),
+diff --git a/internal/service/grafana/workspace_service_account.go b/internal/service/grafana/workspace_service_account.go
+index 56941d5153ea..81a75ed087ab 100644
+--- a/internal/service/grafana/workspace_service_account.go
++++ b/internal/service/grafana/workspace_service_account.go
+@@ -102,7 +102,12 @@ func (r *workspaceServiceAccountResource) Create(ctx context.Context, request re
+ 
+ 	// Set values for unknowns.
+ 	data.ServiceAccountID = fwflex.StringToFramework(ctx, output.Id)
+-	data.setID()
++	id, err := data.setID()
++	if err != nil {
++		response.Diagnostics.AddError(fmt.Sprintf("creating Grafana Workspace Service Account (%s)", name), err.Error())
++		return
++	}
++	data.ID = types.StringValue(id)
+ 
+ 	response.Diagnostics.Append(response.State.Set(ctx, &data)...)
+ }
+@@ -145,7 +150,12 @@ func (r *workspaceServiceAccountResource) Read(ctx context.Context, request reso
+ 
+ 	// Restore resource ID.
+ 	// It has been overwritten by the 'Id' field from the API response.
+-	data.setID()
++	id, err := data.setID()
++	if err != nil {
++		response.Diagnostics.AddError(fmt.Sprintf("reading Grafana Workspace Service Account (%s)", id), err.Error())
++		return
++	}
++	data.ID = types.StringValue(id)
+ 
+ 	// Role is returned from the API in lowercase.
+ 	data.GrafanaRole = fwtypes.StringEnumValueToUpper(output.GrafanaRole)
+@@ -254,6 +264,11 @@ func (data *workspaceServiceAccountResourceModel) InitFromID() error {
+ 	return nil
+ }
+ 
+-func (data *workspaceServiceAccountResourceModel) setID() {
+-	data.ID = types.StringValue(errs.Must(flex.FlattenResourceId([]string{data.WorkspaceID.ValueString(), data.ServiceAccountID.ValueString()}, workspaceServiceAccountResourceIDPartCount, false)))
++func (data *workspaceServiceAccountResourceModel) setID() (string, error) {
++	parts := []string{
++		data.WorkspaceID.ValueString(),
++		data.ServiceAccountID.ValueString(),
++	}
++
++	return flex.FlattenResourceId(parts, workspaceServiceAccountResourceIDPartCount, false)
+ }
+diff --git a/internal/service/grafana/workspace_service_account_token.go b/internal/service/grafana/workspace_service_account_token.go
+index 0673cf313e17..32880a2597fa 100644
+--- a/internal/service/grafana/workspace_service_account_token.go
++++ b/internal/service/grafana/workspace_service_account_token.go
+@@ -133,7 +133,12 @@ func (r *workspaceServiceAccountTokenResource) Create(ctx context.Context, reque
+ 	// Set values for unknowns.
+ 	data.Key = fwflex.StringToFramework(ctx, output.ServiceAccountToken.Key)
+ 	data.TokenID = fwflex.StringToFramework(ctx, output.ServiceAccountToken.Id)
+-	data.setID()
++	id, err := data.setID()
++	if err != nil {
++		response.Diagnostics.AddError("setting resource ID", err.Error())
++		return
++	}
++	data.ID = types.StringValue(id)
+ 
+ 	serviceAccountToken, err := findWorkspaceServiceAccountTokenByThreePartKey(ctx, conn, data.WorkspaceID.ValueString(), data.ServiceAccountID.ValueString(), data.TokenID.ValueString())
+ 
+@@ -187,7 +192,12 @@ func (r *workspaceServiceAccountTokenResource) Read(ctx context.Context, request
+ 
+ 	// Restore resource ID.
+ 	// It has been overwritten by the 'Id' field from the API response.
+-	data.setID()
++	id, err := data.setID()
++	if err != nil {
++		response.Diagnostics.AddError("setting resource ID", err.Error())
++		return
++	}
++	data.ID = types.StringValue(id)
+ 
+ 	response.Diagnostics.Append(response.State.Set(ctx, &data)...)
+ }
+@@ -300,6 +310,12 @@ func (data *workspaceServiceAccountTokenResourceModel) InitFromID() error {
+ 	return nil
+ }
+ 
+-func (data *workspaceServiceAccountTokenResourceModel) setID() {
+-	data.ID = types.StringValue(errs.Must(flex.FlattenResourceId([]string{data.WorkspaceID.ValueString(), data.ServiceAccountID.ValueString(), data.TokenID.ValueString()}, workspaceServiceAccountTokenResourceIDPartCount, false)))
++func (data *workspaceServiceAccountTokenResourceModel) setID() (string, error) {
++	parts := []string{
++		data.WorkspaceID.ValueString(),
++		data.ServiceAccountID.ValueString(),
++		data.TokenID.ValueString(),
++	}
++
++	return flex.FlattenResourceId(parts, workspaceServiceAccountTokenResourceIDPartCount, false)
+ }
+diff --git a/internal/service/lambda/layer_version_permission.go b/internal/service/lambda/layer_version_permission.go
+index 4741fb9ca959..076b023b920b 100644
+--- a/internal/service/lambda/layer_version_permission.go
++++ b/internal/service/lambda/layer_version_permission.go
+@@ -102,7 +102,10 @@ func resourceLayerVersionPermissionCreate(ctx context.Context, d *schema.Resourc
+ 
+ 	layerName := d.Get("layer_name").(string)
+ 	versionNumber := d.Get("version_number").(int)
+-	id := errs.Must(flex.FlattenResourceId([]string{layerName, strconv.FormatInt(int64(versionNumber), 10)}, layerVersionPermissionResourceIDPartCount, true))
++	id, err := flex.FlattenResourceId([]string{layerName, strconv.FormatInt(int64(versionNumber), 10)}, layerVersionPermissionResourceIDPartCount, true)
++	if err != nil {
++		return sdkdiag.AppendFromErr(diags, err)
++	}
+ 	input := &lambda.AddLayerVersionPermissionInput{
+ 		Action:        aws.String(d.Get(names.AttrAction).(string)),
+ 		LayerName:     aws.String(layerName),
+@@ -115,9 +118,7 @@ func resourceLayerVersionPermissionCreate(ctx context.Context, d *schema.Resourc
+ 		input.OrganizationId = aws.String(v.(string))
+ 	}
+ 
+-	_, err := conn.AddLayerVersionPermission(ctx, input)
+-
+-	if err != nil {
++	if _, err := conn.AddLayerVersionPermission(ctx, input); err != nil {
+ 		return sdkdiag.AppendErrorf(diags, "adding Lambda Layer Version Permission (%s): %s", id, err)
+ 	}
+ 
+diff --git a/internal/service/lambda/provisioned_concurrency_config.go b/internal/service/lambda/provisioned_concurrency_config.go
+index f60ea3fbfaaa..591026b77ce4 100644
+--- a/internal/service/lambda/provisioned_concurrency_config.go
++++ b/internal/service/lambda/provisioned_concurrency_config.go
+@@ -88,16 +88,17 @@ func resourceProvisionedConcurrencyConfigCreate(ctx context.Context, d *schema.R
+ 
+ 	functionName := d.Get("function_name").(string)
+ 	qualifier := d.Get("qualifier").(string)
+-	id := errs.Must(flex.FlattenResourceId([]string{functionName, qualifier}, provisionedConcurrencyConfigResourceIDPartCount, true))
++	id, err := flex.FlattenResourceId([]string{functionName, qualifier}, provisionedConcurrencyConfigResourceIDPartCount, true)
++	if err != nil {
++		return sdkdiag.AppendFromErr(diags, err)
++	}
+ 	input := &lambda.PutProvisionedConcurrencyConfigInput{
+ 		FunctionName:                    aws.String(functionName),
+ 		ProvisionedConcurrentExecutions: aws.Int32(int32(d.Get("provisioned_concurrent_executions").(int))),
+ 		Qualifier:                       aws.String(qualifier),
+ 	}
+ 
+-	_, err := conn.PutProvisionedConcurrencyConfig(ctx, input)
+-
+-	if err != nil {
++	if _, err := conn.PutProvisionedConcurrencyConfig(ctx, input); err != nil {
+ 		return sdkdiag.AppendErrorf(diags, "creating Lambda Provisioned Concurrency Config (%s): %s", id, err)
+ 	}
+ 
+diff --git a/internal/service/lexv2models/intent_test.go b/internal/service/lexv2models/intent_test.go
+index 6848d1e9f7d6..baadd51978fc 100644
+--- a/internal/service/lexv2models/intent_test.go
++++ b/internal/service/lexv2models/intent_test.go
+@@ -647,7 +647,7 @@ func TestIntentAutoFlex(t *testing.T) {
+ 	}
+ 
+ 	testTimeStr := "2023-12-08T09:34:01Z"
+-	testTimeTime := errs.Must(time.Parse(time.RFC3339, testTimeStr))
++	testTimeTime := errs.Must(time.Parse(time.RFC3339, testTimeStr)) // nosemgrep: ci.avoid-errs-Must
+ 
+ 	intentDescribeTF := tflexv2models.ResourceIntentData{
+ 		BotID:                  types.StringValue(testString),
+diff --git a/internal/service/m2/deployment.go b/internal/service/m2/deployment.go
+index 8eb29695ee60..5543df89c70c 100644
+--- a/internal/service/m2/deployment.go
++++ b/internal/service/m2/deployment.go
+@@ -118,7 +118,12 @@ func (r *deploymentResource) Create(ctx context.Context, request resource.Create
+ 
+ 	// Set values for unknowns.
+ 	data.DeploymentID = fwflex.StringToFramework(ctx, output.DeploymentId)
+-	data.setID()
++	id, err := data.setID()
++	if err != nil {
++		response.Diagnostics.AddError("creating Mainframe Modernization Deployment", err.Error())
++		return
++	}
++	data.ID = types.StringValue(id)
+ 
+ 	timeout := r.CreateTimeout(ctx, data.Timeouts)
+ 	if _, err := waitDeploymentCreated(ctx, conn, data.ApplicationID.ValueString(), data.DeploymentID.ValueString(), timeout); err != nil {
+@@ -233,7 +238,12 @@ func (r *deploymentResource) Update(ctx context.Context, request resource.Update
+ 
+ 		// Set values for unknowns.
+ 		new.DeploymentID = fwflex.StringToFramework(ctx, output.DeploymentId)
+-		new.setID()
++		id, err := new.setID()
++		if err != nil {
++			response.Diagnostics.AddError("creating Mainframe Modernization Deployment", err.Error())
++			return
++		}
++		new.ID = types.StringValue(id)
+ 
+ 		if _, err := waitDeploymentUpdated(ctx, conn, new.ApplicationID.ValueString(), new.DeploymentID.ValueString(), timeout); err != nil {
+ 			response.Diagnostics.AddError(fmt.Sprintf("waiting for Mainframe Modernization Deployment (%s) update", new.ID.ValueString()), err.Error())
+@@ -443,6 +453,11 @@ func (data *deploymentResourceModel) InitFromID() error {
+ 	return nil
+ }
+ 
+-func (data *deploymentResourceModel) setID() {
+-	data.ID = types.StringValue(errs.Must(flex.FlattenResourceId([]string{data.ApplicationID.ValueString(), data.DeploymentID.ValueString()}, deploymentResourceIDPartCount, false)))
++func (data *deploymentResourceModel) setID() (string, error) {
++	parts := []string{
++		data.ApplicationID.ValueString(),
++		data.DeploymentID.ValueString(),
++	}
++
++	return flex.FlattenResourceId(parts, deploymentResourceIDPartCount, false)
+ }
+diff --git a/internal/service/networkmonitor/probe.go b/internal/service/networkmonitor/probe.go
+index e07e500122dc..8fefba9ca3ed 100644
+--- a/internal/service/networkmonitor/probe.go
++++ b/internal/service/networkmonitor/probe.go
+@@ -153,7 +153,12 @@ func (r *probeResource) Create(ctx context.Context, request resource.CreateReque
+ 	// Set values for unknowns.
+ 	data.ProbeARN = fwflex.StringToFramework(ctx, outputCP.ProbeArn)
+ 	data.ProbeID = fwflex.StringToFramework(ctx, outputCP.ProbeId)
+-	data.setID()
++	id, err := data.setID()
++	if err != nil {
++		response.Diagnostics.AddError("creating CloudWatch Network Monitor Probe (%s)", err.Error())
++		return
++	}
++	data.ID = types.StringValue(id)
+ 
+ 	outputGP, err := waitProbeReady(ctx, conn, data.MonitorName.ValueString(), data.ProbeID.ValueString())
+ 
+@@ -427,6 +432,11 @@ func (m *probeResourceModel) InitFromID() error {
+ 	return nil
+ }
+ 
+-func (m *probeResourceModel) setID() {
+-	m.ID = types.StringValue(errs.Must(flex.FlattenResourceId([]string{m.MonitorName.ValueString(), m.ProbeID.ValueString()}, probeResourceIDPartCount, false)))
++func (m *probeResourceModel) setID() (string, error) {
++	parts := []string{
++		m.MonitorName.ValueString(),
++		m.ProbeID.ValueString(),
++	}
++
++	return flex.FlattenResourceId(parts, probeResourceIDPartCount, false)
+ }
+diff --git a/internal/service/ram/principal_association.go b/internal/service/ram/principal_association.go
+index c2359037530e..2604cf365712 100644
+--- a/internal/service/ram/principal_association.go
++++ b/internal/service/ram/principal_association.go
+@@ -72,8 +72,12 @@ func resourcePrincipalAssociationCreate(ctx context.Context, d *schema.ResourceD
+ 	conn := meta.(*conns.AWSClient).RAMClient(ctx)
+ 
+ 	resourceShareARN, principal := d.Get("resource_share_arn").(string), d.Get(names.AttrPrincipal).(string)
+-	id := errs.Must(flex.FlattenResourceId([]string{resourceShareARN, principal}, principalAssociationResourceIDPartCount, false))
+-	_, err := findPrincipalAssociationByTwoPartKey(ctx, conn, resourceShareARN, principal)
++	id, err := flex.FlattenResourceId([]string{resourceShareARN, principal}, principalAssociationResourceIDPartCount, false)
++	if err != nil {
++		return sdkdiag.AppendFromErr(diags, err)
++	}
++
++	_, err = findPrincipalAssociationByTwoPartKey(ctx, conn, resourceShareARN, principal)
+ 
+ 	switch {
+ 	case err == nil:
+diff --git a/internal/service/ram/resource_association.go b/internal/service/ram/resource_association.go
+index 69e42c317c46..80eb5aa18d52 100644
+--- a/internal/service/ram/resource_association.go
++++ b/internal/service/ram/resource_association.go
+@@ -64,8 +64,12 @@ func resourceResourceAssociationCreate(ctx context.Context, d *schema.ResourceDa
+ 	conn := meta.(*conns.AWSClient).RAMClient(ctx)
+ 
+ 	resourceShareARN, resourceARN := d.Get("resource_share_arn").(string), d.Get(names.AttrResourceARN).(string)
+-	id := errs.Must(flex.FlattenResourceId([]string{resourceShareARN, resourceARN}, resourceAssociationResourceIDPartCount, false))
+-	_, err := findResourceAssociationByTwoPartKey(ctx, conn, resourceShareARN, resourceARN)
++	id, err := flex.FlattenResourceId([]string{resourceShareARN, resourceARN}, resourceAssociationResourceIDPartCount, false)
++	if err != nil {
++		return sdkdiag.AppendFromErr(diags, err)
++	}
++
++	_, err = findResourceAssociationByTwoPartKey(ctx, conn, resourceShareARN, resourceARN)
+ 
+ 	switch {
+ 	case err == nil:
+diff --git a/internal/service/redshiftserverless/custom_domain_association.go b/internal/service/redshiftserverless/custom_domain_association.go
+index 6d1006b5420c..0b8d5a7715d7 100644
+--- a/internal/service/redshiftserverless/custom_domain_association.go
++++ b/internal/service/redshiftserverless/custom_domain_association.go
+@@ -107,7 +107,12 @@ func (r *customDomainAssociationResource) Create(ctx context.Context, request re
+ 
+ 	// Set values for unknowns.
+ 	data.CustomDomainCertificateExpiryTime = timetypes.NewRFC3339TimePointerValue(output.CustomDomainCertificateExpiryTime)
+-	data.setID()
++	id, err := data.setID()
++	if err != nil {
++		response.Diagnostics.AddError("creating Redshift Serverless Custom Domain Association", err.Error())
++		return
++	}
++	data.ID = types.StringValue(id)
+ 
+ 	response.Diagnostics.Append(response.State.Set(ctx, data)...)
+ }
+@@ -260,6 +265,11 @@ func (data *customDomainAssociationResourceModel) InitFromID() error {
+ 	return nil
+ }
+ 
+-func (data *customDomainAssociationResourceModel) setID() {
+-	data.ID = types.StringValue(errs.Must(flex.FlattenResourceId([]string{data.WorkgroupName.ValueString(), data.CustomDomainName.ValueString()}, customDomainAssociationResourceIDPartCount, false)))
++func (data *customDomainAssociationResourceModel) setID() (string, error) {
++	parts := []string{
++		data.WorkgroupName.ValueString(),
++		data.CustomDomainName.ValueString(),
++	}
++
++	return flex.FlattenResourceId(parts, customDomainAssociationResourceIDPartCount, false)
+ }
+diff --git a/internal/service/route53/cidr_location.go b/internal/service/route53/cidr_location.go
+index c70bf07548d2..c2e77dadb96c 100644
+--- a/internal/service/route53/cidr_location.go
++++ b/internal/service/route53/cidr_location.go
+@@ -113,7 +113,12 @@ func (r *cidrLocationResource) Create(ctx context.Context, request resource.Crea
+ 		return
+ 	}
+ 
+-	data.setID()
++	id, err := data.setID()
++	if err != nil {
++		response.Diagnostics.AddError(fmt.Sprintf("creating Route 53 CIDR Location (%s)", name), err.Error())
++		return
++	}
++	data.ID = types.StringValue(id)
+ 
+ 	response.Diagnostics.Append(response.State.Set(ctx, &data)...)
+ }
+@@ -302,8 +307,13 @@ func (data *cidrLocationResourceModel) InitFromID() error {
+ 	return nil
+ }
+ 
+-func (data *cidrLocationResourceModel) setID() {
+-	data.ID = types.StringValue(errs.Must(flex.FlattenResourceId([]string{data.CIDRCollectionID.ValueString(), data.Name.ValueString()}, cidrLocationResourceIDPartCount, false)))
++func (data *cidrLocationResourceModel) setID() (string, error) {
++	parts := []string{
++		data.CIDRCollectionID.ValueString(),
++		data.Name.ValueString(),
++	}
++
++	return flex.FlattenResourceId(parts, cidrLocationResourceIDPartCount, false)
+ }
+ 
+ func findCIDRLocationByTwoPartKey(ctx context.Context, conn *route53.Client, collectionID, locationName string) ([]string, error) {
+diff --git a/internal/service/route53/key_signing_key.go b/internal/service/route53/key_signing_key.go
+index 403a070a10f1..1de00ffdd761 100644
+--- a/internal/service/route53/key_signing_key.go
++++ b/internal/service/route53/key_signing_key.go
+@@ -131,7 +131,10 @@ func resourceKeySigningKeyCreate(ctx context.Context, d *schema.ResourceData, me
+ 	hostedZoneID := d.Get(names.AttrHostedZoneID).(string)
+ 	name := d.Get(names.AttrName).(string)
+ 	status := d.Get(names.AttrStatus).(string)
+-	id := errs.Must(flex.FlattenResourceId([]string{hostedZoneID, name}, keySigningKeyResourceIDPartCount, false))
++	id, err := flex.FlattenResourceId([]string{hostedZoneID, name}, keySigningKeyResourceIDPartCount, false)
++	if err != nil {
++		return sdkdiag.AppendFromErr(diags, err)
++	}
+ 	input := &route53.CreateKeySigningKeyInput{
+ 		CallerReference: aws.String(sdkid.UniqueId()),
+ 		HostedZoneId:    aws.String(hostedZoneID),
+diff --git a/internal/service/route53domains/delegation_signer_record.go b/internal/service/route53domains/delegation_signer_record.go
+index e4d041610ff9..11f84cdfb04b 100644
+--- a/internal/service/route53domains/delegation_signer_record.go
++++ b/internal/service/route53domains/delegation_signer_record.go
+@@ -149,7 +149,12 @@ func (r *delegationSignerRecordResource) Create(ctx context.Context, request res
+ 
+ 	// Set values for unknowns.
+ 	data.DNSSECKeyID = fwflex.StringToFramework(ctx, dnssecKey.Id)
+-	data.setID()
++	id, err := data.setID()
++	if err != nil {
++		response.Diagnostics.AddError(fmt.Sprintf("flattening resource ID Route 53 Domains Domain (%s) DNSSEC key", data.DomainName.ValueString()), err.Error())
++		return
++	}
++	data.ID = types.StringValue(id)
+ 
+ 	response.Diagnostics.Append(response.State.Set(ctx, data)...)
+ }
+@@ -257,6 +262,11 @@ func (data *delegationSignerRecordResourceModel) InitFromID() error {
+ 	return nil
+ }
+ 
+-func (data *delegationSignerRecordResourceModel) setID() {
+-	data.ID = types.StringValue(errs.Must(flex.FlattenResourceId([]string{data.DomainName.ValueString(), data.DNSSECKeyID.ValueString()}, delegationSignerRecordResourceIDPartCount, false)))
++func (data *delegationSignerRecordResourceModel) setID() (string, error) {
++	parts := []string{
++		data.DomainName.ValueString(),
++		data.DNSSECKeyID.ValueString(),
++	}
++
++	return flex.FlattenResourceId(parts, delegationSignerRecordResourceIDPartCount, false)
+ }
+diff --git a/internal/service/s3control/access_grant.go b/internal/service/s3control/access_grant.go
+index ce4d1a042d31..6bd3274a3fac 100644
+--- a/internal/service/s3control/access_grant.go
++++ b/internal/service/s3control/access_grant.go
+@@ -21,7 +21,6 @@ import (
+ 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
+ 	"github.com/hashicorp/terraform-plugin-framework/types"
+ 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/retry"
+-	"github.com/hashicorp/terraform-provider-aws/internal/errs"
+ 	"github.com/hashicorp/terraform-provider-aws/internal/errs/fwdiag"
+ 	"github.com/hashicorp/terraform-provider-aws/internal/flex"
+ 	"github.com/hashicorp/terraform-provider-aws/internal/framework"
+@@ -194,7 +193,12 @@ func (r *accessGrantResource) Create(ctx context.Context, request resource.Creat
+ 	data.AccessGrantARN = fwflex.StringToFramework(ctx, output.AccessGrantArn)
+ 	data.AccessGrantID = fwflex.StringToFramework(ctx, output.AccessGrantId)
+ 	data.GrantScope = fwflex.StringToFramework(ctx, output.GrantScope)
+-	data.setID()
++	id, err := data.setID()
++	if err != nil {
++		response.Diagnostics.AddError("creating S3 Access Grant", err.Error())
++		return
++	}
++	data.ID = types.StringValue(id)
+ 
+ 	response.Diagnostics.Append(response.State.Set(ctx, &data)...)
+ }
+@@ -381,8 +385,13 @@ func (data *accessGrantResourceModel) InitFromID() error {
+ 	return nil
+ }
+ 
+-func (data *accessGrantResourceModel) setID() {
+-	data.ID = types.StringValue(errs.Must(flex.FlattenResourceId([]string{data.AccountID.ValueString(), data.AccessGrantID.ValueString()}, accessGrantResourceIDPartCount, false)))
++func (data *accessGrantResourceModel) setID() (string, error) {
++	parts := []string{
++		data.AccountID.ValueString(),
++		data.AccessGrantID.ValueString(),
++	}
++
++	return flex.FlattenResourceId(parts, accessGrantResourceIDPartCount, false)
+ }
+ 
+ // API returns <AccessGrantsLocationConfiguration><S3SubPrefix></S3SubPrefix></AccessGrantsLocationConfiguration>.
+diff --git a/internal/service/s3control/access_grants_location.go b/internal/service/s3control/access_grants_location.go
+index ca060273a120..9443dfb0910a 100644
+--- a/internal/service/s3control/access_grants_location.go
++++ b/internal/service/s3control/access_grants_location.go
+@@ -18,7 +18,6 @@ import (
+ 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
+ 	"github.com/hashicorp/terraform-plugin-framework/types"
+ 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/retry"
+-	"github.com/hashicorp/terraform-provider-aws/internal/errs"
+ 	"github.com/hashicorp/terraform-provider-aws/internal/errs/fwdiag"
+ 	"github.com/hashicorp/terraform-provider-aws/internal/flex"
+ 	"github.com/hashicorp/terraform-provider-aws/internal/framework"
+@@ -125,7 +124,12 @@ func (r *accessGrantsLocationResource) Create(ctx context.Context, request resou
+ 	output := outputRaw.(*s3control.CreateAccessGrantsLocationOutput)
+ 	data.AccessGrantsLocationARN = fwflex.StringToFramework(ctx, output.AccessGrantsLocationArn)
+ 	data.AccessGrantsLocationID = fwflex.StringToFramework(ctx, output.AccessGrantsLocationId)
+-	data.setID()
++	id, err := data.setID()
++	if err != nil {
++		response.Diagnostics.AddError(fmt.Sprintf("creating S3 Access Grants Location (%s)", data.LocationScope.ValueString()), err.Error())
++		return
++	}
++	data.ID = types.StringValue(id)
+ 
+ 	response.Diagnostics.Append(response.State.Set(ctx, &data)...)
+ }
+@@ -318,6 +322,11 @@ func (data *accessGrantsLocationResourceModel) InitFromID() error {
+ 	return nil
+ }
+ 
+-func (data *accessGrantsLocationResourceModel) setID() {
+-	data.ID = types.StringValue(errs.Must(flex.FlattenResourceId([]string{data.AccountID.ValueString(), data.AccessGrantsLocationID.ValueString()}, accessGrantsLocationResourceIDPartCount, false)))
++func (data *accessGrantsLocationResourceModel) setID() (string, error) {
++	parts := []string{
++		data.AccountID.ValueString(),
++		data.AccessGrantsLocationID.ValueString(),
++	}
++
++	return flex.FlattenResourceId(parts, accessGrantsLocationResourceIDPartCount, false)
+ }
+diff --git a/internal/service/securityhub/product_subscription.go b/internal/service/securityhub/product_subscription.go
+index d8006ab83340..06e279926927 100644
+--- a/internal/service/securityhub/product_subscription.go
++++ b/internal/service/securityhub/product_subscription.go
+@@ -14,7 +14,6 @@ import (
+ 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/retry"
+ 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
+ 	"github.com/hashicorp/terraform-provider-aws/internal/conns"
+-	"github.com/hashicorp/terraform-provider-aws/internal/errs"
+ 	"github.com/hashicorp/terraform-provider-aws/internal/errs/sdkdiag"
+ 	"github.com/hashicorp/terraform-provider-aws/internal/flex"
+ 	tfslices "github.com/hashicorp/terraform-provider-aws/internal/slices"
+@@ -68,7 +67,11 @@ func resourceProductSubscriptionCreate(ctx context.Context, d *schema.ResourceDa
+ 		return sdkdiag.AppendErrorf(diags, "enabling Security Hub Product Subscription (%s): %s", productARN, err)
+ 	}
+ 
+-	d.SetId(errs.Must(flex.FlattenResourceId([]string{productARN, aws.ToString(output.ProductSubscriptionArn)}, productSubscriptionResourceIDPartCount, false)))
++	id, err := flex.FlattenResourceId([]string{productARN, aws.ToString(output.ProductSubscriptionArn)}, productSubscriptionResourceIDPartCount, false)
++	if err != nil {
++		return sdkdiag.AppendFromErr(diags, err)
++	}
++	d.SetId(id)
+ 
+ 	return append(diags, resourceProductSubscriptionRead(ctx, d, meta)...)
+ }
+diff --git a/internal/service/securitylake/data_lake.go b/internal/service/securitylake/data_lake.go
+index 3965c8aff976..2a36dacdc97d 100644
+--- a/internal/service/securitylake/data_lake.go
++++ b/internal/service/securitylake/data_lake.go
+@@ -327,12 +327,17 @@ func (r *dataLakeResource) Delete(ctx context.Context, request resource.DeleteRe
+ 	}
+ 
+ 	conn := r.Meta().SecurityLakeClient(ctx)
++	region, err := regionFromARNString(data.ID.ValueString())
++	if err != nil {
++		response.Diagnostics.AddError(fmt.Sprintf("deleting Security Lake Data Lake (%s)", data.ID.ValueString()), err.Error())
++		return
++	}
+ 
+ 	input := &securitylake.DeleteDataLakeInput{
+-		Regions: []string{errs.Must(regionFromARNString(data.ID.ValueString()))},
++		Regions: []string{region},
+ 	}
+ 
+-	_, err := retryDataLakeConflictWithMutex(ctx, func() (*securitylake.DeleteDataLakeOutput, error) {
++	_, err = retryDataLakeConflictWithMutex(ctx, func() (*securitylake.DeleteDataLakeOutput, error) {
+ 		return conn.DeleteDataLake(ctx, input)
+ 	})
+ 
+@@ -362,8 +367,13 @@ func (r *dataLakeResource) ModifyPlan(ctx context.Context, req resource.ModifyPl
+ }
+ 
+ func findDataLakeByARN(ctx context.Context, conn *securitylake.Client, arn string) (*awstypes.DataLakeResource, error) {
++	region, err := regionFromARNString(arn)
++	if err != nil {
++		return nil, err
++	}
++
+ 	input := &securitylake.ListDataLakesInput{
+-		Regions: []string{errs.Must(regionFromARNString(arn))},
++		Regions: []string{region},
+ 	}
+ 
+ 	return findDataLake(ctx, conn, input, func(v *awstypes.DataLakeResource) bool {
+diff --git a/internal/service/securitylake/subscriber_notification.go b/internal/service/securitylake/subscriber_notification.go
+index baccf539e54c..14c7f045c910 100644
+--- a/internal/service/securitylake/subscriber_notification.go
++++ b/internal/service/securitylake/subscriber_notification.go
+@@ -23,7 +23,6 @@ import (
+ 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
+ 	"github.com/hashicorp/terraform-plugin-framework/types"
+ 	"github.com/hashicorp/terraform-provider-aws/internal/create"
+-	"github.com/hashicorp/terraform-provider-aws/internal/errs"
+ 	"github.com/hashicorp/terraform-provider-aws/internal/flex"
+ 	"github.com/hashicorp/terraform-provider-aws/internal/framework"
+ 	fwflex "github.com/hashicorp/terraform-provider-aws/internal/framework/flex"
+@@ -152,7 +151,12 @@ func (r *subscriberNotificationResource) Create(ctx context.Context, request res
+ 	// Set values for unknowns.
+ 	data.EndpointID = fwflex.StringToFramework(ctx, output.SubscriberEndpoint)
+ 	data.SubscriberEndpoint = fwflex.StringToFramework(ctx, output.SubscriberEndpoint)
+-	data.setID()
++	id, err := data.setID()
++	if err != nil {
++		response.Diagnostics.AddError("creating Security Lake Subscriber Notification", err.Error())
++		return
++	}
++	data.ID = types.StringValue(id)
+ 
+ 	response.Diagnostics.Append(response.State.Set(ctx, data)...)
+ }
+@@ -241,7 +245,15 @@ func (r *subscriberNotificationResource) Update(ctx context.Context, request res
+ 
+ 		new.EndpointID = fwflex.StringToFramework(ctx, output.SubscriberEndpoint)
+ 		new.SubscriberEndpoint = fwflex.StringToFramework(ctx, output.SubscriberEndpoint)
+-		new.setID()
++		id, err := new.setID()
++		if err != nil {
++			response.Diagnostics.AddError(
++				create.ProblemStandardMessage(names.SecurityLake, create.ErrActionUpdating, ResNameSubscriberNotification, new.ID.String(), err),
++				err.Error(),
++			)
++			return
++		}
++		new.ID = types.StringValue(id)
+ 	}
+ 
+ 	response.Diagnostics.Append(response.State.Set(ctx, &new)...)
+@@ -366,8 +378,13 @@ func (data *subscriberNotificationResourceModel) initFromID() error {
+ 	return nil
+ }
+ 
+-func (data *subscriberNotificationResourceModel) setID() {
+-	data.ID = types.StringValue(errs.Must(flex.FlattenResourceId([]string{data.SubscriberID.ValueString(), "notification"}, subscriberNotificationIdPartCount, false)))
++func (data *subscriberNotificationResourceModel) setID() (string, error) {
++	parts := []string{
++		data.SubscriberID.ValueString(),
++		"notification",
++	}
++
++	return flex.FlattenResourceId(parts, subscriberNotificationIdPartCount, false)
+ }
+ 
+ func refreshConfiguration(ctx context.Context, config fwtypes.ListNestedObjectValueOf[subscriberNotificationResourceConfigurationModel], subscriber *awstypes.SubscriberResource, diags *diag.Diagnostics) fwtypes.ListNestedObjectValueOf[subscriberNotificationResourceConfigurationModel] {
+diff --git a/internal/service/ssm/patch_group.go b/internal/service/ssm/patch_group.go
+index 78c7c5d3e661..c0f2aafa6c20 100644
+--- a/internal/service/ssm/patch_group.go
++++ b/internal/service/ssm/patch_group.go
+@@ -61,15 +61,16 @@ func resourcePatchGroupCreate(ctx context.Context, d *schema.ResourceData, meta
+ 
+ 	baselineID := d.Get("baseline_id").(string)
+ 	patchGroup := d.Get("patch_group").(string)
+-	id := errs.Must(flex.FlattenResourceId([]string{patchGroup, baselineID}, patchGroupResourceIDPartCount, false))
++	id, err := flex.FlattenResourceId([]string{patchGroup, baselineID}, patchGroupResourceIDPartCount, false)
++	if err != nil {
++		return sdkdiag.AppendFromErr(diags, err)
++	}
+ 	input := &ssm.RegisterPatchBaselineForPatchGroupInput{
+ 		BaselineId: aws.String(baselineID),
+ 		PatchGroup: aws.String(patchGroup),
+ 	}
+ 
+-	_, err := conn.RegisterPatchBaselineForPatchGroup(ctx, input)
+-
+-	if err != nil {
++	if _, err := conn.RegisterPatchBaselineForPatchGroup(ctx, input); err != nil {
+ 		return sdkdiag.AppendErrorf(diags, "creating SSM Patch Group (%s): %s", id, err)
+ 	}
+ 
+diff --git a/internal/service/wafv2/web_acl_association.go b/internal/service/wafv2/web_acl_association.go
+index cfcd5e75f5e3..657abf472e5b 100644
+--- a/internal/service/wafv2/web_acl_association.go
++++ b/internal/service/wafv2/web_acl_association.go
+@@ -67,18 +67,20 @@ func resourceWebACLAssociationCreate(ctx context.Context, d *schema.ResourceData
+ 
+ 	webACLARN := d.Get("web_acl_arn").(string)
+ 	resourceARN := d.Get(names.AttrResourceARN).(string)
+-	id := errs.Must(flex.FlattenResourceId([]string{webACLARN, resourceARN}, webACLAssociationResourceIDPartCount, true))
++	id, err := flex.FlattenResourceId([]string{webACLARN, resourceARN}, webACLAssociationResourceIDPartCount, true)
++	if err != nil {
++		return sdkdiag.AppendFromErr(diags, err)
++	}
++
+ 	input := &wafv2.AssociateWebACLInput{
+ 		ResourceArn: aws.String(resourceARN),
+ 		WebACLArn:   aws.String(webACLARN),
+ 	}
+ 
+ 	log.Printf("[INFO] Creating WAFv2 WebACL Association: %s", d.Id())
+-	_, err := tfresource.RetryWhenIsA[*awstypes.WAFUnavailableEntityException](ctx, d.Timeout(schema.TimeoutCreate), func() (interface{}, error) {
++	if _, err = tfresource.RetryWhenIsA[*awstypes.WAFUnavailableEntityException](ctx, d.Timeout(schema.TimeoutCreate), func() (interface{}, error) {
+ 		return conn.AssociateWebACL(ctx, input)
+-	})
+-
+-	if err != nil {
++	}); err != nil {
+ 		return sdkdiag.AppendErrorf(diags, "creating WAFv2 WebACL Association (%s): %s", id, err)
+ 	}
+ 

@@ -86,7 +86,7 @@ class EvaluationConfig(BaseModel):
     agent_id: str
     output_dir: Path = Path("./output")
     nr_workers: int = Field(gt=0, default=4)
-    timeout_test: int = Field(gt=0, default=600)  # 10 minutes
+    timeout_test: int = Field(gt=0, default=1200)  # 20 minutes
     timeout_rule: int = Field(gt=0, default=1200)  # 20 minutes
     force: bool = False
 

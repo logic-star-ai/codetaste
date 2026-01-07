@@ -1,0 +1,3332 @@
+diff --git a/conftest.py b/conftest.py
+index 4cfacc2a256..ece57eecc6d 100644
+--- a/conftest.py
++++ b/conftest.py
+@@ -1,10 +1,17 @@
++from __future__ import annotations
++
+ from pathlib import Path
++from typing import TYPE_CHECKING
+ 
+ import pytest
+ from twisted.web.http import H2_ENABLED
+ 
+ from scrapy.utils.reactor import set_asyncio_event_loop_policy
+ from tests.keys import generate_keys
++from tests.mockserver.http import MockServer
++
++if TYPE_CHECKING:
++    from collections.abc import Generator
+ 
+ 
+ def _py_files(folder):
+@@ -48,6 +55,12 @@ def _py_files(folder):
+     )
+ 
+ 
++@pytest.fixture(scope="session")
++def mockserver() -> Generator[MockServer]:
++    with MockServer() as mockserver:
++        yield mockserver
++
++
+ @pytest.fixture(scope="session")
+ def reactor_pytest(request) -> str:
+     return request.config.getoption("--reactor")
+diff --git a/tests/CrawlerRunner/ip_address.py b/tests/CrawlerRunner/ip_address.py
+index 207fc86ad08..9811bf90c81 100644
+--- a/tests/CrawlerRunner/ip_address.py
++++ b/tests/CrawlerRunner/ip_address.py
+@@ -1,10 +1,11 @@
+ # ruff: noqa: E402
+ 
+ from scrapy.utils.reactor import install_reactor
++from tests.mockserver.dns import MockDNSServer
++from tests.mockserver.http import MockServer
+ 
+ install_reactor("twisted.internet.asyncioreactor.AsyncioSelectorReactor")
+ 
+-from urllib.parse import urlparse
+ 
+ from twisted.names import cache, resolve
+ from twisted.names import hosts as hostsModule
+@@ -15,7 +16,6 @@
+ from scrapy.crawler import CrawlerRunner
+ from scrapy.utils.httpobj import urlparse_cached
+ from scrapy.utils.log import configure_logging
+-from tests.mockserver import MockDNSServer, MockServer
+ 
+ 
+ # https://stackoverflow.com/a/32784190
+@@ -46,7 +46,7 @@ def parse(self, response):
+     from twisted.internet import reactor
+ 
+     with MockServer() as mock_http_server, MockDNSServer() as mock_dns_server:
+-        port = urlparse(mock_http_server.http_address).port
++        port = mock_http_server.http_port
+         url = f"http://not.a.real.domain:{port}/echo"
+ 
+         servers = [(mock_dns_server.host, mock_dns_server.port)]
+diff --git a/tests/ftpserver.py b/tests/ftpserver.py
+deleted file mode 100644
+index 0c6ca362128..00000000000
+--- a/tests/ftpserver.py
++++ /dev/null
+@@ -1,24 +0,0 @@
+-from argparse import ArgumentParser
+-
+-from pyftpdlib.authorizers import DummyAuthorizer
+-from pyftpdlib.handlers import FTPHandler
+-from pyftpdlib.servers import FTPServer
+-
+-
+-def main():
+-    parser = ArgumentParser()
+-    parser.add_argument("-d", "--directory")
+-    args = parser.parse_args()
+-
+-    authorizer = DummyAuthorizer()
+-    full_permissions = "elradfmwMT"
+-    authorizer.add_anonymous(args.directory, perm=full_permissions)
+-    handler = FTPHandler
+-    handler.authorizer = authorizer
+-    address = ("127.0.0.1", 2121)
+-    server = FTPServer(address, handler)
+-    server.serve_forever()
+-
+-
+-if __name__ == "__main__":
+-    main()
+diff --git a/tests/mockserver.py b/tests/mockserver.py
+deleted file mode 100644
+index 7e53bc9dc3e..00000000000
+--- a/tests/mockserver.py
++++ /dev/null
+@@ -1,436 +0,0 @@
+-from __future__ import annotations
+-
+-import argparse
+-import json
+-import os
+-import random
+-import sys
+-from pathlib import Path
+-from shutil import rmtree
+-from subprocess import PIPE, Popen
+-from tempfile import mkdtemp
+-from typing import TYPE_CHECKING
+-from urllib.parse import urlencode
+-
+-from OpenSSL import SSL
+-from twisted.internet import defer, ssl
+-from twisted.internet.task import deferLater
+-from twisted.names import dns, error
+-from twisted.names.server import DNSServerFactory
+-from twisted.web import resource, server
+-from twisted.web.server import NOT_DONE_YET, Site
+-from twisted.web.static import Data, File
+-from twisted.web.util import Redirect, redirectTo
+-
+-from scrapy.utils.python import to_bytes, to_unicode
+-from tests import tests_datadir
+-
+-if TYPE_CHECKING:
+-    from twisted.internet.protocol import ServerFactory
+-
+-
+-def getarg(request, name, default=None, type_=None):
+-    if name in request.args:
+-        value = request.args[name][0]
+-        if type_ is not None:
+-            value = type_(value)
+-        return value
+-    return default
+-
+-
+-def get_mockserver_env() -> dict[str, str]:
+-    """Return a OS environment dict suitable to run mockserver processes."""
+-
+-    tests_path = Path(__file__).parent.parent
+-    pythonpath = str(tests_path) + os.pathsep + os.environ.get("PYTHONPATH", "")
+-    env = os.environ.copy()
+-    env["PYTHONPATH"] = pythonpath
+-    return env
+-
+-
+-# most of the following resources are copied from twisted.web.test.test_webclient
+-class ForeverTakingResource(resource.Resource):
+-    """
+-    L{ForeverTakingResource} is a resource which never finishes responding
+-    to requests.
+-    """
+-
+-    def __init__(self, write=False):
+-        resource.Resource.__init__(self)
+-        self._write = write
+-
+-    def render(self, request):
+-        if self._write:
+-            request.write(b"some bytes")
+-        return server.NOT_DONE_YET
+-
+-
+-class ErrorResource(resource.Resource):
+-    def render(self, request):
+-        request.setResponseCode(401)
+-        if request.args.get(b"showlength"):
+-            request.setHeader(b"content-length", b"0")
+-        return b""
+-
+-
+-class NoLengthResource(resource.Resource):
+-    def render(self, request):
+-        return b"nolength"
+-
+-
+-class HostHeaderResource(resource.Resource):
+-    """
+-    A testing resource which renders itself as the value of the host header
+-    from the request.
+-    """
+-
+-    def render(self, request):
+-        return request.requestHeaders.getRawHeaders(b"host")[0]
+-
+-
+-class PayloadResource(resource.Resource):
+-    """
+-    A testing resource which renders itself as the contents of the request body
+-    as long as the request body is 100 bytes long, otherwise which renders
+-    itself as C{"ERROR"}.
+-    """
+-
+-    def render(self, request):
+-        data = request.content.read()
+-        contentLength = request.requestHeaders.getRawHeaders(b"content-length")[0]
+-        if len(data) != 100 or int(contentLength) != 100:
+-            return b"ERROR"
+-        return data
+-
+-
+-class BrokenDownloadResource(resource.Resource):
+-    def render(self, request):
+-        # only sends 3 bytes even though it claims to send 5
+-        request.setHeader(b"content-length", b"5")
+-        request.write(b"abc")
+-        return b""
+-
+-
+-class LeafResource(resource.Resource):
+-    isLeaf = True
+-
+-    def deferRequest(self, request, delay, f, *a, **kw):
+-        from twisted.internet import reactor
+-
+-        def _cancelrequest(_):
+-            # silence CancelledError
+-            d.addErrback(lambda _: None)
+-            d.cancel()
+-
+-        d = deferLater(reactor, delay, f, *a, **kw)
+-        request.notifyFinish().addErrback(_cancelrequest)
+-        return d
+-
+-
+-class Follow(LeafResource):
+-    def render(self, request):
+-        total = getarg(request, b"total", 100, type_=int)
+-        show = getarg(request, b"show", 1, type_=int)
+-        order = getarg(request, b"order", b"desc")
+-        maxlatency = getarg(request, b"maxlatency", 0, type_=float)
+-        n = getarg(request, b"n", total, type_=int)
+-        if order == b"rand":
+-            nlist = [random.randint(1, total) for _ in range(show)]
+-        else:  # order == "desc"
+-            nlist = range(n, max(n - show, 0), -1)
+-
+-        lag = random.random() * maxlatency
+-        self.deferRequest(request, lag, self.renderRequest, request, nlist)
+-        return NOT_DONE_YET
+-
+-    def renderRequest(self, request, nlist):
+-        s = """<html> <head></head> <body>"""
+-        args = request.args.copy()
+-        for nl in nlist:
+-            args[b"n"] = [to_bytes(str(nl))]
+-            argstr = urlencode(args, doseq=True)
+-            s += f"<a href='/follow?{argstr}'>follow {nl}</a><br>"
+-        s += """</body>"""
+-        request.write(to_bytes(s))
+-        request.finish()
+-
+-
+-class Delay(LeafResource):
+-    def render_GET(self, request):
+-        n = getarg(request, b"n", 1, type_=float)
+-        b = getarg(request, b"b", 1, type_=int)
+-        if b:
+-            # send headers now and delay body
+-            request.write("")
+-        self.deferRequest(request, n, self._delayedRender, request, n)
+-        return NOT_DONE_YET
+-
+-    def _delayedRender(self, request, n):
+-        request.write(to_bytes(f"Response delayed for {n:.3f} seconds\n"))
+-        request.finish()
+-
+-
+-class Status(LeafResource):
+-    def render_GET(self, request):
+-        n = getarg(request, b"n", 200, type_=int)
+-        request.setResponseCode(n)
+-        return b""
+-
+-
+-class Raw(LeafResource):
+-    def render_GET(self, request):
+-        request.startedWriting = 1
+-        self.deferRequest(request, 0, self._delayedRender, request)
+-        return NOT_DONE_YET
+-
+-    render_POST = render_GET
+-
+-    def _delayedRender(self, request):
+-        raw = getarg(request, b"raw", b"HTTP 1.1 200 OK\n")
+-        request.startedWriting = 1
+-        request.write(raw)
+-        request.channel.transport.loseConnection()
+-        request.finish()
+-
+-
+-class Echo(LeafResource):
+-    def render_GET(self, request):
+-        output = {
+-            "headers": {
+-                to_unicode(k): [to_unicode(v) for v in vs]
+-                for k, vs in request.requestHeaders.getAllRawHeaders()
+-            },
+-            "body": to_unicode(request.content.read()),
+-        }
+-        return to_bytes(json.dumps(output))
+-
+-    render_POST = render_GET
+-
+-
+-class RedirectTo(LeafResource):
+-    def render(self, request):
+-        goto = getarg(request, b"goto", b"/")
+-        # we force the body content, otherwise Twisted redirectTo()
+-        # returns HTML with <meta http-equiv="refresh"
+-        redirectTo(goto, request)
+-        return b"redirecting..."
+-
+-
+-class Partial(LeafResource):
+-    def render_GET(self, request):
+-        request.setHeader(b"Content-Length", b"1024")
+-        self.deferRequest(request, 0, self._delayedRender, request)
+-        return NOT_DONE_YET
+-
+-    def _delayedRender(self, request):
+-        request.write(b"partial content\n")
+-        request.finish()
+-
+-
+-class Drop(Partial):
+-    def _delayedRender(self, request):
+-        abort = getarg(request, b"abort", 0, type_=int)
+-        request.write(b"this connection will be dropped\n")
+-        tr = request.channel.transport
+-        try:
+-            if abort and hasattr(tr, "abortConnection"):
+-                tr.abortConnection()
+-            else:
+-                tr.loseConnection()
+-        finally:
+-            request.finish()
+-
+-
+-class ArbitraryLengthPayloadResource(LeafResource):
+-    def render(self, request):
+-        return request.content.read()
+-
+-
+-class NoMetaRefreshRedirect(Redirect):
+-    def render(self, request: server.Request) -> bytes:
+-        content = Redirect.render(self, request)
+-        return content.replace(
+-            b'http-equiv="refresh"', b'http-no-equiv="do-not-refresh-me"'
+-        )
+-
+-
+-class Root(resource.Resource):
+-    def __init__(self):
+-        resource.Resource.__init__(self)
+-        self.putChild(b"status", Status())
+-        self.putChild(b"follow", Follow())
+-        self.putChild(b"delay", Delay())
+-        self.putChild(b"partial", Partial())
+-        self.putChild(b"drop", Drop())
+-        self.putChild(b"raw", Raw())
+-        self.putChild(b"echo", Echo())
+-        self.putChild(b"payload", PayloadResource())
+-        self.putChild(b"alpayload", ArbitraryLengthPayloadResource())
+-        self.putChild(b"files", File(str(Path(tests_datadir, "test_site/files/"))))
+-        self.putChild(b"redirect-to", RedirectTo())
+-        self.putChild(b"text", Data(b"Works", "text/plain"))
+-        self.putChild(
+-            b"html",
+-            Data(
+-                b"<body><p class='one'>Works</p><p class='two'>World</p></body>",
+-                "text/html",
+-            ),
+-        )
+-        self.putChild(
+-            b"enc-gb18030",
+-            Data(b"<p>gb18030 encoding</p>", "text/html; charset=gb18030"),
+-        )
+-        self.putChild(b"redirect", Redirect(b"/redirected"))
+-        self.putChild(
+-            b"redirect-no-meta-refresh", NoMetaRefreshRedirect(b"/redirected")
+-        )
+-        self.putChild(b"redirected", Data(b"Redirected here", "text/plain"))
+-
+-    def getChild(self, name, request):
+-        return self
+-
+-    def render(self, request):
+-        return b"Scrapy mock HTTP server\n"
+-
+-
+-class MockServer:
+-    def __enter__(self):
+-        self.proc = Popen(
+-            [sys.executable, "-u", "-m", "tests.mockserver", "-t", "http"],
+-            stdout=PIPE,
+-            env=get_mockserver_env(),
+-        )
+-        http_address = self.proc.stdout.readline().strip().decode("ascii")
+-        https_address = self.proc.stdout.readline().strip().decode("ascii")
+-
+-        self.http_address = http_address
+-        self.https_address = https_address
+-
+-        return self
+-
+-    def __exit__(self, exc_type, exc_value, traceback):
+-        self.proc.kill()
+-        self.proc.communicate()
+-
+-    def url(self, path, is_secure=False):
+-        host = self.https_address if is_secure else self.http_address
+-        host = host.replace("0.0.0.0", "127.0.0.1")
+-        return host + path
+-
+-
+-class MockDNSResolver:
+-    """
+-    Implements twisted.internet.interfaces.IResolver partially
+-    """
+-
+-    def _resolve(self, name):
+-        record = dns.Record_A(address=b"127.0.0.1")
+-        answer = dns.RRHeader(name=name, payload=record)
+-        return [answer], [], []
+-
+-    def query(self, query, timeout=None):
+-        if query.type == dns.A:
+-            return defer.succeed(self._resolve(query.name.name))
+-        return defer.fail(error.DomainError())
+-
+-    def lookupAllRecords(self, name, timeout=None):
+-        return defer.succeed(self._resolve(name))
+-
+-
+-class MockDNSServer:
+-    def __enter__(self):
+-        self.proc = Popen(
+-            [sys.executable, "-u", "-m", "tests.mockserver", "-t", "dns"],
+-            stdout=PIPE,
+-            env=get_mockserver_env(),
+-        )
+-        self.host = "127.0.0.1"
+-        self.port = int(
+-            self.proc.stdout.readline().strip().decode("ascii").split(":")[1]
+-        )
+-        return self
+-
+-    def __exit__(self, exc_type, exc_value, traceback):
+-        self.proc.kill()
+-        self.proc.communicate()
+-
+-
+-class MockFTPServer:
+-    """Creates an FTP server on port 2121 with a default passwordless user
+-    (anonymous) and a temporary root path that you can read from the
+-    :attr:`path` attribute."""
+-
+-    def __enter__(self):
+-        self.path = Path(mkdtemp())
+-        self.proc = Popen(
+-            [sys.executable, "-u", "-m", "tests.ftpserver", "-d", str(self.path)],
+-            stderr=PIPE,
+-            env=get_mockserver_env(),
+-        )
+-        for line in self.proc.stderr:
+-            if b"starting FTP server" in line:
+-                break
+-        return self
+-
+-    def __exit__(self, exc_type, exc_value, traceback):
+-        rmtree(str(self.path))
+-        self.proc.kill()
+-        self.proc.communicate()
+-
+-    def url(self, path):
+-        return "ftp://127.0.0.1:2121/" + path
+-
+-
+-def ssl_context_factory(
+-    keyfile="keys/localhost.key", certfile="keys/localhost.crt", cipher_string=None
+-):
+-    factory = ssl.DefaultOpenSSLContextFactory(
+-        str(Path(__file__).parent / keyfile),
+-        str(Path(__file__).parent / certfile),
+-    )
+-    if cipher_string:
+-        ctx = factory.getContext()
+-        # disabling TLS1.3 because it unconditionally enables some strong ciphers
+-        ctx.set_options(SSL.OP_CIPHER_SERVER_PREFERENCE | SSL.OP_NO_TLSv1_3)
+-        ctx.set_cipher_list(to_bytes(cipher_string))
+-    return factory
+-
+-
+-if __name__ == "__main__":
+-    from twisted.internet import reactor
+-
+-    parser = argparse.ArgumentParser()
+-    parser.add_argument(
+-        "-t", "--type", type=str, choices=("http", "dns"), default="http"
+-    )
+-    args = parser.parse_args()
+-
+-    factory: ServerFactory
+-
+-    if args.type == "http":
+-        root = Root()
+-        factory = Site(root)
+-        httpPort = reactor.listenTCP(0, factory)
+-        contextFactory = ssl_context_factory()
+-        httpsPort = reactor.listenSSL(0, factory, contextFactory)
+-
+-        def print_listening():
+-            httpHost = httpPort.getHost()
+-            httpsHost = httpsPort.getHost()
+-            httpAddress = f"http://{httpHost.host}:{httpHost.port}"
+-            httpsAddress = f"https://{httpsHost.host}:{httpsHost.port}"
+-            print(httpAddress)
+-            print(httpsAddress)
+-
+-    elif args.type == "dns":
+-        clients = [MockDNSResolver()]
+-        factory = DNSServerFactory(clients=clients)
+-        protocol = dns.DNSDatagramProtocol(controller=factory)
+-        listener = reactor.listenUDP(0, protocol)
+-
+-        def print_listening():
+-            host = listener.getHost()
+-            print(f"{host.host}:{host.port}")
+-
+-    reactor.callWhenRunning(print_listening)
+-    reactor.run()
+diff --git a/tests/mockserver/__init__.py b/tests/mockserver/__init__.py
+new file mode 100644
+index 00000000000..e69de29bb2d
+diff --git a/tests/mockserver/dns.py b/tests/mockserver/dns.py
+new file mode 100644
+index 00000000000..7c08f237c3d
+--- /dev/null
++++ b/tests/mockserver/dns.py
+@@ -0,0 +1,67 @@
++from __future__ import annotations
++
++import sys
++from subprocess import PIPE, Popen
++
++from twisted.internet import defer
++from twisted.names import dns, error
++from twisted.names.server import DNSServerFactory
++
++from tests.utils import get_script_run_env
++
++
++class MockDNSResolver:
++    """
++    Implements twisted.internet.interfaces.IResolver partially
++    """
++
++    def _resolve(self, name):
++        record = dns.Record_A(address=b"127.0.0.1")
++        answer = dns.RRHeader(name=name, payload=record)
++        return [answer], [], []
++
++    def query(self, query, timeout=None):
++        if query.type == dns.A:
++            return defer.succeed(self._resolve(query.name.name))
++        return defer.fail(error.DomainError())
++
++    def lookupAllRecords(self, name, timeout=None):
++        return defer.succeed(self._resolve(name))
++
++
++class MockDNSServer:
++    def __enter__(self):
++        self.proc = Popen(
++            [sys.executable, "-u", "-m", "tests.mockserver.dns"],
++            stdout=PIPE,
++            env=get_script_run_env(),
++        )
++        self.host = "127.0.0.1"
++        self.port = int(
++            self.proc.stdout.readline().strip().decode("ascii").split(":")[1]
++        )
++        return self
++
++    def __exit__(self, exc_type, exc_value, traceback):
++        self.proc.kill()
++        self.proc.communicate()
++
++
++def main() -> None:
++    from twisted.internet import reactor
++
++    clients = [MockDNSResolver()]
++    factory = DNSServerFactory(clients=clients)
++    protocol = dns.DNSDatagramProtocol(controller=factory)
++    listener = reactor.listenUDP(0, protocol)
++
++    def print_listening():
++        host = listener.getHost()
++        print(f"{host.host}:{host.port}")
++
++    reactor.callWhenRunning(print_listening)
++    reactor.run()
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/tests/mockserver/ftp.py b/tests/mockserver/ftp.py
+new file mode 100644
+index 00000000000..5505ac25819
+--- /dev/null
++++ b/tests/mockserver/ftp.py
+@@ -0,0 +1,59 @@
++from __future__ import annotations
++
++import sys
++from argparse import ArgumentParser
++from pathlib import Path
++from shutil import rmtree
++from subprocess import PIPE, Popen
++from tempfile import mkdtemp
++
++from pyftpdlib.authorizers import DummyAuthorizer
++from pyftpdlib.handlers import FTPHandler
++from pyftpdlib.servers import FTPServer
++
++from tests.utils import get_script_run_env
++
++
++class MockFTPServer:
++    """Creates an FTP server on port 2121 with a default passwordless user
++    (anonymous) and a temporary root path that you can read from the
++    :attr:`path` attribute."""
++
++    def __enter__(self):
++        self.path = Path(mkdtemp())
++        self.proc = Popen(
++            [sys.executable, "-u", "-m", "tests.mockserver.ftp", "-d", str(self.path)],
++            stderr=PIPE,
++            env=get_script_run_env(),
++        )
++        for line in self.proc.stderr:
++            if b"starting FTP server" in line:
++                break
++        return self
++
++    def __exit__(self, exc_type, exc_value, traceback):
++        rmtree(str(self.path))
++        self.proc.kill()
++        self.proc.communicate()
++
++    def url(self, path):
++        return "ftp://127.0.0.1:2121/" + path
++
++
++def main() -> None:
++    parser = ArgumentParser()
++    parser.add_argument("-d", "--directory")
++    args = parser.parse_args()
++
++    authorizer = DummyAuthorizer()
++    full_permissions = "elradfmwMT"
++    authorizer.add_anonymous(args.directory, perm=full_permissions)
++    handler = FTPHandler
++    handler.authorizer = authorizer
++    address = ("127.0.0.1", 2121)
++    server = FTPServer(address, handler)
++    server.serve_forever()
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/tests/mockserver/http.py b/tests/mockserver/http.py
+new file mode 100644
+index 00000000000..409920dcb97
+--- /dev/null
++++ b/tests/mockserver/http.py
+@@ -0,0 +1,95 @@
++from __future__ import annotations
++
++from pathlib import Path
++
++from twisted.web import resource
++from twisted.web.static import Data, File
++from twisted.web.util import Redirect
++
++from tests import tests_datadir
++
++from .http_base import BaseMockServer, main_factory
++from .http_resources import (
++    ArbitraryLengthPayloadResource,
++    BrokenChunkedResource,
++    BrokenDownloadResource,
++    ChunkedResource,
++    ContentLengthHeaderResource,
++    Delay,
++    Drop,
++    DuplicateHeaderResource,
++    Echo,
++    EmptyContentTypeHeaderResource,
++    Follow,
++    ForeverTakingResource,
++    HostHeaderResource,
++    LargeChunkedFileResource,
++    NoMetaRefreshRedirect,
++    Partial,
++    PayloadResource,
++    Raw,
++    RedirectTo,
++    Status,
++)
++
++
++class Root(resource.Resource):
++    def __init__(self):
++        super().__init__()
++        self.putChild(b"status", Status())
++        self.putChild(b"follow", Follow())
++        self.putChild(b"delay", Delay())
++        self.putChild(b"partial", Partial())
++        self.putChild(b"drop", Drop())
++        self.putChild(b"raw", Raw())
++        self.putChild(b"echo", Echo())
++        self.putChild(b"payload", PayloadResource())
++        self.putChild(b"alpayload", ArbitraryLengthPayloadResource())
++        self.putChild(b"static", File(str(Path(tests_datadir, "test_site/"))))
++        self.putChild(b"redirect-to", RedirectTo())
++        self.putChild(b"text", Data(b"Works", "text/plain"))
++        self.putChild(
++            b"html",
++            Data(
++                b"<body><p class='one'>Works</p><p class='two'>World</p></body>",
++                "text/html",
++            ),
++        )
++        self.putChild(
++            b"enc-gb18030",
++            Data(b"<p>gb18030 encoding</p>", "text/html; charset=gb18030"),
++        )
++        self.putChild(b"redirect", Redirect(b"/redirected"))
++        self.putChild(
++            b"redirect-no-meta-refresh", NoMetaRefreshRedirect(b"/redirected")
++        )
++        self.putChild(b"redirected", Data(b"Redirected here", "text/plain"))
++        numbers = [str(x).encode("utf8") for x in range(2**18)]
++        self.putChild(b"numbers", Data(b"".join(numbers), "text/plain"))
++        self.putChild(b"wait", ForeverTakingResource())
++        self.putChild(b"hang-after-headers", ForeverTakingResource(write=True))
++        self.putChild(b"host", HostHeaderResource())
++        self.putChild(b"broken", BrokenDownloadResource())
++        self.putChild(b"chunked", ChunkedResource())
++        self.putChild(b"broken-chunked", BrokenChunkedResource())
++        self.putChild(b"contentlength", ContentLengthHeaderResource())
++        self.putChild(b"nocontenttype", EmptyContentTypeHeaderResource())
++        self.putChild(b"largechunkedfile", LargeChunkedFileResource())
++        self.putChild(b"duplicate-header", DuplicateHeaderResource())
++
++    def getChild(self, name, request):
++        return self
++
++    def render(self, request):
++        return b"Scrapy mock HTTP server\n"
++
++
++class MockServer(BaseMockServer):
++    module_name = "tests.mockserver.http"
++
++
++main = main_factory(Root)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/tests/mockserver/http_base.py b/tests/mockserver/http_base.py
+new file mode 100644
+index 00000000000..440d38fb940
+--- /dev/null
++++ b/tests/mockserver/http_base.py
+@@ -0,0 +1,132 @@
++"""Base classes and functions for HTTP mockservers."""
++
++from __future__ import annotations
++
++import argparse
++import sys
++from abc import ABC, abstractmethod
++from subprocess import PIPE, Popen
++from typing import TYPE_CHECKING
++from urllib.parse import urlparse
++
++from twisted.web.server import Site
++
++from tests.utils import get_script_run_env
++
++from .utils import ssl_context_factory
++
++if TYPE_CHECKING:
++    from collections.abc import Callable
++
++    from twisted.web import resource
++
++
++class BaseMockServer(ABC):
++    listen_http: bool = True
++    listen_https: bool = True
++
++    @property
++    @abstractmethod
++    def module_name(self) -> str:
++        raise NotImplementedError
++
++    def __init__(self) -> None:
++        if not self.listen_http and not self.listen_https:
++            raise ValueError("At least one of listen_http and listen_https must be set")
++
++        self.proc: Popen | None = None
++        self.host: str = "127.0.0.1"
++        self.http_port: int | None = None
++        self.https_port: int | None = None
++
++    def __enter__(self):
++        self.proc = Popen(
++            [sys.executable, "-u", "-m", self.module_name, *self.get_additional_args()],
++            stdout=PIPE,
++            env=get_script_run_env(),
++        )
++        if self.listen_http:
++            http_address = self.proc.stdout.readline().strip().decode("ascii")
++            http_parsed = urlparse(http_address)
++            self.http_port = http_parsed.port
++        if self.listen_https:
++            https_address = self.proc.stdout.readline().strip().decode("ascii")
++            https_parsed = urlparse(https_address)
++            self.https_port = https_parsed.port
++        return self
++
++    def __exit__(self, exc_type, exc_value, traceback):
++        if self.proc:
++            self.proc.kill()
++            self.proc.communicate()
++
++    def get_additional_args(self) -> list[str]:
++        return []
++
++    def port(self, is_secure: bool = False) -> int:
++        if not is_secure and not self.listen_http:
++            raise ValueError("This server doesn't provide HTTP")
++        if is_secure and not self.listen_https:
++            raise ValueError("This server doesn't provide HTTPS")
++        port = self.https_port if is_secure else self.http_port
++        assert port is not None
++        return port
++
++    def url(self, path: str, is_secure: bool = False) -> str:
++        port = self.port(is_secure)
++        scheme = "https" if is_secure else "http"
++        return f"{scheme}://{self.host}:{port}{path}"
++
++
++def main_factory(
++    resource_class: type[resource.Resource],
++    *,
++    listen_http: bool = True,
++    listen_https: bool = True,
++) -> Callable[[], None]:
++    if not listen_http and not listen_https:
++        raise ValueError("At least one of listen_http and listen_https must be set")
++
++    def main() -> None:
++        from twisted.internet import reactor
++
++        root = resource_class()
++        factory = Site(root)
++
++        if listen_http:
++            http_port = reactor.listenTCP(0, factory)
++
++        if listen_https:
++            parser = argparse.ArgumentParser()
++            parser.add_argument("--keyfile", help="SSL key file")
++            parser.add_argument("--certfile", help="SSL certificate file")
++            parser.add_argument(
++                "--cipher-string",
++                default=None,
++                help="SSL cipher string (optional)",
++            )
++            args = parser.parse_args()
++            context_factory_kw = {}
++            if args.keyfile:
++                context_factory_kw["keyfile"] = args.keyfile
++            if args.certfile:
++                context_factory_kw["certfile"] = args.certfile
++            if args.cipher_string:
++                context_factory_kw["cipher_string"] = args.cipher_string
++            context_factory = ssl_context_factory(**context_factory_kw)
++            https_port = reactor.listenSSL(0, factory, context_factory)
++
++        def print_listening():
++            if listen_http:
++                http_host = http_port.getHost()
++                http_address = f"http://{http_host.host}:{http_host.port}"
++                print(http_address)
++            if listen_https:
++                https_host = https_port.getHost()
++                https_address = f"https://{https_host.host}:{https_host.port}"
++                print(https_address)
++
++        reactor.callWhenRunning(print_listening)
++        reactor.run()
++
++    return main
+diff --git a/tests/mockserver/http_resources.py b/tests/mockserver/http_resources.py
+new file mode 100644
+index 00000000000..c9083b1d99c
+--- /dev/null
++++ b/tests/mockserver/http_resources.py
+@@ -0,0 +1,309 @@
++from __future__ import annotations
++
++import json
++import random
++from urllib.parse import urlencode
++
++from twisted.internet.task import deferLater
++from twisted.web import resource, server
++from twisted.web.server import NOT_DONE_YET
++from twisted.web.util import Redirect, redirectTo
++
++from scrapy.utils.python import to_bytes, to_unicode
++
++
++def getarg(request, name, default=None, type_=None):
++    if name in request.args:
++        value = request.args[name][0]
++        if type_ is not None:
++            value = type_(value)
++        return value
++    return default
++
++
++def close_connection(request):
++    # We have to force a disconnection for HTTP/1.1 clients. Otherwise
++    # client keeps the connection open waiting for more data.
++    request.channel.loseConnection()
++    request.finish()
++
++
++# most of the following resources are copied from twisted.web.test.test_webclient
++class ForeverTakingResource(resource.Resource):
++    """
++    L{ForeverTakingResource} is a resource which never finishes responding
++    to requests.
++    """
++
++    def __init__(self, write=False):
++        resource.Resource.__init__(self)
++        self._write = write
++
++    def render(self, request):
++        if self._write:
++            request.write(b"some bytes")
++        return server.NOT_DONE_YET
++
++
++class HostHeaderResource(resource.Resource):
++    """
++    A testing resource which renders itself as the value of the host header
++    from the request.
++    """
++
++    def render(self, request):
++        return request.requestHeaders.getRawHeaders(b"host")[0]
++
++
++class PayloadResource(resource.Resource):
++    """
++    A testing resource which renders itself as the contents of the request body
++    as long as the request body is 100 bytes long, otherwise which renders
++    itself as C{"ERROR"}.
++    """
++
++    def render(self, request):
++        data = request.content.read()
++        contentLength = request.requestHeaders.getRawHeaders(b"content-length")[0]
++        if len(data) != 100 or int(contentLength) != 100:
++            return b"ERROR"
++        return data
++
++
++class LeafResource(resource.Resource):
++    isLeaf = True
++
++    def deferRequest(self, request, delay, f, *a, **kw):
++        from twisted.internet import reactor
++
++        def _cancelrequest(_):
++            # silence CancelledError
++            d.addErrback(lambda _: None)
++            d.cancel()
++
++        d = deferLater(reactor, delay, f, *a, **kw)
++        request.notifyFinish().addErrback(_cancelrequest)
++        return d
++
++
++class Follow(LeafResource):
++    def render(self, request):
++        total = getarg(request, b"total", 100, type_=int)
++        show = getarg(request, b"show", 1, type_=int)
++        order = getarg(request, b"order", b"desc")
++        maxlatency = getarg(request, b"maxlatency", 0, type_=float)
++        n = getarg(request, b"n", total, type_=int)
++        if order == b"rand":
++            nlist = [random.randint(1, total) for _ in range(show)]
++        else:  # order == "desc"
++            nlist = range(n, max(n - show, 0), -1)
++
++        lag = random.random() * maxlatency
++        self.deferRequest(request, lag, self.renderRequest, request, nlist)
++        return NOT_DONE_YET
++
++    def renderRequest(self, request, nlist):
++        s = """<html> <head></head> <body>"""
++        args = request.args.copy()
++        for nl in nlist:
++            args[b"n"] = [to_bytes(str(nl))]
++            argstr = urlencode(args, doseq=True)
++            s += f"<a href='/follow?{argstr}'>follow {nl}</a><br>"
++        s += """</body>"""
++        request.write(to_bytes(s))
++        request.finish()
++
++
++class Delay(LeafResource):
++    def render_GET(self, request):
++        n = getarg(request, b"n", 1, type_=float)
++        b = getarg(request, b"b", 1, type_=int)
++        if b:
++            # send headers now and delay body
++            request.write("")
++        self.deferRequest(request, n, self._delayedRender, request, n)
++        return NOT_DONE_YET
++
++    def _delayedRender(self, request, n):
++        request.write(to_bytes(f"Response delayed for {n:.3f} seconds\n"))
++        request.finish()
++
++
++class Status(LeafResource):
++    def render_GET(self, request):
++        n = getarg(request, b"n", 200, type_=int)
++        request.setResponseCode(n)
++        return b""
++
++
++class Raw(LeafResource):
++    def render_GET(self, request):
++        request.startedWriting = 1
++        self.deferRequest(request, 0, self._delayedRender, request)
++        return NOT_DONE_YET
++
++    render_POST = render_GET
++
++    def _delayedRender(self, request):
++        raw = getarg(request, b"raw", b"HTTP 1.1 200 OK\n")
++        request.startedWriting = 1
++        request.write(raw)
++        request.channel.transport.loseConnection()
++        request.finish()
++
++
++class Echo(LeafResource):
++    def render_GET(self, request):
++        output = {
++            "headers": {
++                to_unicode(k): [to_unicode(v) for v in vs]
++                for k, vs in request.requestHeaders.getAllRawHeaders()
++            },
++            "body": to_unicode(request.content.read()),
++        }
++        return to_bytes(json.dumps(output))
++
++    render_POST = render_GET
++
++
++class RedirectTo(LeafResource):
++    def render(self, request):
++        goto = getarg(request, b"goto", b"/")
++        # we force the body content, otherwise Twisted redirectTo()
++        # returns HTML with <meta http-equiv="refresh"
++        redirectTo(goto, request)
++        return b"redirecting..."
++
++
++class Partial(LeafResource):
++    def render_GET(self, request):
++        request.setHeader(b"Content-Length", b"1024")
++        self.deferRequest(request, 0, self._delayedRender, request)
++        return NOT_DONE_YET
++
++    def _delayedRender(self, request):
++        request.write(b"partial content\n")
++        request.finish()
++
++
++class Drop(Partial):
++    def _delayedRender(self, request):
++        abort = getarg(request, b"abort", 0, type_=int)
++        request.write(b"this connection will be dropped\n")
++        tr = request.channel.transport
++        try:
++            if abort and hasattr(tr, "abortConnection"):
++                tr.abortConnection()
++            else:
++                tr.loseConnection()
++        finally:
++            request.finish()
++
++
++class ArbitraryLengthPayloadResource(LeafResource):
++    def render(self, request):
++        return request.content.read()
++
++
++class NoMetaRefreshRedirect(Redirect):
++    def render(self, request: server.Request) -> bytes:
++        content = Redirect.render(self, request)
++        return content.replace(
++            b'http-equiv="refresh"', b'http-no-equiv="do-not-refresh-me"'
++        )
++
++
++class ContentLengthHeaderResource(resource.Resource):
++    """
++    A testing resource which renders itself as the value of the Content-Length
++    header from the request.
++    """
++
++    def render(self, request):
++        return request.requestHeaders.getRawHeaders(b"content-length")[0]
++
++
++class ChunkedResource(resource.Resource):
++    def render(self, request):
++        from twisted.internet import reactor
++
++        def response():
++            request.write(b"chunked ")
++            request.write(b"content\n")
++            request.finish()
++
++        reactor.callLater(0, response)
++        return server.NOT_DONE_YET
++
++
++class BrokenChunkedResource(resource.Resource):
++    def render(self, request):
++        from twisted.internet import reactor
++
++        def response():
++            request.write(b"chunked ")
++            request.write(b"content\n")
++            # Disable terminating chunk on finish.
++            request.chunked = False
++            close_connection(request)
++
++        reactor.callLater(0, response)
++        return server.NOT_DONE_YET
++
++
++class BrokenDownloadResource(resource.Resource):
++    def render(self, request):
++        from twisted.internet import reactor
++
++        def response():
++            request.setHeader(b"Content-Length", b"20")
++            request.write(b"partial")
++            close_connection(request)
++
++        reactor.callLater(0, response)
++        return server.NOT_DONE_YET
++
++
++class EmptyContentTypeHeaderResource(resource.Resource):
++    """
++    A testing resource which renders itself as the value of request body
++    without content-type header in response.
++    """
++
++    def render(self, request):
++        request.setHeader("content-type", "")
++        return request.content.read()
++
++
++class LargeChunkedFileResource(resource.Resource):
++    def render(self, request):
++        from twisted.internet import reactor
++
++        def response():
++            for i in range(1024):
++                request.write(b"x" * 1024)
++            request.finish()
++
++        reactor.callLater(0, response)
++        return server.NOT_DONE_YET
++
++
++class DuplicateHeaderResource(resource.Resource):
++    def render(self, request):
++        request.responseHeaders.setRawHeaders(b"Set-Cookie", [b"a=b", b"c=d"])
++        return b""
++
++
++class UriResource(resource.Resource):
++    """Return the full uri that was requested"""
++
++    def getChild(self, path, request):
++        return self
++
++    def render(self, request):
++        # Note: this is an ugly hack for CONNECT request timeout test.
++        #       Returning some data here fail SSL/TLS handshake
++        # ToDo: implement proper HTTPS proxy tests, not faking them.
++        if request.method != b"CONNECT":
++            return request.uri
++        return b""
+diff --git a/tests/mockserver/proxy_echo.py b/tests/mockserver/proxy_echo.py
+new file mode 100644
+index 00000000000..6345726b652
+--- /dev/null
++++ b/tests/mockserver/proxy_echo.py
+@@ -0,0 +1,17 @@
++# This is only used by tests.test_downloader_handlers_http_base.TestHttpProxyBase
++
++from __future__ import annotations
++
++from .http_base import BaseMockServer, main_factory
++from .http_resources import UriResource
++
++
++class ProxyEchoMockServer(BaseMockServer):
++    module_name = "tests.mockserver.proxy_echo"
++
++
++main = main_factory(UriResource)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/tests/mockserver/simple_https.py b/tests/mockserver/simple_https.py
+new file mode 100644
+index 00000000000..5f23dd2c4fc
+--- /dev/null
++++ b/tests/mockserver/simple_https.py
+@@ -0,0 +1,46 @@
++# This is only used by tests.test_downloader_handlers_http_base.TestSimpleHttpsBase
++
++from __future__ import annotations
++
++from twisted.web import resource
++from twisted.web.static import Data
++
++from .http_base import BaseMockServer, main_factory
++
++
++class Root(resource.Resource):
++    def __init__(self):
++        resource.Resource.__init__(self)
++        self.putChild(b"file", Data(b"0123456789", "text/plain"))
++
++    def getChild(self, name, request):
++        return self
++
++
++class SimpleMockServer(BaseMockServer):
++    listen_http = False
++    module_name = "tests.mockserver.simple_https"
++
++    def __init__(self, keyfile: str, certfile: str, cipher_string: str | None):
++        super().__init__()
++        self.keyfile = keyfile
++        self.certfile = certfile
++        self.cipher_string = cipher_string or ""
++
++    def get_additional_args(self) -> list[str]:
++        args = [
++            "--keyfile",
++            self.keyfile,
++            "--certfile",
++            self.certfile,
++        ]
++        if self.cipher_string is not None:
++            args.extend(["--cipher-string", self.cipher_string])
++        return args
++
++
++main = main_factory(Root, listen_http=False)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/tests/mockserver/utils.py b/tests/mockserver/utils.py
+new file mode 100644
+index 00000000000..f43152f92a8
+--- /dev/null
++++ b/tests/mockserver/utils.py
+@@ -0,0 +1,23 @@
++from __future__ import annotations
++
++from pathlib import Path
++
++from OpenSSL import SSL
++from twisted.internet import ssl
++
++from scrapy.utils.python import to_bytes
++
++
++def ssl_context_factory(
++    keyfile="keys/localhost.key", certfile="keys/localhost.crt", cipher_string=None
++):
++    factory = ssl.DefaultOpenSSLContextFactory(
++        str(Path(__file__).parent.parent / keyfile),
++        str(Path(__file__).parent.parent / certfile),
++    )
++    if cipher_string:
++        ctx = factory.getContext()
++        # disabling TLS1.3 because it unconditionally enables some strong ciphers
++        ctx.set_options(SSL.OP_CIPHER_SERVER_PREFERENCE | SSL.OP_NO_TLSv1_3)
++        ctx.set_cipher_list(to_bytes(cipher_string))
++    return factory
+diff --git a/tests/test_closespider.py b/tests/test_closespider.py
+index 563ecbe928f..2243cd37131 100644
+--- a/tests/test_closespider.py
++++ b/tests/test_closespider.py
+@@ -1,7 +1,7 @@
+ from twisted.internet.defer import inlineCallbacks
+ 
+ from scrapy.utils.test import get_crawler
+-from tests.mockserver import MockServer
++from tests.mockserver.http import MockServer
+ from tests.spiders import (
+     ErrorSpider,
+     FollowAllSpider,
+diff --git a/tests/test_command_fetch.py b/tests/test_command_fetch.py
+index c8359436169..b6b443e285b 100644
+--- a/tests/test_command_fetch.py
++++ b/tests/test_command_fetch.py
+@@ -1,4 +1,4 @@
+-from tests.mockserver import MockServer
++from tests.mockserver.http import MockServer
+ from tests.test_commands import TestProjectBase
+ 
+ 
+diff --git a/tests/test_command_parse.py b/tests/test_command_parse.py
+index 5c3120c216a..fe7a807d495 100644
+--- a/tests/test_command_parse.py
++++ b/tests/test_command_parse.py
+@@ -4,7 +4,7 @@
+ 
+ from scrapy.commands import parse
+ from scrapy.settings import Settings
+-from tests.mockserver import MockServer
++from tests.mockserver.http import MockServer
+ from tests.test_commands import TestCommandBase
+ 
+ 
+diff --git a/tests/test_command_shell.py b/tests/test_command_shell.py
+index 76c1eb6635f..76635b1aab5 100644
+--- a/tests/test_command_shell.py
++++ b/tests/test_command_shell.py
+@@ -8,7 +8,7 @@
+ 
+ from scrapy.utils.reactor import _asyncio_reactor_path
+ from tests import NON_EXISTING_RESOLVABLE, tests_datadir
+-from tests.mockserver import MockServer
++from tests.mockserver.http import MockServer
+ from tests.test_commands import TestProjectBase
+ 
+ 
+diff --git a/tests/test_contracts.py b/tests/test_contracts.py
+index fc3cd9df0e7..326be570e46 100644
+--- a/tests/test_contracts.py
++++ b/tests/test_contracts.py
+@@ -18,7 +18,7 @@
+ from scrapy.spidermiddlewares.httperror import HttpError
+ from scrapy.spiders import Spider
+ from scrapy.utils.test import get_crawler
+-from tests.mockserver import MockServer
++from tests.mockserver.http import MockServer
+ 
+ 
+ class DemoItem(Item):
+diff --git a/tests/test_core_downloader.py b/tests/test_core_downloader.py
+index ca15c560a4e..9d33f428077 100644
+--- a/tests/test_core_downloader.py
++++ b/tests/test_core_downloader.py
+@@ -6,7 +6,6 @@
+ import OpenSSL.SSL
+ import pytest
+ from pytest_twisted import async_yield_fixture
+-from twisted.protocols.policies import WrappingFactory
+ from twisted.web import server, static
+ from twisted.web.client import Agent, BrowserLikePolicyForHTTPS, readBody
+ from twisted.web.client import Response as TxResponse
+@@ -22,7 +21,8 @@
+ from scrapy.utils.misc import build_from_crawler
+ from scrapy.utils.python import to_bytes
+ from scrapy.utils.test import get_crawler
+-from tests.mockserver import PayloadResource, ssl_context_factory
++from tests.mockserver.http_resources import PayloadResource
++from tests.mockserver.utils import ssl_context_factory
+ 
+ if TYPE_CHECKING:
+     from twisted.internet.defer import Deferred
+@@ -44,8 +44,7 @@ async def server_url(self, tmp_path):
+         r = static.File(str(tmp_path))
+         r.putChild(b"payload", PayloadResource())
+         site = server.Site(r, timeout=None)
+-        wrapper = WrappingFactory(site)
+-        port = self._listen(wrapper)
++        port = self._listen(site)
+         portno = port.getHost().port
+ 
+         yield f"https://127.0.0.1:{portno}/"
+diff --git a/tests/test_crawl.py b/tests/test_crawl.py
+index 877b23bef0a..255a03a2a6c 100644
+--- a/tests/test_crawl.py
++++ b/tests/test_crawl.py
+@@ -23,7 +23,7 @@
+ from scrapy.utils.python import to_unicode
+ from scrapy.utils.test import get_crawler, get_reactor_settings
+ from tests import NON_EXISTING_RESOLVABLE
+-from tests.mockserver import MockServer
++from tests.mockserver.http import MockServer
+ from tests.spiders import (
+     AsyncDefAsyncioGenComplexSpider,
+     AsyncDefAsyncioGenExcSpider,
+diff --git a/tests/test_crawler.py b/tests/test_crawler.py
+index bc182d2f57d..e7e7440a837 100644
+--- a/tests/test_crawler.py
++++ b/tests/test_crawler.py
+@@ -34,7 +34,8 @@
+ from scrapy.utils.log import configure_logging, get_scrapy_root_handler
+ from scrapy.utils.spider import DefaultSpider
+ from scrapy.utils.test import get_crawler, get_reactor_settings
+-from tests.mockserver import MockServer, get_mockserver_env
++from tests.mockserver.http import MockServer
++from tests.utils import get_script_run_env
+ 
+ BASE_SETTINGS: dict[str, Any] = {}
+ 
+@@ -753,7 +754,7 @@ def run_script(self, script_name: str, *script_args: str) -> str:
+         args = self.get_script_args(script_name, *script_args)
+         p = subprocess.Popen(
+             args,
+-            env=get_mockserver_env(),
++            env=get_script_run_env(),
+             stdout=subprocess.PIPE,
+             stderr=subprocess.PIPE,
+         )
+@@ -830,14 +831,14 @@ def test_caching_hostname_resolver_ipv6(self):
+         assert "Spider closed (finished)" in log
+         assert "twisted.internet.error.DNSLookupError" not in log
+ 
+-    def test_caching_hostname_resolver_finite_execution(self):
+-        with MockServer() as mock_server:
+-            http_address = mock_server.http_address.replace("0.0.0.0", "127.0.0.1")
+-            log = self.run_script("caching_hostname_resolver.py", http_address)
+-            assert "Spider closed (finished)" in log
+-            assert "ERROR: Error downloading" not in log
+-            assert "TimeoutError" not in log
+-            assert "twisted.internet.error.DNSLookupError" not in log
++    def test_caching_hostname_resolver_finite_execution(
++        self, mockserver: MockServer
++    ) -> None:
++        log = self.run_script("caching_hostname_resolver.py", mockserver.url("/"))
++        assert "Spider closed (finished)" in log
++        assert "ERROR: Error downloading" not in log
++        assert "TimeoutError" not in log
++        assert "twisted.internet.error.DNSLookupError" not in log
+ 
+     def test_twisted_reactor_asyncio(self):
+         log = self.run_script("twisted_reactor_asyncio.py")
+diff --git a/tests/test_downloader_handler_twisted_http10.py b/tests/test_downloader_handler_twisted_http10.py
+index ddb3250db99..c3e0aa7c429 100644
+--- a/tests/test_downloader_handler_twisted_http10.py
++++ b/tests/test_downloader_handler_twisted_http10.py
+@@ -17,6 +17,7 @@
+ 
+ if TYPE_CHECKING:
+     from scrapy.core.downloader.handlers import DownloadHandlerProtocol
++    from tests.mockserver.http import MockServer
+ 
+ 
+ class HTTP10DownloadHandlerMixin:
+@@ -31,15 +32,17 @@ class TestHttp10(HTTP10DownloadHandlerMixin, TestHttpBase):
+ 
+     @deferred_f_from_coro_f
+     async def test_protocol(
+-        self, server_port: int, download_handler: DownloadHandlerProtocol
++        self, mockserver: MockServer, download_handler: DownloadHandlerProtocol
+     ) -> None:
+-        request = Request(self.getURL(server_port, "host"), method="GET")
++        request = Request(
++            mockserver.url("/host", is_secure=self.is_secure), method="GET"
++        )
+         response = await download_request(download_handler, request)
+         assert response.protocol == "HTTP/1.0"
+ 
+ 
+ class TestHttps10(TestHttp10):
+-    scheme = "https"
++    is_secure = True
+ 
+ 
+ @pytest.mark.filterwarnings("ignore::scrapy.exceptions.ScrapyDeprecationWarning")
+diff --git a/tests/test_downloader_handler_twisted_http11.py b/tests/test_downloader_handler_twisted_http11.py
+index 7b26ce03fe7..79b2a6fc5f6 100644
+--- a/tests/test_downloader_handler_twisted_http11.py
++++ b/tests/test_downloader_handler_twisted_http11.py
+@@ -7,13 +7,13 @@
+ from scrapy.core.downloader.handlers.http11 import HTTP11DownloadHandler
+ from tests.test_downloader_handlers_http_base import (
+     TestHttp11Base,
+-    TestHttpMockServerBase,
+     TestHttpProxyBase,
+     TestHttps11Base,
+     TestHttpsCustomCiphersBase,
+     TestHttpsInvalidDNSIdBase,
+     TestHttpsInvalidDNSPatternBase,
+     TestHttpsWrongHostnameBase,
++    TestHttpWithCrawlerBase,
+     TestSimpleHttpsBase,
+ )
+ 
+@@ -57,7 +57,7 @@ class TestHttps11CustomCiphers(HTTP11DownloadHandlerMixin, TestHttpsCustomCipher
+     pass
+ 
+ 
+-class TestHttp11MockServer(TestHttpMockServerBase):
++class TestHttp11WithCrawler(TestHttpWithCrawlerBase):
+     @property
+     def settings_dict(self) -> dict[str, Any] | None:
+         return None  # default handler settings
+diff --git a/tests/test_downloader_handler_twisted_http2.py b/tests/test_downloader_handler_twisted_http2.py
+index a76cf9dfc59..3e3e677a276 100644
+--- a/tests/test_downloader_handler_twisted_http2.py
++++ b/tests/test_downloader_handler_twisted_http2.py
+@@ -7,33 +7,29 @@
+ from unittest import mock
+ 
+ import pytest
+-from pytest_twisted import async_yield_fixture
+ from testfixtures import LogCapture
+ from twisted.internet import defer, error
+-from twisted.web import server
+ from twisted.web.error import SchemeNotSupported
+ from twisted.web.http import H2_ENABLED
+ 
+ from scrapy.http import Request
+ from scrapy.spiders import Spider
+ from scrapy.utils.defer import deferred_f_from_coro_f, maybe_deferred_to_future
+-from tests.mockserver import ssl_context_factory
+ from tests.test_downloader_handlers_http_base import (
+-    TestHttpMockServerBase,
+     TestHttpProxyBase,
+     TestHttps11Base,
+     TestHttpsCustomCiphersBase,
+     TestHttpsInvalidDNSIdBase,
+     TestHttpsInvalidDNSPatternBase,
+     TestHttpsWrongHostnameBase,
+-    UriResource,
++    TestHttpWithCrawlerBase,
+     download_request,
+ )
+ 
+ if TYPE_CHECKING:
+-    from collections.abc import AsyncGenerator
+-
+     from scrapy.core.downloader.handlers import DownloadHandlerProtocol
++    from tests.mockserver.http import MockServer
++    from tests.mockserver.proxy_echo import ProxyEchoMockServer
+ 
+ 
+ pytestmark = pytest.mark.skipif(
+@@ -57,20 +53,24 @@ class TestHttps2(H2DownloadHandlerMixin, TestHttps11Base):
+ 
+     @deferred_f_from_coro_f
+     async def test_protocol(
+-        self, server_port: int, download_handler: DownloadHandlerProtocol
++        self, mockserver: MockServer, download_handler: DownloadHandlerProtocol
+     ) -> None:
+-        request = Request(self.getURL(server_port, "host"), method="GET")
++        request = Request(
++            mockserver.url("/host", is_secure=self.is_secure), method="GET"
++        )
+         response = await download_request(download_handler, request)
+         assert response.protocol == "h2"
+ 
+     @deferred_f_from_coro_f
+     async def test_download_with_maxsize_very_large_file(
+-        self, server_port: int, download_handler: DownloadHandlerProtocol
++        self, mockserver: MockServer, download_handler: DownloadHandlerProtocol
+     ) -> None:
+         from twisted.internet import reactor
+ 
+         with mock.patch("scrapy.core.http2.stream.logger") as logger:
+-            request = Request(self.getURL(server_port, "largechunkedfile"))
++            request = Request(
++                mockserver.url("/largechunkedfile", is_secure=self.is_secure)
++            )
+ 
+             def check(logger: mock.Mock) -> None:
+                 logger.error.assert_called_once_with(mock.ANY)
+@@ -107,30 +107,34 @@ def test_download_allow_data_loss_via_setting(self) -> None:  # type: ignore[ove
+ 
+     @deferred_f_from_coro_f
+     async def test_concurrent_requests_same_domain(
+-        self, server_port: int, download_handler: DownloadHandlerProtocol
++        self, mockserver: MockServer, download_handler: DownloadHandlerProtocol
+     ) -> None:
+-        request1 = Request(self.getURL(server_port, "file"))
++        request1 = Request(mockserver.url("/text", is_secure=self.is_secure))
+         response1 = await download_request(download_handler, request1)
+-        assert response1.body == b"0123456789"
++        assert response1.body == b"Works"
+ 
+-        request2 = Request(self.getURL(server_port, "echo"), method="POST")
++        request2 = Request(
++            mockserver.url("/echo", is_secure=self.is_secure), method="POST"
++        )
+         response2 = await download_request(download_handler, request2)
+         assert response2.headers["Content-Length"] == b"79"
+ 
+     @pytest.mark.xfail(reason="https://github.com/python-hyper/h2/issues/1247")
+     @deferred_f_from_coro_f
+     async def test_connect_request(
+-        self, server_port: int, download_handler: DownloadHandlerProtocol
++        self, mockserver: MockServer, download_handler: DownloadHandlerProtocol
+     ) -> None:
+-        request = Request(self.getURL(server_port, "file"), method="CONNECT")
++        request = Request(
++            mockserver.url("/file", is_secure=self.is_secure), method="CONNECT"
++        )
+         response = await download_request(download_handler, request)
+         assert response.body == b""
+ 
+     @deferred_f_from_coro_f
+     async def test_custom_content_length_good(
+-        self, server_port: int, download_handler: DownloadHandlerProtocol
++        self, mockserver: MockServer, download_handler: DownloadHandlerProtocol
+     ) -> None:
+-        request = Request(self.getURL(server_port, "contentlength"))
++        request = Request(mockserver.url("/contentlength", is_secure=self.is_secure))
+         custom_content_length = str(len(request.body))
+         request.headers["Content-Length"] = custom_content_length
+         response = await download_request(download_handler, request)
+@@ -138,9 +142,9 @@ async def test_custom_content_length_good(
+ 
+     @deferred_f_from_coro_f
+     async def test_custom_content_length_bad(
+-        self, server_port: int, download_handler: DownloadHandlerProtocol
++        self, mockserver: MockServer, download_handler: DownloadHandlerProtocol
+     ) -> None:
+-        request = Request(self.getURL(server_port, "contentlength"))
++        request = Request(mockserver.url("/contentlength", is_secure=self.is_secure))
+         actual_content_length = str(len(request.body))
+         bad_content_length = str(len(request.body) + 1)
+         request.headers["Content-Length"] = bad_content_length
+@@ -159,9 +163,9 @@ async def test_custom_content_length_bad(
+ 
+     @deferred_f_from_coro_f
+     async def test_duplicate_header(
+-        self, server_port: int, download_handler: DownloadHandlerProtocol
++        self, mockserver: MockServer, download_handler: DownloadHandlerProtocol
+     ) -> None:
+-        request = Request(self.getURL(server_port, "echo"))
++        request = Request(mockserver.url("/echo", is_secure=self.is_secure))
+         header, value1, value2 = "Custom-Header", "foo", "bar"
+         request.headers.appendlist(header, value1)
+         request.headers.appendlist(header, value2)
+@@ -187,7 +191,7 @@ class TestHttps2CustomCiphers(H2DownloadHandlerMixin, TestHttpsCustomCiphersBase
+     pass
+ 
+ 
+-class TestHttp2MockServer(TestHttpMockServerBase):
++class TestHttp2WithCrawler(TestHttpWithCrawlerBase):
+     """HTTP 2.0 test case with MockServer"""
+ 
+     @property
+@@ -202,35 +206,31 @@ def settings_dict(self) -> dict[str, Any] | None:
+ 
+ 
+ class TestHttps2Proxy(H2DownloadHandlerMixin, TestHttpProxyBase):
+-    # only used for HTTPS tests
+-    keyfile = "keys/localhost.key"
+-    certfile = "keys/localhost.crt"
+-    scheme = "https"
++    is_secure = True
+     expected_http_proxy_request_body = b"/"
+ 
+-    @async_yield_fixture
+-    async def server_port(self) -> AsyncGenerator[int]:
+-        from twisted.internet import reactor
+-
+-        site = server.Site(UriResource(), timeout=None)
+-        port = reactor.listenSSL(
+-            0,
+-            site,
+-            ssl_context_factory(self.keyfile, self.certfile),
+-            interface=self.host,
+-        )
+-
+-        yield port.getHost().port
+-
+-        await port.stopListening()
+-
+     @deferred_f_from_coro_f
+     async def test_download_with_proxy_https_timeout(
+-        self, server_port: int, download_handler: DownloadHandlerProtocol
++        self,
++        proxy_mockserver: ProxyEchoMockServer,
++        download_handler: DownloadHandlerProtocol,
+     ) -> None:
+         with pytest.raises(NotImplementedError):
+             await maybe_deferred_to_future(
+                 super().test_download_with_proxy_https_timeout(
+-                    server_port, download_handler
++                    proxy_mockserver, download_handler
++                )
++            )
++
++    @deferred_f_from_coro_f
++    async def test_download_with_proxy_without_http_scheme(
++        self,
++        proxy_mockserver: ProxyEchoMockServer,
++        download_handler: DownloadHandlerProtocol,
++    ) -> None:
++        with pytest.raises(SchemeNotSupported):
++            await maybe_deferred_to_future(
++                super().test_download_with_proxy_without_http_scheme(
++                    proxy_mockserver, download_handler
+                 )
+             )
+diff --git a/tests/test_downloader_handlers_http_base.py b/tests/test_downloader_handlers_http_base.py
+index 35f5d483e09..bbaf9696b3e 100644
+--- a/tests/test_downloader_handlers_http_base.py
++++ b/tests/test_downloader_handlers_http_base.py
+@@ -12,8 +12,6 @@
+ from pytest_twisted import async_yield_fixture
+ from testfixtures import LogCapture
+ from twisted.internet import defer, error
+-from twisted.protocols.policies import WrappingFactory
+-from twisted.web import resource, server, static, util
+ from twisted.web._newclient import ResponseFailed
+ from twisted.web.http import _DataLoss
+ 
+@@ -25,114 +23,18 @@
+     maybe_deferred_to_future,
+ )
+ from scrapy.utils.misc import build_from_crawler
+-from scrapy.utils.python import to_bytes
+ from scrapy.utils.spider import DefaultSpider
+ from scrapy.utils.test import get_crawler
+ from tests import NON_EXISTING_RESOLVABLE
+-from tests.mockserver import (
+-    Echo,
+-    ForeverTakingResource,
+-    HostHeaderResource,
+-    MockServer,
+-    NoLengthResource,
+-    PayloadResource,
+-    ssl_context_factory,
+-)
++from tests.mockserver.proxy_echo import ProxyEchoMockServer
++from tests.mockserver.simple_https import SimpleMockServer
+ from tests.spiders import SingleRequestSpider
+ 
+ if TYPE_CHECKING:
+-    from collections.abc import AsyncGenerator
+-    from pathlib import Path
++    from collections.abc import AsyncGenerator, Generator
+ 
+     from scrapy.core.downloader.handlers import DownloadHandlerProtocol
+-
+-
+-class ContentLengthHeaderResource(resource.Resource):
+-    """
+-    A testing resource which renders itself as the value of the Content-Length
+-    header from the request.
+-    """
+-
+-    def render(self, request):
+-        return request.requestHeaders.getRawHeaders(b"content-length")[0]
+-
+-
+-class ChunkedResource(resource.Resource):
+-    def render(self, request):
+-        from twisted.internet import reactor
+-
+-        def response():
+-            request.write(b"chunked ")
+-            request.write(b"content\n")
+-            request.finish()
+-
+-        reactor.callLater(0, response)
+-        return server.NOT_DONE_YET
+-
+-
+-class BrokenChunkedResource(resource.Resource):
+-    def render(self, request):
+-        from twisted.internet import reactor
+-
+-        def response():
+-            request.write(b"chunked ")
+-            request.write(b"content\n")
+-            # Disable terminating chunk on finish.
+-            request.chunked = False
+-            closeConnection(request)
+-
+-        reactor.callLater(0, response)
+-        return server.NOT_DONE_YET
+-
+-
+-class BrokenDownloadResource(resource.Resource):
+-    def render(self, request):
+-        from twisted.internet import reactor
+-
+-        def response():
+-            request.setHeader(b"Content-Length", b"20")
+-            request.write(b"partial")
+-            closeConnection(request)
+-
+-        reactor.callLater(0, response)
+-        return server.NOT_DONE_YET
+-
+-
+-def closeConnection(request):
+-    # We have to force a disconnection for HTTP/1.1 clients. Otherwise
+-    # client keeps the connection open waiting for more data.
+-    request.channel.loseConnection()
+-    request.finish()
+-
+-
+-class EmptyContentTypeHeaderResource(resource.Resource):
+-    """
+-    A testing resource which renders itself as the value of request body
+-    without content-type header in response.
+-    """
+-
+-    def render(self, request):
+-        request.setHeader("content-type", "")
+-        return request.content.read()
+-
+-
+-class LargeChunkedFileResource(resource.Resource):
+-    def render(self, request):
+-        from twisted.internet import reactor
+-
+-        def response():
+-            for i in range(1024):
+-                request.write(b"x" * 1024)
+-            request.finish()
+-
+-        reactor.callLater(0, response)
+-        return server.NOT_DONE_YET
+-
+-
+-class DuplicateHeaderResource(resource.Resource):
+-    def render(self, request):
+-        request.responseHeaders.setRawHeaders(b"Set-Cookie", [b"a=b", b"c=d"])
+-        return b""
++    from tests.mockserver.http import MockServer
+ 
+ 
+ async def download_request(
+@@ -157,59 +59,13 @@ async def close_dh(dh: DownloadHandlerProtocol) -> None:
+ 
+ 
+ class TestHttpBase(ABC):
+-    scheme = "http"
+-    host = "localhost"
+-
+-    # only used for HTTPS tests
+-    keyfile = "keys/localhost.key"
+-    certfile = "keys/localhost.crt"
++    is_secure = False
+ 
+     @property
+     @abstractmethod
+     def download_handler_cls(self) -> type[DownloadHandlerProtocol]:
+         raise NotImplementedError
+ 
+-    @pytest.fixture
+-    def site(self, tmp_path):
+-        (tmp_path / "file").write_bytes(b"0123456789")
+-        r = static.File(str(tmp_path))
+-        r.putChild(b"redirect", util.Redirect(b"/file"))
+-        r.putChild(b"wait", ForeverTakingResource())
+-        r.putChild(b"hang-after-headers", ForeverTakingResource(write=True))
+-        r.putChild(b"nolength", NoLengthResource())
+-        r.putChild(b"host", HostHeaderResource())
+-        r.putChild(b"payload", PayloadResource())
+-        r.putChild(b"broken", BrokenDownloadResource())
+-        r.putChild(b"chunked", ChunkedResource())
+-        r.putChild(b"broken-chunked", BrokenChunkedResource())
+-        r.putChild(b"contentlength", ContentLengthHeaderResource())
+-        r.putChild(b"nocontenttype", EmptyContentTypeHeaderResource())
+-        r.putChild(b"largechunkedfile", LargeChunkedFileResource())
+-        r.putChild(b"duplicate-header", DuplicateHeaderResource())
+-        r.putChild(b"echo", Echo())
+-        return server.Site(r, timeout=None)
+-
+-    @async_yield_fixture
+-    async def server_port(self, site: server.Site) -> AsyncGenerator[int]:
+-        from twisted.internet import reactor
+-
+-        if self.scheme == "https":
+-            # Using WrappingFactory do not enable HTTP/2 failing all the
+-            # tests with H2DownloadHandler
+-            port = reactor.listenSSL(
+-                0,
+-                site,
+-                ssl_context_factory(self.keyfile, self.certfile),
+-                interface=self.host,
+-            )
+-        else:
+-            wrapper = WrappingFactory(site)
+-            port = reactor.listenTCP(0, wrapper, interface=self.host)
+-
+-        yield port.getHost().port
+-
+-        await port.stopListening()
+-
+     @async_yield_fixture
+     async def download_handler(self) -> AsyncGenerator[DownloadHandlerProtocol]:
+         dh = build_from_crawler(self.download_handler_cls, get_crawler())
+@@ -218,45 +74,46 @@ async def download_handler(self) -> AsyncGenerator[DownloadHandlerProtocol]:
+ 
+         await close_dh(dh)
+ 
+-    def getURL(self, portno: int, path: str) -> str:
+-        return f"{self.scheme}://{self.host}:{portno}/{path}"
+-
+     @deferred_f_from_coro_f
+     async def test_download(
+-        self, server_port: int, download_handler: DownloadHandlerProtocol
++        self, mockserver: MockServer, download_handler: DownloadHandlerProtocol
+     ) -> None:
+-        request = Request(self.getURL(server_port, "file"))
++        request = Request(mockserver.url("/text", is_secure=self.is_secure))
+         response = await download_request(download_handler, request)
+-        assert response.body == b"0123456789"
++        assert response.body == b"Works"
+ 
+     @deferred_f_from_coro_f
+     async def test_download_head(
+-        self, server_port: int, download_handler: DownloadHandlerProtocol
++        self, mockserver: MockServer, download_handler: DownloadHandlerProtocol
+     ) -> None:
+-        request = Request(self.getURL(server_port, "file"), method="HEAD")
++        request = Request(
++            mockserver.url("/text", is_secure=self.is_secure), method="HEAD"
++        )
+         response = await download_request(download_handler, request)
+         assert response.body == b""
+ 
+     @deferred_f_from_coro_f
+     async def test_redirect_status(
+-        self, server_port: int, download_handler: DownloadHandlerProtocol
++        self, mockserver: MockServer, download_handler: DownloadHandlerProtocol
+     ) -> None:
+-        request = Request(self.getURL(server_port, "redirect"))
++        request = Request(mockserver.url("/redirect", is_secure=self.is_secure))
+         response = await download_request(download_handler, request)
+         assert response.status == 302
+ 
+     @deferred_f_from_coro_f
+     async def test_redirect_status_head(
+-        self, server_port: int, download_handler: DownloadHandlerProtocol
++        self, mockserver: MockServer, download_handler: DownloadHandlerProtocol
+     ) -> None:
+-        request = Request(self.getURL(server_port, "redirect"), method="HEAD")
++        request = Request(
++            mockserver.url("/redirect", is_secure=self.is_secure), method="HEAD"
++        )
+         response = await download_request(download_handler, request)
+         assert response.status == 302
+ 
+     @deferred_f_from_coro_f
+     async def test_timeout_download_from_spider_nodata_rcvd(
+         self,
+-        server_port: int,
++        mockserver: MockServer,
+         download_handler: DownloadHandlerProtocol,
+         reactor_pytest: str,
+     ) -> None:
+@@ -268,7 +125,7 @@ async def test_timeout_download_from_spider_nodata_rcvd(
+ 
+         # client connects but no data is received
+         meta = {"download_timeout": 0.5}
+-        request = Request(self.getURL(server_port, "wait"), meta=meta)
++        request = Request(mockserver.url("/wait", is_secure=self.is_secure), meta=meta)
+         d = deferred_from_coro(download_request(download_handler, request))
+         with pytest.raises((defer.TimeoutError, error.TimeoutError)):
+             await maybe_deferred_to_future(d)
+@@ -276,7 +133,7 @@ async def test_timeout_download_from_spider_nodata_rcvd(
+     @deferred_f_from_coro_f
+     async def test_timeout_download_from_spider_server_hangs(
+         self,
+-        server_port: int,
++        mockserver: MockServer,
+         download_handler: DownloadHandlerProtocol,
+         reactor_pytest: str,
+     ) -> None:
+@@ -287,33 +144,36 @@ async def test_timeout_download_from_spider_server_hangs(
+             )
+         # client connects, server send headers and some body bytes but hangs
+         meta = {"download_timeout": 0.5}
+-        request = Request(self.getURL(server_port, "hang-after-headers"), meta=meta)
++        request = Request(
++            mockserver.url("/hang-after-headers", is_secure=self.is_secure), meta=meta
++        )
+         d = deferred_from_coro(download_request(download_handler, request))
+         with pytest.raises((defer.TimeoutError, error.TimeoutError)):
+             await maybe_deferred_to_future(d)
+ 
++    @pytest.mark.parametrize("send_header", [True, False])
+     @deferred_f_from_coro_f
+-    async def test_host_header_not_in_request_headers(
+-        self, server_port: int, download_handler: DownloadHandlerProtocol
+-    ) -> None:
+-        request = Request(self.getURL(server_port, "host"))
+-        response = await download_request(download_handler, request)
+-        assert response.body == to_bytes(f"{self.host}:{server_port}")
+-        assert not request.headers
+-
+-    @deferred_f_from_coro_f
+-    async def test_host_header_set_in_request_headers(
+-        self, server_port: int, download_handler: DownloadHandlerProtocol
++    async def test_host_header(
++        self,
++        send_header: bool,
++        mockserver: MockServer,
++        download_handler: DownloadHandlerProtocol,
+     ) -> None:
+-        host = f"{self.host}:{server_port}"
+-        request = Request(self.getURL(server_port, "host"), headers={"Host": host})
++        host_port = f"{mockserver.host}:{mockserver.port(is_secure=self.is_secure)}"
++        request = Request(
++            mockserver.url("/host", is_secure=self.is_secure),
++            headers={"Host": host_port} if send_header else {},
++        )
+         response = await download_request(download_handler, request)
+-        assert response.body == host.encode()
+-        assert request.headers.get("Host") == host.encode()
++        assert response.body == host_port.encode()
++        if send_header:
++            assert request.headers.get("Host") == host_port.encode()
++        else:
++            assert not request.headers
+ 
+     @deferred_f_from_coro_f
+     async def test_content_length_zero_bodyless_post_request_headers(
+-        self, server_port: int, download_handler: DownloadHandlerProtocol
++        self, mockserver: MockServer, download_handler: DownloadHandlerProtocol
+     ) -> None:
+         """Tests if "Content-Length: 0" is sent for bodyless POST requests.
+ 
+@@ -325,15 +185,19 @@ async def test_content_length_zero_bodyless_post_request_headers(
+         https://github.com/kennethreitz/requests/issues/405
+         https://bugs.python.org/issue14721
+         """
+-        request = Request(self.getURL(server_port, "contentlength"), method="POST")
++        request = Request(
++            mockserver.url("/contentlength", is_secure=self.is_secure), method="POST"
++        )
+         response = await download_request(download_handler, request)
+         assert response.body == b"0"
+ 
+     @deferred_f_from_coro_f
+     async def test_content_length_zero_bodyless_post_only_one(
+-        self, server_port: int, download_handler: DownloadHandlerProtocol
++        self, mockserver: MockServer, download_handler: DownloadHandlerProtocol
+     ) -> None:
+-        request = Request(self.getURL(server_port, "echo"), method="POST")
++        request = Request(
++            mockserver.url("/echo", is_secure=self.is_secure), method="POST"
++        )
+         response = await download_request(download_handler, request)
+         headers = Headers(json.loads(response.text)["headers"])
+         contentlengths = headers.getlist("Content-Length")
+@@ -342,20 +206,26 @@ async def test_content_length_zero_bodyless_post_only_one(
+ 
+     @deferred_f_from_coro_f
+     async def test_payload(
+-        self, server_port: int, download_handler: DownloadHandlerProtocol
++        self, mockserver: MockServer, download_handler: DownloadHandlerProtocol
+     ) -> None:
+         body = b"1" * 100  # PayloadResource requires body length to be 100
+-        request = Request(self.getURL(server_port, "payload"), method="POST", body=body)
++        request = Request(
++            mockserver.url("/payload", is_secure=self.is_secure),
++            method="POST",
++            body=body,
++        )
+         response = await download_request(download_handler, request)
+         assert response.body == body
+ 
+     @deferred_f_from_coro_f
+     async def test_response_header_content_length(
+-        self, server_port: int, download_handler: DownloadHandlerProtocol
++        self, mockserver: MockServer, download_handler: DownloadHandlerProtocol
+     ) -> None:
+-        request = Request(self.getURL(server_port, "file"), method="GET")
++        request = Request(
++            mockserver.url("/text", is_secure=self.is_secure), method="GET"
++        )
+         response = await download_request(download_handler, request)
+-        assert response.headers[b"content-length"] == b"10"
++        assert response.headers[b"content-length"] == b"5"
+ 
+     @pytest.mark.parametrize(
+         ("filename", "body", "response_class"),
+@@ -370,18 +240,20 @@ async def test_response_class(
+         filename: str,
+         body: bytes,
+         response_class: type[Response],
+-        server_port: int,
++        mockserver: MockServer,
+         download_handler: DownloadHandlerProtocol,
+     ) -> None:
+-        request = Request(self.getURL(server_port, filename), body=body)
++        request = Request(
++            mockserver.url(f"/{filename}", is_secure=self.is_secure), body=body
++        )
+         response = await download_request(download_handler, request)
+         assert type(response) is response_class  # pylint: disable=unidiomatic-typecheck
+ 
+     @deferred_f_from_coro_f
+     async def test_get_duplicate_header(
+-        self, server_port: int, download_handler: DownloadHandlerProtocol
++        self, mockserver: MockServer, download_handler: DownloadHandlerProtocol
+     ) -> None:
+-        request = Request(self.getURL(server_port, "duplicate-header"))
++        request = Request(mockserver.url("/duplicate-header", is_secure=self.is_secure))
+         response = await download_request(download_handler, request)
+         assert response.headers.getlist(b"Set-Cookie") == [b"a=b", b"c=d"]
+ 
+@@ -391,51 +263,55 @@ class TestHttp11Base(TestHttpBase):
+ 
+     @deferred_f_from_coro_f
+     async def test_download_without_maxsize_limit(
+-        self, server_port: int, download_handler: DownloadHandlerProtocol
++        self, mockserver: MockServer, download_handler: DownloadHandlerProtocol
+     ) -> None:
+-        request = Request(self.getURL(server_port, "file"))
++        request = Request(mockserver.url("/text", is_secure=self.is_secure))
+         response = await download_request(download_handler, request)
+-        assert response.body == b"0123456789"
++        assert response.body == b"Works"
+ 
+     @deferred_f_from_coro_f
+     async def test_response_class_choosing_request(
+-        self, server_port: int, download_handler: DownloadHandlerProtocol
++        self, mockserver: MockServer, download_handler: DownloadHandlerProtocol
+     ) -> None:
+         """Tests choosing of correct response type
+         in case of Content-Type is empty but body contains text.
+         """
+         body = b"Some plain text\ndata with tabs\t and null bytes\0"
+-        request = Request(self.getURL(server_port, "nocontenttype"), body=body)
++        request = Request(
++            mockserver.url("/nocontenttype", is_secure=self.is_secure), body=body
++        )
+         response = await download_request(download_handler, request)
+         assert type(response) is TextResponse  # pylint: disable=unidiomatic-typecheck
+ 
+     @deferred_f_from_coro_f
+     async def test_download_with_maxsize(
+-        self, server_port: int, download_handler: DownloadHandlerProtocol
++        self, mockserver: MockServer, download_handler: DownloadHandlerProtocol
+     ) -> None:
+-        request = Request(self.getURL(server_port, "file"))
++        request = Request(mockserver.url("/text", is_secure=self.is_secure))
+ 
+         # 10 is minimal size for this request and the limit is only counted on
+         # response body. (regardless of headers)
+         response = await download_request(
+-            download_handler, request, Spider("foo", download_maxsize=10)
++            download_handler, request, Spider("foo", download_maxsize=5)
+         )
+-        assert response.body == b"0123456789"
++        assert response.body == b"Works"
+ 
+         with pytest.raises((defer.CancelledError, error.ConnectionAborted)):
+             await download_request(
+-                download_handler, request, Spider("foo", download_maxsize=9)
++                download_handler, request, Spider("foo", download_maxsize=4)
+             )
+ 
+     @deferred_f_from_coro_f
+     async def test_download_with_maxsize_very_large_file(
+-        self, server_port: int, download_handler: DownloadHandlerProtocol
++        self, mockserver: MockServer, download_handler: DownloadHandlerProtocol
+     ) -> None:
+         from twisted.internet import reactor
+ 
+         # TODO: the logger check is specific to scrapy.core.downloader.handlers.http11
+         with mock.patch("scrapy.core.downloader.handlers.http11.logger") as logger:
+-            request = Request(self.getURL(server_port, "largechunkedfile"))
++            request = Request(
++                mockserver.url("/largechunkedfile", is_secure=self.is_secure)
++            )
+ 
+             def check(logger: mock.Mock) -> None:
+                 logger.warning.assert_called_once_with(mock.ANY, mock.ANY)
+@@ -455,18 +331,18 @@ def check(logger: mock.Mock) -> None:
+ 
+     @deferred_f_from_coro_f
+     async def test_download_with_maxsize_per_req(
+-        self, server_port: int, download_handler: DownloadHandlerProtocol
++        self, mockserver: MockServer, download_handler: DownloadHandlerProtocol
+     ) -> None:
+         meta = {"download_maxsize": 2}
+-        request = Request(self.getURL(server_port, "file"), meta=meta)
++        request = Request(mockserver.url("/text", is_secure=self.is_secure), meta=meta)
+         with pytest.raises((defer.CancelledError, error.ConnectionAborted)):
+             await download_request(download_handler, request)
+ 
+     @deferred_f_from_coro_f
+     async def test_download_with_small_maxsize_per_spider(
+-        self, server_port: int, download_handler: DownloadHandlerProtocol
++        self, mockserver: MockServer, download_handler: DownloadHandlerProtocol
+     ) -> None:
+-        request = Request(self.getURL(server_port, "file"))
++        request = Request(mockserver.url("/text", is_secure=self.is_secure))
+         with pytest.raises((defer.CancelledError, error.ConnectionAborted)):
+             await download_request(
+                 download_handler, request, Spider("foo", download_maxsize=2)
+@@ -474,29 +350,32 @@ async def test_download_with_small_maxsize_per_spider(
+ 
+     @deferred_f_from_coro_f
+     async def test_download_with_large_maxsize_per_spider(
+-        self, server_port: int, download_handler: DownloadHandlerProtocol
++        self, mockserver: MockServer, download_handler: DownloadHandlerProtocol
+     ) -> None:
+-        request = Request(self.getURL(server_port, "file"))
++        request = Request(mockserver.url("/text", is_secure=self.is_secure))
+         response = await download_request(
+             download_handler, request, Spider("foo", download_maxsize=100)
+         )
+-        assert response.body == b"0123456789"
++        assert response.body == b"Works"
+ 
+     @deferred_f_from_coro_f
+     async def test_download_chunked_content(
+-        self, server_port: int, download_handler: DownloadHandlerProtocol
++        self, mockserver: MockServer, download_handler: DownloadHandlerProtocol
+     ) -> None:
+-        request = Request(self.getURL(server_port, "chunked"))
++        request = Request(mockserver.url("/chunked", is_secure=self.is_secure))
+         response = await download_request(download_handler, request)
+         assert response.body == b"chunked content\n"
+ 
+     @pytest.mark.parametrize("url", ["broken", "broken-chunked"])
+     @deferred_f_from_coro_f
+     async def test_download_cause_data_loss(
+-        self, url: str, server_port: int, download_handler: DownloadHandlerProtocol
++        self,
++        url: str,
++        mockserver: MockServer,
++        download_handler: DownloadHandlerProtocol,
+     ) -> None:
+         # TODO: this one checks for Twisted-specific exceptions
+-        request = Request(self.getURL(server_port, url))
++        request = Request(mockserver.url(f"/{url}", is_secure=self.is_secure))
+         with pytest.raises(ResponseFailed) as exc_info:
+             await download_request(download_handler, request)
+         assert any(r.check(_DataLoss) for r in exc_info.value.reasons)
+@@ -504,10 +383,14 @@ async def test_download_cause_data_loss(
+     @pytest.mark.parametrize("url", ["broken", "broken-chunked"])
+     @deferred_f_from_coro_f
+     async def test_download_allow_data_loss(
+-        self, url: str, server_port: int, download_handler: DownloadHandlerProtocol
++        self,
++        url: str,
++        mockserver: MockServer,
++        download_handler: DownloadHandlerProtocol,
+     ) -> None:
+         request = Request(
+-            self.getURL(server_port, url), meta={"download_fail_on_dataloss": False}
++            mockserver.url(f"/{url}", is_secure=self.is_secure),
++            meta={"download_fail_on_dataloss": False},
+         )
+         response = await download_request(download_handler, request)
+         assert response.flags == ["dataloss"]
+@@ -515,11 +398,11 @@ async def test_download_allow_data_loss(
+     @pytest.mark.parametrize("url", ["broken", "broken-chunked"])
+     @deferred_f_from_coro_f
+     async def test_download_allow_data_loss_via_setting(
+-        self, url: str, server_port: int
++        self, url: str, mockserver: MockServer
+     ) -> None:
+         crawler = get_crawler(settings_dict={"DOWNLOAD_FAIL_ON_DATALOSS": False})
+         download_handler = build_from_crawler(self.download_handler_cls, crawler)
+-        request = Request(self.getURL(server_port, url))
++        request = Request(mockserver.url(f"/{url}", is_secure=self.is_secure))
+         try:
+             response = await maybe_deferred_to_future(
+                 download_handler.download_request(request, DefaultSpider())
+@@ -532,15 +415,17 @@ async def test_download_allow_data_loss_via_setting(
+ 
+     @deferred_f_from_coro_f
+     async def test_protocol(
+-        self, server_port: int, download_handler: DownloadHandlerProtocol
++        self, mockserver: MockServer, download_handler: DownloadHandlerProtocol
+     ) -> None:
+-        request = Request(self.getURL(server_port, "host"), method="GET")
++        request = Request(
++            mockserver.url("/host", is_secure=self.is_secure), method="GET"
++        )
+         response = await download_request(download_handler, request)
+         assert response.protocol == "HTTP/1.1"
+ 
+ 
+ class TestHttps11Base(TestHttp11Base):
+-    scheme = "https"
++    is_secure = True
+ 
+     tls_log_message = (
+         'SSL connection certificate: issuer "/C=IE/O=Scrapy/CN=localhost", '
+@@ -548,18 +433,18 @@ class TestHttps11Base(TestHttp11Base):
+     )
+ 
+     @deferred_f_from_coro_f
+-    async def test_tls_logging(self, server_port: int) -> None:
++    async def test_tls_logging(self, mockserver: MockServer) -> None:
+         crawler = get_crawler(
+             settings_dict={"DOWNLOADER_CLIENT_TLS_VERBOSE_LOGGING": True}
+         )
+         download_handler = build_from_crawler(self.download_handler_cls, crawler)
+         try:
+             with LogCapture() as log_capture:
+-                request = Request(self.getURL(server_port, "file"))
++                request = Request(mockserver.url("/text", is_secure=self.is_secure))
+                 response = await maybe_deferred_to_future(
+                     download_handler.download_request(request, DefaultSpider())
+                 )
+-                assert response.body == b"0123456789"
++                assert response.body == b"Works"
+                 log_capture.check_present(
+                     ("scrapy.core.downloader.tls", "DEBUG", self.tls_log_message)
+                 )
+@@ -577,31 +462,23 @@ class TestSimpleHttpsBase(ABC):
+     host = "localhost"
+     cipher_string: str | None = None
+ 
++    @pytest.fixture(scope="class")
++    def simple_mockserver(self) -> Generator[SimpleMockServer]:
++        with SimpleMockServer(
++            self.keyfile, self.certfile, self.cipher_string
++        ) as simple_mockserver:
++            yield simple_mockserver
++
++    @pytest.fixture(scope="class")
++    def url(self, simple_mockserver: SimpleMockServer) -> str:
++        # need to use self.host instead of what mockserver returns
++        return f"https://{self.host}:{simple_mockserver.port(is_secure=True)}/file"
++
+     @property
+     @abstractmethod
+     def download_handler_cls(self) -> type[DownloadHandlerProtocol]:
+         raise NotImplementedError
+ 
+-    @async_yield_fixture
+-    async def server_port(self, tmp_path: Path) -> AsyncGenerator[int]:
+-        from twisted.internet import reactor
+-
+-        (tmp_path / "file").write_bytes(b"0123456789")
+-        r = static.File(str(tmp_path))
+-        site = server.Site(r, timeout=None)
+-        port = reactor.listenSSL(
+-            0,
+-            site,
+-            ssl_context_factory(
+-                self.keyfile, self.certfile, cipher_string=self.cipher_string
+-            ),
+-            interface=self.host,
+-        )
+-
+-        yield port.getHost().port
+-
+-        await port.stopListening()
+-
+     @async_yield_fixture
+     async def download_handler(self) -> AsyncGenerator[DownloadHandlerProtocol]:
+         if self.cipher_string is not None:
+@@ -615,14 +492,11 @@ async def download_handler(self) -> AsyncGenerator[DownloadHandlerProtocol]:
+ 
+         await close_dh(dh)
+ 
+-    def getURL(self, portno: int, path: str) -> str:
+-        return f"https://{self.host}:{portno}/{path}"
+-
+     @deferred_f_from_coro_f
+     async def test_download(
+-        self, server_port: int, download_handler: DownloadHandlerProtocol
++        self, url: str, download_handler: DownloadHandlerProtocol
+     ) -> None:
+-        request = Request(self.getURL(server_port, "file"))
++        request = Request(url)
+         response = await download_request(download_handler, request)
+         assert response.body == b"0123456789"
+ 
+@@ -654,9 +528,7 @@ class TestHttpsCustomCiphersBase(TestSimpleHttpsBase):
+     cipher_string = "CAMELLIA256-SHA"
+ 
+ 
+-class TestHttpMockServerBase(ABC):
+-    """HTTP 1.1 test case with MockServer"""
+-
++class TestHttpWithCrawlerBase(ABC):
+     @property
+     @abstractmethod
+     def settings_dict(self) -> dict[str, Any] | None:
+@@ -664,63 +536,40 @@ def settings_dict(self) -> dict[str, Any] | None:
+ 
+     is_secure = False
+ 
+-    @classmethod
+-    def setup_class(cls):
+-        cls.mockserver = MockServer()
+-        cls.mockserver.__enter__()
+-
+-    @classmethod
+-    def teardown_class(cls):
+-        cls.mockserver.__exit__(None, None, None)
+-
+     @deferred_f_from_coro_f
+-    async def test_download_with_content_length(self):
++    async def test_download_with_content_length(self, mockserver: MockServer) -> None:
+         crawler = get_crawler(SingleRequestSpider, self.settings_dict)
+         # http://localhost:8998/partial set Content-Length to 1024, use download_maxsize= 1000 to avoid
+         # download it
+         await maybe_deferred_to_future(
+             crawler.crawl(
+                 seed=Request(
+-                    url=self.mockserver.url("/partial", is_secure=self.is_secure),
++                    url=mockserver.url("/partial", is_secure=self.is_secure),
+                     meta={"download_maxsize": 1000},
+                 )
+             )
+         )
+-        failure = crawler.spider.meta["failure"]
++        assert crawler.spider
++        failure = crawler.spider.meta["failure"]  # type: ignore[attr-defined]
+         assert isinstance(failure.value, defer.CancelledError)
+ 
+     @deferred_f_from_coro_f
+-    async def test_download(self):
++    async def test_download(self, mockserver: MockServer) -> None:
+         crawler = get_crawler(SingleRequestSpider, self.settings_dict)
+         await maybe_deferred_to_future(
+             crawler.crawl(
+-                seed=Request(url=self.mockserver.url("", is_secure=self.is_secure))
++                seed=Request(url=mockserver.url("", is_secure=self.is_secure))
+             )
+         )
+-        failure = crawler.spider.meta.get("failure")
++        assert crawler.spider
++        failure = crawler.spider.meta.get("failure")  # type: ignore[attr-defined]
+         assert failure is None
+-        reason = crawler.spider.meta["close_reason"]
++        reason = crawler.spider.meta["close_reason"]  # type: ignore[attr-defined]
+         assert reason == "finished"
+ 
+ 
+-class UriResource(resource.Resource):
+-    """Return the full uri that was requested"""
+-
+-    def getChild(self, path, request):
+-        return self
+-
+-    def render(self, request):
+-        # Note: this is an ugly hack for CONNECT request timeout test.
+-        #       Returning some data here fail SSL/TLS handshake
+-        # ToDo: implement proper HTTPS proxy tests, not faking them.
+-        if request.method != b"CONNECT":
+-            return request.uri
+-        return b""
+-
+-
+ class TestHttpProxyBase(ABC):
+-    scheme = "http"
+-    host = "127.0.0.1"
++    is_secure = False
+     expected_http_proxy_request_body = b"http://example.com"
+ 
+     @property
+@@ -728,17 +577,10 @@ class TestHttpProxyBase(ABC):
+     def download_handler_cls(self) -> type[DownloadHandlerProtocol]:
+         raise NotImplementedError
+ 
+-    @async_yield_fixture
+-    async def server_port(self) -> AsyncGenerator[int]:
+-        from twisted.internet import reactor
+-
+-        site = server.Site(UriResource(), timeout=None)
+-        wrapper = WrappingFactory(site)
+-        port = reactor.listenTCP(0, wrapper, interface=self.host)
+-
+-        yield port.getHost().port
+-
+-        await port.stopListening()
++    @pytest.fixture(scope="session")
++    def proxy_mockserver(self) -> Generator[ProxyEchoMockServer]:
++        with ProxyEchoMockServer() as proxy:
++            yield proxy
+ 
+     @async_yield_fixture
+     async def download_handler(self) -> AsyncGenerator[DownloadHandlerProtocol]:
+@@ -748,14 +590,13 @@ async def download_handler(self) -> AsyncGenerator[DownloadHandlerProtocol]:
+ 
+         await close_dh(dh)
+ 
+-    def getURL(self, portno: int, path: str) -> str:
+-        return f"{self.scheme}://{self.host}:{portno}/{path}"
+-
+     @deferred_f_from_coro_f
+     async def test_download_with_proxy(
+-        self, server_port: int, download_handler: DownloadHandlerProtocol
++        self,
++        proxy_mockserver: ProxyEchoMockServer,
++        download_handler: DownloadHandlerProtocol,
+     ) -> None:
+-        http_proxy = self.getURL(server_port, "")
++        http_proxy = proxy_mockserver.url("", is_secure=self.is_secure)
+         request = Request("http://example.com", meta={"proxy": http_proxy})
+         response = await download_request(download_handler, request)
+         assert response.status == 200
+@@ -764,9 +605,13 @@ async def test_download_with_proxy(
+ 
+     @deferred_f_from_coro_f
+     async def test_download_without_proxy(
+-        self, server_port: int, download_handler: DownloadHandlerProtocol
++        self,
++        proxy_mockserver: ProxyEchoMockServer,
++        download_handler: DownloadHandlerProtocol,
+     ) -> None:
+-        request = Request(self.getURL(server_port, "path/to/resource"))
++        request = Request(
++            proxy_mockserver.url("/path/to/resource", is_secure=self.is_secure)
++        )
+         response = await download_request(download_handler, request)
+         assert response.status == 200
+         assert response.url == request.url
+@@ -774,11 +619,13 @@ async def test_download_without_proxy(
+ 
+     @deferred_f_from_coro_f
+     async def test_download_with_proxy_https_timeout(
+-        self, server_port: int, download_handler: DownloadHandlerProtocol
++        self,
++        proxy_mockserver: ProxyEchoMockServer,
++        download_handler: DownloadHandlerProtocol,
+     ) -> None:
+         if NON_EXISTING_RESOLVABLE:
+             pytest.skip("Non-existing hosts are resolvable")
+-        http_proxy = self.getURL(server_port, "")
++        http_proxy = proxy_mockserver.url("", is_secure=self.is_secure)
+         domain = "https://no-such-domain.nosuch"
+         request = Request(domain, meta={"proxy": http_proxy, "download_timeout": 0.2})
+         with pytest.raises(error.TimeoutError) as exc_info:
+@@ -787,9 +634,11 @@ async def test_download_with_proxy_https_timeout(
+ 
+     @deferred_f_from_coro_f
+     async def test_download_with_proxy_without_http_scheme(
+-        self, server_port: int, download_handler: DownloadHandlerProtocol
++        self,
++        proxy_mockserver: ProxyEchoMockServer,
++        download_handler: DownloadHandlerProtocol,
+     ) -> None:
+-        http_proxy = self.getURL(server_port, "").replace("http://", "")
++        http_proxy = f"{proxy_mockserver.host}:{proxy_mockserver.port()}"
+         request = Request("http://example.com", meta={"proxy": http_proxy})
+         response = await download_request(download_handler, request)
+         assert response.status == 200
+diff --git a/tests/test_downloaderslotssettings.py b/tests/test_downloaderslotssettings.py
+index 0d950046411..55a67d6d211 100644
+--- a/tests/test_downloaderslotssettings.py
++++ b/tests/test_downloaderslotssettings.py
+@@ -6,7 +6,7 @@
+ from scrapy.core.downloader import Downloader, Slot
+ from scrapy.crawler import CrawlerRunner
+ from scrapy.utils.test import get_crawler
+-from tests.mockserver import MockServer
++from tests.mockserver.http import MockServer
+ from tests.spiders import MetaSpider
+ 
+ 
+diff --git a/tests/test_engine.py b/tests/test_engine.py
+index ecb615f61f4..9590859bbb2 100644
+--- a/tests/test_engine.py
++++ b/tests/test_engine.py
+@@ -16,7 +16,6 @@
+ from collections import defaultdict
+ from dataclasses import dataclass
+ from logging import DEBUG
+-from pathlib import Path
+ from unittest.mock import Mock
+ from urllib.parse import urlparse
+ 
+@@ -27,7 +26,6 @@
+ from testfixtures import LogCapture
+ from twisted.internet import defer
+ from twisted.internet.defer import inlineCallbacks
+-from twisted.web import server, static, util
+ 
+ from scrapy import signals
+ from scrapy.core.engine import ExecutionEngine, _Slot
+@@ -38,9 +36,11 @@
+ from scrapy.linkextractors import LinkExtractor
+ from scrapy.signals import request_scheduled
+ from scrapy.spiders import Spider
++from scrapy.utils.defer import deferred_f_from_coro_f, maybe_deferred_to_future
+ from scrapy.utils.signal import disconnect_all
+ from scrapy.utils.test import get_crawler
+-from tests import get_testdata, tests_datadir
++from tests import get_testdata
++from tests.mockserver.http import MockServer
+ 
+ 
+ class MyItem(Item):
+@@ -65,7 +65,6 @@ class DataClassItem:
+ 
+ class MySpider(Spider):
+     name = "scrapytest.org"
+-    allowed_domains = ["scrapytest.org", "localhost"]
+ 
+     itemurl_re = re.compile(r"item\d+.html")
+     name_re = re.compile(r"<h1>(.*?)</h1>", re.MULTILINE)
+@@ -130,25 +129,6 @@ def spider_idle(self):
+         raise CloseSpider(reason="custom_reason")
+ 
+ 
+-def start_test_site(debug=False):
+-    from twisted.internet import reactor
+-
+-    root_dir = Path(tests_datadir, "test_site")
+-    r = static.File(str(root_dir))
+-    r.putChild(b"redirect", util.Redirect(b"/redirected"))
+-    r.putChild(b"redirected", static.Data(b"Redirected here", "text/plain"))
+-    numbers = [str(x).encode("utf8") for x in range(2**18)]
+-    r.putChild(b"numbers", static.Data(b"".join(numbers), "text/plain"))
+-
+-    port = reactor.listenTCP(0, server.Site(r), interface="127.0.0.1")
+-    if debug:
+-        print(
+-            f"Test server running at http://localhost:{port.getHost().port}/ "
+-            "- hit Ctrl-C to finish."
+-        )
+-    return port
+-
+-
+ class CrawlerRun:
+     """A class to run the crawler and keep track of events occurred"""
+ 
+@@ -164,12 +144,11 @@ def __init__(self, spider_class):
+         self.signals_caught = {}
+         self.spider_class = spider_class
+ 
+-    def run(self):
+-        self.port = start_test_site()
+-        self.portno = self.port.getHost().port
++    async def run(self, mockserver: MockServer) -> None:
++        self.mockserver = mockserver
+ 
+         start_urls = [
+-            self.geturl("/"),
++            self.geturl("/static/"),
+             self.geturl("/redirect"),
+             self.geturl("/redirect"),  # duplicate
+             self.geturl("/numbers"),
+@@ -194,20 +173,19 @@ def run(self):
+         )
+         self.crawler.crawl(start_urls=start_urls)
+ 
+-        self.deferred = defer.Deferred()
++        self.deferred: defer.Deferred[None] = defer.Deferred()
+         dispatcher.connect(self.stop, signals.engine_stopped)
+-        return self.deferred
++        await maybe_deferred_to_future(self.deferred)
+ 
+     def stop(self):
+-        self.port.stopListening()  # FIXME: wait for this Deferred
+         for name, signal in vars(signals).items():
+             if not name.startswith("_"):
+                 disconnect_all(signal)
+         self.deferred.callback(None)
+         return self.crawler.stop()
+ 
+-    def geturl(self, path):
+-        return f"http://localhost:{self.portno}{path}"
++    def geturl(self, path: str) -> str:
++        return self.mockserver.url(path)
+ 
+     def getpath(self, url):
+         u = urlparse(url)
+@@ -249,12 +227,12 @@ class TestEngineBase:
+     @staticmethod
+     def _assert_visited_urls(run: CrawlerRun) -> None:
+         must_be_visited = [
+-            "/",
++            "/static/",
+             "/redirect",
+             "/redirected",
+-            "/item1.html",
+-            "/item2.html",
+-            "/item999.html",
++            "/static/item1.html",
++            "/static/item2.html",
++            "/static/item999.html",
+         ]
+         urls_visited = {rp[0].url for rp in run.respplug}
+         urls_expected = {run.geturl(p) for p in must_be_visited}
+@@ -266,7 +244,11 @@ def _assert_visited_urls(run: CrawlerRun) -> None:
+     def _assert_scheduled_requests(run: CrawlerRun, count: int) -> None:
+         assert len(run.reqplug) == count
+ 
+-        paths_expected = ["/item999.html", "/item2.html", "/item1.html"]
++        paths_expected = [
++            "/static/item999.html",
++            "/static/item2.html",
++            "/static/item1.html",
++        ]
+ 
+         urls_requested = {rq[0].url for rq in run.reqplug}
+         urls_expected = {run.geturl(p) for p in paths_expected}
+@@ -288,7 +270,7 @@ def _assert_downloaded_responses(run: CrawlerRun, count: int) -> None:
+         assert len(run.reqreached) == count
+ 
+         for response, _ in run.respplug:
+-            if run.getpath(response.url) == "/item999.html":
++            if run.getpath(response.url) == "/static/item999.html":
+                 assert response.status == 404
+             if run.getpath(response.url) == "/redirect":
+                 assert response.status == 302
+@@ -334,11 +316,11 @@ def _assert_bytes_received(run: CrawlerRun) -> None:
+         assert len(run.bytes) == 9
+         for request, data in run.bytes.items():
+             joined_data = b"".join(data)
+-            if run.getpath(request.url) == "/":
++            if run.getpath(request.url) == "/static/":
+                 assert joined_data == get_testdata("test_site", "index.html")
+-            elif run.getpath(request.url) == "/item1.html":
++            elif run.getpath(request.url) == "/static/item1.html":
+                 assert joined_data == get_testdata("test_site", "item1.html")
+-            elif run.getpath(request.url) == "/item2.html":
++            elif run.getpath(request.url) == "/static/item2.html":
+                 assert joined_data == get_testdata("test_site", "item2.html")
+             elif run.getpath(request.url) == "/redirected":
+                 assert joined_data == b"Redirected here"
+@@ -353,7 +335,7 @@ def _assert_bytes_received(run: CrawlerRun) -> None:
+                     b"    </body>\n"
+                     b"</html>\n"
+                 )
+-            elif run.getpath(request.url) == "/tem999.html":
++            elif run.getpath(request.url) == "/static/item999.html":
+                 assert (
+                     joined_data == b"\n<html>\n"
+                     b"  <head><title>404 - No Such Resource</title></head>\n"
+@@ -390,8 +372,8 @@ def _assert_signals_caught(run: CrawlerRun) -> None:
+ 
+ 
+ class TestEngine(TestEngineBase):
+-    @inlineCallbacks
+-    def test_crawler(self):
++    @deferred_f_from_coro_f
++    async def test_crawler(self, mockserver: MockServer) -> None:
+         for spider in (
+             MySpider,
+             DictItemsSpider,
+@@ -399,7 +381,7 @@ def test_crawler(self):
+             DataClassItemsSpider,
+         ):
+             run = CrawlerRun(spider)
+-            yield run.run()
++            await run.run(mockserver)
+             self._assert_visited_urls(run)
+             self._assert_scheduled_requests(run, count=9)
+             self._assert_downloaded_responses(run, count=9)
+@@ -407,23 +389,25 @@ def test_crawler(self):
+             self._assert_signals_caught(run)
+             self._assert_bytes_received(run)
+ 
+-    @inlineCallbacks
+-    def test_crawler_dupefilter(self):
++    @deferred_f_from_coro_f
++    async def test_crawler_dupefilter(self, mockserver: MockServer) -> None:
+         run = CrawlerRun(DupeFilterSpider)
+-        yield run.run()
++        await run.run(mockserver)
+         self._assert_scheduled_requests(run, count=8)
+         self._assert_dropped_requests(run)
+ 
+-    @inlineCallbacks
+-    def test_crawler_itemerror(self):
++    @deferred_f_from_coro_f
++    async def test_crawler_itemerror(self, mockserver: MockServer) -> None:
+         run = CrawlerRun(ItemZeroDivisionErrorSpider)
+-        yield run.run()
++        await run.run(mockserver)
+         self._assert_items_error(run)
+ 
+-    @inlineCallbacks
+-    def test_crawler_change_close_reason_on_idle(self):
++    @deferred_f_from_coro_f
++    async def test_crawler_change_close_reason_on_idle(
++        self, mockserver: MockServer
++    ) -> None:
+         run = CrawlerRun(ChangeCloseReasonSpider)
+-        yield run.run()
++        await run.run(mockserver)
+         assert {
+             "spider": run.crawler.spider,
+             "reason": "custom_reason",
+@@ -539,11 +523,3 @@ async def start():
+         f"{scheduler.enqueued!r} != [{keep_request!r}]"
+     )
+     crawler.signals.disconnect(signal_handler, request_scheduled)
+-
+-
+-if __name__ == "__main__":
+-    from twisted.internet import reactor  # pylint: disable=ungrouped-imports
+-
+-    if len(sys.argv) > 1 and sys.argv[1] == "runserver":
+-        start_test_site(debug=True)
+-        reactor.run()
+diff --git a/tests/test_engine_loop.py b/tests/test_engine_loop.py
+index 49a800fe2c6..2bb5d2ff4f4 100644
+--- a/tests/test_engine_loop.py
++++ b/tests/test_engine_loop.py
+@@ -10,9 +10,8 @@
+ from scrapy import Request, Spider, signals
+ from scrapy.utils.defer import deferred_f_from_coro_f, maybe_deferred_to_future
+ from scrapy.utils.test import get_crawler
+-
+-from .mockserver import MockServer
+-from .test_scheduler import MemoryScheduler
++from tests.mockserver.http import MockServer
++from tests.test_scheduler import MemoryScheduler
+ 
+ if TYPE_CHECKING:
+     from scrapy.http import Response
+diff --git a/tests/test_engine_stop_download_bytes.py b/tests/test_engine_stop_download_bytes.py
+index 2662e45e1b5..1d7df70eb7e 100644
+--- a/tests/test_engine_stop_download_bytes.py
++++ b/tests/test_engine_stop_download_bytes.py
+@@ -1,7 +1,11 @@
++from __future__ import annotations
++
++from typing import TYPE_CHECKING
++
+ from testfixtures import LogCapture
+-from twisted.internet.defer import inlineCallbacks
+ 
+ from scrapy.exceptions import StopDownload
++from scrapy.utils.defer import deferred_f_from_coro_f
+ from tests.test_engine import (
+     AttrsItemsSpider,
+     CrawlerRun,
+@@ -11,6 +15,9 @@
+     TestEngineBase,
+ )
+ 
++if TYPE_CHECKING:
++    from tests.mockserver.http import MockServer
++
+ 
+ class BytesReceivedCrawlerRun(CrawlerRun):
+     def bytes_received(self, data, request, spider):
+@@ -19,8 +26,8 @@ def bytes_received(self, data, request, spider):
+ 
+ 
+ class TestBytesReceivedEngine(TestEngineBase):
+-    @inlineCallbacks
+-    def test_crawler(self):
++    @deferred_f_from_coro_f
++    async def test_crawler(self, mockserver: MockServer) -> None:
+         for spider in (
+             MySpider,
+             DictItemsSpider,
+@@ -29,12 +36,12 @@ def test_crawler(self):
+         ):
+             run = BytesReceivedCrawlerRun(spider)
+             with LogCapture() as log:
+-                yield run.run()
++                await run.run(mockserver)
+                 log.check_present(
+                     (
+                         "scrapy.core.downloader.handlers.http11",
+                         "DEBUG",
+-                        f"Download stopped for <GET http://localhost:{run.portno}/redirected> "
++                        f"Download stopped for <GET {mockserver.url('/redirected')}> "
+                         "from signal handler BytesReceivedCrawlerRun.bytes_received",
+                     )
+                 )
+@@ -42,7 +49,7 @@ def test_crawler(self):
+                     (
+                         "scrapy.core.downloader.handlers.http11",
+                         "DEBUG",
+-                        f"Download stopped for <GET http://localhost:{run.portno}/> "
++                        f"Download stopped for <GET {mockserver.url('/static/')}> "
+                         "from signal handler BytesReceivedCrawlerRun.bytes_received",
+                     )
+                 )
+@@ -50,7 +57,7 @@ def test_crawler(self):
+                     (
+                         "scrapy.core.downloader.handlers.http11",
+                         "DEBUG",
+-                        f"Download stopped for <GET http://localhost:{run.portno}/numbers> "
++                        f"Download stopped for <GET {mockserver.url('/numbers')}> "
+                         "from signal handler BytesReceivedCrawlerRun.bytes_received",
+                     )
+                 )
+diff --git a/tests/test_engine_stop_download_headers.py b/tests/test_engine_stop_download_headers.py
+index 14271592700..c01413d4e7d 100644
+--- a/tests/test_engine_stop_download_headers.py
++++ b/tests/test_engine_stop_download_headers.py
+@@ -1,7 +1,11 @@
++from __future__ import annotations
++
++from typing import TYPE_CHECKING
++
+ from testfixtures import LogCapture
+-from twisted.internet.defer import inlineCallbacks
+ 
+ from scrapy.exceptions import StopDownload
++from scrapy.utils.defer import deferred_f_from_coro_f
+ from tests.test_engine import (
+     AttrsItemsSpider,
+     CrawlerRun,
+@@ -11,6 +15,9 @@
+     TestEngineBase,
+ )
+ 
++if TYPE_CHECKING:
++    from tests.mockserver.http import MockServer
++
+ 
+ class HeadersReceivedCrawlerRun(CrawlerRun):
+     def headers_received(self, headers, body_length, request, spider):
+@@ -19,8 +26,8 @@ def headers_received(self, headers, body_length, request, spider):
+ 
+ 
+ class TestHeadersReceivedEngine(TestEngineBase):
+-    @inlineCallbacks
+-    def test_crawler(self):
++    @deferred_f_from_coro_f
++    async def test_crawler(self, mockserver: MockServer) -> None:
+         for spider in (
+             MySpider,
+             DictItemsSpider,
+@@ -29,12 +36,12 @@ def test_crawler(self):
+         ):
+             run = HeadersReceivedCrawlerRun(spider)
+             with LogCapture() as log:
+-                yield run.run()
++                await run.run(mockserver)
+                 log.check_present(
+                     (
+                         "scrapy.core.downloader.handlers.http11",
+                         "DEBUG",
+-                        f"Download stopped for <GET http://localhost:{run.portno}/redirected> from"
++                        f"Download stopped for <GET {mockserver.url('/redirected')}> from"
+                         " signal handler HeadersReceivedCrawlerRun.headers_received",
+                     )
+                 )
+@@ -42,7 +49,7 @@ def test_crawler(self):
+                     (
+                         "scrapy.core.downloader.handlers.http11",
+                         "DEBUG",
+-                        f"Download stopped for <GET http://localhost:{run.portno}/> from signal"
++                        f"Download stopped for <GET {mockserver.url('/static/')}> from signal"
+                         " handler HeadersReceivedCrawlerRun.headers_received",
+                     )
+                 )
+@@ -50,7 +57,7 @@ def test_crawler(self):
+                     (
+                         "scrapy.core.downloader.handlers.http11",
+                         "DEBUG",
+-                        f"Download stopped for <GET http://localhost:{run.portno}/numbers> from"
++                        f"Download stopped for <GET {mockserver.url('/numbers')}> from"
+                         " signal handler HeadersReceivedCrawlerRun.headers_received",
+                     )
+                 )
+@@ -66,7 +73,7 @@ def _assert_bytes_received(run: CrawlerRun) -> None:
+ 
+     @staticmethod
+     def _assert_visited_urls(run: CrawlerRun) -> None:
+-        must_be_visited = ["/", "/redirect", "/redirected"]
++        must_be_visited = ["/static/", "/redirect", "/redirected"]
+         urls_visited = {rp[0].url for rp in run.respplug}
+         urls_expected = {run.geturl(p) for p in must_be_visited}
+         assert urls_expected <= urls_visited, (
+diff --git a/tests/test_feedexport.py b/tests/test_feedexport.py
+index 309466b9099..c5bd1b17275 100644
+--- a/tests/test_feedexport.py
++++ b/tests/test_feedexport.py
+@@ -54,7 +54,8 @@
+ from scrapy.utils.defer import deferred_f_from_coro_f, maybe_deferred_to_future
+ from scrapy.utils.python import to_unicode
+ from scrapy.utils.test import get_crawler
+-from tests.mockserver import MockFTPServer, MockServer
++from tests.mockserver.ftp import MockFTPServer
++from tests.mockserver.http import MockServer
+ from tests.spiders import ItemSpider
+ 
+ if TYPE_CHECKING:
+diff --git a/tests/test_http2_client_protocol.py b/tests/test_http2_client_protocol.py
+index 77d328333de..3247da61bf1 100644
+--- a/tests/test_http2_client_protocol.py
++++ b/tests/test_http2_client_protocol.py
+@@ -35,7 +35,8 @@
+     deferred_from_coro,
+     maybe_deferred_to_future,
+ )
+-from tests.mockserver import LeafResource, Status, ssl_context_factory
++from tests.mockserver.http_resources import LeafResource, Status
++from tests.mockserver.utils import ssl_context_factory
+ 
+ if TYPE_CHECKING:
+     from collections.abc import AsyncGenerator, Coroutine, Generator
+diff --git a/tests/test_logformatter.py b/tests/test_logformatter.py
+index 4cc48ca514e..f21e52e52ab 100644
+--- a/tests/test_logformatter.py
++++ b/tests/test_logformatter.py
+@@ -11,7 +11,7 @@
+ from scrapy.logformatter import LogFormatter
+ from scrapy.spiders import Spider
+ from scrapy.utils.test import get_crawler
+-from tests.mockserver import MockServer
++from tests.mockserver.http import MockServer
+ from tests.spiders import ItemSpider
+ 
+ 
+diff --git a/tests/test_pipeline_crawl.py b/tests/test_pipeline_crawl.py
+index 5f758a7636e..494833fe1c0 100644
+--- a/tests/test_pipeline_crawl.py
++++ b/tests/test_pipeline_crawl.py
+@@ -13,7 +13,7 @@
+ from scrapy import Spider, signals
+ from scrapy.utils.misc import load_object
+ from scrapy.utils.test import get_crawler
+-from tests.mockserver import MockServer
++from tests.mockserver.http import MockServer
+ from tests.spiders import SimpleSpider
+ 
+ if TYPE_CHECKING:
+@@ -149,7 +149,7 @@ def test_download_media(self):
+         crawler = self._create_crawler(MediaDownloadSpider)
+         with LogCapture() as log:
+             yield crawler.crawl(
+-                self.mockserver.url("/files/images/"),
++                self.mockserver.url("/static/files/images/"),
+                 media_key=self.media_key,
+                 media_urls_key=self.media_urls_key,
+             )
+@@ -160,7 +160,7 @@ def test_download_media_wrong_urls(self):
+         crawler = self._create_crawler(BrokenLinksMediaDownloadSpider)
+         with LogCapture() as log:
+             yield crawler.crawl(
+-                self.mockserver.url("/files/images/"),
++                self.mockserver.url("/static/files/images/"),
+                 media_key=self.media_key,
+                 media_urls_key=self.media_urls_key,
+             )
+@@ -171,7 +171,7 @@ def test_download_media_redirected_default_failure(self):
+         crawler = self._create_crawler(RedirectedMediaDownloadSpider)
+         with LogCapture() as log:
+             yield crawler.crawl(
+-                self.mockserver.url("/files/images/"),
++                self.mockserver.url("/static/files/images/"),
+                 media_key=self.media_key,
+                 media_urls_key=self.media_urls_key,
+                 mockserver=self.mockserver,
+@@ -187,7 +187,7 @@ def test_download_media_redirected_allowed(self):
+         crawler = self._create_crawler(RedirectedMediaDownloadSpider, settings)
+         with LogCapture() as log:
+             yield crawler.crawl(
+-                self.mockserver.url("/files/images/"),
++                self.mockserver.url("/static/files/images/"),
+                 media_key=self.media_key,
+                 media_urls_key=self.media_urls_key,
+                 mockserver=self.mockserver,
+@@ -210,7 +210,7 @@ def file_path(self, request, response=None, info=None, *, item=None):
+         crawler = self._create_crawler(MediaDownloadSpider, settings)
+         with LogCapture() as log:
+             yield crawler.crawl(
+-                self.mockserver.url("/files/images/"),
++                self.mockserver.url("/static/files/images/"),
+                 media_key=self.media_key,
+                 media_urls_key=self.media_urls_key,
+                 mockserver=self.mockserver,
+diff --git a/tests/test_pipeline_files.py b/tests/test_pipeline_files.py
+index 424236401e8..a4cdaa5f85c 100644
+--- a/tests/test_pipeline_files.py
++++ b/tests/test_pipeline_files.py
+@@ -30,7 +30,7 @@
+     S3FilesStore,
+ )
+ from scrapy.utils.test import get_crawler
+-from tests.mockserver import MockFTPServer
++from tests.mockserver.ftp import MockFTPServer
+ 
+ from .test_pipeline_media import _mocked_download_func
+ 
+diff --git a/tests/test_pipelines.py b/tests/test_pipelines.py
+index 4df9495a57d..064033f017c 100644
+--- a/tests/test_pipelines.py
++++ b/tests/test_pipelines.py
+@@ -6,7 +6,7 @@
+ from scrapy import Request, Spider, signals
+ from scrapy.utils.defer import deferred_to_future, maybe_deferred_to_future
+ from scrapy.utils.test import get_crawler, get_from_asyncio_queue
+-from tests.mockserver import MockServer
++from tests.mockserver.http import MockServer
+ 
+ 
+ class SimplePipeline:
+diff --git a/tests/test_proxy_connect.py b/tests/test_proxy_connect.py
+index 400dfa4ba4c..f9874f821aa 100644
+--- a/tests/test_proxy_connect.py
++++ b/tests/test_proxy_connect.py
+@@ -12,7 +12,7 @@
+ 
+ from scrapy.http import Request
+ from scrapy.utils.test import get_crawler
+-from tests.mockserver import MockServer
++from tests.mockserver.http import MockServer
+ from tests.spiders import SimpleSpider, SingleRequestSpider
+ 
+ 
+diff --git a/tests/test_request_attribute_binding.py b/tests/test_request_attribute_binding.py
+index c0606ac3548..de0f0d89523 100644
+--- a/tests/test_request_attribute_binding.py
++++ b/tests/test_request_attribute_binding.py
+@@ -4,7 +4,7 @@
+ from scrapy import Request, signals
+ from scrapy.http.response import Response
+ from scrapy.utils.test import get_crawler
+-from tests.mockserver import MockServer
++from tests.mockserver.http import MockServer
+ from tests.spiders import SingleRequestSpider
+ 
+ OVERRIDDEN_URL = "https://example.org"
+diff --git a/tests/test_request_cb_kwargs.py b/tests/test_request_cb_kwargs.py
+index 34a07a3a1a4..041fc958853 100644
+--- a/tests/test_request_cb_kwargs.py
++++ b/tests/test_request_cb_kwargs.py
+@@ -3,7 +3,7 @@
+ 
+ from scrapy.http import Request
+ from scrapy.utils.test import get_crawler
+-from tests.mockserver import MockServer
++from tests.mockserver.http import MockServer
+ from tests.spiders import MockServerSpider
+ 
+ 
+diff --git a/tests/test_request_left.py b/tests/test_request_left.py
+index 451125932aa..721bfc76ea2 100644
+--- a/tests/test_request_left.py
++++ b/tests/test_request_left.py
+@@ -3,7 +3,7 @@
+ from scrapy.signals import request_left_downloader
+ from scrapy.spiders import Spider
+ from scrapy.utils.test import get_crawler
+-from tests.mockserver import MockServer
++from tests.mockserver.http import MockServer
+ 
+ 
+ class SignalCatcherSpider(Spider):
+diff --git a/tests/test_scheduler.py b/tests/test_scheduler.py
+index 9aed270e33f..ef03771c3a5 100644
+--- a/tests/test_scheduler.py
++++ b/tests/test_scheduler.py
+@@ -18,7 +18,7 @@
+ from scrapy.utils.httpobj import urlparse_cached
+ from scrapy.utils.misc import load_object
+ from scrapy.utils.test import get_crawler
+-from tests.mockserver import MockServer
++from tests.mockserver.http import MockServer
+ 
+ 
+ class MemoryScheduler(BaseScheduler):
+diff --git a/tests/test_scheduler_base.py b/tests/test_scheduler_base.py
+index f85a754c2f7..5d31a988636 100644
+--- a/tests/test_scheduler_base.py
++++ b/tests/test_scheduler_base.py
+@@ -13,7 +13,7 @@
+ from scrapy.utils.httpobj import urlparse_cached
+ from scrapy.utils.request import fingerprint
+ from scrapy.utils.test import get_crawler
+-from tests.mockserver import MockServer
++from tests.mockserver.http import MockServer
+ 
+ PATHS = ["/a", "/b", "/c"]
+ URLS = [urljoin("https://example.org", p) for p in PATHS]
+diff --git a/tests/test_signals.py b/tests/test_signals.py
+index dcbd0fb3564..2e4f9ffb1e4 100644
+--- a/tests/test_signals.py
++++ b/tests/test_signals.py
+@@ -4,7 +4,7 @@
+ from scrapy import Request, Spider, signals
+ from scrapy.utils.defer import deferred_f_from_coro_f, maybe_deferred_to_future
+ from scrapy.utils.test import get_crawler, get_from_asyncio_queue
+-from tests.mockserver import MockServer
++from tests.mockserver.http import MockServer
+ 
+ 
+ class ItemSpider(Spider):
+diff --git a/tests/test_spidermiddleware_httperror.py b/tests/test_spidermiddleware_httperror.py
+index 5289335e3bf..b41ae986ed2 100644
+--- a/tests/test_spidermiddleware_httperror.py
++++ b/tests/test_spidermiddleware_httperror.py
+@@ -11,7 +11,7 @@
+ from scrapy.spidermiddlewares.httperror import HttpError, HttpErrorMiddleware
+ from scrapy.spiders import Spider
+ from scrapy.utils.test import get_crawler
+-from tests.mockserver import MockServer
++from tests.mockserver.http import MockServer
+ from tests.spiders import MockServerSpider
+ 
+ 
+diff --git a/tests/test_spidermiddleware_output_chain.py b/tests/test_spidermiddleware_output_chain.py
+index d8af25b3aaf..3f2b2057b87 100644
+--- a/tests/test_spidermiddleware_output_chain.py
++++ b/tests/test_spidermiddleware_output_chain.py
+@@ -3,7 +3,7 @@
+ from scrapy import Request, Spider
+ from scrapy.utils.defer import deferred_f_from_coro_f, maybe_deferred_to_future
+ from scrapy.utils.test import get_crawler
+-from tests.mockserver import MockServer
++from tests.mockserver.http import MockServer
+ 
+ 
+ class LogExceptionMiddleware:
+diff --git a/tests/test_webclient.py b/tests/test_webclient.py
+index d441a03a9ee..963cb606eb7 100644
+--- a/tests/test_webclient.py
++++ b/tests/test_webclient.py
+@@ -22,15 +22,12 @@
+ from scrapy.utils.misc import build_from_crawler
+ from scrapy.utils.python import to_bytes, to_unicode
+ from scrapy.utils.test import get_crawler
+-from tests.mockserver import (
+-    BrokenDownloadResource,
+-    ErrorResource,
++from tests.mockserver.http_resources import (
+     ForeverTakingResource,
+     HostHeaderResource,
+-    NoLengthResource,
+     PayloadResource,
+-    ssl_context_factory,
+ )
++from tests.mockserver.utils import ssl_context_factory
+ from tests.test_core_downloader import TestContextFactoryBase
+ 
+ 
+@@ -195,6 +192,27 @@ def render(self, request):
+         return body.encode(self.out_encoding)
+ 
+ 
++class BrokenDownloadResource(resource.Resource):
++    def render(self, request):
++        # only sends 3 bytes even though it claims to send 5
++        request.setHeader(b"content-length", b"5")
++        request.write(b"abc")
++        return b""
++
++
++class ErrorResource(resource.Resource):
++    def render(self, request):
++        request.setResponseCode(401)
++        if request.args.get(b"showlength"):
++            request.setHeader(b"content-length", b"0")
++        return b""
++
++
++class NoLengthResource(resource.Resource):
++    def render(self, request):
++        return b"nolength"
++
++
+ @pytest.mark.filterwarnings("ignore::scrapy.exceptions.ScrapyDeprecationWarning")
+ class TestWebClient:
+     def _listen(self, site):
+diff --git a/tests/utils/__init__.py b/tests/utils/__init__.py
+index e5e56f414e7..a81f2d1a232 100644
+--- a/tests/utils/__init__.py
++++ b/tests/utils/__init__.py
+@@ -1,3 +1,6 @@
++import os
++from pathlib import Path
++
+ from twisted.internet.defer import Deferred
+ 
+ 
+@@ -7,3 +10,13 @@ def twisted_sleep(seconds):
+     d = Deferred()
+     reactor.callLater(seconds, d.callback, None)
+     return d
++
++
++def get_script_run_env() -> dict[str, str]:
++    """Return a OS environment dict suitable to run scripts shipped with tests."""
++
++    tests_path = Path(__file__).parent.parent
++    pythonpath = str(tests_path) + os.pathsep + os.environ.get("PYTHONPATH", "")
++    env = os.environ.copy()
++    env["PYTHONPATH"] = pythonpath
++    return env

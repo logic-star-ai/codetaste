@@ -1,0 +1,2120 @@
+diff --git a/crates/bevy_ecs/src/bundle.rs b/crates/bevy_ecs/src/bundle.rs
+index 5075642da6d82..8dacc98a911d7 100644
+--- a/crates/bevy_ecs/src/bundle.rs
++++ b/crates/bevy_ecs/src/bundle.rs
+@@ -77,8 +77,6 @@ use core::{any::TypeId, ptr::NonNull};
+ /// Additionally, [Tuples](`tuple`) of bundles are also [`Bundle`] (with up to 15 bundles).
+ /// These bundles contain the items of the 'inner' bundles.
+ /// This is a convenient shorthand which is primarily used when spawning entities.
+-/// For example, spawning an entity using the bundle `(SpriteBundle {...}, PlayerMarker)`
+-/// will spawn an entity with components required for a 2d sprite, and the `PlayerMarker` component.
+ ///
+ /// [`unit`], otherwise known as [`()`](`unit`), is a [`Bundle`] containing no components (since it
+ /// can also be considered as the empty tuple).
+diff --git a/crates/bevy_sprite/src/bundle.rs b/crates/bevy_sprite/src/bundle.rs
+index 8d4cf1365f5de..fbbdf2efe372c 100644
+--- a/crates/bevy_sprite/src/bundle.rs
++++ b/crates/bevy_sprite/src/bundle.rs
+@@ -1,3 +1,4 @@
++#![expect(deprecated)]
+ use crate::Sprite;
+ use bevy_asset::Handle;
+ use bevy_ecs::bundle::Bundle;
+@@ -16,6 +17,10 @@ use bevy_transform::components::{GlobalTransform, Transform};
+ /// - [`ImageScaleMode`](crate::ImageScaleMode) to enable either slicing or tiling of the texture
+ /// - [`TextureAtlas`](crate::TextureAtlas) to draw a specific section of the texture
+ #[derive(Bundle, Clone, Debug, Default)]
++#[deprecated(
++    since = "0.15.0",
++    note = "Use the `Sprite` component instead. Inserting it will now also insert `Transform` and `Visibility` automatically."
++)]
+ pub struct SpriteBundle {
+     /// Specifies the rendering properties of the sprite, such as color tint and flip.
+     pub sprite: Sprite,
+diff --git a/crates/bevy_sprite/src/lib.rs b/crates/bevy_sprite/src/lib.rs
+index d1067cf6a6915..62634f859910a 100644
+--- a/crates/bevy_sprite/src/lib.rs
++++ b/crates/bevy_sprite/src/lib.rs
+@@ -185,9 +185,9 @@ pub fn calculate_bounds_2d(
+     atlases: Res<Assets<TextureAtlasLayout>>,
+     meshes_without_aabb: Query<(Entity, &Mesh2d), (Without<Aabb>, Without<NoFrustumCulling>)>,
+     sprites_to_recalculate_aabb: Query<
+-        (Entity, &Sprite, &Handle<Image>, Option<&TextureAtlas>),
++        (Entity, &Sprite),
+         (
+-            Or<(Without<Aabb>, Changed<Sprite>, Changed<TextureAtlas>)>,
++            Or<(Without<Aabb>, Changed<Sprite>)>,
+             Without<NoFrustumCulling>,
+         ),
+     >,
+@@ -199,13 +199,13 @@ pub fn calculate_bounds_2d(
+             }
+         }
+     }
+-    for (entity, sprite, texture_handle, atlas) in &sprites_to_recalculate_aabb {
++    for (entity, sprite) in &sprites_to_recalculate_aabb {
+         if let Some(size) = sprite
+             .custom_size
+             .or_else(|| sprite.rect.map(|rect| rect.size()))
+-            .or_else(|| match atlas {
++            .or_else(|| match &sprite.texture_atlas {
+                 // We default to the texture size for regular sprites
+-                None => images.get(texture_handle).map(Image::size_f32),
++                None => images.get(&sprite.image).map(Image::size_f32),
+                 // We default to the drawn rect for atlas sprites
+                 Some(atlas) => atlas
+                     .texture_rect(&atlases)
+@@ -259,10 +259,7 @@ mod test {
+         app.add_systems(Update, calculate_bounds_2d);
+ 
+         // Add entities
+-        let entity = app
+-            .world_mut()
+-            .spawn((Sprite::default(), image_handle))
+-            .id();
++        let entity = app.world_mut().spawn(Sprite::from_image(image_handle)).id();
+ 
+         // Verify that the entity does not have an AABB
+         assert!(!app
+diff --git a/crates/bevy_sprite/src/picking_backend.rs b/crates/bevy_sprite/src/picking_backend.rs
+index f9f906536c722..c2f3344b52f1e 100644
+--- a/crates/bevy_sprite/src/picking_backend.rs
++++ b/crates/bevy_sprite/src/picking_backend.rs
+@@ -4,7 +4,7 @@
+ 
+ use core::cmp::Reverse;
+ 
+-use crate::{Sprite, TextureAtlas, TextureAtlasLayout};
++use crate::{Sprite, TextureAtlasLayout};
+ use bevy_app::prelude::*;
+ use bevy_asset::prelude::*;
+ use bevy_ecs::prelude::*;
+@@ -32,8 +32,6 @@ pub fn sprite_picking(
+     sprite_query: Query<(
+         Entity,
+         &Sprite,
+-        Option<&TextureAtlas>,
+-        &Handle<Image>,
+         &GlobalTransform,
+         Option<&PickingBehavior>,
+         &ViewVisibility,
+@@ -42,9 +40,9 @@ pub fn sprite_picking(
+ ) {
+     let mut sorted_sprites: Vec<_> = sprite_query
+         .iter()
+-        .filter(|x| !x.4.affine().is_nan())
++        .filter(|x| !x.2.affine().is_nan())
+         .collect();
+-    sorted_sprites.sort_by_key(|x| Reverse(FloatOrd(x.4.translation().z)));
++    sorted_sprites.sort_by_key(|x| Reverse(FloatOrd(x.2.translation().z)));
+ 
+     let primary_window = primary_window.get_single().ok();
+ 
+@@ -77,82 +75,79 @@ pub fn sprite_picking(
+             .iter()
+             .copied()
+             .filter(|(.., visibility)| visibility.get())
+-            .filter_map(
+-                |(entity, sprite, atlas, image, sprite_transform, picking_behavior, ..)| {
+-                    if blocked {
+-                        return None;
+-                    }
+-
+-                    // Hit box in sprite coordinate system
+-                    let extents = match (sprite.custom_size, atlas) {
+-                        (Some(custom_size), _) => custom_size,
+-                        (None, None) => images.get(image)?.size().as_vec2(),
+-                        (None, Some(atlas)) => texture_atlas_layout
+-                            .get(&atlas.layout)
+-                            .and_then(|layout| layout.textures.get(atlas.index))
+-                            // Dropped atlas layouts and indexes out of bounds are rendered as a sprite
+-                            .map_or(images.get(image)?.size().as_vec2(), |rect| {
+-                                rect.size().as_vec2()
+-                            }),
+-                    };
+-                    let anchor = sprite.anchor.as_vec();
+-                    let center = -anchor * extents;
+-                    let rect = Rect::from_center_half_size(center, extents / 2.0);
+-
+-                    // Transform cursor line segment to sprite coordinate system
+-                    let world_to_sprite = sprite_transform.affine().inverse();
+-                    let cursor_start_sprite =
+-                        world_to_sprite.transform_point3(cursor_ray_world.origin);
+-                    let cursor_end_sprite = world_to_sprite.transform_point3(cursor_ray_end);
+-
+-                    // Find where the cursor segment intersects the plane Z=0 (which is the sprite's
+-                    // plane in sprite-local space). It may not intersect if, for example, we're
+-                    // viewing the sprite side-on
+-                    if cursor_start_sprite.z == cursor_end_sprite.z {
+-                        // Cursor ray is parallel to the sprite and misses it
+-                        return None;
+-                    }
+-                    let lerp_factor =
+-                        f32::inverse_lerp(cursor_start_sprite.z, cursor_end_sprite.z, 0.0);
+-                    if !(0.0..=1.0).contains(&lerp_factor) {
+-                        // Lerp factor is out of range, meaning that while an infinite line cast by
+-                        // the cursor would intersect the sprite, the sprite is not between the
+-                        // camera's near and far planes
+-                        return None;
+-                    }
+-                    // Otherwise we can interpolate the xy of the start and end positions by the
+-                    // lerp factor to get the cursor position in sprite space!
+-                    let cursor_pos_sprite = cursor_start_sprite
+-                        .lerp(cursor_end_sprite, lerp_factor)
+-                        .xy();
+-
+-                    let is_cursor_in_sprite = rect.contains(cursor_pos_sprite);
+-
+-                    blocked = is_cursor_in_sprite
+-                        && picking_behavior.map(|p| p.should_block_lower) != Some(false);
+-
+-                    is_cursor_in_sprite.then(|| {
+-                        let hit_pos_world =
+-                            sprite_transform.transform_point(cursor_pos_sprite.extend(0.0));
+-                        // Transform point from world to camera space to get the Z distance
+-                        let hit_pos_cam = cam_transform
+-                            .affine()
+-                            .inverse()
+-                            .transform_point3(hit_pos_world);
+-                        // HitData requires a depth as calculated from the camera's near clipping plane
+-                        let depth = -cam_ortho.near - hit_pos_cam.z;
+-                        (
+-                            entity,
+-                            HitData::new(
+-                                cam_entity,
+-                                depth,
+-                                Some(hit_pos_world),
+-                                Some(*sprite_transform.back()),
+-                            ),
+-                        )
+-                    })
+-                },
+-            )
++            .filter_map(|(entity, sprite, sprite_transform, picking_behavior, ..)| {
++                if blocked {
++                    return None;
++                }
++
++                // Hit box in sprite coordinate system
++                let extents = match (sprite.custom_size, &sprite.texture_atlas) {
++                    (Some(custom_size), _) => custom_size,
++                    (None, None) => images.get(&sprite.image)?.size().as_vec2(),
++                    (None, Some(atlas)) => texture_atlas_layout
++                        .get(&atlas.layout)
++                        .and_then(|layout| layout.textures.get(atlas.index))
++                        // Dropped atlas layouts and indexes out of bounds are rendered as a sprite
++                        .map_or(images.get(&sprite.image)?.size().as_vec2(), |rect| {
++                            rect.size().as_vec2()
++                        }),
++                };
++                let anchor = sprite.anchor.as_vec();
++                let center = -anchor * extents;
++                let rect = Rect::from_center_half_size(center, extents / 2.0);
++
++                // Transform cursor line segment to sprite coordinate system
++                let world_to_sprite = sprite_transform.affine().inverse();
++                let cursor_start_sprite = world_to_sprite.transform_point3(cursor_ray_world.origin);
++                let cursor_end_sprite = world_to_sprite.transform_point3(cursor_ray_end);
++
++                // Find where the cursor segment intersects the plane Z=0 (which is the sprite's
++                // plane in sprite-local space). It may not intersect if, for example, we're
++                // viewing the sprite side-on
++                if cursor_start_sprite.z == cursor_end_sprite.z {
++                    // Cursor ray is parallel to the sprite and misses it
++                    return None;
++                }
++                let lerp_factor =
++                    f32::inverse_lerp(cursor_start_sprite.z, cursor_end_sprite.z, 0.0);
++                if !(0.0..=1.0).contains(&lerp_factor) {
++                    // Lerp factor is out of range, meaning that while an infinite line cast by
++                    // the cursor would intersect the sprite, the sprite is not between the
++                    // camera's near and far planes
++                    return None;
++                }
++                // Otherwise we can interpolate the xy of the start and end positions by the
++                // lerp factor to get the cursor position in sprite space!
++                let cursor_pos_sprite = cursor_start_sprite
++                    .lerp(cursor_end_sprite, lerp_factor)
++                    .xy();
++
++                let is_cursor_in_sprite = rect.contains(cursor_pos_sprite);
++
++                blocked = is_cursor_in_sprite
++                    && picking_behavior.map(|p| p.should_block_lower) != Some(false);
++
++                is_cursor_in_sprite.then(|| {
++                    let hit_pos_world =
++                        sprite_transform.transform_point(cursor_pos_sprite.extend(0.0));
++                    // Transform point from world to camera space to get the Z distance
++                    let hit_pos_cam = cam_transform
++                        .affine()
++                        .inverse()
++                        .transform_point3(hit_pos_world);
++                    // HitData requires a depth as calculated from the camera's near clipping plane
++                    let depth = -cam_ortho.near - hit_pos_cam.z;
++                    (
++                        entity,
++                        HitData::new(
++                            cam_entity,
++                            depth,
++                            Some(hit_pos_world),
++                            Some(*sprite_transform.back()),
++                        ),
++                    )
++                })
++            })
+             .collect();
+ 
+         let order = camera.order as f32;
+diff --git a/crates/bevy_sprite/src/render/mod.rs b/crates/bevy_sprite/src/render/mod.rs
+index d3bef973748b4..c3e9ba9b5b96c 100644
+--- a/crates/bevy_sprite/src/render/mod.rs
++++ b/crates/bevy_sprite/src/render/mod.rs
+@@ -1,10 +1,10 @@
+ use core::ops::Range;
+ 
+ use crate::{
+-    texture_atlas::{TextureAtlas, TextureAtlasLayout},
+-    ComputedTextureSlices, Sprite, WithSprite, SPRITE_SHADER_HANDLE,
++    texture_atlas::TextureAtlasLayout, ComputedTextureSlices, Sprite, WithSprite,
++    SPRITE_SHADER_HANDLE,
+ };
+-use bevy_asset::{AssetEvent, AssetId, Assets, Handle};
++use bevy_asset::{AssetEvent, AssetId, Assets};
+ use bevy_color::{ColorToComponents, LinearRgba};
+ use bevy_core_pipeline::{
+     core_2d::{Transparent2d, CORE_2D_DEPTH_FORMAT},
+@@ -377,15 +377,12 @@ pub fn extract_sprites(
+             &ViewVisibility,
+             &Sprite,
+             &GlobalTransform,
+-            &Handle<Image>,
+-            Option<&TextureAtlas>,
+             Option<&ComputedTextureSlices>,
+         )>,
+     >,
+ ) {
+     extracted_sprites.sprites.clear();
+-    for (original_entity, entity, view_visibility, sprite, transform, handle, sheet, slices) in
+-        sprite_query.iter()
++    for (original_entity, entity, view_visibility, sprite, transform, slices) in sprite_query.iter()
+     {
+         if !view_visibility.get() {
+             continue;
+@@ -394,12 +391,14 @@ pub fn extract_sprites(
+         if let Some(slices) = slices {
+             extracted_sprites.sprites.extend(
+                 slices
+-                    .extract_sprites(transform, original_entity, sprite, handle)
++                    .extract_sprites(transform, original_entity, sprite)
+                     .map(|e| (commands.spawn(TemporaryRenderEntity).id(), e)),
+             );
+         } else {
+-            let atlas_rect =
+-                sheet.and_then(|s| s.texture_rect(&texture_atlases).map(|r| r.as_rect()));
++            let atlas_rect = sprite
++                .texture_atlas
++                .as_ref()
++                .and_then(|s| s.texture_rect(&texture_atlases).map(|r| r.as_rect()));
+             let rect = match (atlas_rect, sprite.rect) {
+                 (None, None) => None,
+                 (None, Some(sprite_rect)) => Some(sprite_rect),
+@@ -423,7 +422,7 @@ pub fn extract_sprites(
+                     custom_size: sprite.custom_size,
+                     flip_x: sprite.flip_x,
+                     flip_y: sprite.flip_y,
+-                    image_handle_id: handle.id(),
++                    image_handle_id: sprite.image.id(),
+                     anchor: sprite.anchor.as_vec(),
+                     original_entity: Some(original_entity),
+                 },
+diff --git a/crates/bevy_sprite/src/sprite.rs b/crates/bevy_sprite/src/sprite.rs
+index 13e37ee56cadd..f6a4da9949442 100644
+--- a/crates/bevy_sprite/src/sprite.rs
++++ b/crates/bevy_sprite/src/sprite.rs
+@@ -1,16 +1,22 @@
++use bevy_asset::Handle;
+ use bevy_color::Color;
+ use bevy_ecs::{component::Component, reflect::ReflectComponent};
+ use bevy_math::{Rect, Vec2};
+ use bevy_reflect::{std_traits::ReflectDefault, Reflect};
++use bevy_render::{sync_world::SyncToRenderWorld, texture::Image, view::Visibility};
++use bevy_transform::components::Transform;
+ 
+-use crate::TextureSlicer;
++use crate::{TextureAtlas, TextureSlicer};
+ 
+-/// Specifies the rendering properties of a sprite.
+-///
+-/// This is commonly used as a component within [`SpriteBundle`](crate::bundle::SpriteBundle).
++/// Describes a sprite to be rendered to a 2D camera
+ #[derive(Component, Debug, Default, Clone, Reflect)]
++#[require(Transform, Visibility, SyncToRenderWorld)]
+ #[reflect(Component, Default, Debug)]
+ pub struct Sprite {
++    /// The image used to render the sprite
++    pub image: Handle<Image>,
++    /// The (optional) texture atlas used to render the sprite
++    pub texture_atlas: Option<TextureAtlas>,
+     /// The sprite's color tint
+     pub color: Color,
+     /// Flip the sprite along the `X` axis
+@@ -21,9 +27,9 @@ pub struct Sprite {
+     /// of the sprite's image
+     pub custom_size: Option<Vec2>,
+     /// An optional rectangle representing the region of the sprite's image to render, instead of rendering
+-    /// the full image. This is an easy one-off alternative to using a [`TextureAtlas`](crate::TextureAtlas).
++    /// the full image. This is an easy one-off alternative to using a [`TextureAtlas`].
+     ///
+-    /// When used with a [`TextureAtlas`](crate::TextureAtlas), the rect
++    /// When used with a [`TextureAtlas`], the rect
+     /// is offset by the atlas's minimal (top-left) corner position.
+     pub rect: Option<Rect>,
+     /// [`Anchor`] point of the sprite in the world
+@@ -38,6 +44,38 @@ impl Sprite {
+             ..Default::default()
+         }
+     }
++
++    /// Create a sprite from an image
++    pub fn from_image(image: Handle<Image>) -> Self {
++        Self {
++            image,
++            ..Default::default()
++        }
++    }
++
++    /// Create a sprite from an image, with an associated texture atlas
++    pub fn from_atlas_image(image: Handle<Image>, atlas: TextureAtlas) -> Self {
++        Self {
++            image,
++            texture_atlas: Some(atlas),
++            ..Default::default()
++        }
++    }
++
++    /// Create a sprite from a solid color
++    pub fn from_color(color: impl Into<Color>, size: Vec2) -> Self {
++        Self {
++            color: color.into(),
++            custom_size: Some(size),
++            ..Default::default()
++        }
++    }
++}
++
++impl From<Handle<Image>> for Sprite {
++    fn from(image: Handle<Image>) -> Self {
++        Self::from_image(image)
++    }
+ }
+ 
+ /// Controls how the image is altered when scaled.
+@@ -58,7 +96,7 @@ pub enum ImageScaleMode {
+     },
+ }
+ 
+-/// How a sprite is positioned relative to its [`Transform`](bevy_transform::components::Transform).
++/// How a sprite is positioned relative to its [`Transform`].
+ /// It defaults to `Anchor::Center`.
+ #[derive(Component, Debug, Clone, Copy, PartialEq, Default, Reflect)]
+ #[reflect(Component, Default, Debug, PartialEq)]
+diff --git a/crates/bevy_sprite/src/texture_atlas_builder.rs b/crates/bevy_sprite/src/texture_atlas_builder.rs
+index e99dd20efc3f8..2428fd4b15298 100644
+--- a/crates/bevy_sprite/src/texture_atlas_builder.rs
++++ b/crates/bevy_sprite/src/texture_atlas_builder.rs
+@@ -190,10 +190,7 @@ impl<'a> TextureAtlasBuilder<'a> {
+     ///     let texture = textures.add(texture);
+     ///     let layout = layouts.add(atlas_layout);
+     ///     // Spawn your sprite
+-    ///     commands.spawn((
+-    ///         SpriteBundle { texture, ..Default::default() },
+-    ///         TextureAtlas::from(layout),
+-    ///     ));
++    ///     commands.spawn(Sprite::from_atlas_image(texture, TextureAtlas::from(layout)));
+     /// }
+     /// ```
+     ///
+diff --git a/crates/bevy_sprite/src/texture_slice/computed_slices.rs b/crates/bevy_sprite/src/texture_slice/computed_slices.rs
+index c49987e1bb93a..25b23c7025225 100644
+--- a/crates/bevy_sprite/src/texture_slice/computed_slices.rs
++++ b/crates/bevy_sprite/src/texture_slice/computed_slices.rs
+@@ -1,7 +1,7 @@
+-use crate::{ExtractedSprite, ImageScaleMode, Sprite, TextureAtlas, TextureAtlasLayout};
++use crate::{ExtractedSprite, ImageScaleMode, Sprite, TextureAtlasLayout};
+ 
+ use super::TextureSlice;
+-use bevy_asset::{AssetEvent, Assets, Handle};
++use bevy_asset::{AssetEvent, Assets};
+ use bevy_ecs::prelude::*;
+ use bevy_math::{Rect, Vec2};
+ use bevy_render::texture::Image;
+@@ -29,7 +29,6 @@ impl ComputedTextureSlices {
+         transform: &'a GlobalTransform,
+         original_entity: Entity,
+         sprite: &'a Sprite,
+-        handle: &'a Handle<Image>,
+     ) -> impl ExactSizeIterator<Item = ExtractedSprite> + 'a {
+         let mut flip = Vec2::ONE;
+         let [mut flip_x, mut flip_y] = [false; 2];
+@@ -52,7 +51,7 @@ impl ComputedTextureSlices {
+                 custom_size: Some(slice.draw_size),
+                 flip_x,
+                 flip_y,
+-                image_handle_id: handle.id(),
++                image_handle_id: sprite.image.id(),
+                 anchor: Self::redepend_anchor_from_sprite_to_slice(sprite, slice),
+             }
+         })
+@@ -88,12 +87,10 @@ impl ComputedTextureSlices {
+ fn compute_sprite_slices(
+     sprite: &Sprite,
+     scale_mode: &ImageScaleMode,
+-    image_handle: &Handle<Image>,
+     images: &Assets<Image>,
+-    atlas: Option<&TextureAtlas>,
+     atlas_layouts: &Assets<TextureAtlasLayout>,
+ ) -> Option<ComputedTextureSlices> {
+-    let (image_size, texture_rect) = match atlas {
++    let (image_size, texture_rect) = match &sprite.texture_atlas {
+         Some(a) => {
+             let layout = atlas_layouts.get(&a.layout)?;
+             (
+@@ -102,7 +99,7 @@ fn compute_sprite_slices(
+             )
+         }
+         None => {
+-            let image = images.get(image_handle)?;
++            let image = images.get(&sprite.image)?;
+             let size = Vec2::new(
+                 image.texture_descriptor.size.width as f32,
+                 image.texture_descriptor.size.height as f32,
+@@ -139,13 +136,7 @@ pub(crate) fn compute_slices_on_asset_event(
+     mut events: EventReader<AssetEvent<Image>>,
+     images: Res<Assets<Image>>,
+     atlas_layouts: Res<Assets<TextureAtlasLayout>>,
+-    sprites: Query<(
+-        Entity,
+-        &ImageScaleMode,
+-        &Sprite,
+-        &Handle<Image>,
+-        Option<&TextureAtlas>,
+-    )>,
++    sprites: Query<(Entity, &ImageScaleMode, &Sprite)>,
+ ) {
+     // We store the asset ids of added/modified image assets
+     let added_handles: HashSet<_> = events
+@@ -159,18 +150,11 @@ pub(crate) fn compute_slices_on_asset_event(
+         return;
+     }
+     // We recompute the sprite slices for sprite entities with a matching asset handle id
+-    for (entity, scale_mode, sprite, image_handle, atlas) in &sprites {
+-        if !added_handles.contains(&image_handle.id()) {
++    for (entity, scale_mode, sprite) in &sprites {
++        if !added_handles.contains(&sprite.image.id()) {
+             continue;
+         }
+-        if let Some(slices) = compute_sprite_slices(
+-            sprite,
+-            scale_mode,
+-            image_handle,
+-            &images,
+-            atlas,
+-            &atlas_layouts,
+-        ) {
++        if let Some(slices) = compute_sprite_slices(sprite, scale_mode, &images, &atlas_layouts) {
+             commands.entity(entity).insert(slices);
+         }
+     }
+@@ -183,30 +167,12 @@ pub(crate) fn compute_slices_on_sprite_change(
+     images: Res<Assets<Image>>,
+     atlas_layouts: Res<Assets<TextureAtlasLayout>>,
+     changed_sprites: Query<
+-        (
+-            Entity,
+-            &ImageScaleMode,
+-            &Sprite,
+-            &Handle<Image>,
+-            Option<&TextureAtlas>,
+-        ),
+-        Or<(
+-            Changed<ImageScaleMode>,
+-            Changed<Handle<Image>>,
+-            Changed<Sprite>,
+-            Changed<TextureAtlas>,
+-        )>,
++        (Entity, &ImageScaleMode, &Sprite),
++        Or<(Changed<ImageScaleMode>, Changed<Sprite>)>,
+     >,
+ ) {
+-    for (entity, scale_mode, sprite, image_handle, atlas) in &changed_sprites {
+-        if let Some(slices) = compute_sprite_slices(
+-            sprite,
+-            scale_mode,
+-            image_handle,
+-            &images,
+-            atlas,
+-            &atlas_layouts,
+-        ) {
++    for (entity, scale_mode, sprite) in &changed_sprites {
++        if let Some(slices) = compute_sprite_slices(sprite, scale_mode, &images, &atlas_layouts) {
+             commands.entity(entity).insert(slices);
+         }
+     }
+diff --git a/examples/2d/bloom_2d.rs b/examples/2d/bloom_2d.rs
+index fcd5534632f68..3f12ea772ef1e 100644
+--- a/examples/2d/bloom_2d.rs
++++ b/examples/2d/bloom_2d.rs
+@@ -33,13 +33,10 @@ fn setup(
+     ));
+ 
+     // Sprite
+-    commands.spawn(SpriteBundle {
+-        texture: asset_server.load("branding/bevy_bird_dark.png"),
+-        sprite: Sprite {
+-            color: Color::srgb(5.0, 5.0, 5.0), // 4. Put something bright in a dark environment to see the effect
+-            custom_size: Some(Vec2::splat(160.0)),
+-            ..default()
+-        },
++    commands.spawn(Sprite {
++        image: asset_server.load("branding/bevy_bird_dark.png"),
++        color: Color::srgb(5.0, 5.0, 5.0), // 4. Put something bright in a dark environment to see the effect
++        custom_size: Some(Vec2::splat(160.0)),
+         ..default()
+     });
+ 
+diff --git a/examples/2d/cpu_draw.rs b/examples/2d/cpu_draw.rs
+index 0fa6e81a62bcf..8e9982dbee6f0 100644
+--- a/examples/2d/cpu_draw.rs
++++ b/examples/2d/cpu_draw.rs
+@@ -78,11 +78,7 @@ fn setup(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
+     let handle = images.add(image);
+ 
+     // create a sprite entity using our image
+-    commands.spawn(SpriteBundle {
+-        texture: handle.clone(),
+-        ..Default::default()
+-    });
+-
++    commands.spawn(Sprite::from_image(handle.clone()));
+     commands.insert_resource(MyProcGenImage(handle));
+ }
+ 
+diff --git a/examples/2d/move_sprite.rs b/examples/2d/move_sprite.rs
+index 9bbbe496584c5..976389404b9e3 100644
+--- a/examples/2d/move_sprite.rs
++++ b/examples/2d/move_sprite.rs
+@@ -19,11 +19,8 @@ enum Direction {
+ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
+     commands.spawn(Camera2d);
+     commands.spawn((
+-        SpriteBundle {
+-            texture: asset_server.load("branding/icon.png"),
+-            transform: Transform::from_xyz(100., 0., 0.),
+-            ..default()
+-        },
++        Sprite::from_image(asset_server.load("branding/icon.png")),
++        Transform::from_xyz(100., 0., 0.),
+         Direction::Up,
+     ));
+ }
+diff --git a/examples/2d/pixel_grid_snap.rs b/examples/2d/pixel_grid_snap.rs
+index 7e2fcffb5c5b0..d1b24ab5f3746 100644
+--- a/examples/2d/pixel_grid_snap.rs
++++ b/examples/2d/pixel_grid_snap.rs
+@@ -52,22 +52,16 @@ struct Rotate;
+ fn setup_sprite(mut commands: Commands, asset_server: Res<AssetServer>) {
+     // the sample sprite that will be rendered to the pixel-perfect canvas
+     commands.spawn((
+-        SpriteBundle {
+-            texture: asset_server.load("pixel/bevy_pixel_dark.png"),
+-            transform: Transform::from_xyz(-40., 20., 2.),
+-            ..default()
+-        },
++        Sprite::from_image(asset_server.load("pixel/bevy_pixel_dark.png")),
++        Transform::from_xyz(-40., 20., 2.),
+         Rotate,
+         PIXEL_PERFECT_LAYERS,
+     ));
+ 
+     // the sample sprite that will be rendered to the high-res "outer world"
+     commands.spawn((
+-        SpriteBundle {
+-            texture: asset_server.load("pixel/bevy_pixel_light.png"),
+-            transform: Transform::from_xyz(-40., -20., 2.),
+-            ..default()
+-        },
++        Sprite::from_image(asset_server.load("pixel/bevy_pixel_light.png")),
++        Transform::from_xyz(-40., -20., 2.),
+         Rotate,
+         HIGH_RES_LAYERS,
+     ));
+@@ -132,14 +126,7 @@ fn setup_camera(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
+     ));
+ 
+     // spawn the canvas
+-    commands.spawn((
+-        SpriteBundle {
+-            texture: image_handle,
+-            ..default()
+-        },
+-        Canvas,
+-        HIGH_RES_LAYERS,
+-    ));
++    commands.spawn((Sprite::from_image(image_handle), Canvas, HIGH_RES_LAYERS));
+ 
+     // the "outer" camera renders whatever is on `HIGH_RES_LAYERS` to the screen.
+     // here, the canvas and one of the sample sprites will be rendered by this camera
+diff --git a/examples/2d/rotation.rs b/examples/2d/rotation.rs
+index 85a8542a98306..1468dc6011da5 100644
+--- a/examples/2d/rotation.rs
++++ b/examples/2d/rotation.rs
+@@ -62,10 +62,7 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
+ 
+     // player controlled ship
+     commands.spawn((
+-        SpriteBundle {
+-            texture: ship_handle,
+-            ..default()
+-        },
++        Sprite::from_image(ship_handle),
+         Player {
+             movement_speed: 500.0,                  // meters per second
+             rotation_speed: f32::to_radians(360.0), // degrees per second
+@@ -74,39 +71,27 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
+ 
+     // enemy that snaps to face the player spawns on the bottom and left
+     commands.spawn((
+-        SpriteBundle {
+-            texture: enemy_a_handle.clone(),
+-            transform: Transform::from_xyz(0.0 - horizontal_margin, 0.0, 0.0),
+-            ..default()
+-        },
++        Sprite::from_image(enemy_a_handle.clone()),
++        Transform::from_xyz(0.0 - horizontal_margin, 0.0, 0.0),
+         SnapToPlayer,
+     ));
+     commands.spawn((
+-        SpriteBundle {
+-            texture: enemy_a_handle,
+-            transform: Transform::from_xyz(0.0, 0.0 - vertical_margin, 0.0),
+-            ..default()
+-        },
++        Sprite::from_image(enemy_a_handle),
++        Transform::from_xyz(0.0, 0.0 - vertical_margin, 0.0),
+         SnapToPlayer,
+     ));
+ 
+     // enemy that rotates to face the player enemy spawns on the top and right
+     commands.spawn((
+-        SpriteBundle {
+-            texture: enemy_b_handle.clone(),
+-            transform: Transform::from_xyz(0.0 + horizontal_margin, 0.0, 0.0),
+-            ..default()
+-        },
++        Sprite::from_image(enemy_b_handle.clone()),
++        Transform::from_xyz(0.0 + horizontal_margin, 0.0, 0.0),
+         RotateToPlayer {
+             rotation_speed: f32::to_radians(45.0), // degrees per second
+         },
+     ));
+     commands.spawn((
+-        SpriteBundle {
+-            texture: enemy_b_handle,
+-            transform: Transform::from_xyz(0.0, 0.0 + vertical_margin, 0.0),
+-            ..default()
+-        },
++        Sprite::from_image(enemy_b_handle),
++        Transform::from_xyz(0.0, 0.0 + vertical_margin, 0.0),
+         RotateToPlayer {
+             rotation_speed: f32::to_radians(90.0), // degrees per second
+         },
+diff --git a/examples/2d/sprite.rs b/examples/2d/sprite.rs
+index 1866f2d4fbf19..4c6f6c92f1dad 100644
+--- a/examples/2d/sprite.rs
++++ b/examples/2d/sprite.rs
+@@ -11,8 +11,7 @@ fn main() {
+ 
+ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
+     commands.spawn(Camera2d);
+-    commands.spawn(SpriteBundle {
+-        texture: asset_server.load("branding/bevy_bird_dark.png"),
+-        ..default()
+-    });
++    commands.spawn(Sprite::from_image(
++        asset_server.load("branding/bevy_bird_dark.png"),
++    ));
+ }
+diff --git a/examples/2d/sprite_animation.rs b/examples/2d/sprite_animation.rs
+index 57d9870750d20..5a7849ed266ab 100644
+--- a/examples/2d/sprite_animation.rs
++++ b/examples/2d/sprite_animation.rs
+@@ -56,24 +56,23 @@ impl AnimationConfig {
+ 
+ // This system loops through all the sprites in the `TextureAtlas`, from  `first_sprite_index` to
+ // `last_sprite_index` (both defined in `AnimationConfig`).
+-fn execute_animations(
+-    time: Res<Time>,
+-    mut query: Query<(&mut AnimationConfig, &mut TextureAtlas)>,
+-) {
+-    for (mut config, mut atlas) in &mut query {
++fn execute_animations(time: Res<Time>, mut query: Query<(&mut AnimationConfig, &mut Sprite)>) {
++    for (mut config, mut sprite) in &mut query {
+         // we track how long the current sprite has been displayed for
+         config.frame_timer.tick(time.delta());
+ 
+         // If it has been displayed for the user-defined amount of time (fps)...
+         if config.frame_timer.just_finished() {
+-            if atlas.index == config.last_sprite_index {
+-                // ...and it IS the last frame, then we move back to the first frame and stop.
+-                atlas.index = config.first_sprite_index;
+-            } else {
+-                // ...and it is NOT the last frame, then we move to the next frame...
+-                atlas.index += 1;
+-                // ...and reset the frame timer to start counting all over again
+-                config.frame_timer = AnimationConfig::timer_from_fps(config.fps);
++            if let Some(atlas) = &mut sprite.texture_atlas {
++                if atlas.index == config.last_sprite_index {
++                    // ...and it IS the last frame, then we move back to the first frame and stop.
++                    atlas.index = config.first_sprite_index;
++                } else {
++                    // ...and it is NOT the last frame, then we move to the next frame...
++                    atlas.index += 1;
++                    // ...and reset the frame timer to start counting all over again
++                    config.frame_timer = AnimationConfig::timer_from_fps(config.fps);
++                }
+             }
+         }
+     }
+@@ -104,16 +103,15 @@ fn setup(
+ 
+     // create the first (left-hand) sprite
+     commands.spawn((
+-        SpriteBundle {
+-            transform: Transform::from_scale(Vec3::splat(6.0))
+-                .with_translation(Vec3::new(-50.0, 0.0, 0.0)),
+-            texture: texture.clone(),
++        Sprite {
++            image: texture.clone(),
++            texture_atlas: Some(TextureAtlas {
++                layout: texture_atlas_layout.clone(),
++                index: animation_config_1.first_sprite_index,
++            }),
+             ..default()
+         },
+-        TextureAtlas {
+-            layout: texture_atlas_layout.clone(),
+-            index: animation_config_1.first_sprite_index,
+-        },
++        Transform::from_scale(Vec3::splat(6.0)).with_translation(Vec3::new(-50.0, 0.0, 0.0)),
+         LeftSprite,
+         animation_config_1,
+     ));
+@@ -123,15 +121,13 @@ fn setup(
+ 
+     // create the second (right-hand) sprite
+     commands.spawn((
+-        SpriteBundle {
+-            transform: Transform::from_scale(Vec3::splat(6.0))
+-                .with_translation(Vec3::new(50.0, 0.0, 0.0)),
+-            texture: texture.clone(),
+-            ..default()
+-        },
+-        TextureAtlas {
+-            layout: texture_atlas_layout.clone(),
+-            index: animation_config_2.first_sprite_index,
++        Sprite {
++            image: texture.clone(),
++            texture_atlas: Some(TextureAtlas {
++                layout: texture_atlas_layout.clone(),
++                index: animation_config_2.first_sprite_index,
++            }),
++            ..Default::default()
+         },
+         RightSprite,
+         animation_config_2,
+diff --git a/examples/2d/sprite_flipping.rs b/examples/2d/sprite_flipping.rs
+index 60bdfa8add974..905d8a8edbd0d 100644
+--- a/examples/2d/sprite_flipping.rs
++++ b/examples/2d/sprite_flipping.rs
+@@ -11,15 +11,12 @@ fn main() {
+ 
+ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
+     commands.spawn(Camera2d);
+-    commands.spawn(SpriteBundle {
+-        texture: asset_server.load("branding/bevy_bird_dark.png"),
+-        sprite: Sprite {
+-            // Flip the logo to the left
+-            flip_x: true,
+-            // And don't flip it upside-down ( the default )
+-            flip_y: false,
+-            ..default()
+-        },
+-        ..default()
++    commands.spawn(Sprite {
++        image: asset_server.load("branding/bevy_bird_dark.png"),
++        // Flip the logo to the left
++        flip_x: true,
++        // And don't flip it upside-down ( the default )
++        flip_y: false,
++        ..Default::default()
+     });
+ }
+diff --git a/examples/2d/sprite_sheet.rs b/examples/2d/sprite_sheet.rs
+index 42a7cd4dc7419..6e7ddd2f8b0db 100644
+--- a/examples/2d/sprite_sheet.rs
++++ b/examples/2d/sprite_sheet.rs
+@@ -22,16 +22,19 @@ struct AnimationTimer(Timer);
+ 
+ fn animate_sprite(
+     time: Res<Time>,
+-    mut query: Query<(&AnimationIndices, &mut AnimationTimer, &mut TextureAtlas)>,
++    mut query: Query<(&AnimationIndices, &mut AnimationTimer, &mut Sprite)>,
+ ) {
+-    for (indices, mut timer, mut atlas) in &mut query {
++    for (indices, mut timer, mut sprite) in &mut query {
+         timer.tick(time.delta());
++
+         if timer.just_finished() {
+-            atlas.index = if atlas.index == indices.last {
+-                indices.first
+-            } else {
+-                atlas.index + 1
+-            };
++            if let Some(atlas) = &mut sprite.texture_atlas {
++                atlas.index = if atlas.index == indices.last {
++                    indices.first
++                } else {
++                    atlas.index + 1
++                };
++            }
+         }
+     }
+ }
+@@ -48,15 +51,14 @@ fn setup(
+     let animation_indices = AnimationIndices { first: 1, last: 6 };
+     commands.spawn(Camera2d);
+     commands.spawn((
+-        SpriteBundle {
+-            transform: Transform::from_scale(Vec3::splat(6.0)),
++        Sprite::from_atlas_image(
+             texture,
+-            ..default()
+-        },
+-        TextureAtlas {
+-            layout: texture_atlas_layout,
+-            index: animation_indices.first,
+-        },
++            TextureAtlas {
++                layout: texture_atlas_layout,
++                index: animation_indices.first,
++            },
++        ),
++        Transform::from_scale(Vec3::splat(6.0)),
+         animation_indices,
+         AnimationTimer(Timer::from_seconds(0.1, TimerMode::Repeating)),
+     ));
+diff --git a/examples/2d/sprite_slice.rs b/examples/2d/sprite_slice.rs
+index 7da31b4667876..9f6866e9791f5 100644
+--- a/examples/2d/sprite_slice.rs
++++ b/examples/2d/sprite_slice.rs
+@@ -73,15 +73,14 @@ fn spawn_sprites(
+ 
+     for (label, text_style, size, scale_mode) in cases {
+         position.x += 0.5 * size.x;
+-        let mut cmd = commands.spawn(SpriteBundle {
+-            transform: Transform::from_translation(position),
+-            texture: texture_handle.clone(),
+-            sprite: Sprite {
++        let mut cmd = commands.spawn((
++            Sprite {
++                image: texture_handle.clone(),
+                 custom_size: Some(size),
+                 ..default()
+             },
+-            ..default()
+-        });
++            Transform::from_translation(position),
++        ));
+         if let Some(scale_mode) = scale_mode {
+             cmd.insert(scale_mode);
+         }
+diff --git a/examples/2d/sprite_tile.rs b/examples/2d/sprite_tile.rs
+index 57fecefe40c7d..90f6bed127c22 100644
+--- a/examples/2d/sprite_tile.rs
++++ b/examples/2d/sprite_tile.rs
+@@ -27,10 +27,7 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
+         speed: 50.0,
+     });
+     commands.spawn((
+-        SpriteBundle {
+-            texture: asset_server.load("branding/icon.png"),
+-            ..default()
+-        },
++        Sprite::from_image(asset_server.load("branding/icon.png")),
+         ImageScaleMode::Tiled {
+             tile_x: true,
+             tile_y: true,
+diff --git a/examples/2d/text2d.rs b/examples/2d/text2d.rs
+index 8bee817e0c574..d59b0d63a5cdd 100644
+--- a/examples/2d/text2d.rs
++++ b/examples/2d/text2d.rs
+@@ -79,15 +79,10 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
+     let box_size = Vec2::new(300.0, 200.0);
+     let box_position = Vec2::new(0.0, -250.0);
+     commands
+-        .spawn(SpriteBundle {
+-            sprite: Sprite {
+-                color: Color::srgb(0.25, 0.25, 0.75),
+-                custom_size: Some(Vec2::new(box_size.x, box_size.y)),
+-                ..default()
+-            },
+-            transform: Transform::from_translation(box_position.extend(0.0)),
+-            ..default()
+-        })
++        .spawn((
++            Sprite::from_color(Color::srgb(0.25, 0.25, 0.75), box_size),
++            Transform::from_translation(box_position.extend(0.0)),
++        ))
+         .with_children(|builder| {
+             builder.spawn(Text2dBundle {
+                 text: Text {
+@@ -110,15 +105,10 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
+     let other_box_size = Vec2::new(300.0, 200.0);
+     let other_box_position = Vec2::new(320.0, -250.0);
+     commands
+-        .spawn(SpriteBundle {
+-            sprite: Sprite {
+-                color: Color::srgb(0.20, 0.3, 0.70),
+-                custom_size: Some(Vec2::new(other_box_size.x, other_box_size.y)),
+-                ..default()
+-            },
+-            transform: Transform::from_translation(other_box_position.extend(0.0)),
+-            ..default()
+-        })
++        .spawn((
++            Sprite::from_color(Color::srgb(0.20, 0.3, 0.70), other_box_size),
++            Transform::from_translation(other_box_position.extend(0.0)),
++        ))
+         .with_children(|builder| {
+             builder.spawn(Text2dBundle {
+                 text: Text {
+diff --git a/examples/2d/texture_atlas.rs b/examples/2d/texture_atlas.rs
+index 81ce1942f7614..4abcd852b8000 100644
+--- a/examples/2d/texture_atlas.rs
++++ b/examples/2d/texture_atlas.rs
+@@ -99,26 +99,24 @@ fn setup(
+     // padded textures are to the right, unpadded to the left
+ 
+     // draw unpadded texture atlas
+-    commands.spawn(SpriteBundle {
+-        texture: linear_texture.clone(),
+-        transform: Transform {
++    commands.spawn((
++        Sprite::from_image(linear_texture.clone()),
++        Transform {
+             translation: Vec3::new(-250.0, -130.0, 0.0),
+             scale: Vec3::splat(0.8),
+             ..default()
+         },
+-        ..default()
+-    });
++    ));
+ 
+     // draw padded texture atlas
+-    commands.spawn(SpriteBundle {
+-        texture: linear_padded_texture.clone(),
+-        transform: Transform {
++    commands.spawn((
++        Sprite::from_image(linear_padded_texture.clone()),
++        Transform {
+             translation: Vec3::new(250.0, -130.0, 0.0),
+             scale: Vec3::splat(0.8),
+             ..default()
+         },
+-        ..default()
+-    });
++    ));
+ 
+     let font = asset_server.load("fonts/FiraSans-Bold.ttf");
+ 
+@@ -260,16 +258,15 @@ fn create_sprite_from_atlas(
+     vendor_handle: &Handle<Image>,
+ ) {
+     commands.spawn((
+-        SpriteBundle {
+-            transform: Transform {
+-                translation: Vec3::new(translation.0, translation.1, translation.2),
+-                scale: Vec3::splat(3.0),
+-                ..default()
+-            },
+-            texture: atlas_texture,
++        Transform {
++            translation: Vec3::new(translation.0, translation.1, translation.2),
++            scale: Vec3::splat(3.0),
+             ..default()
+         },
+-        atlas_sources.handle(atlas_handle, vendor_handle).unwrap(),
++        Sprite::from_atlas_image(
++            atlas_texture,
++            atlas_sources.handle(atlas_handle, vendor_handle).unwrap(),
++        ),
+     ));
+ }
+ 
+diff --git a/examples/2d/transparency_2d.rs b/examples/2d/transparency_2d.rs
+index fbcc535ec38e3..0442c21f23d5d 100644
+--- a/examples/2d/transparency_2d.rs
++++ b/examples/2d/transparency_2d.rs
+@@ -15,27 +15,22 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
+ 
+     let sprite_handle = asset_server.load("branding/icon.png");
+ 
+-    commands.spawn(SpriteBundle {
+-        texture: sprite_handle.clone(),
+-        ..default()
+-    });
+-    commands.spawn(SpriteBundle {
+-        sprite: Sprite {
++    commands.spawn(Sprite::from_image(sprite_handle.clone()));
++    commands.spawn((
++        Sprite {
++            image: sprite_handle.clone(),
+             // Alpha channel of the color controls transparency.
+             color: Color::srgba(0.0, 0.0, 1.0, 0.7),
+             ..default()
+         },
+-        texture: sprite_handle.clone(),
+-        transform: Transform::from_xyz(100.0, 0.0, 0.0),
+-        ..default()
+-    });
+-    commands.spawn(SpriteBundle {
+-        sprite: Sprite {
++        Transform::from_xyz(100.0, 0.0, 0.0),
++    ));
++    commands.spawn((
++        Sprite {
++            image: sprite_handle,
+             color: Color::srgba(0.0, 1.0, 0.0, 0.3),
+             ..default()
+         },
+-        texture: sprite_handle,
+-        transform: Transform::from_xyz(200.0, 0.0, 0.0),
+-        ..default()
+-    });
++        Transform::from_xyz(200.0, 0.0, 0.0),
++    ));
+ }
+diff --git a/examples/animation/color_animation.rs b/examples/animation/color_animation.rs
+index dff3175c4e9c3..9ff1ab1d8449e 100644
+--- a/examples/animation/color_animation.rs
++++ b/examples/animation/color_animation.rs
+@@ -70,28 +70,16 @@ fn setup(mut commands: Commands) {
+ 
+ fn spawn_curve_sprite<T: CurveColor>(commands: &mut Commands, y: f32, points: [T; 4]) {
+     commands.spawn((
+-        SpriteBundle {
+-            transform: Transform::from_xyz(0., y, 0.),
+-            sprite: Sprite {
+-                custom_size: Some(Vec2::new(75., 75.)),
+-                ..Default::default()
+-            },
+-            ..Default::default()
+-        },
++        Sprite::sized(Vec2::new(75., 75.)),
++        Transform::from_xyz(0., y, 0.),
+         Curve(CubicBezier::new([points]).to_curve().unwrap()),
+     ));
+ }
+ 
+ fn spawn_mixed_sprite<T: MixedColor>(commands: &mut Commands, y: f32, colors: [T; 4]) {
+     commands.spawn((
+-        SpriteBundle {
+-            transform: Transform::from_xyz(0., y, 0.),
+-            sprite: Sprite {
+-                custom_size: Some(Vec2::new(75., 75.)),
+-                ..Default::default()
+-            },
+-            ..Default::default()
+-        },
++        Transform::from_xyz(0., y, 0.),
++        Sprite::sized(Vec2::new(75., 75.)),
+         Mixed(colors),
+     ));
+ }
+diff --git a/examples/animation/easing_functions.rs b/examples/animation/easing_functions.rs
+index 5854e75b6a414..f43bb0b36da92 100644
+--- a/examples/animation/easing_functions.rs
++++ b/examples/animation/easing_functions.rs
+@@ -82,24 +82,14 @@ fn setup(mut commands: Commands) {
+                     SelectedEaseFunction(*function, color),
+                 ))
+                 .with_children(|p| {
+-                    p.spawn(SpriteBundle {
+-                        sprite: Sprite {
+-                            custom_size: Some(Vec2::new(5.0, 5.0)),
+-                            color,
+-                            ..default()
+-                        },
+-                        transform: Transform::from_xyz(SIZE_PER_FUNCTION + 5.0, 15.0, 0.0),
+-                        ..default()
+-                    });
+-                    p.spawn(SpriteBundle {
+-                        sprite: Sprite {
+-                            custom_size: Some(Vec2::new(4.0, 4.0)),
+-                            color,
+-                            ..default()
+-                        },
+-                        transform: Transform::from_xyz(0.0, 0.0, 0.0),
+-                        ..default()
+-                    });
++                    p.spawn((
++                        Sprite::from_color(color, Vec2::splat(5.0)),
++                        Transform::from_xyz(SIZE_PER_FUNCTION + 5.0, 15.0, 0.0),
++                    ));
++                    p.spawn((
++                        Sprite::from_color(color, Vec2::splat(4.0)),
++                        Transform::from_xyz(0.0, 0.0, 0.0),
++                    ));
+                 });
+         }
+     }
+diff --git a/examples/asset/alter_sprite.rs b/examples/asset/alter_sprite.rs
+index 65e952cdbf9d0..7d6f03f3fdd7b 100644
+--- a/examples/asset/alter_sprite.rs
++++ b/examples/asset/alter_sprite.rs
+@@ -75,23 +75,16 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
+         // This marker component ensures we can easily find either of the Birds by using With and
+         // Without query filters.
+         Left,
+-        SpriteBundle {
+-            texture: texture_left,
+-            transform: Transform::from_xyz(-200.0, 0.0, 0.0),
+-            ..default()
+-        },
++        Sprite::from_image(texture_left),
++        Transform::from_xyz(-200.0, 0.0, 0.0),
+         bird_left,
+     ));
+ 
+     commands.spawn((
+         Name::new("Bird Right"),
+-        SpriteBundle {
+-            // In contrast to the above, here we rely on the default `RenderAssetUsages` loader
+-            // setting.
+-            texture: asset_server.load(bird_right.get_texture_path()),
+-            transform: Transform::from_xyz(200.0, 0.0, 0.0),
+-            ..default()
+-        },
++        // In contrast to the above, here we rely on the default `RenderAssetUsages` loader setting
++        Sprite::from_image(asset_server.load(bird_right.get_texture_path())),
++        Transform::from_xyz(200.0, 0.0, 0.0),
+         bird_right,
+     ));
+ }
+diff --git a/examples/asset/asset_decompression.rs b/examples/asset/asset_decompression.rs
+index 0be3d1d5cb178..e514924ca9d0a 100644
+--- a/examples/asset/asset_decompression.rs
++++ b/examples/asset/asset_decompression.rs
+@@ -99,25 +99,20 @@ fn main() {
+         .init_asset::<GzAsset>()
+         .init_asset_loader::<GzAssetLoader>()
+         .add_systems(Startup, setup)
+-        .add_systems(Update, decompress::<Image>)
++        .add_systems(Update, decompress::<Sprite, Image>)
+         .run();
+ }
+ 
+ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
+     commands.spawn(Camera2d);
+ 
+-    commands.spawn((
+-        Compressed::<Image> {
+-            compressed: asset_server.load("data/compressed_image.png.gz"),
+-            ..default()
+-        },
+-        Sprite::default(),
+-        Transform::default(),
+-        Visibility::default(),
+-    ));
++    commands.spawn(Compressed::<Image> {
++        compressed: asset_server.load("data/compressed_image.png.gz"),
++        ..default()
++    });
+ }
+ 
+-fn decompress<A: Asset>(
++fn decompress<T: Component + From<Handle<A>>, A: Asset>(
+     mut commands: Commands,
+     asset_server: Res<AssetServer>,
+     mut compressed_assets: ResMut<Assets<GzAsset>>,
+@@ -133,6 +128,6 @@ fn decompress<A: Asset>(
+         commands
+             .entity(entity)
+             .remove::<Compressed<A>>()
+-            .insert(asset_server.add(uncompressed));
++            .insert(T::from(asset_server.add(uncompressed)));
+     }
+ }
+diff --git a/examples/asset/asset_settings.rs b/examples/asset/asset_settings.rs
+index 930c6bdc432ab..cf8182f4f9898 100644
+--- a/examples/asset/asset_settings.rs
++++ b/examples/asset/asset_settings.rs
+@@ -23,15 +23,14 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
+     // If you are using a very small image and rendering it larger like seen here, the default linear filtering will result in a blurry image.
+     // Useful note: The default sampler specified by the ImagePlugin is *not* the same as the default implementation of sampler. This is why
+     // everything uses linear by default but if you look at the default of sampler, it uses nearest.
+-    commands.spawn(SpriteBundle {
+-        texture: asset_server.load("bevy_pixel_dark.png"),
+-        sprite: Sprite {
++    commands.spawn((
++        Sprite {
++            image: asset_server.load("bevy_pixel_dark.png"),
+             custom_size: Some(Vec2 { x: 160.0, y: 120.0 }),
+             ..Default::default()
+         },
+-        transform: Transform::from_xyz(-100.0, 0.0, 0.0),
+-        ..Default::default()
+-    });
++        Transform::from_xyz(-100.0, 0.0, 0.0),
++    ));
+ 
+     // When a .meta file is added with the same name as the asset and a '.meta' extension
+     // you can (and must) specify all fields of the asset loader's settings for that
+@@ -42,15 +41,14 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
+     // A good reference when filling this out is to check out [ImageLoaderSettings::default()]
+     // and follow to the default implementation of each fields type.
+     // https://docs.rs/bevy/latest/bevy/render/texture/struct.ImageLoaderSettings.html#
+-    commands.spawn(SpriteBundle {
+-        texture: asset_server.load("bevy_pixel_dark_with_meta.png"),
+-        sprite: Sprite {
++    commands.spawn((
++        Sprite {
++            image: asset_server.load("bevy_pixel_dark_with_meta.png"),
+             custom_size: Some(Vec2 { x: 160.0, y: 120.0 }),
+             ..Default::default()
+         },
+-        transform: Transform::from_xyz(100.0, 0.0, 0.0),
+-        ..Default::default()
+-    });
++        Transform::from_xyz(100.0, 0.0, 0.0),
++    ));
+ 
+     // Another option is to use the AssetServers load_with_settings function.
+     // With this you can specify the same settings upon loading your asset with a
+@@ -62,20 +60,19 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
+     // settings changes from any loads after the first of the same asset will be ignored.
+     // This is why this one loads a differently named copy of the asset instead of using
+     // same one as without a .meta file.
+-    commands.spawn(SpriteBundle {
+-        texture: asset_server.load_with_settings(
+-            "bevy_pixel_dark_with_settings.png",
+-            |settings: &mut ImageLoaderSettings| {
+-                settings.sampler = ImageSampler::nearest();
+-            },
+-        ),
+-        sprite: Sprite {
++    commands.spawn((
++        Sprite {
++            image: asset_server.load_with_settings(
++                "bevy_pixel_dark_with_settings.png",
++                |settings: &mut ImageLoaderSettings| {
++                    settings.sampler = ImageSampler::nearest();
++                },
++            ),
+             custom_size: Some(Vec2 { x: 160.0, y: 120.0 }),
+             ..Default::default()
+         },
+-        transform: Transform::from_xyz(0.0, 150.0, 0.0),
+-        ..Default::default()
+-    });
++        Transform::from_xyz(0.0, 150.0, 0.0),
++    ));
+ 
+     commands.spawn(Camera2d);
+ }
+diff --git a/examples/asset/custom_asset_reader.rs b/examples/asset/custom_asset_reader.rs
+index ef677c6e450db..eacb13e4385c3 100644
+--- a/examples/asset/custom_asset_reader.rs
++++ b/examples/asset/custom_asset_reader.rs
+@@ -61,8 +61,5 @@ fn main() {
+ 
+ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
+     commands.spawn(Camera2d);
+-    commands.spawn(SpriteBundle {
+-        texture: asset_server.load("branding/icon.png"),
+-        ..default()
+-    });
++    commands.spawn(Sprite::from_image(asset_server.load("branding/icon.png")));
+ }
+diff --git a/examples/asset/embedded_asset.rs b/examples/asset/embedded_asset.rs
+index 6d288ed45fadb..66349cfc5aef8 100644
+--- a/examples/asset/embedded_asset.rs
++++ b/examples/asset/embedded_asset.rs
+@@ -48,8 +48,5 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
+         "embedded://embedded_asset/files/bevy_pixel_light.png".into()
+     );
+ 
+-    commands.spawn(SpriteBundle {
+-        texture: asset_server.load(asset_path),
+-        ..default()
+-    });
++    commands.spawn(Sprite::from_image(asset_server.load(asset_path)));
+ }
+diff --git a/examples/asset/extra_source.rs b/examples/asset/extra_source.rs
+index da757bca4430d..298b9d4aa85c7 100644
+--- a/examples/asset/extra_source.rs
++++ b/examples/asset/extra_source.rs
+@@ -42,8 +42,5 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
+     // path.
+     assert_eq!(asset_path, "example_files://bevy_pixel_light.png".into());
+ 
+-    commands.spawn(SpriteBundle {
+-        texture: asset_server.load(asset_path),
+-        ..default()
+-    });
++    commands.spawn(Sprite::from_image(asset_server.load(asset_path)));
+ }
+diff --git a/examples/audio/spatial_audio_2d.rs b/examples/audio/spatial_audio_2d.rs
+index a3e2543213312..e70507c8e1382 100644
+--- a/examples/audio/spatial_audio_2d.rs
++++ b/examples/audio/spatial_audio_2d.rs
+@@ -46,26 +46,16 @@ fn setup(
+         .spawn((SpatialBundle::default(), listener.clone()))
+         .with_children(|parent| {
+             // left ear
+-            parent.spawn(SpriteBundle {
+-                sprite: Sprite {
+-                    color: RED.into(),
+-                    custom_size: Some(Vec2::splat(20.0)),
+-                    ..default()
+-                },
+-                transform: Transform::from_xyz(-gap / 2.0, 0.0, 0.0),
+-                ..default()
+-            });
++            parent.spawn((
++                Sprite::from_color(RED, Vec2::splat(20.0)),
++                Transform::from_xyz(-gap / 2.0, 0.0, 0.0),
++            ));
+ 
+             // right ear
+-            parent.spawn(SpriteBundle {
+-                sprite: Sprite {
+-                    color: LIME.into(),
+-                    custom_size: Some(Vec2::splat(20.0)),
+-                    ..default()
+-                },
+-                transform: Transform::from_xyz(gap / 2.0, 0.0, 0.0),
+-                ..default()
+-            });
++            parent.spawn((
++                Sprite::from_color(LIME, Vec2::splat(20.0)),
++                Transform::from_xyz(gap / 2.0, 0.0, 0.0),
++            ));
+         });
+ 
+     // example instructions
+diff --git a/examples/ecs/fallible_params.rs b/examples/ecs/fallible_params.rs
+index 6100154c2828e..fda8583e7fa19 100644
+--- a/examples/ecs/fallible_params.rs
++++ b/examples/ecs/fallible_params.rs
+@@ -68,15 +68,12 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
+             rotation_speed: 2.0,
+             min_follow_radius: 50.0,
+         },
+-        SpriteBundle {
+-            sprite: Sprite {
+-                color: bevy::color::palettes::tailwind::BLUE_800.into(),
+-                ..default()
+-            },
+-            transform: Transform::from_translation(Vec3::ZERO),
+-            texture,
+-            ..default()
++        Sprite {
++            image: texture,
++            color: bevy::color::palettes::tailwind::BLUE_800.into(),
++            ..Default::default()
+         },
++        Transform::from_translation(Vec3::ZERO),
+     ));
+ }
+ 
+@@ -99,15 +96,12 @@ fn user_input(
+                 rotation: rng.gen_range(0.0..std::f32::consts::TAU),
+                 rotation_speed: rng.gen_range(0.5..1.5),
+             },
+-            SpriteBundle {
+-                sprite: Sprite {
+-                    color: bevy::color::palettes::tailwind::RED_800.into(),
+-                    ..default()
+-                },
+-                transform: Transform::from_translation(Vec3::ZERO),
+-                texture,
++            Sprite {
++                image: texture,
++                color: bevy::color::palettes::tailwind::RED_800.into(),
+                 ..default()
+             },
++            Transform::from_translation(Vec3::ZERO),
+         ));
+     }
+ 
+diff --git a/examples/ecs/hierarchy.rs b/examples/ecs/hierarchy.rs
+index 9b831fa175d31..744989884fbf3 100644
+--- a/examples/ecs/hierarchy.rs
++++ b/examples/ecs/hierarchy.rs
+@@ -18,23 +18,21 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
+ 
+     // Spawn a root entity with no parent
+     let parent = commands
+-        .spawn(SpriteBundle {
+-            transform: Transform::from_scale(Vec3::splat(0.75)),
+-            texture: texture.clone(),
+-            ..default()
+-        })
++        .spawn((
++            Sprite::from_image(texture.clone()),
++            Transform::from_scale(Vec3::splat(0.75)),
++        ))
+         // With that entity as a parent, run a lambda that spawns its children
+         .with_children(|parent| {
+             // parent is a ChildBuilder, which has a similar API to Commands
+-            parent.spawn(SpriteBundle {
+-                transform: Transform::from_xyz(250.0, 0.0, 0.0).with_scale(Vec3::splat(0.75)),
+-                texture: texture.clone(),
+-                sprite: Sprite {
++            parent.spawn((
++                Transform::from_xyz(250.0, 0.0, 0.0).with_scale(Vec3::splat(0.75)),
++                Sprite {
++                    image: texture.clone(),
+                     color: BLUE.into(),
+                     ..default()
+                 },
+-                ..default()
+-            });
++            ));
+         })
+         // Store parent entity for next sections
+         .id();
+@@ -42,15 +40,14 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
+     // Another way is to use the add_child function to add children after the parent
+     // entity has already been spawned.
+     let child = commands
+-        .spawn(SpriteBundle {
+-            transform: Transform::from_xyz(0.0, 250.0, 0.0).with_scale(Vec3::splat(0.75)),
+-            texture,
+-            sprite: Sprite {
++        .spawn((
++            Sprite {
++                image: texture,
+                 color: LIME.into(),
+                 ..default()
+             },
+-            ..default()
+-        })
++            Transform::from_xyz(0.0, 250.0, 0.0).with_scale(Vec3::splat(0.75)),
++        ))
+         .id();
+ 
+     // Add child to the parent.
+diff --git a/examples/ecs/parallel_query.rs b/examples/ecs/parallel_query.rs
+index 9c71bfa4fa0c7..3963b880f83d6 100644
+--- a/examples/ecs/parallel_query.rs
++++ b/examples/ecs/parallel_query.rs
+@@ -16,11 +16,8 @@ fn spawn_system(mut commands: Commands, asset_server: Res<AssetServer>) {
+     let mut rng = ChaCha8Rng::seed_from_u64(19878367467713);
+     for _ in 0..128 {
+         commands.spawn((
+-            SpriteBundle {
+-                texture: texture.clone(),
+-                transform: Transform::from_scale(Vec3::splat(0.1)),
+-                ..default()
+-            },
++            Sprite::from_image(texture.clone()),
++            Transform::from_scale(Vec3::splat(0.1)),
+             Velocity(20.0 * Vec2::new(rng.gen::<f32>() - 0.5, rng.gen::<f32>() - 0.5)),
+         ));
+     }
+diff --git a/examples/ecs/removal_detection.rs b/examples/ecs/removal_detection.rs
+index 1d16631b05efd..d194d284d1f5e 100644
+--- a/examples/ecs/removal_detection.rs
++++ b/examples/ecs/removal_detection.rs
+@@ -29,10 +29,7 @@ struct MyComponent;
+ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
+     commands.spawn(Camera2d);
+     commands.spawn((
+-        SpriteBundle {
+-            texture: asset_server.load("branding/icon.png"),
+-            ..default()
+-        },
++        Sprite::from_image(asset_server.load("branding/icon.png")),
+         // Add the `Component`.
+         MyComponent,
+     ));
+diff --git a/examples/games/breakout.rs b/examples/games/breakout.rs
+index ee1d861fbd973..6073e52a29332 100644
+--- a/examples/games/breakout.rs
++++ b/examples/games/breakout.rs
+@@ -106,7 +106,8 @@ struct CollisionSound(Handle<AudioSource>);
+ struct WallBundle {
+     // You can nest bundles inside of other bundles like this
+     // Allowing you to compose their functionality
+-    sprite_bundle: SpriteBundle,
++    sprite: Sprite,
++    transform: Transform,
+     collider: Collider,
+ }
+ 
+@@ -153,21 +154,15 @@ impl WallBundle {
+     // making our code easier to read and less prone to bugs when we change the logic
+     fn new(location: WallLocation) -> WallBundle {
+         WallBundle {
+-            sprite_bundle: SpriteBundle {
+-                transform: Transform {
+-                    // We need to convert our Vec2 into a Vec3, by giving it a z-coordinate
+-                    // This is used to determine the order of our sprites
+-                    translation: location.position().extend(0.0),
+-                    // The z-scale of 2D objects must always be 1.0,
+-                    // or their ordering will be affected in surprising ways.
+-                    // See https://github.com/bevyengine/bevy/issues/4149
+-                    scale: location.size().extend(1.0),
+-                    ..default()
+-                },
+-                sprite: Sprite {
+-                    color: WALL_COLOR,
+-                    ..default()
+-                },
++            sprite: Sprite::from_color(WALL_COLOR, Vec2::ONE),
++            transform: Transform {
++                // We need to convert our Vec2 into a Vec3, by giving it a z-coordinate
++                // This is used to determine the order of our sprites
++                translation: location.position().extend(0.0),
++                // The z-scale of 2D objects must always be 1.0,
++                // or their ordering will be affected in surprising ways.
++                // See https://github.com/bevyengine/bevy/issues/4149
++                scale: location.size().extend(1.0),
+                 ..default()
+             },
+             collider: Collider,
+@@ -200,16 +195,10 @@ fn setup(
+     let paddle_y = BOTTOM_WALL + GAP_BETWEEN_PADDLE_AND_FLOOR;
+ 
+     commands.spawn((
+-        SpriteBundle {
+-            transform: Transform {
+-                translation: Vec3::new(0.0, paddle_y, 0.0),
+-                scale: PADDLE_SIZE.extend(1.0),
+-                ..default()
+-            },
+-            sprite: Sprite {
+-                color: PADDLE_COLOR,
+-                ..default()
+-            },
++        Sprite::from_color(PADDLE_COLOR, Vec2::ONE),
++        Transform {
++            translation: Vec3::new(0.0, paddle_y, 0.0),
++            scale: PADDLE_SIZE.extend(1.0),
+             ..default()
+         },
+         Paddle,
+@@ -294,16 +283,13 @@ fn setup(
+ 
+             // brick
+             commands.spawn((
+-                SpriteBundle {
+-                    sprite: Sprite {
+-                        color: BRICK_COLOR,
+-                        ..default()
+-                    },
+-                    transform: Transform {
+-                        translation: brick_position.extend(0.0),
+-                        scale: Vec3::new(BRICK_SIZE.x, BRICK_SIZE.y, 1.0),
+-                        ..default()
+-                    },
++                Sprite {
++                    color: BRICK_COLOR,
++                    ..default()
++                },
++                Transform {
++                    translation: brick_position.extend(0.0),
++                    scale: Vec3::new(BRICK_SIZE.x, BRICK_SIZE.y, 1.0),
+                     ..default()
+                 },
+                 Brick,
+diff --git a/examples/games/contributors.rs b/examples/games/contributors.rs
+index 1321e67b9a3d8..b2f08fbbb9ec9 100644
+--- a/examples/games/contributors.rs
++++ b/examples/games/contributors.rs
+@@ -106,17 +106,14 @@ fn setup_contributor_selection(mut commands: Commands, asset_server: Res<AssetSe
+                     translation: velocity,
+                     rotation: -dir * 5.0,
+                 },
+-                SpriteBundle {
+-                    sprite: Sprite {
+-                        custom_size: Some(Vec2::splat(SPRITE_SIZE)),
+-                        color: DESELECTED.with_hue(hue).into(),
+-                        flip_x: flipped,
+-                        ..default()
+-                    },
+-                    texture: texture_handle.clone(),
+-                    transform,
++                Sprite {
++                    image: texture_handle.clone(),
++                    custom_size: Some(Vec2::splat(SPRITE_SIZE)),
++                    color: DESELECTED.with_hue(hue).into(),
++                    flip_x: flipped,
+                     ..default()
+                 },
++                transform,
+             ))
+             .id();
+ 
+diff --git a/examples/games/desk_toy.rs b/examples/games/desk_toy.rs
+index c68104db23aa6..eacb24fa13b37 100644
+--- a/examples/games/desk_toy.rs
++++ b/examples/games/desk_toy.rs
+@@ -135,10 +135,7 @@ fn setup(
+     // Spawn the Bevy logo sprite
+     commands
+         .spawn((
+-            SpriteBundle {
+-                texture: asset_server.load("branding/icon.png"),
+-                ..default()
+-            },
++            Sprite::from_image(asset_server.load("branding/icon.png")),
+             BevyLogo,
+         ))
+         .with_children(|commands| {
+diff --git a/examples/movement/physics_in_fixed_timestep.rs b/examples/movement/physics_in_fixed_timestep.rs
+index cd5440915af86..722f325a01829 100644
+--- a/examples/movement/physics_in_fixed_timestep.rs
++++ b/examples/movement/physics_in_fixed_timestep.rs
+@@ -133,11 +133,8 @@ fn spawn_player(mut commands: Commands, asset_server: Res<AssetServer>) {
+     commands.spawn(Camera2d);
+     commands.spawn((
+         Name::new("Player"),
+-        SpriteBundle {
+-            texture: asset_server.load("branding/icon.png"),
+-            transform: Transform::from_scale(Vec3::splat(0.3)),
+-            ..default()
+-        },
++        Sprite::from_image(asset_server.load("branding/icon.png")),
++        Transform::from_scale(Vec3::splat(0.3)),
+         AccumulatedInput::default(),
+         Velocity::default(),
+         PhysicalTranslation::default(),
+diff --git a/examples/picking/sprite_picking.rs b/examples/picking/sprite_picking.rs
+index b0a9d7a7e8247..774ee57cddbda 100644
+--- a/examples/picking/sprite_picking.rs
++++ b/examples/picking/sprite_picking.rs
+@@ -32,7 +32,7 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
+     commands.spawn(Camera2d);
+ 
+     let len = 128.0;
+-    let sprite_size = Some(Vec2::splat(len / 2.0));
++    let sprite_size = Vec2::splat(len / 2.0);
+ 
+     commands
+         .spawn(SpatialBundle::default())
+@@ -57,35 +57,29 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
+ 
+                 // spawn black square behind sprite to show anchor point
+                 commands
+-                    .spawn(SpriteBundle {
+-                        sprite: Sprite {
+-                            custom_size: sprite_size,
+-                            color: Color::BLACK,
+-                            ..default()
+-                        },
+-                        transform: Transform::from_xyz(i * len - len, j * len - len, -1.0),
+-                        ..default()
+-                    })
++                    .spawn((
++                        Sprite::from_color(Color::BLACK, sprite_size),
++                        Transform::from_xyz(i * len - len, j * len - len, -1.0),
++                    ))
+                     .observe(recolor_on::<Pointer<Over>>(Color::srgb(0.0, 1.0, 1.0)))
+                     .observe(recolor_on::<Pointer<Out>>(Color::BLACK))
+                     .observe(recolor_on::<Pointer<Down>>(Color::srgb(1.0, 1.0, 0.0)))
+                     .observe(recolor_on::<Pointer<Up>>(Color::srgb(0.0, 1.0, 1.0)));
+ 
+                 commands
+-                    .spawn(SpriteBundle {
+-                        sprite: Sprite {
+-                            custom_size: sprite_size,
++                    .spawn((
++                        Sprite {
++                            image: asset_server.load("branding/bevy_bird_dark.png"),
++                            custom_size: Some(sprite_size),
+                             color: Color::srgb(1.0, 0.0, 0.0),
+                             anchor: anchor.to_owned(),
+                             ..default()
+                         },
+-                        texture: asset_server.load("branding/bevy_bird_dark.png"),
+                         // 3x3 grid of anchor examples by changing transform
+-                        transform: Transform::from_xyz(i * len - len, j * len - len, 0.0)
++                        Transform::from_xyz(i * len - len, j * len - len, 0.0)
+                             .with_scale(Vec3::splat(1.0 + (i - 1.0) * 0.2))
+                             .with_rotation(Quat::from_rotation_z((j - 1.0) * 0.2)),
+-                        ..default()
+-                    })
++                    ))
+                     .observe(recolor_on::<Pointer<Over>>(Color::srgb(0.0, 1.0, 0.0)))
+                     .observe(recolor_on::<Pointer<Out>>(Color::srgb(1.0, 0.0, 0.0)))
+                     .observe(recolor_on::<Pointer<Down>>(Color::srgb(0.0, 0.0, 1.0)))
+@@ -131,15 +125,14 @@ fn setup_atlas(
+     let animation_indices = AnimationIndices { first: 1, last: 6 };
+     commands
+         .spawn((
+-            TextureAtlas {
+-                layout: texture_atlas_layout_handle,
+-                index: animation_indices.first,
+-            },
+-            SpriteBundle {
+-                texture: texture_handle,
+-                transform: Transform::from_xyz(300.0, 0.0, 0.0).with_scale(Vec3::splat(6.0)),
+-                ..default()
+-            },
++            Sprite::from_atlas_image(
++                texture_handle,
++                TextureAtlas {
++                    layout: texture_atlas_layout_handle,
++                    index: animation_indices.first,
++                },
++            ),
++            Transform::from_xyz(300.0, 0.0, 0.0).with_scale(Vec3::splat(6.0)),
+             animation_indices,
+             AnimationTimer(Timer::from_seconds(0.1, TimerMode::Repeating)),
+         ))
+diff --git a/examples/shader/compute_shader_game_of_life.rs b/examples/shader/compute_shader_game_of_life.rs
+index cb13a560a4780..e27c2c88cea57 100644
+--- a/examples/shader/compute_shader_game_of_life.rs
++++ b/examples/shader/compute_shader_game_of_life.rs
+@@ -67,15 +67,14 @@ fn setup(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
+     let image0 = images.add(image.clone());
+     let image1 = images.add(image);
+ 
+-    commands.spawn(SpriteBundle {
+-        sprite: Sprite {
++    commands.spawn((
++        Sprite {
++            image: image0.clone(),
+             custom_size: Some(Vec2::new(SIZE.0 as f32, SIZE.1 as f32)),
+             ..default()
+         },
+-        texture: image0.clone(),
+-        transform: Transform::from_scale(Vec3::splat(DISPLAY_FACTOR as f32)),
+-        ..default()
+-    });
++        Transform::from_scale(Vec3::splat(DISPLAY_FACTOR as f32)),
++    ));
+     commands.spawn(Camera2d);
+ 
+     commands.insert_resource(GameOfLifeImages {
+diff --git a/examples/state/computed_states.rs b/examples/state/computed_states.rs
+index c1c669ccc29ca..58a3e9b71bee1 100644
+--- a/examples/state/computed_states.rs
++++ b/examples/state/computed_states.rs
+@@ -423,10 +423,7 @@ mod ui {
+     pub fn setup_game(mut commands: Commands, asset_server: Res<AssetServer>) {
+         commands.spawn((
+             StateScoped(InGame),
+-            SpriteBundle {
+-                texture: asset_server.load("branding/icon.png"),
+-                ..default()
+-            },
++            Sprite::from_image(asset_server.load("branding/icon.png")),
+         ));
+     }
+ 
+diff --git a/examples/state/custom_transitions.rs b/examples/state/custom_transitions.rs
+index c71a07d4a43df..54408697e24dc 100644
+--- a/examples/state/custom_transitions.rs
++++ b/examples/state/custom_transitions.rs
+@@ -223,10 +223,7 @@ fn setup(mut commands: Commands) {
+ }
+ 
+ fn setup_game(mut commands: Commands, asset_server: Res<AssetServer>) {
+-    commands.spawn(SpriteBundle {
+-        texture: asset_server.load("branding/icon.png"),
+-        ..default()
+-    });
++    commands.spawn(Sprite::from_image(asset_server.load("branding/icon.png")));
+     info!("Setup game");
+ }
+ 
+diff --git a/examples/state/states.rs b/examples/state/states.rs
+index 0ecb2686fc976..4bacb88e52afc 100644
+--- a/examples/state/states.rs
++++ b/examples/state/states.rs
+@@ -120,10 +120,7 @@ fn cleanup_menu(mut commands: Commands, menu_data: Res<MenuData>) {
+ }
+ 
+ fn setup_game(mut commands: Commands, asset_server: Res<AssetServer>) {
+-    commands.spawn(SpriteBundle {
+-        texture: asset_server.load("branding/icon.png"),
+-        ..default()
+-    });
++    commands.spawn(Sprite::from_image(asset_server.load("branding/icon.png")));
+ }
+ 
+ const SPEED: f32 = 100.0;
+diff --git a/examples/state/sub_states.rs b/examples/state/sub_states.rs
+index 74a135f8105e7..c375a06fe3082 100644
+--- a/examples/state/sub_states.rs
++++ b/examples/state/sub_states.rs
+@@ -198,10 +198,7 @@ mod ui {
+     }
+ 
+     pub fn setup_game(mut commands: Commands, asset_server: Res<AssetServer>) {
+-        commands.spawn(SpriteBundle {
+-            texture: asset_server.load("branding/icon.png"),
+-            ..default()
+-        });
++        commands.spawn(Sprite::from_image(asset_server.load("branding/icon.png")));
+     }
+ 
+     pub fn setup_paused_screen(mut commands: Commands) {
+diff --git a/examples/stress_tests/bevymark.rs b/examples/stress_tests/bevymark.rs
+index 88963ac42bf52..d0b9268ff1d20 100644
+--- a/examples/stress_tests/bevymark.rs
++++ b/examples/stress_tests/bevymark.rs
+@@ -433,16 +433,16 @@ fn spawn_birds(
+                         color
+                     };
+                     (
+-                        SpriteBundle {
+-                            texture: bird_resources
++                        Sprite {
++                            image: bird_resources
+                                 .textures
+                                 .choose(&mut bird_resources.material_rng)
+                                 .unwrap()
+                                 .clone(),
+-                            transform,
+-                            sprite: Sprite { color, ..default() },
++                            color,
+                             ..default()
+                         },
++                        transform,
+                         Bird { velocity },
+                     )
+                 })
+diff --git a/examples/stress_tests/many_animated_sprites.rs b/examples/stress_tests/many_animated_sprites.rs
+index 1bf789b6a369a..4456345369c2e 100644
+--- a/examples/stress_tests/many_animated_sprites.rs
++++ b/examples/stress_tests/many_animated_sprites.rs
+@@ -82,19 +82,16 @@ fn setup(
+             timer.set_elapsed(Duration::from_secs_f32(rng.gen::<f32>()));
+ 
+             commands.spawn((
+-                SpriteBundle {
+-                    texture: texture_handle.clone(),
+-                    transform: Transform {
+-                        translation,
+-                        rotation,
+-                        scale,
+-                    },
+-                    sprite: Sprite {
+-                        custom_size: Some(tile_size),
+-                        ..default()
+-                    },
++                Sprite {
++                    image: texture_handle.clone(),
++                    custom_size: Some(tile_size),
+                     ..default()
+                 },
++                Transform {
++                    translation,
++                    rotation,
++                    scale,
++                },
+                 TextureAtlas::from(texture_atlas_handle.clone()),
+                 AnimationTimer(timer),
+             ));
+diff --git a/examples/stress_tests/many_sprites.rs b/examples/stress_tests/many_sprites.rs
+index 2ec829c96d704..4dac8d159f1a6 100644
+--- a/examples/stress_tests/many_sprites.rs
++++ b/examples/stress_tests/many_sprites.rs
+@@ -81,14 +81,9 @@ fn setup(mut commands: Commands, assets: Res<AssetServer>, color_tint: Res<Color
+             let rotation = Quat::from_rotation_z(rng.gen::<f32>());
+             let scale = Vec3::splat(rng.gen::<f32>() * 2.0);
+ 
+-            sprites.push(SpriteBundle {
+-                texture: sprite_handle.clone(),
+-                transform: Transform {
+-                    translation,
+-                    rotation,
+-                    scale,
+-                },
+-                sprite: Sprite {
++            sprites.push((
++                Sprite {
++                    image: sprite_handle.clone(),
+                     custom_size: Some(tile_size),
+                     color: if color_tint.0 {
+                         COLORS[rng.gen_range(0..3)]
+@@ -97,8 +92,12 @@ fn setup(mut commands: Commands, assets: Res<AssetServer>, color_tint: Res<Color
+                     },
+                     ..default()
+                 },
+-                ..default()
+-            });
++                Transform {
++                    translation,
++                    rotation,
++                    scale,
++                },
++            ));
+         }
+     }
+     commands.spawn_batch(sprites);
+diff --git a/examples/time/virtual_time.rs b/examples/time/virtual_time.rs
+index f7a101ce68d68..8fe1945481d0d 100644
+--- a/examples/time/virtual_time.rs
++++ b/examples/time/virtual_time.rs
+@@ -53,27 +53,21 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>, mut time: ResMu
+ 
+     // the sprite moving based on real time
+     commands.spawn((
+-        SpriteBundle {
+-            texture: texture_handle.clone(),
+-            transform: Transform::from_scale(sprite_scale),
+-            ..default()
+-        },
++        Sprite::from_image(texture_handle.clone()),
++        Transform::from_scale(sprite_scale),
+         RealTime,
+     ));
+ 
+     // the sprite moving based on virtual time
+     commands.spawn((
+-        SpriteBundle {
+-            texture: texture_handle,
+-            sprite: Sprite {
+-                color: virtual_color,
+-                ..default()
+-            },
+-            transform: Transform {
+-                scale: sprite_scale,
+-                translation: Vec3::new(0., -160., 0.),
+-                ..default()
+-            },
++        Sprite {
++            image: texture_handle,
++            color: virtual_color,
++            ..Default::default()
++        },
++        Transform {
++            scale: sprite_scale,
++            translation: Vec3::new(0., -160., 0.),
+             ..default()
+         },
+         VirtualTime,
+diff --git a/examples/tools/gamepad_viewer.rs b/examples/tools/gamepad_viewer.rs
+index fe71166d56e8b..11172f07102cd 100644
+--- a/examples/tools/gamepad_viewer.rs
++++ b/examples/tools/gamepad_viewer.rs
+@@ -282,34 +282,20 @@ fn setup_sticks(
+             })
+             .with_children(|parent| {
+                 // full extent
+-                parent.spawn(SpriteBundle {
+-                    sprite: Sprite {
+-                        custom_size: Some(Vec2::splat(STICK_BOUNDS_SIZE * 2.)),
+-                        color: DEAD_COLOR,
+-                        ..default()
+-                    },
+-                    ..default()
+-                });
++                parent.spawn(Sprite::from_color(
++                    DEAD_COLOR,
++                    Vec2::splat(STICK_BOUNDS_SIZE * 2.),
++                ));
+                 // live zone
+-                parent.spawn(SpriteBundle {
+-                    transform: Transform::from_xyz(live_mid, live_mid, 2.),
+-                    sprite: Sprite {
+-                        custom_size: Some(Vec2::new(live_size, live_size)),
+-                        color: LIVE_COLOR,
+-                        ..default()
+-                    },
+-                    ..default()
+-                });
++                parent.spawn((
++                    Sprite::from_color(LIVE_COLOR, Vec2::splat(live_size)),
++                    Transform::from_xyz(live_mid, live_mid, 2.),
++                ));
+                 // dead zone
+-                parent.spawn(SpriteBundle {
+-                    transform: Transform::from_xyz(dead_mid, dead_mid, 3.),
+-                    sprite: Sprite {
+-                        custom_size: Some(Vec2::new(dead_size, dead_size)),
+-                        color: DEAD_COLOR,
+-                        ..default()
+-                    },
+-                    ..default()
+-                });
++                parent.spawn((
++                    Sprite::from_color(DEAD_COLOR, Vec2::splat(dead_size)),
++                    Transform::from_xyz(dead_mid, dead_mid, 3.),
++                ));
+                 // text
+                 let style = TextStyle {
+                     font_size: 13.,
+diff --git a/examples/window/transparent_window.rs b/examples/window/transparent_window.rs
+index 2909c2a3bfdbe..ed5a47297310f 100644
+--- a/examples/window/transparent_window.rs
++++ b/examples/window/transparent_window.rs
+@@ -32,8 +32,5 @@ fn main() {
+ 
+ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
+     commands.spawn(Camera2d);
+-    commands.spawn(SpriteBundle {
+-        texture: asset_server.load("branding/icon.png"),
+-        ..default()
+-    });
++    commands.spawn(Sprite::from_image(asset_server.load("branding/icon.png")));
+ }
+diff --git a/tests/window/minimising.rs b/tests/window/minimising.rs
+index 6fb791794e7aa..e4a9184111cdd 100644
+--- a/tests/window/minimising.rs
++++ b/tests/window/minimising.rs
+@@ -71,12 +71,8 @@ fn setup_2d(mut commands: Commands) {
+             ..default()
+         },
+     ));
+-    commands.spawn(SpriteBundle {
+-        sprite: Sprite {
+-            color: Color::srgb(0.25, 0.25, 0.75),
+-            custom_size: Some(Vec2::new(50.0, 50.0)),
+-            ..default()
+-        },
+-        ..default()
+-    });
++    commands.spawn(Sprite::from_color(
++        Color::srgb(0.25, 0.25, 0.75),
++        Vec2::new(50.0, 50.0),
++    ));
+ }
+diff --git a/tests/window/resizing.rs b/tests/window/resizing.rs
+index 65858b3df5046..f43702caf8556 100644
+--- a/tests/window/resizing.rs
++++ b/tests/window/resizing.rs
+@@ -147,12 +147,8 @@ fn setup_2d(mut commands: Commands) {
+             ..default()
+         },
+     ));
+-    commands.spawn(SpriteBundle {
+-        sprite: Sprite {
+-            color: Color::srgb(0.25, 0.25, 0.75),
+-            custom_size: Some(Vec2::new(50.0, 50.0)),
+-            ..default()
+-        },
+-        ..default()
+-    });
++    commands.spawn(Sprite::from_color(
++        Color::srgb(0.25, 0.25, 0.75),
++        Vec2::new(50.0, 50.0),
++    ));
+ }
