@@ -64,7 +64,8 @@ def evaluate_single_instance(instance: InstanceRow, agent_id: str, config: Evalu
     Returns:
         True if successful, False otherwise
     """
-    instance_logger = get_logger(f"evaluation-{instance.id}", use_file=True, use_stdout=False)
+    log_subdir = f"inference/{agent_id}"
+    instance_logger = get_logger(f"{instance.id}", use_file=True, use_stdout=False, log_subdir=log_subdir)
 
     # Determine paths
     agent_output_dir = config.output_dir / instance.owner / instance.repo / instance.short_hash / agent_id
