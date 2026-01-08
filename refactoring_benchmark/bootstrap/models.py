@@ -13,6 +13,8 @@ class BootstrapConfig(BaseModel):
     instances_csv: Path
     nr_workers: int = Field(gt=0, default=4)
     force_runtime_build: bool = False
+    rerun_metrics: bool = False
+    force_full_build: bool = False
     api_key: str
     base_image: str = "benchmark/benchmark-base-all"
     timeout_bootstrap: int = Field(gt=0, default=7200)  # 2 hours

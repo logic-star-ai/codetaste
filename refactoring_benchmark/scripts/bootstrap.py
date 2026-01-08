@@ -52,6 +52,8 @@ def main():
         instances_csv=args.instances_csv,
         nr_workers=args.nr_workers,
         force_runtime_build=args.force_runtime_build,
+        rerun_metrics=args.rerun_metrics,
+        force_full_build=args.force_full_build,
         api_key=api_key,
     )
 

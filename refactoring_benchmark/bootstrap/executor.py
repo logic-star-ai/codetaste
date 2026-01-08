@@ -20,7 +20,7 @@ from refactoring_benchmark.utils.logger import get_logger
 from refactoring_benchmark.utils.models import InstanceRow
 
 
-def bootstrap_single_instance(instance: InstanceRow, config: BootstrapConfig) -> bool:
+def bootstrap_single_instance(instance: InstanceRow, config: BootstrapConfig, is_interrupted: List[bool]) -> bool:
     """
     Bootstrap a single instance with retry logic.
 
@@ -35,68 +35,93 @@ def bootstrap_single_instance(instance: InstanceRow, config: BootstrapConfig) ->
     instance_dir = instance.instance_dir()
     metadata_path = Path(instance_dir) / "instance_metadata.json"
 
-    # Check if already bootstrapped
+    # Validate mutual exclusivity
+    flags = [config.rerun_metrics, config.force_full_build, config.force_runtime_build]
+    if sum(flags) > 1:
+        instance_logger.error("Only one of --rerun-metrics, --force-full-build, --force-runtime-build allowed")
+        return False
+
+    # Load or create metadata
     if metadata_path.exists():
         metadata = ExecutionInstanceMetadata.load_from_json(metadata_path)
-        client = podman_utils.get_local_client(80 * 60)
-        if not podman_utils.is_image_existing(client, metadata.setup_image):
-            instance_logger.error(
-                f"Inconsistent state: Setup image missing for instance {instance.id} but metadata exists. Remove metadata to bootstrap setup again."
-            )
-            return False
-        if config.force_runtime_build:
-            instance_logger.info(f"⚠️  FORCING runtime phase for instance: {instance.id} with existing metadata.")
-            try:
-                bootstrap_runtime_phase(
-                    client, instance, instance.setup_image, config, instance_logger, metadata=metadata, force=True
-                )
-                instance_logger.info(f"✅ Successfully rebuilt runtime for instance: {instance.id}")
-                return True
-            except Exception as e:
-                instance_logger.error(f"Failed to rebuild runtime: {e}")
-                return False
-            finally:
-                if client is not None:
-                    client.close()
-        else:
+
+        # Early skip if nothing to do
+        if sum(flags) == 0:
             instance_logger.info(f"⏭️  SKIPPING: Instance already bootstrapped: {instance.id}")
             return True
+    else:
+        # New instance - can't use runtime-only or rerun-metrics flags
+        if config.force_runtime_build or config.rerun_metrics:
+            instance_logger.error(f"Cannot use --force-runtime-build or --rerun-metrics without existing metadata")
+            return False
 
-    # Initialize metadata
-    metadata = ExecutionInstanceMetadata(
-        owner=instance.owner,
-        repo=instance.repo,
-        base_hash=instance.commit_hash,
-        golden_hash=instance.golden_commit_hash,
-        setup_image=instance.setup_image,
-        runtime_image=instance.runtime_image,
-    )
+        metadata = ExecutionInstanceMetadata(
+            owner=instance.owner,
+            repo=instance.repo,
+            base_hash=instance.commit_hash,
+            golden_hash=instance.golden_commit_hash,
+            setup_image=instance.setup_image,
+            runtime_image=instance.runtime_image,
+        )
 
     client = None
     try:
-        # Check if language is supported
-        is_supported = any(lang in instance.language.lower() for lang in config.supported_languages)
         client = podman_utils.get_local_client(120 * 60)
 
-        # Attempt 1: Bootstrap with agent
-        try:
-            setup_img = bootstrap_setup_phase(
-                client, instance, metadata, config, instance_logger, use_base_image=not is_supported
+        # Handle runtime-only rebuild (special case)
+        if config.force_runtime_build:
+            # Validate setup image exists
+            if not podman_utils.is_image_existing(client, metadata.setup_image):
+                instance_logger.error(f"Setup image missing: {metadata.setup_image}")
+                return False
+
+            # Just rebuild runtime, reuse existing metadata
+            bootstrap_runtime_phase(
+                client, instance, instance.setup_image, config,
+                instance_logger, metadata=metadata, force=True
             )
-            bootstrap_runtime_phase(client, instance, setup_img, config, instance_logger, metadata=metadata)
+            instance_logger.info(f"✅ Successfully rebuilt runtime for: {instance.id}")
+            return True
+
+        # Run setup + runtime (with fallback for new/rebuild)
+        is_supported = any(lang in instance.language.lower() for lang in config.supported_languages)
+
+        # Force runtime rebuild when setup is updated/rebuilt
+        force_runtime = config.force_full_build or config.rerun_metrics
+
+        try:
+            # Attempt with agent or reuse
+            setup_img = bootstrap_setup_phase(
+                client, instance, metadata, config, instance_logger,
+                use_base_image=not is_supported,
+                force_rebuild=config.force_full_build,
+                reuse_only=config.rerun_metrics
+            )
+            # Save metadata after setup completes
+            metadata.save_to_json(metadata_path)
+            if is_interrupted[0]:
+                instance_logger.warning("Bootstrap interrupted, skipping runtime phase.")
+                return False
+            bootstrap_runtime_phase(client, instance, setup_img, config, instance_logger, metadata=metadata, force=force_runtime)
             instance_logger.info(f"✅ Successfully bootstrapped {instance.id}.")
-        # Attempt 2: Fallback to base image
+
         except (RuntimeError, TimeoutError, BootstrapError) as e:
-            instance_logger.error(f"Attempt 1 failed ({e}). Retrying with base image without execution environment...")
-            setup_img = bootstrap_setup_phase(client, instance, metadata, config, instance_logger, use_base_image=True)
-            bootstrap_runtime_phase(client, instance, setup_img, config, instance_logger, metadata=metadata)
-            instance_logger.info(f"✅ Successfully bootstrapped {instance.id} on retry with base image.")
-        # Save metadata
-        metadata.save_to_json(metadata_path)
+            # Fallback: retry with base image (no agent)
+            instance_logger.error(f"Attempt failed for {instance.id} ({e}). Retrying with base image...")
+            setup_img = bootstrap_setup_phase(
+                client, instance, metadata, config, instance_logger, use_base_image=True
+            )
+            metadata.save_to_json(metadata_path)
+            if is_interrupted[0]:
+                instance_logger.warning("Bootstrap interrupted, skipping runtime phase.")
+                return False
+            bootstrap_runtime_phase(client, instance, setup_img, config, instance_logger, metadata=metadata, force=force_runtime)
+            instance_logger.info(f"✅ Successfully bootstrapped {instance.id} on retry.")
+
         return True
 
     except Exception as e:
-        instance_logger.error(f"❌ FAILED to bootstrap after retry: {e}")
+        instance_logger.error(f"❌ FAILED to bootstrap for {instance.id}: {e}")
         return False
 
     finally:
@@ -119,6 +144,7 @@ class BootstrapOrchestrator:
         self.config = config
         self.logger = get_logger("bootstrap")
         self.executor = None
+        self.interrupted = [False]
 
         # Setup signal handlers
         self._setup_signal_handlers()
@@ -131,6 +157,7 @@ class BootstrapOrchestrator:
             self.logger.warning(f"\nReceived {sig_name}, initiating shutdown...")
             if self.executor:
                 self.executor.shutdown(wait=False, cancel_futures=True)
+            self.interrupted[0] = True
             self._cleanup_containers()
             print(f"Exiting due to {sig_name}")
             sys.exit(1)
@@ -165,7 +192,7 @@ class BootstrapOrchestrator:
         try:
             # Submit all tasks
             future_to_instance = {
-                executor.submit(bootstrap_single_instance, inst, self.config): inst for inst in self.instances
+                executor.submit(bootstrap_single_instance, inst, self.config, self.interrupted): inst for inst in self.instances
             }
 
             # Process completed tasks with progress bar

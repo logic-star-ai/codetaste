@@ -37,7 +37,7 @@ def validate_container_size(container: PodmanContainer, metadata: Optional[Execu
 
 
 def validate_and_commit_container(
-    container: PodmanContainer, image_name: str, max_size_bytes: int = 5 * (1024**3), **commit_kwargs
+    container: PodmanContainer, image_name: str, logger: logging.Logger, max_size_bytes: int = 5 * (1024**3), **commit_kwargs
 ) -> None:
     """
     Validate container size then commit if within limits.
@@ -53,6 +53,7 @@ def validate_and_commit_container(
     """
     validate_container_size(container, max_size_bytes=max_size_bytes)
     podman_utils.commit_container(container, image_name, **commit_kwargs)
+    logger.info(f"Committed container to image: {image_name}")
 
 
 def setup_testbed_container(

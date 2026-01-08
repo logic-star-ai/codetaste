@@ -77,6 +77,8 @@ def bootstrap_setup_phase(
     config: BootstrapConfig,
     logger: logging.Logger,
     use_base_image: bool = False,
+    force_rebuild: bool = False,
+    reuse_only: bool = False,
 ) -> str:
     """
     Phase 1: Ensure a setup image exists.
@@ -88,12 +90,14 @@ def bootstrap_setup_phase(
         config: Bootstrap configuration
         logger: Logger instance
         use_base_image: If True, skip agent and use base image
+        force_rebuild: If True, rebuild from scratch (ignore existing image)
+        reuse_only: If True, must reuse existing image (fail if missing)
 
     Returns:
         Name of the setup image
 
     Raises:
-        RuntimeError: If metrics validation fails
+        RuntimeError: If metrics validation fails or reuse_only but image missing
     """
     instance_dir = row.instance_dir()
     repo_url = f"https://github.com/{row.owner}/{row.repo}.git"
@@ -103,27 +107,34 @@ def bootstrap_setup_phase(
     container: Optional[PodmanContainer] = None
 
     try:
-        # 1. Reuse existing image if available
-        if podman_utils.is_image_existing(client, setup_image):
+        image_exists = podman_utils.is_image_existing(client, setup_image)
+        if image_exists and not force_rebuild and not use_base_image:
+            # Flow 1: Reuse existing image
             logger.info(f"Reusing existing setup image: {setup_image}")
             container = podman_utils.safe_container_run(
                 client, setup_image, detach=True, working_dir="/testbed", remove=True
             )
-
-        # 2. Bootstrap new container if image missing
+        elif reuse_only and not use_base_image:
+            # Error: reuse_only but image doesn't exist
+            raise RuntimeError(f"Image {setup_image} doesn't exist but reuse_only=True")
         else:
             container = setup_testbed_container(
                 client, config.base_image, config.api_key, repo_url, row.golden_commit_hash, logger
             )
-
             if use_base_image:
-                return _finalize_fallback(container, setup_image, metadata)
+                logger.info(f"Using base image as setup image for {setup_image}")
+                return _finalize_fallback(container, setup_image, metadata, logger)
+            # Flow 2: Build from scratch (either forced or image missing)
+            if force_rebuild:
+                logger.info(f"Force rebuild: Building setup image from scratch")
+            else:
+                logger.info(f"Building new setup image: {setup_image}")
 
             try:
                 container = bootstrap_run_setup_agent(container, config, logger)
             except (TimeoutError, BootstrapError) as e:
                 metadata.has_execution_environment = False
-                metadata.reason_no_execution_environment += f"Agent error: {e} "
+                metadata.reason_no_execution_environment = f"Agent error: {e} "
                 raise
             validate_container_size(container, metadata=metadata)
 
@@ -138,14 +149,17 @@ def bootstrap_setup_phase(
         validate_container_size(container, metadata=metadata)
         # 4. Final Validation
         if metadata.golden_metrics.is_valid or metadata.base_metrics.is_valid:
-            validate_and_commit_container(container, setup_image)
             metadata.has_execution_environment = True
+            metadata_json = metadata.model_dump_json(indent=2).encode("utf-8")
+            podman_utils.copy_to_container(container, metadata_json, "/rules/instance_metadata.json")
+            logger.info("Injected instance_metadata.json into /rules")
+            validate_and_commit_container(container, setup_image, logger)
             return setup_image
 
         metadata.golden_metrics = None
         metadata.base_metrics = None
         metadata.has_execution_environment = False
-        metadata.reason_no_execution_environment += f"Insufficient test coverage. "
+        metadata.reason_no_execution_environment = f"Insufficient test coverage. "
         raise RuntimeError(f"Metrics validation failed for {row.id}")
 
     finally:
@@ -153,7 +167,7 @@ def bootstrap_setup_phase(
             podman_utils.stop_container(container)
 
 
-def _finalize_fallback(container: PodmanContainer, setup_image: str, metadata: ExecutionInstanceMetadata) -> str:
+def _finalize_fallback(container: PodmanContainer, setup_image: str, metadata: ExecutionInstanceMetadata, logger: logging.Logger) -> str:
     """
     Commits the current container state as the setup image and marks as fallback.
 
@@ -165,9 +179,12 @@ def _finalize_fallback(container: PodmanContainer, setup_image: str, metadata: E
     Returns:
         Setup image name
     """
-    validate_and_commit_container(container, setup_image)
     metadata.has_execution_environment = False
     metadata.reason_no_execution_environment += "Used base image fallback."
+    metadata_json = metadata.model_dump_json(indent=2).encode("utf-8")
+    podman_utils.copy_to_container(container, metadata_json, "/rules/instance_metadata.json")
+    logger.info("Injected instance_metadata.json into /rules.")
+    validate_and_commit_container(container, setup_image, logger)
     return setup_image
 
 
