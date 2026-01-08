@@ -121,7 +121,9 @@ def run_metrics(container: PodmanContainer, commit_hash: str, logger: logging.Lo
         logger,
         timeout=300,
     )
-
+    # TODO: VALIDATE THIS?
+    cleanup_tmp = ["bash", "-c", "sudo find /tmp -mindepth 1 -delete"]
+    podman_utils.podman_exec_logged(container, cleanup_tmp, logger)  
     command = "sudo /scripts/setup_system.sh || true; source /scripts/setup_shell.sh || true; /scripts/run_tests"
     try:
         exit_code, (stdout_bytes, stderr_bytes) = podman_utils.podman_timed_exec_bash_logged(

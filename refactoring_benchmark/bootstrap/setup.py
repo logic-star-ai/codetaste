@@ -105,7 +105,7 @@ def bootstrap_setup_phase(
     try:
         # 1. Reuse existing image if available
         if podman_utils.is_image_existing(client, setup_image):
-            logger.info(f"Reusing existing image {setup_image}")
+            logger.info(f"Reusing existing setup image: {setup_image}")
             container = podman_utils.safe_container_run(
                 client, setup_image, detach=True, working_dir="/testbed", remove=True
             )
