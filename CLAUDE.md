@@ -91,6 +91,7 @@ refactoring_benchmark/
 ├── podman/             # Container management utilities
 ├── coverage/           # Code coverage parsing
 ├── utils/              # Shared utilities, models, prompts
+├── tools/              # Utilities (pseudo agents, description builder)
 ├── scripts/            # Main entry points
 └── base_images/        # Docker base image definitions
 
@@ -103,8 +104,6 @@ pyproject.toml         # Poetry project configuration
 
 - **`instances.csv`**: Benchmark definitions (owner, repo, commits, category, language)
 - **`entrypoint.sh`**: Container entry point supporting modes: `inference`, `eval_test`, `eval_rule`
-- **`agent/agent_config.json`**: Agent metadata for inference
-- **`refactoring_benchmark/utils/prompts.py`**: Prompts for bootstrap agent
 
 ## Metrics
 
@@ -157,6 +156,15 @@ python -m refactoring_benchmark.scripts.evaluate
 python -m refactoring_benchmark.scripts.analyze
 ```
 
+### Creating Pseudo Agent Outputs
+Create baseline comparison agents without running actual inference:
+
+```bash
+python -m refactoring_benchmark.tools.create_pseudo_agents --agent golden --agent null --output-dir output_minimal
+```
+
+Both agents create complete output structures (prediction.diff, agent_config.json, inference_metadata.json) compatible with evaluation.
+
 ## Output Structure
 
 ```
@@ -171,6 +179,9 @@ output/
 
 ## Development
 
+### Contributing
+Special care should be taken to write clean, lean and maintainable code. It's important to explore the repository enough to avoid code duplication! 
+
 ### Testing
 ```bash
 pytest                           # Run all tests
@@ -181,7 +192,7 @@ pytest --cov                     # With coverage report
 
 ### Code Formatting
 ```bash
-black .
+black ./refactoring_benchmark
 ```
 
 ## Container Modes
