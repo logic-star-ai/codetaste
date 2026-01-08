@@ -36,8 +36,7 @@ def run_single_instance(instance: InstanceRow, config: InferenceConfig) -> bool:
     Returns:
         True if successful, False otherwise
     """
-    log_subdir = f"inference/{config.sanitized_agent_id}"
-    instance_logger = get_logger(f"{instance.id}", use_file=True, use_stdout=False, log_subdir=log_subdir)
+    instance_logger = get_logger(f"{instance.id}", use_file=True, use_stdout=False, log_subdir=f"{config.sanitized_agent_id}")
     output_dir = get_instance_output_dir(instance, config.sanitized_agent_id, config.output_dir)
 
     # Check if output already exists (skip unless force)

@@ -30,11 +30,12 @@ def run_test_evaluation(
         Tuple of (TestMetrics or None, stdout)
     """
     container: Optional[PodmanContainer] = None
-    client = podman_utils.get_local_client()
+    client = podman_utils.get_local_client(timeout=timeout)
 
     if not client:
         return None, "Failed to connect to Podman daemon"
 
+    stdout_lines = []
     try:
         # Verify image exists
         try:
@@ -56,25 +57,19 @@ def run_test_evaluation(
         )
 
         # Stream and collect output
-        stdout_lines = []
-        try:
-            for log_line in container.logs(stream=True, follow=True):
-                line = log_line.decode("utf-8", errors="replace").rstrip()
-                stdout_lines.append(line)
-        except Exception:
-            pass
+        for log_line in container.logs(stream=True, follow=True):
+            line = log_line.decode("utf-8", errors="replace").rstrip()
+            stdout_lines.append(line)
 
         # Wait for completion with timeout
-        try:
-            exit_code = container.wait(timeout=timeout)
-        except Exception:
-            return None, f"Test evaluation timed out after {timeout}s"
+        exit_code = container.wait(timeout=timeout)
 
         stdout = "\n".join(stdout_lines)
         return None, stdout  # Parser will handle extracting metrics
 
     except Exception as e:
-        return None, f"Test evaluation failed: {e}"
+        stdout = "\n".join(stdout_lines) 
+        return None, stdout + f"\n\nTest evaluation failed: {e}"
 
     finally:
         if container is not None:
