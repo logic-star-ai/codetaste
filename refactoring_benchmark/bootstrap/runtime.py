@@ -68,6 +68,12 @@ def bootstrap_runtime_phase(
                     with open(file_path, "rb") as f:
                         podman_utils.copy_to_container(container, f.read(), f"{target}/{filename}")
 
+        # 2a. Inject default.semgrepignore into /rules
+        default_semgrepignore = project_root / "assets" / "default.semgrepignore"
+        with open(default_semgrepignore, "rb") as f:
+            podman_utils.copy_to_container(container, f.read(), "/rules/default.semgrepignore")
+        logger.info("Injected default.semgrepignore into /rules")
+
         # 3. Inject instance_metadata.json into /rules
         if metadata is not None:
             metadata_json = metadata.model_dump_json(indent=2).encode("utf-8")

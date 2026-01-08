@@ -169,6 +169,10 @@ case "$1" in
         echo "Running Opengrep with positive rules..."
         sudo chmod -R 755 "$RULES_DIR"
 
+        # Setup default .semgrepignore
+        cat /rules/default.semgrepignore > /testbed/.semgrepignore
+        echo "-> Applied default .semgrepignore to /testbed"
+
         # Scan with positive rules
         if [ -f "$RULES_POSITIVE" ]; then
             echo "-> Scanning with positive rules: $RULES_POSITIVE"
