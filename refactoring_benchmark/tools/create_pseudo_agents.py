@@ -9,13 +9,13 @@ Both agents create proper output structure with agent_config.json and inference_
 """
 
 import argparse
-import csv
 import json
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
 from refactoring_benchmark.inference.models import AgentConfig, AgentInfo, ModelInfo, InferenceMetadata
+from refactoring_benchmark.utils.common import load_instances_from_csv
 from refactoring_benchmark.utils.models import InstanceRow
 
 
@@ -152,12 +152,8 @@ def main():
 
     # Load instances
     print(f"Loading instances from {instances_csv}...")
-    instances = []
     try:
-        with open(instances_csv, "r") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                instances.append(InstanceRow(**row))
+        instances = load_instances_from_csv(instances_csv)
     except Exception as e:
         print(f"Error: Failed to load instances from CSV: {e}")
         return 1

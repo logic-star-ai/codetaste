@@ -1,6 +1,5 @@
 """Main entry point for evaluating inference results."""
 
-import csv
 import sys
 from pathlib import Path
 
@@ -8,7 +7,7 @@ from refactoring_benchmark.evaluation.cli import parse_args
 from refactoring_benchmark.evaluation.executor import EvaluationOrchestrator
 from refactoring_benchmark.evaluation.models import EvaluationConfig
 from refactoring_benchmark.utils.logger import get_logger, setup_logging
-from refactoring_benchmark.utils.models import InstanceRow
+from refactoring_benchmark.utils.common import load_instances_from_csv
 
 
 def main():
@@ -31,12 +30,8 @@ def main():
         logger.error(f"Instances CSV not found: {args.instances_csv}")
         sys.exit(1)
 
-    instances = []
     try:
-        with open(args.instances_csv, "r") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                instances.append(InstanceRow(**row))
+        instances = load_instances_from_csv(args.instances_csv)
     except Exception as e:
         logger.error(f"Failed to load instances from CSV: {e}")
         sys.exit(1)

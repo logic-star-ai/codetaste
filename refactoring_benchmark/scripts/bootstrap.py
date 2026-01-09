@@ -1,6 +1,5 @@
 """Main entry point for bootstrap execution."""
 
-import csv
 import os
 import sys
 from pathlib import Path
@@ -9,7 +8,7 @@ from refactoring_benchmark.bootstrap.cli import parse_args
 from refactoring_benchmark.bootstrap.models import BootstrapConfig
 from refactoring_benchmark.bootstrap.executor import BootstrapOrchestrator
 from refactoring_benchmark.utils.logger import get_logger, setup_logging
-from refactoring_benchmark.utils.models import InstanceRow
+from refactoring_benchmark.utils.common import load_instances_from_csv
 
 
 def main():
@@ -34,10 +33,11 @@ def main():
         sys.exit(1)
 
     # Load instances
-    instances = []
-    with open(args.instances_csv, "r") as f:
-        for row in csv.DictReader(f):
-            instances.append(InstanceRow(**row))
+    try:
+        instances = load_instances_from_csv(args.instances_csv)
+    except Exception as e:
+        logger.error(f"Failed to load instances: {e}")
+        sys.exit(1)
 
     if not instances:
         logger.error("No instances found in CSV")
