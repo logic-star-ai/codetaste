@@ -5,44 +5,10 @@ import statistics
 
 from pydantic import BaseModel, Field
 
-from refactoring_benchmark.analyze.models import AnalysisData, AgentIFRData
+from refactoring_benchmark.analyze.models import AnalysisData, AgentInstanceStats, MetricStatistics, AgentStatistics, CombinationStatistics, AllStatistics
 from refactoring_benchmark.analyze.validation import ValidityStatus
 
 
-class MetricStatistics(BaseModel):
-    """Statistics for a single IFR metric."""
-
-    mean: float = Field(description="Average value")
-    median: float = Field(description="Median value")
-    count: int = Field(ge=0, description="Number of instances included")
-
-
-class AgentStatistics(BaseModel):
-    """Complete statistics for one agent under specific filtering conditions."""
-
-    agent_id: str = Field(description="Agent identifier")
-    total_ifr: MetricStatistics = Field(description="Total IFR statistics")
-    positive_ifr: MetricStatistics = Field(description="Positive IFR statistics")
-    negative_ifr: MetricStatistics = Field(description="Negative IFR statistics")
-
-
-class CombinationStatistics(BaseModel):
-    """Statistics for all agents under one filtering combination."""
-
-    combination_id: int = Field(ge=1, le=6, description="Combination number (1-6)")
-    ifr_condition: Literal["all", "ifr_gt_0"] = Field(description="IFR filtering condition")
-    validity_condition: Literal["all", "valid", "invalid"] = Field(
-        description="Test validity filtering condition"
-    )
-    agents: Dict[str, AgentStatistics] = Field(description="Statistics per agent")
-
-
-class AllStatistics(BaseModel):
-    """Complete statistics for all 6 combinations."""
-
-    combinations: Dict[int, CombinationStatistics] = Field(
-        description="Statistics for each combination (1-6)"
-    )
 
 
 def _compute_statistics(values: list[float]) -> MetricStatistics:
@@ -60,7 +26,7 @@ def _filter_agent_data(
     agent_id: str,
     ifr_condition: Literal["all", "ifr_gt_0"],
     validity_condition: Literal["all", "valid", "invalid"],
-) -> list[AgentIFRData]:
+) -> list[AgentInstanceStats]:
     """
     Filter agent data based on IFR and validity conditions.
 
@@ -130,13 +96,21 @@ def compute_combination_statistics(
                 total_ifr=MetricStatistics(mean=0.0, median=0.0, count=0),
                 positive_ifr=MetricStatistics(mean=0.0, median=0.0, count=0),
                 negative_ifr=MetricStatistics(mean=0.0, median=0.0, count=0),
+                precision_added=MetricStatistics(mean=0.0, median=0.0, count=0),
+                precision_removed=MetricStatistics(mean=0.0, median=0.0, count=0),
+                precision_overall=MetricStatistics(mean=0.0, median=0.0, count=0),
             )
             continue
 
-        # Extract metric values
+        # Extract IFR metric values
         total_ifr_values = [d.total_ifr for d in filtered_data]
         positive_ifr_values = [d.positive_ifr for d in filtered_data]
         negative_ifr_values = [d.negative_ifr for d in filtered_data]
+
+        # Extract precision metric values (only from instances that have them)
+        precision_added_values = [d.precision_added for d in filtered_data if d.precision_added is not None]
+        precision_removed_values = [d.precision_removed for d in filtered_data if d.precision_removed is not None]
+        precision_overall_values = [d.precision_overall for d in filtered_data if d.precision_overall is not None]
 
         # Compute statistics
         agent_stats[agent_id] = AgentStatistics(
@@ -144,6 +118,9 @@ def compute_combination_statistics(
             total_ifr=_compute_statistics(total_ifr_values),
             positive_ifr=_compute_statistics(positive_ifr_values),
             negative_ifr=_compute_statistics(negative_ifr_values),
+            precision_added=_compute_statistics(precision_added_values),
+            precision_removed=_compute_statistics(precision_removed_values),
+            precision_overall=_compute_statistics(precision_overall_values),
         )
 
     return CombinationStatistics(

@@ -1,8 +1,9 @@
 """Analysis package for evaluation results and IFR plotting."""
 
-from .loader import load_all_results, organize_data
+from .loader import load_all_results, organize_data, load_and_merge_precision_data
+from refactoring_benchmark.utils.common import load_instances_from_csv
 from .plotting import create_ifr_plots, create_ifr_plot
-from .models import AnalysisData, InstanceData, AgentIFRData
+from .models import AnalysisData, InstanceData, AgentInstanceStats
 from .validation import ValidityStatus, check_test_validity
 from .config import IFRPlotConfig, IFRMetricType, IFR_PLOT_DEFINITIONS
 from .filters import (
@@ -30,13 +31,15 @@ __all__ = [
     # Data loading and organization
     "load_all_results",
     "organize_data",
+    "load_and_merge_precision_data",
+    "load_instances_from_csv",
     # Plotting
     "create_ifr_plots",
     "create_ifr_plot",
     # Data models
     "AnalysisData",
     "InstanceData",
-    "AgentIFRData",
+    "AgentInstanceStats",
     # Validation
     "ValidityStatus",
     "check_test_validity",
