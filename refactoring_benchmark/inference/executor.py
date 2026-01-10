@@ -1,6 +1,7 @@
 """Executor for running inference on benchmark instances."""
 
 import os
+import shutil
 import signal
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -47,7 +48,10 @@ def run_single_instance(instance: InstanceRow, config: InferenceConfig) -> bool:
         return True
 
     # Create output directory
+    if output_dir.exists() and output_dir.is_dir():
+        shutil.rmtree(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    
 
     # Copy metadata files
     try:

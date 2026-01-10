@@ -98,7 +98,7 @@ def validate_agent_dir(agent_dir: Path) -> None:
     }
 
     optional_files = {
-        "setup_agent.sh": agent_dir / "setup_agent.sh",
+        "setup_system.sh": agent_dir / "setup_system.sh",
     }
 
     missing = []
