@@ -108,6 +108,7 @@ def evaluate_single_instance(instance: InstanceRow, agent_id: str, config: Evalu
             prediction_diff,
             eval_dir,
             config.timeout_test,
+            instance_logger
         )
 
         rule_future = executor.submit(
@@ -116,6 +117,7 @@ def evaluate_single_instance(instance: InstanceRow, agent_id: str, config: Evalu
             prediction_diff,
             eval_dir,
             config.timeout_rule,
+            instance_logger
         )
 
         # Wait for both to complete
