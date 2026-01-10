@@ -1,0 +1,1 @@
+Rename `ConfigSource` and `source` to `RefSource` for better API consistency

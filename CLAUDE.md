@@ -33,6 +33,13 @@ Runs AI agents on benchmark instances to generate refactoring patches.
 3. Extracts git diff as `prediction.diff`
 4. Saves inference metadata
 
+**Description Types:**
+Agents can be given different types of task descriptions:
+- `standard`: Full description including title, summary, why, and scope sections
+- `minimal`: Only title and summary (reduced context)
+- `nano`: Only title (very limited context)
+- `open`: Open-ended prompt asking to maximize usability without specific instructions
+
 **Entry point:** `refactoring_benchmark/scripts/inference.py`
 
 ### 3. Evaluation Phase (`refactoring_benchmark/evaluation/`)
