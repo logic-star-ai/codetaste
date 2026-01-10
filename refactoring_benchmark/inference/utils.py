@@ -120,7 +120,7 @@ def augment_inference_metadata_with_description_type(
 
     Args:
         output_dir: Output directory containing inference_metadata.json
-        description_type: Type of description used ("standard" or "minimal")
+        description_type: Type of description used ("standard", "minimal", "nano" or "open")
     """
     metadata_path = output_dir / "inference_metadata.json"
     if not metadata_path.exists():

@@ -95,15 +95,8 @@ def run_single_instance(instance: InstanceRow, config: InferenceConfig) -> bool:
                 str(output_dir): {"bind": "/output", "mode": "rw"},
             },
             working_dir="/testbed",
-            remove=True,
+            remove=False,
         )
-
-        # Stream container output to log
-        try:
-            for log_line in container.logs(stream=True, follow=True):
-                instance_logger.info(log_line.decode("utf-8", errors="replace").rstrip())
-        except Exception as log_error:
-            instance_logger.warning(f"Error streaming logs: {log_error}")
 
         # Wait for container to finish with timeout
         try:
@@ -113,6 +106,13 @@ def run_single_instance(instance: InstanceRow, config: InferenceConfig) -> bool:
             # Create fallback metadata for timeout
             create_fallback_inference_metadata(output_dir, finish_reason="timeout")
             return False
+
+        # container output to log
+        raw_logs = container.logs(stream=False, follow=False)
+        raw_logs = b"".join(raw_logs) if not isinstance(raw_logs, bytes) else raw_logs
+        stdout = raw_logs.decode("utf-8", errors="replace")
+        instance_logger.info(stdout)
+        (output_dir / "inference.out").write_text(stdout, encoding="utf-8")
 
         # Check exit code
         prediction_path = output_dir / "prediction.diff"
@@ -136,12 +136,16 @@ def run_single_instance(instance: InstanceRow, config: InferenceConfig) -> bool:
     except Exception as e:
         instance_logger.error(f"Unexpected error during inference: {e}")
         # Create fallback metadata for crash
-        create_fallback_inference_metadata(output_dir, finish_reason="crashed")
+        create_fallback_inference_metadata(output_dir, finish_reason="crashed", additional={"error": str(e)})
         return False
 
     finally:
         if container is not None:
             podman_utils.stop_container(container)
+            try:
+                container.remove(force=True)
+            except Exception as e:
+                instance_logger.error(f"Failed to remove container [{instance.id}]: {e}")
         client.close()
 
 
