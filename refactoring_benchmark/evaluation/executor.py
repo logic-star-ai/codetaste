@@ -5,6 +5,7 @@ import signal
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+import time
 from typing import List
 
 from tqdm import tqdm
@@ -70,6 +71,7 @@ def evaluate_single_instance(instance: InstanceRow, agent_id: str, config: Evalu
     agent_output_dir = config.output_dir / instance.owner / instance.repo / instance.short_hash / agent_id
     eval_dir = agent_output_dir / "evaluation"
     prediction_diff = agent_output_dir / "prediction.diff"
+    inference_metadata_path = agent_output_dir / "inference_metadata.json"
     instance_metadata_path = eval_dir / "instance_metadata.json"
     agent_config_path = agent_output_dir / "agent_config.json"
 
@@ -117,8 +119,8 @@ def evaluate_single_instance(instance: InstanceRow, agent_id: str, config: Evalu
         )
 
         # Wait for both to complete
-        test_metrics, test_stdout = test_future.result()
         rule_success, rule_stdout = rule_future.result()
+        test_metrics, test_stdout = test_future.result()
 
     # Save raw outputs for debugging
     (eval_dir / "test_output.txt").write_text(test_stdout)
@@ -145,6 +147,15 @@ def evaluate_single_instance(instance: InstanceRow, agent_id: str, config: Evalu
     except Exception as e:
         instance_logger.error(f"Failed to load instance metadata: {e}")
         return False
+    
+    inference_metadata = None
+    if inference_metadata_path.exists():
+        try:
+            with inference_metadata_path.open("r", encoding="utf-8") as f:
+                inference_metadata = json.load(f)
+            instance_logger.info("Loaded inference metadata successfully")
+        except Exception as e:
+            instance_logger.error(f"Failed to load inference metadata: {e}")
 
     # Create evaluation result
     evaluation_result = EvaluationResult(
@@ -152,6 +163,7 @@ def evaluate_single_instance(instance: InstanceRow, agent_id: str, config: Evalu
         agent_config=agent_config,
         agent_test_metrics=test_metrics,
         agent_rule_metrics=rule_metrics,
+        inference_metadata=inference_metadata,
     )
 
     # Save evaluation result
@@ -199,6 +211,7 @@ class EvaluationOrchestrator:
                 self.executor.shutdown(wait=False, cancel_futures=True)
             self._cleanup_containers()
             print(f"Exiting due to {sig_name}")
+            time.sleep(1)
             sys.exit(1)
 
         signal.signal(signal.SIGINT, signal_handler)
