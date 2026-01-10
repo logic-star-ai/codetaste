@@ -77,18 +77,33 @@ case "$1" in
             echo "Error: Agent script not found at $AGENT_SCRIPT"
             exit 1
         fi
-        # Select description type (default: standard)
-        DESCRIPTION_TYPE="${DESCRIPTION_TYPE:-standard}"
-        if [ "$DESCRIPTION_TYPE" = "minimal" ]; then
-            echo "Using minimal description"
-            mv "$TASK_DESC_DIR/minimal_description.md" "$TASK_DESC_DIR/description.md"
+
+        if [ "$DESCRIPTION_TYPE" = "open" ]; then
+            echo "Using open description"
+            mv "$TASK_DESC_DIR/open_description.md" "$TASK_DESC_DIR/description.md"
         else
-            echo "Using standard description"
-            rm -f "$TASK_DESC_DIR/minimal_description.md"
+            case "$DESCRIPTION_TYPE" in
+                "nano")
+                    echo "Using nano description"
+                    SRC_FILE="$TASK_DESC_DIR/nano_description.md"
+                    ;;
+                "minimal")
+                    echo "Using minimal description"
+                    SRC_FILE="$TASK_DESC_DIR/minimal_description.md"
+                    ;;
+                *)
+                    echo "Using standard description"
+                    # Ensure this path is correct (Absolute vs Relative)
+                    SRC_FILE="/task_description/description.md"
+                    ;;
+            esac
+            HEADER="Perform the task described below. You are required to implement **all** the required changes, without user feedback. The changes must be performed directly on the codebase."
+            echo "$HEADER" > "$TASK_DESC_DIR/description.md"
+            cat "$SRC_FILE" >> "$TASK_DESC_DIR/description.md"
         fi
+        rm -f "$TASK_DESC_DIR/nano_description.md" "$TASK_DESC_DIR/minimal_description.md" "$TASK_DESC_DIR/open_description.md"
 
         create_restricted_user
-        
         # Agent System Setup Script Can Still Use Github
         if [ -f "$AGENT_SYSTEM_SETUP_SCRIPT" ]; then
             echo "=== Running Agent System Setup Script ==="
