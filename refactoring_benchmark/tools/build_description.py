@@ -260,6 +260,8 @@ def build_filtered_description(
         if section_name in included_sections and section_name in sections:
             content, _ = sections[section_name]
             format_str, _ = section_formats[section_name]
+            if len(included_sections) == 1:
+                format_str = format_str.lstrip("# ")
 
             if content:  # Only add if content exists
                 output_parts.append(format_str.format(content=content))
@@ -270,6 +272,7 @@ def build_filtered_description(
 def process_instances(
     instances_csv: Path,
     descriptions_dir: Path,
+    description_name: str,
     output_base_dir: Path,
     included_sections: List[str]
 ) -> Tuple[int, int, List[str]]:
@@ -313,7 +316,7 @@ def process_instances(
                 output_dir.mkdir(parents=True, exist_ok=True)
 
                 # Write filtered description
-                output_file = output_dir / "description.md"
+                output_file = output_dir / description_name
                 output_file.write_text(filtered_content, encoding='utf-8')
 
                 success_count += 1
@@ -376,6 +379,12 @@ Supported sections:
         default=Path(__file__).parent.parent.parent / "assets" / "descriptions",
         help='Path to source descriptions (default: ./assets/descriptions)'
     )
+    parser.add_argument(
+        '--description-name',
+        type=str,
+        default='description.md',
+        help='Name of the description file in each instance directory (default: description.md)'
+    )
 
     args = parser.parse_args()
 
@@ -414,6 +423,7 @@ Supported sections:
     success, errors, error_msgs = process_instances(
         args.instances_csv,
         args.descriptions_dir,
+        args.description_name,
         output_dir,
         included_sections
     )
