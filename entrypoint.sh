@@ -81,6 +81,9 @@ case "$1" in
         if [ "$DESCRIPTION_TYPE" = "open" ]; then
             echo "Using open description"
             mv "$TASK_DESC_DIR/open_description.md" "$TASK_DESC_DIR/description.md"
+        elif [ "$DESCRIPTION_TYPE" = "files" ]; then
+            echo "Using files description"
+            mv "$TASK_DESC_DIR/files_description.md" "$TASK_DESC_DIR/description.md"
         else
             case "$DESCRIPTION_TYPE" in
                 "nano")
@@ -101,7 +104,7 @@ case "$1" in
             echo "$HEADER" > "$TASK_DESC_DIR/description.md"
             cat "$SRC_FILE" >> "$TASK_DESC_DIR/description.md"
         fi
-        rm -f "$TASK_DESC_DIR/nano_description.md" "$TASK_DESC_DIR/minimal_description.md" "$TASK_DESC_DIR/open_description.md"
+        rm -f "$TASK_DESC_DIR/nano_description.md" "$TASK_DESC_DIR/minimal_description.md" "$TASK_DESC_DIR/open_description.md" "$TASK_DESC_DIR/files_description.md"
 
         create_restricted_user
         # Agent System Setup Script Can Still Use Github
