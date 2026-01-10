@@ -41,7 +41,7 @@ def parse_args() -> argparse.Namespace:
         "--agent-dir",
         type=Path,
         default=Path("./agent"),
-        help="Path to the agent directory containing setup_agent.sh, run_agent, and agent_config.json",
+        help="Path to the agent directory containing setup_system.sh, run_agent, and agent_config.json",
     )
 
     parser.add_argument(
