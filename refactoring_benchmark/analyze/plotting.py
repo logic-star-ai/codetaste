@@ -61,6 +61,10 @@ def create_ifr_plot(
                 bar.set_hatch(config.hatch_pattern)
                 bar.set_edgecolor(config.no_exec_env_edge_color)
                 bar.set_linewidth(config.edge_linewidth)
+            elif status == ValidityStatus.NO_TEST_RESULTS:
+                bar.set_hatch(config.hatch_pattern)
+                bar.set_edgecolor(config.no_test_results_edge_color)
+                bar.set_linewidth(config.edge_linewidth)
 
     # Configure axes
     ax.set_xlabel("Instance (owner/repo/hash)", fontsize=config.xlabel_fontsize)

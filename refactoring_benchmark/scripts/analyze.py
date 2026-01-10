@@ -86,6 +86,14 @@ def print_statistics_summary(all_stats):
                     f"{agent_stats.precision_overall.count:>8d}"
                 )
 
+            # Print cost metric
+            print(
+                f"{'':40} {'Avg Cost USD':<20} "
+                f"{agent_stats.avg_cost_usd.mean:>10.4f} "
+                f"{agent_stats.avg_cost_usd.median:>10.4f} "
+                f"{agent_stats.avg_cost_usd.count:>8d}"
+            )
+
             print("-" * 88)
 
 
@@ -215,3 +223,5 @@ Examples:
 
 if __name__ == "__main__":
     main()
+
+# TODO : Handle Finish Reasons --> What if error, budget exceeded, etc.

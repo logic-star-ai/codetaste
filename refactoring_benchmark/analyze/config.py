@@ -20,6 +20,7 @@ class IFRPlotConfig(BaseModel):
     hatch_pattern: str = Field(default="///", description="Hatch pattern for invalid results")
     invalid_tests_edge_color: str = Field(default="red", description="Edge color for invalid test results")
     no_exec_env_edge_color: str = Field(default="black", description="Edge color for no execution environment")
+    no_test_results_edge_color: str = Field(default="gray", description="Edge color for no test results")
     edge_linewidth: float = Field(default=1.5, gt=0, description="Line width for hatched edges")
 
     # Text settings

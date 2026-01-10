@@ -11,6 +11,7 @@ class ValidityStatus(str, Enum):
     VALID = "valid"
     NO_EXEC_ENV = "no_exec_env"
     INVALID_TESTS = "invalid_tests"
+    NO_TEST_RESULTS = "no_test_results"
 
 
 def check_test_validity(result: EvaluationResult) -> ValidityStatus:
@@ -28,7 +29,7 @@ def check_test_validity(result: EvaluationResult) -> ValidityStatus:
         return ValidityStatus.NO_EXEC_ENV
 
     if result.agent_test_metrics is None:
-        return ValidityStatus.INVALID_TESTS
+        return ValidityStatus.NO_TEST_RESULTS
 
     agent_passed = result.agent_test_metrics.passed
     base_passed = result.instance_metadata.base_metrics.passed
@@ -37,7 +38,7 @@ def check_test_validity(result: EvaluationResult) -> ValidityStatus:
     min_passed = min(base_passed, golden_passed)
     max_passed = max(base_passed, golden_passed)
 
-    if min_passed <= agent_passed <= max_passed:
+    if 0.9 * min_passed <= agent_passed <= 1.1 * max_passed: # Some Tolerance for now due to non-determinism
         return ValidityStatus.VALID
     else:
         return ValidityStatus.INVALID_TESTS

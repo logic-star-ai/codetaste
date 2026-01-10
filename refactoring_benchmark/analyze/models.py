@@ -21,6 +21,8 @@ class AgentInstanceStats(BaseModel):
     precision_removed: float | None = Field(None, ge=0, le=100, description="Precision of deletions percentage")
     precision_overall: float | None = Field(None, ge=0, le=100, description="Overall precision percentage")
 
+    cost_usd: float = Field(default=-1.0, description="Cost in USD, -1 if missing, 0 for pseudo agents")
+
     @classmethod
     def from_rule_metrics(cls, metrics: RuleMetrics, validity_status: ValidityStatus) -> "AgentInstanceStats":
         """Create AgentIFRData from RuleMetrics, converting to percentages."""
@@ -84,6 +86,7 @@ class AgentStatistics(BaseModel):
     precision_added: MetricStatistics = Field(description="Precision of additions statistics")
     precision_removed: MetricStatistics = Field(description="Precision of deletions statistics")
     precision_overall: MetricStatistics = Field(description="Overall precision statistics")
+    avg_cost_usd: MetricStatistics = Field(description="Average cost in USD statistics")
 
 
 class CombinationStatistics(BaseModel):

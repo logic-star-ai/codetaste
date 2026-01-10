@@ -99,6 +99,7 @@ def compute_combination_statistics(
                 precision_added=MetricStatistics(mean=0.0, median=0.0, count=0),
                 precision_removed=MetricStatistics(mean=0.0, median=0.0, count=0),
                 precision_overall=MetricStatistics(mean=0.0, median=0.0, count=0),
+                avg_cost_usd=MetricStatistics(mean=0.0, median=0.0, count=0),
             )
             continue
 
@@ -112,6 +113,9 @@ def compute_combination_statistics(
         precision_removed_values = [d.precision_removed for d in filtered_data if d.precision_removed is not None]
         precision_overall_values = [d.precision_overall for d in filtered_data if d.precision_overall is not None]
 
+        # Extract cost values (all instances have cost, defaulting to -1.0)
+        cost_values = [d.cost_usd for d in filtered_data]
+
         # Compute statistics
         agent_stats[agent_id] = AgentStatistics(
             agent_id=agent_id,
@@ -121,6 +125,7 @@ def compute_combination_statistics(
             precision_added=_compute_statistics(precision_added_values),
             precision_removed=_compute_statistics(precision_removed_values),
             precision_overall=_compute_statistics(precision_overall_values),
+            avg_cost_usd=_compute_statistics(cost_values),
         )
 
     return CombinationStatistics(

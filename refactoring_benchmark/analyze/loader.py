@@ -104,6 +104,8 @@ def organize_data(results: List[EvaluationResult], filters: Sequence[ResultFilte
             analysis_data.instances[instance.display_path] = InstanceData(instance=instance)
         # Add agent data using factory method
         agent_data = AgentInstanceStats.from_rule_metrics(result.agent_rule_metrics, validity_status)
+        if result.inference_metadata is not None:
+            agent_data.cost_usd = result.inference_metadata.cost_usd
         analysis_data.instances[instance.display_path].agents[agent_id] = agent_data
 
     return analysis_data
