@@ -54,37 +54,28 @@ def safe_container_run(client: podman.PodmanClient, image, **kwargs) -> PodmanCo
 def register_container(container: PodmanContainer) -> None:
     """Register a container for tracking and automatic cleanup."""
     with _containers_lock:
+        utils_logger.debug(f"Acquired lock to register container {container.id[:12]}...")
         _active_containers.add(container)
-        utils_logger.debug(
-            f"Registered container {container.id[:12]} (total active: {len(_active_containers)}). A process only sees his containers, not parents or siblings."
-        )
-
-
-def unregister_container(container: PodmanContainer) -> None:
-    """Remove a container from tracking after cleanup."""
-    with _containers_lock:
-        _active_containers.discard(container)
-        utils_logger.debug(
-            f"Unregistered container {container.id[:12]} (total active: {len(_active_containers)}). A process only sees his containers, not parents or siblings."
-        )
+        utils_logger.debug(f"Registered container {container.id[:12]}. Total active: {len(_active_containers)}")
+    utils_logger.debug(f"Released lock after registering container {container.id[:12]}...")
 
 
 def cleanup_all_containers() -> None:
     """Clean up all tracked containers. Called on exit or interrupt."""
     with _containers_lock:
-        if not _active_containers:
-            return
+        utils_logger.debug("Acquired lock to cleanup all containers...")
+        if _active_containers:
+            utils_logger.debug(f"Cleaning up {len(_active_containers)} active container(s)...")
+            containers_to_cleanup = list(_active_containers)
 
-        utils_logger.debug(f"Cleaning up {len(_active_containers)} active container(s)...")
-        containers_to_cleanup = list(_active_containers)
-
-        for container in containers_to_cleanup:
-            try:
-                stop_container(container)
-                utils_logger.debug(f"✅ Cleaned up container {container.id[:12]}. {len(_active_containers)} remaining.")
-            except Exception as e:
-                utils_logger.warning(f"⚠️ Failed to cleanup container {container.id[:12]}: {e}")
-
+            for container in containers_to_cleanup:
+                try:
+                    utils_logger.debug(f"Cleaning up container {container.id[:12]}... {len(_active_containers)} remaining.")
+                    stop_container(container)
+                    utils_logger.debug(f"✅ Cleaned up container {container.id[:12]}. {len(_active_containers)} remaining.")
+                except Exception as e:
+                    utils_logger.warning(f"⚠️ Failed to cleanup container {container.id[:12]}: {e}")
+    utils_logger.debug("Released lock after cleaning up all containers...")
 
 def stream_exec(
     container: PodmanContainer,
@@ -175,25 +166,21 @@ def extract_folder_from_container(container: PodmanContainer, container_path: st
 
 
 def stop_container(container: PodmanContainer, force: bool = True, auto_unregister: bool = True) -> None:
-    """
-    Stop and remove a Docker container.
-
-    Args:
-        container: Docker container instance
-        force: Force removal of the container
-        auto_unregister: Automatically unregister from tracking set (default: True)
-    """
     with _containers_lock:
+        utils_logger.debug(f"Acquired lock to stop container {container.id[:12]}...")
         if container not in _active_containers:
-            return
-        if auto_unregister:
-            unregister_container(container)
-        try:
-            container.stop(timeout=2)
-        except (APIError, json.JSONDecodeError) as e:
-            pass
-        except NotFound:
-            return
+            utils_logger.debug(f"Container {container.id[:12]} not tracked, skipping stop.")
+        else:
+            try:
+                utils_logger.debug(f"Stopping container {container.id[:12]} (force={force})...")
+                container.stop(timeout=2)
+                utils_logger.info(f"Stopped container {container.id[:12]}.")
+            except (APIError, Exception) as e:
+                utils_logger.warning(f"Error stopping {container.id[:12]}: {e}")
+            finally:
+                if auto_unregister:
+                    _active_containers.discard(container)
+    utils_logger.debug(f"Released lock after stopping container {container.id[:12]}...")
 
 
 def podman_timed_exec_bash_logged(
