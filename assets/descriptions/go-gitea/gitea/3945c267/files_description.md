@@ -1,5 +1,5 @@
 Autonomously identify and execute improvements to the **entire** codebase. Optimize structure, architecture, code quality and/or logic flow. Proceed directly to modifying the actual codebase; do not output analysis, plan, roadmap or similar files.
-The files that are look particularly concerning to me are amongst others the following:
+Some of the files that look particularly concerning to me are the following:
 - feed/convert.go b/routers/web/feed/convert.go
 - models/issues/comment.go
 - models/activities/action.go
@@ -7,21 +7,21 @@ The files that are look particularly concerning to me are amongst others the fol
 - models/issues/review.go
 - models/issues/issue_update.go
 - models/issues/issue_xref.go
-- models/activities/notification.go
 - repo/issue.go b/routers/web/repo/issue.go
+- models/activities/notification.go
 - models/project/board.go
 - services/convert/issue_comment.go
 - models/project/project.go
 - services/convert/notification.go
 - org/projects.go b/routers/web/org/projects.go
-- models/project/issue.go
 - models/repo/collaboration_test.go
+- models/project/issue.go
 - repo/projects.go b/routers/web/repo/projects.go
 - templates/projects/list.tmpl
 - models/repo/mirror.go
-- models/repo/collaboration.go
 - modules/templates/util_misc.go
-- services/externalaccount/user.go
+- models/repo/collaboration.go
 - models/activities/action_test.go
+- services/externalaccount/user.go
 - templates/repo/issue/view_content/comments.tmpl
 - services/convert/pull_review.go

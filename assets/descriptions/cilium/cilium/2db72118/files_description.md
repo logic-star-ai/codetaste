@@ -1,27 +1,27 @@
 Autonomously identify and execute improvements to the **entire** codebase. Optimize structure, architecture, code quality and/or logic flow. Proceed directly to modifying the actual codebase; do not output analysis, plan, roadmap or similar files.
-The files that are look particularly concerning to me are amongst others the following:
+Some of the files that look particularly concerning to me are the following:
 - pkg/k8s/watchers/watcher.go
 - pkg/policy/groups/actions.go
 - pkg/policy/groups/helpers.go
 - daemon/cmd/daemon.go
 - operator/cmd/root.go
-- pkg/datapath/linux/devices_test.go
 - daemon/cmd/endpoint.go
+- pkg/datapath/linux/devices_test.go
 - pkg/ipam/crd.go
-- pkg/k8s/watchers/endpointsynchronizer.go
 - daemon/cmd/daemon_main.go
+- pkg/k8s/watchers/endpointsynchronizer.go
 - pkg/k8s/watchers/watcher_test.go
 - pkg/nodediscovery/nodediscovery.go
 - daemon/cmd/status_test.go
 - pkg/ipam/ipam.go
-- pkg/k8s/watchers/cilium_network_policy.go
 - pkg/bgp/k8s/client.go
-- pkg/policy/groups/controllers.go
-- pkg/k8s/cnpstatus.go
 - pkg/bgpv1/agent/controller.go
-- operator/cmd/ccnp_event.go
-- operator/cmd/cnp_event.go
-- pkg/aws/eni/migration.go
-- daemon/cmd/status.go
+- pkg/k8s/cnpstatus.go
+- pkg/k8s/watchers/cilium_network_policy.go
+- pkg/policy/groups/controllers.go
 - pkg/bgp/manager/manager.go
+- pkg/aws/eni/migration.go
+- operator/cmd/ccnp_event.go
 - pkg/k8s/watchers/pod.go
+- operator/cmd/cnp_event.go
+- daemon/cmd/status.go

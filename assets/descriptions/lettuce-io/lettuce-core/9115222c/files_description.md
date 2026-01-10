@@ -1,27 +1,27 @@
 Autonomously identify and execute improvements to the **entire** codebase. Optimize structure, architecture, code quality and/or logic flow. Proceed directly to modifying the actual codebase; do not output analysis, plan, roadmap or similar files.
-The files that are look particularly concerning to me are amongst others the following:
+Some of the files that look particularly concerning to me are the following:
 - src/main/java/io/lettuce/core/internal/Futures.java
 - src/main/java/io/lettuce/core/resource/PromiseAdapter.java
 - src/test/java/io/lettuce/core/AsyncConnectionIntegrationTests.java
 - src/main/java/io/lettuce/core/resource/DefaultEventLoopGroupProvider.java
 - src/main/java/io/lettuce/core/resource/DefaultClientResources.java
-- src/test/java/io/lettuce/core/cluster/NodeSelectionAsyncIntegrationTests.java
 - src/test/java/io/lettuce/test/TestFutures.java
+- src/test/java/io/lettuce/core/cluster/NodeSelectionAsyncIntegrationTests.java
 - src/test/java/io/lettuce/core/support/AsyncConnectionPoolSupportIntegrationTests.java
 - src/test/java/io/lettuce/core/support/BoundedAsyncPoolUnitTests.java
 - PubSubCommandTest.java b/src/test/java/io/lettuce/core/pubsub/PubSubCommandTest.java
+- src/test/java/io/lettuce/core/cluster/RedisClusterClientIntegrationTests.java
 - src/test/java/io/lettuce/core/ClientOptionsIntegrationTests.java
 - src/test/java/io/lettuce/core/cluster/AsyncConnectionProviderIntegrationTests.java
 - src/main/java/io/lettuce/core/AbstractRedisClient.java
-- src/test/java/io/lettuce/core/cluster/RedisClusterClientIntegrationTests.java
 - src/test/java/io/lettuce/core/support/AsyncPoolWithValidationUnitTests.java
-- src/test/java/io/lettuce/core/cluster/commands/CustomClusterCommandIntegrationTests.java
 - src/test/java/io/lettuce/core/commands/CustomCommandIntegrationTests.java
+- src/test/java/io/lettuce/core/cluster/commands/CustomClusterCommandIntegrationTests.java
+- src/test/java/io/lettuce/core/cluster/RedisClusterSetupTest.java
+- RedisClusterPubSubConnectionIntegrationTests.java b/src/test/java/io/lettuce/core/cluster/pubsub/RedisClusterPubSubConnectionIntegrationTests.java
 - src/test/java/io/lettuce/core/cluster/ClusterCommandIntegrationTests.java
 - src/main/java/io/lettuce/core/cluster/ClusterFutureSyncInvocationHandler.java
 - src/test/java/io/lettuce/core/protocol/AsyncCommandUnitTests.java
-- RedisClusterPubSubConnectionIntegrationTests.java b/src/test/java/io/lettuce/core/cluster/pubsub/RedisClusterPubSubConnectionIntegrationTests.java
-- src/test/java/io/lettuce/core/cluster/RedisClusterSetupTest.java
-- src/test/java/io/lettuce/core/resource/DefaultClientResourcesUnitTests.java
 - src/test/java/io/lettuce/core/masterslave/CustomCommandIntegrationTests.java
-- src/test/java/io/lettuce/core/LettuceFuturesUnitTests.java
+- src/test/java/io/lettuce/core/resource/DefaultClientResourcesUnitTests.java
+- src/test/java/io/lettuce/core/cluster/AdvancedClusterClientIntegrationTests.java

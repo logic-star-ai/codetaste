@@ -1,5 +1,5 @@
 Autonomously identify and execute improvements to the **entire** codebase. Optimize structure, architecture, code quality and/or logic flow. Proceed directly to modifying the actual codebase; do not output analysis, plan, roadmap or similar files.
-The files that are look particularly concerning to me are amongst others the following:
+Some of the files that look particularly concerning to me are the following:
 - saleor/webhook/tests/test_webhook_serializers.py
 - saleor/product/search.py
 - saleor/attribute/migrations/0038_remove_assignedproductattribute.py
@@ -20,8 +20,8 @@ The files that are look particularly concerning to me are amongst others the fol
 - saleor/static/populatedb_data.json
 - saleor/graphql/product/tests/mutations/test_product_bulk_create.py
 - saleor/csv/utils/__init__.py
+- saleor/order/tests/test_notifications.py
 - saleor/graphql/product/mutations/product_type/product_type_delete.py
 - saleor/graphql/product/bulk_mutations/product_type_bulk_delete.py
 - saleor/webhook/payloads.py
-- saleor/order/tests/test_notifications.py
 - saleor/graphql/product/bulk_mutations/product_bulk_delete.py

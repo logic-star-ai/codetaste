@@ -1,5 +1,5 @@
 Autonomously identify and execute improvements to the **entire** codebase. Optimize structure, architecture, code quality and/or logic flow. Proceed directly to modifying the actual codebase; do not output analysis, plan, roadmap or similar files.
-The files that are look particularly concerning to me are amongst others the following:
+Some of the files that look particularly concerning to me are the following:
 - internal/quantile/quantile.go
 - nsqd/protocol_v2.go
 - nsqd/http.go
@@ -11,17 +11,17 @@ The files that are look particularly concerning to me are amongst others the fol
 - apps/nsq_to_nsq/nsq_to_nsq.go
 - internal/http_api/api_response.go
 - nsqlookupd/nsqlookupd_test.go
-- internal/version/binary.go
 - internal/statsd/client.go
+- internal/version/binary.go
 - apps/nsq_to_http/nsq_to_http.go
-- internal/lookupd/types.go
 - nsqd/nsqd.go
-- apps/nsq_to_file/nsq_to_file.go
+- internal/lookupd/types.go
 - nsq_pubsub.go b/apps/nsq_pubsub/nsq_pubsub.go
-- nsqd/test/cluster_test.go
+- apps/nsq_to_file/nsq_to_file.go
 - nsqd/protocol_v2_test.go
 - apps/nsq_tail/nsq_tail.go
+- nsqd/test/cluster_test.go
 - internal/http_api/topic_channel_args.go
-- nsqlookupd/nsqlookupd.go
-- apps/nsqd/nsqd.go
 - apps/to_nsq/to_nsq.go
+- apps/nsqd/nsqd.go
+- nsqlookupd/nsqlookupd.go

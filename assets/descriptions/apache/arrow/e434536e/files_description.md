@@ -1,5 +1,5 @@
 Autonomously identify and execute improvements to the **entire** codebase. Optimize structure, architecture, code quality and/or logic flow. Proceed directly to modifying the actual codebase; do not output analysis, plan, roadmap or similar files.
-The files that are look particularly concerning to me are amongst others the following:
+Some of the files that look particularly concerning to me are the following:
 - cpp/src/arrow/compute/row/grouper_test.cc
 - cpp/src/arrow/compute/test_util_internal.cc
 - cpp/src/arrow/compute/test_util_internal.h
@@ -9,19 +9,19 @@ The files that are look particularly concerning to me are amongst others the fol
 - cpp/src/arrow/compute/kernels/scalar_string_benchmark.cc
 - cpp/src/arrow/compute/kernels/vector_selection_benchmark.cc
 - cpp/src/arrow/compute/kernels/vector_topk_benchmark.cc
-- cpp/src/arrow/compute/kernels/vector_sort_benchmark.cc
 - cpp/src/arrow/dataset/file_test.cc
-- cpp/src/arrow/acero/aggregate_node_test.cc
+- cpp/src/arrow/compute/kernels/vector_sort_benchmark.cc
 - cpp/src/arrow/acero/plan_test.cc
-- cpp/src/arrow/acero/hash_aggregate_test.cc
-- cpp/src/arrow/compute/kernels/scalar_round_benchmark.cc
-- cpp/src/arrow/compute/kernels/scalar_arithmetic_benchmark.cc
 - cpp/src/arrow/acero/asof_join_node_test.cc
+- cpp/src/arrow/compute/kernels/scalar_round_benchmark.cc
+- cpp/src/arrow/acero/aggregate_node_test.cc
+- cpp/src/arrow/compute/kernels/scalar_arithmetic_benchmark.cc
+- cpp/src/arrow/acero/hash_aggregate_test.cc
 - cpp/src/arrow/dataset/CMakeLists.txt
-- cpp/src/arrow/compute/kernels/vector_partition_benchmark.cc
 - cpp/src/arrow/acero/test_util_internal.cc
-- cpp/src/arrow/compute/kernels/scalar_validity_test.cc
-- cpp/src/arrow/compute/kernels/vector_hash_test.cc
-- cpp/src/arrow/compute/kernels/scalar_cast_test.cc
+- cpp/src/arrow/compute/kernels/vector_partition_benchmark.cc
+- cpp/src/arrow/compute/kernels/vector_pairwise_test.cc
+- cpp/src/arrow/compute/kernels/scalar_random_benchmark.cc
+- cpp/src/arrow/compute/kernels/scalar_arithmetic_test.cc
+- cpp/src/arrow/compute/kernels/scalar_string_test.cc
 - cpp/src/arrow/compute/kernels/scalar_temporal_test.cc
-- cpp/src/arrow/compute/kernels/test_util_internal.cc

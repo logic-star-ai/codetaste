@@ -1,5 +1,5 @@
 Autonomously identify and execute improvements to the **entire** codebase. Optimize structure, architecture, code quality and/or logic flow. Proceed directly to modifying the actual codebase; do not output analysis, plan, roadmap or similar files.
-The files that are look particularly concerning to me are amongst others the following:
+Some of the files that look particularly concerning to me are the following:
 - docs/pipeline-api.md
 - pkg/apis/pipeline/v1beta1/openapi_generated.go
 - pkg/apis/pipeline/v1/openapi_generated.go
@@ -12,8 +12,8 @@ The files that are look particularly concerning to me are amongst others the fol
 - pkg/apis/pipeline/v1/swagger.json
 - pkg/apis/pipeline/v1/zz_generated.deepcopy.go
 - pkg/resolution/resolver/cluster/resolver_test.go
-- pkg/reconciler/taskrun/resources/taskspec_test.go
 - pkg/reconciler/pipelinerun/resources/pipelineref.go
+- pkg/reconciler/taskrun/resources/taskspec_test.go
 - pkg/reconciler/taskrun/resources/taskref.go
 - pkg/apis/pipeline/v1/provenance.go
 - test/status_test.go
@@ -21,7 +21,7 @@ The files that are look particularly concerning to me are amongst others the fol
 - pkg/reconciler/pipelinerun/resources/pipelinerunresolution_test.go
 - pkg/reconciler/taskrun/taskrun_test.go
 - pkg/resolution/resolver/framework/reconciler_test.go
-- pkg/reconciler/pipelinerun/pipelinerun_test.go
-- pkg/reconciler/taskrun/taskrun.go
 - test/resolution.go
 - pkg/reconciler/pipelinerun/pipelinespec/pipelinespec.go
+- pkg/reconciler/taskrun/taskrun.go
+- pkg/reconciler/taskrun/resources/taskspec.go
