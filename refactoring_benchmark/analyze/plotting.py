@@ -11,10 +11,7 @@ from refactoring_benchmark.analyze.validation import ValidityStatus
 
 
 def create_ifr_plot(
-    data: AnalysisData,
-    metric_key: IFRMetricType,
-    title: str,
-    config: IFRPlotConfig = IFRPlotConfig()
+    data: AnalysisData, metric_key: IFRMetricType, title: str, config: IFRPlotConfig = IFRPlotConfig()
 ) -> plt.Figure:
     """
     Create a bar chart for a specific IFR metric.
@@ -52,14 +49,7 @@ def create_ifr_plot(
                 values.append(0)
                 validity_statuses.append(ValidityStatus.VALID)
 
-        bars = ax.bar(
-            x + i * width,
-            values,
-            width,
-            label=agent,
-            color=colors[i],
-            alpha=config.bar_alpha
-        )
+        bars = ax.bar(x + i * width, values, width, label=agent, color=colors[i], alpha=config.bar_alpha)
 
         # Apply hatching based on validity status
         for bar, status in zip(bars, validity_statuses):
@@ -73,34 +63,23 @@ def create_ifr_plot(
                 bar.set_linewidth(config.edge_linewidth)
 
     # Configure axes
-    ax.set_xlabel('Instance (owner/repo/hash)', fontsize=config.xlabel_fontsize)
-    ax.set_ylabel('IFR (%)', fontsize=config.ylabel_fontsize)
-    ax.set_title(title, fontsize=config.title_fontsize, fontweight='bold')
+    ax.set_xlabel("Instance (owner/repo/hash)", fontsize=config.xlabel_fontsize)
+    ax.set_ylabel("IFR (%)", fontsize=config.ylabel_fontsize)
+    ax.set_title(title, fontsize=config.title_fontsize, fontweight="bold")
     ax.set_xticks(x + width * (len(agents) - 1) / 2)
-    ax.set_xticklabels(instances, rotation=45, ha='right', fontsize=config.tick_fontsize)
+    ax.set_xticklabels(instances, rotation=45, ha="right", fontsize=config.tick_fontsize)
     ax.set_ylim(0, 100)
-    ax.legend(loc='upper left', bbox_to_anchor=(1, 1), fontsize=config.legend_fontsize)
-    ax.grid(axis='y', alpha=config.grid_alpha, linestyle=config.grid_linestyle)
+    ax.legend(loc="upper left", bbox_to_anchor=(1, 1), fontsize=config.legend_fontsize)
+    ax.grid(axis="y", alpha=config.grid_alpha, linestyle=config.grid_linestyle)
 
     # Add footer text
-    fig.text(
-        0.99, 0.01,
-        config.footer_text,
-        ha='right', va='bottom',
-        fontsize=config.footer_fontsize,
-        style='italic'
-    )
+    fig.text(0.99, 0.01, config.footer_text, ha="right", va="bottom", fontsize=config.footer_fontsize, style="italic")
 
     plt.tight_layout()
     return fig
 
 
-def create_ifr_plots(
-    data: AnalysisData,
-    output_dir: Path,
-    config: IFRPlotConfig = IFRPlotConfig(),
-    dpi: int = 300
-):
+def create_ifr_plots(data: AnalysisData, output_dir: Path, config: IFRPlotConfig = IFRPlotConfig(), dpi: int = 300):
     """
     Generate and save all three IFR plots.
 
@@ -117,6 +96,6 @@ def create_ifr_plots(
         fig = create_ifr_plot(data, metric_key, title, config)
 
         output_file = output_dir / f"{metric_key}_plot.png"
-        fig.savefig(output_file, dpi=dpi, bbox_inches='tight')
+        fig.savefig(output_file, dpi=dpi, bbox_inches="tight")
         print(f"    Saved to {output_file}")
         plt.close(fig)

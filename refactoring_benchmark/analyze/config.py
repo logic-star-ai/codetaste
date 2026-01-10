@@ -37,7 +37,7 @@ class IFRPlotConfig(BaseModel):
     # Footer text
     footer_text: str = Field(
         default="Red hatching: invalid test results | Black hatching: no execution environment",
-        description="Footer text explaining hatching patterns"
+        description="Footer text explaining hatching patterns",
     )
 
     class Config:

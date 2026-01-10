@@ -61,7 +61,7 @@ def run_test_evaluation(
         except Exception as e:
             logger.error(f"Error while waiting for container: {e}")
             return None, f"Error while waiting ({timeout}s) for container."
-        
+
         logger.debug(f"Container {container.id} exited with code {exit_code}.")
         raw_logs = container.logs(stream=False, follow=False)
         raw_logs = b"".join(raw_logs) if not isinstance(raw_logs, bytes) else raw_logs

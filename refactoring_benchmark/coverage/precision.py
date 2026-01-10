@@ -34,9 +34,7 @@ def _debug_print_line_intersections(
     if not (metrics.relevant_removed_lines or metrics.relevant_added_lines):
         return
 
-    print(
-        f"\n  DEBUG: Intersection details for {diff_path.parent.name}/{diff_path.parent.parent.name}"
-    )
+    print(f"\n  DEBUG: Intersection details for {diff_path.parent.name}/{diff_path.parent.parent.name}")
 
     for label, intersection, sarif_src, diff_src in [
         (
@@ -61,20 +59,10 @@ def _debug_print_line_intersections(
         d_map = {(l.uri, l.line_number): l for l in diff_src}
 
         for line in sorted(intersection, key=lambda x: (x.uri, x.line_number))[:5]:
-            s_line, d_line = s_map.get((line.uri, line.line_number)), d_map.get(
-                (line.uri, line.line_number)
-            )
+            s_line, d_line = s_map.get((line.uri, line.line_number)), d_map.get((line.uri, line.line_number))
             s_cont = s_line.content.strip() if s_line and s_line.content else ""
             d_cont = d_line.content.strip() if d_line and d_line.content else ""
-            match = (
-                "✓"
-                if (
-                    s_cont
-                    and d_cont
-                    and (s_cont in d_line.content or d_cont in s_line.content)
-                )
-                else "✗"
-            )
+            match = "✓" if (s_cont and d_cont and (s_cont in d_line.content or d_cont in s_line.content)) else "✗"
             print(f"    {match} {line.uri}:{line.line_number}")
             print(f"      SARIF: {repr(s_cont[:70]) if s_cont else '<no content>'}")
             print(f"      DIFF:  {repr(d_cont[:70]) if d_cont else '<no content>'}")
@@ -123,13 +111,14 @@ def calculate_precision(
         lines_matched_by_removal_rules=lines_matched_by_removal_rules,
     )
 
-
     # Print debug output if requested
     if debug:
-        print((
-            f"{diff_path.parent.name}/{diff_path.parent.parent.name} : Total lines added in diff: {len(lines_added):4} lines. "
-            f"Total lines in positive SARIF: {len(lines_matched_by_addition_rules):4} lines."
-        ))
+        print(
+            (
+                f"{diff_path.parent.name}/{diff_path.parent.parent.name} : Total lines added in diff: {len(lines_added):4} lines. "
+                f"Total lines in positive SARIF: {len(lines_matched_by_addition_rules):4} lines."
+            )
+        )
         _debug_print_line_intersections(
             metrics,
             lines_matched_by_removal_rules,
@@ -198,7 +187,5 @@ def calculate_precision_instance_agent(
             metrics=metrics,
         )
     except Exception as e:
-        print(
-            f"  Warning: Failed to calculate precision for {instance.display_path}/{agent_name}: {e}"
-        )
+        print(f"  Warning: Failed to calculate precision for {instance.display_path}/{agent_name}: {e}")
         return None

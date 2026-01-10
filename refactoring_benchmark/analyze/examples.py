@@ -28,10 +28,7 @@ def example_filter_single_agent():
     results = load_all_results(output_dir)
 
     # Filter to only include Claude Code Sonnet results
-    data = organize_data(
-        results,
-        filters=[filter_by_agent_id("claude-code-v2.0.76-sonnet45")]
-    )
+    data = organize_data(results, filters=[filter_by_agent_id("claude-code-v2.0.76-sonnet45")])
 
     create_ifr_plots(data, Path("./analyze/claude-sonnet-only"))
 
@@ -42,10 +39,7 @@ def example_filter_with_exec_env():
     results = load_all_results(output_dir)
 
     # Only include results where execution environment is available
-    data = organize_data(
-        results,
-        filters=[filter_has_execution_environment(True)]
-    )
+    data = organize_data(results, filters=[filter_has_execution_environment(True)])
 
     create_ifr_plots(data, Path("./analyze/with-exec-env"))
 
@@ -56,10 +50,7 @@ def example_filter_valid_tests_only():
     results = load_all_results(output_dir)
 
     # Only include results where tests are valid
-    data = organize_data(
-        results,
-        filters=[filter_by_validity_status(ValidityStatus.VALID)]
-    )
+    data = organize_data(results, filters=[filter_by_validity_status(ValidityStatus.VALID)])
 
     create_ifr_plots(data, Path("./analyze/valid-tests-only"))
 
@@ -70,10 +61,7 @@ def example_filter_specific_owner():
     results = load_all_results(output_dir)
 
     # Only include Apache projects
-    data = organize_data(
-        results,
-        filters=[filter_by_owner("apache")]
-    )
+    data = organize_data(results, filters=[filter_by_owner("apache")])
 
     create_ifr_plots(data, Path("./analyze/apache-only"))
 
@@ -89,8 +77,8 @@ def example_combine_multiple_filters():
         filters=[
             filter_by_agent_id("claude-code-v2.0.76-sonnet45"),
             filter_by_validity_status(ValidityStatus.VALID),
-            filter_has_execution_environment(True)
-        ]
+            filter_has_execution_environment(True),
+        ],
     )
 
     create_ifr_plots(data, Path("./analyze/claude-valid-with-env"))
@@ -103,15 +91,11 @@ def example_using_combine_filters():
 
     # Create a reusable combined filter
     production_ready_filter = combine_filters(
-        filter_has_execution_environment(True),
-        filter_by_validity_status(ValidityStatus.VALID)
+        filter_has_execution_environment(True), filter_by_validity_status(ValidityStatus.VALID)
     )
 
     # Can use this filter as a single function
-    data = organize_data(
-        results,
-        filters=[production_ready_filter]
-    )
+    data = organize_data(results, filters=[production_ready_filter])
 
     create_ifr_plots(data, Path("./analyze/production-ready"))
 
@@ -124,10 +108,7 @@ def example_filter_successful_runs():
     results = load_all_results(output_dir)
 
     # Only include runs where finish_reason="success"
-    data = organize_data(
-        results,
-        filters=[filter_successful_only()]
-    )
+    data = organize_data(results, filters=[filter_successful_only()])
 
     create_ifr_plots(data, Path("./analyze/successful-only"))
 
@@ -140,10 +121,7 @@ def example_filter_by_finish_reason():
     results = load_all_results(output_dir)
 
     # Include success or max_turns (exclude crashed, error, etc.)
-    data = organize_data(
-        results,
-        filters=[filter_by_finish_reason(["success", "max_turns"])]
-    )
+    data = organize_data(results, filters=[filter_by_finish_reason(["success", "max_turns"])])
 
     create_ifr_plots(data, Path("./analyze/success-or-max-turns"))
 
@@ -161,8 +139,8 @@ def example_high_quality_results():
         filters=[
             filter_successful_only(),
             filter_by_validity_status(ValidityStatus.VALID),
-            filter_has_execution_environment(True)
-        ]
+            filter_has_execution_environment(True),
+        ],
     )
 
     create_ifr_plots(data, Path("./analyze/high-quality"))

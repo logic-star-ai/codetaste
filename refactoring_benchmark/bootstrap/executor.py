@@ -77,8 +77,7 @@ def bootstrap_single_instance(instance: InstanceRow, config: BootstrapConfig, is
 
             # Just rebuild runtime, reuse existing metadata
             bootstrap_runtime_phase(
-                client, instance, instance.setup_image, config,
-                instance_logger, metadata=metadata, force=True
+                client, instance, instance.setup_image, config, instance_logger, metadata=metadata, force=True
             )
             instance_logger.info(f"✅ Successfully rebuilt runtime for: {instance.id}")
             return True
@@ -92,30 +91,36 @@ def bootstrap_single_instance(instance: InstanceRow, config: BootstrapConfig, is
         try:
             # Attempt with agent or reuse
             setup_img = bootstrap_setup_phase(
-                client, instance, metadata, config, instance_logger,
+                client,
+                instance,
+                metadata,
+                config,
+                instance_logger,
                 use_base_image=not is_supported,
                 force_rebuild=config.force_full_build,
-                reuse_only=config.rerun_metrics
+                reuse_only=config.rerun_metrics,
             )
             # Save metadata after setup completes
             metadata.save_to_json(metadata_path)
             if is_interrupted[0]:
                 instance_logger.warning("Bootstrap interrupted, skipping runtime phase.")
                 return False
-            bootstrap_runtime_phase(client, instance, setup_img, config, instance_logger, metadata=metadata, force=force_runtime)
+            bootstrap_runtime_phase(
+                client, instance, setup_img, config, instance_logger, metadata=metadata, force=force_runtime
+            )
             instance_logger.info(f"✅ Successfully bootstrapped {instance.id}.")
 
         except (RuntimeError, TimeoutError, BootstrapError) as e:
             # Fallback: retry with base image (no agent)
             instance_logger.error(f"Attempt failed for {instance.id} ({e}). Retrying with base image...")
-            setup_img = bootstrap_setup_phase(
-                client, instance, metadata, config, instance_logger, use_base_image=True
-            )
+            setup_img = bootstrap_setup_phase(client, instance, metadata, config, instance_logger, use_base_image=True)
             metadata.save_to_json(metadata_path)
             if is_interrupted[0]:
                 instance_logger.warning("Bootstrap interrupted, skipping runtime phase.")
                 return False
-            bootstrap_runtime_phase(client, instance, setup_img, config, instance_logger, metadata=metadata, force=force_runtime)
+            bootstrap_runtime_phase(
+                client, instance, setup_img, config, instance_logger, metadata=metadata, force=force_runtime
+            )
             instance_logger.info(f"✅ Successfully bootstrapped {instance.id} on retry.")
 
         return True
@@ -192,7 +197,8 @@ class BootstrapOrchestrator:
         try:
             # Submit all tasks
             future_to_instance = {
-                executor.submit(bootstrap_single_instance, inst, self.config, self.interrupted): inst for inst in self.instances
+                executor.submit(bootstrap_single_instance, inst, self.config, self.interrupted): inst
+                for inst in self.instances
             }
 
             # Process completed tasks with progress bar

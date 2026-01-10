@@ -20,12 +20,15 @@ def combine_filters(*filters: ResultFilter) -> ResultFilter:
     Returns:
         A single filter function that returns True only if all filters return True
     """
+
     def combined(result: EvaluationResult) -> bool:
         return all(f(result) for f in filters)
+
     return combined
 
 
 # Common filter builders
+
 
 def filter_by_agent_id(agent_ids: str | Sequence[str]) -> ResultFilter:
     """
@@ -138,6 +141,7 @@ def filter_has_execution_environment(has_env: bool = True) -> ResultFilter:
         >>> filter_fn = filter_has_execution_environment(True)  # Only with exec env
         >>> filter_fn = filter_has_execution_environment(False)  # Only without exec env
     """
+
     def filter_fn(result: EvaluationResult) -> bool:
         return result.instance_metadata.has_execution_environment == has_env
 
@@ -145,9 +149,7 @@ def filter_has_execution_environment(has_env: bool = True) -> ResultFilter:
 
 
 def filter_by_ifr_threshold(
-    metric: str = "ifr",
-    min_value: float | None = None,
-    max_value: float | None = None
+    metric: str = "ifr", min_value: float | None = None, max_value: float | None = None
 ) -> ResultFilter:
     """
     Create a filter based on IFR metric thresholds.
@@ -164,6 +166,7 @@ def filter_by_ifr_threshold(
         >>> filter_fn = filter_by_ifr_threshold("ifr", min_value=0.8)  # IFR >= 80%
         >>> filter_fn = filter_by_ifr_threshold("positive_ifr", min_value=0.5, max_value=0.9)
     """
+
     def filter_fn(result: EvaluationResult) -> bool:
         value = getattr(result.agent_rule_metrics, metric)
         if min_value is not None and value < min_value:

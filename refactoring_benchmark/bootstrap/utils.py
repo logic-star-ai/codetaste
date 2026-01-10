@@ -16,7 +16,11 @@ class BootstrapError(Exception):
     pass
 
 
-def validate_container_size(container: PodmanContainer, metadata: Optional[ExecutionInstanceMetadata] = None, max_size_bytes: int = 5 * (1024**3)) -> None:
+def validate_container_size(
+    container: PodmanContainer,
+    metadata: Optional[ExecutionInstanceMetadata] = None,
+    max_size_bytes: int = 5 * (1024**3),
+) -> None:
     """
     Validate container storage size does not exceed limit.
 
@@ -32,12 +36,18 @@ def validate_container_size(container: PodmanContainer, metadata: Optional[Execu
     if container_size > max_size_bytes:
         if metadata:
             metadata.has_execution_environment = False
-            metadata.reason_no_execution_environment += f"Container size {container_size / (1024**3):.2f}GB exceeds limit. "
+            metadata.reason_no_execution_environment += (
+                f"Container size {container_size / (1024**3):.2f}GB exceeds limit. "
+            )
         raise BootstrapError(f"Container additional size exceeded {max_size_bytes / (1024**3):.2f}GB limit.")
 
 
 def validate_and_commit_container(
-    container: PodmanContainer, image_name: str, logger: logging.Logger, max_size_bytes: int = 5 * (1024**3), **commit_kwargs
+    container: PodmanContainer,
+    image_name: str,
+    logger: logging.Logger,
+    max_size_bytes: int = 5 * (1024**3),
+    **commit_kwargs,
 ) -> None:
     """
     Validate container size then commit if within limits.
@@ -124,7 +134,7 @@ def run_metrics(container: PodmanContainer, commit_hash: str, logger: logging.Lo
     )
     # TODO: VALIDATE THIS?
     cleanup_tmp = ["bash", "-c", "sudo find /tmp -mindepth 1 -delete"]
-    podman_utils.podman_exec_logged(container, cleanup_tmp, logger)  
+    podman_utils.podman_exec_logged(container, cleanup_tmp, logger)
     command = "sudo /scripts/setup_system.sh || true; source /scripts/setup_shell.sh || true; /scripts/run_tests"
     try:
         exit_code, (stdout_bytes, stderr_bytes) = podman_utils.podman_timed_exec_bash_logged(

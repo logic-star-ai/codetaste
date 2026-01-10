@@ -12,6 +12,7 @@ from pathlib import Path
 # The open prompt text
 OPEN_DESCRIPTION = "Autonomously identify and execute improvements to the **entire** codebase, without user intervention. Refactor the codebase. Improve structure, architecture, code quality and/or logic flow. Perform modifications on the actual codebase; do NOT output analysis, plan, roadmap or similar files."
 
+
 def create_open_descriptions(instances_csv: Path, descriptions_dir: Path) -> None:
     """
     Create open_description.md files for all instances.
@@ -23,12 +24,12 @@ def create_open_descriptions(instances_csv: Path, descriptions_dir: Path) -> Non
     success_count = 0
     error_count = 0
 
-    with open(instances_csv, 'r') as f:
+    with open(instances_csv, "r") as f:
         reader = csv.DictReader(f)
         for row in reader:
-            owner = row['owner']
-            repo = row['repo']
-            commit_hash = row['commit_hash']
+            owner = row["owner"]
+            repo = row["repo"]
+            commit_hash = row["commit_hash"]
             short_hash = commit_hash[:8]
 
             # Target directory
@@ -42,7 +43,7 @@ def create_open_descriptions(instances_csv: Path, descriptions_dir: Path) -> Non
             # Create open_description.md
             open_desc_path = target_dir / "open_description.md"
             try:
-                open_desc_path.write_text(OPEN_DESCRIPTION, encoding='utf-8')
+                open_desc_path.write_text(OPEN_DESCRIPTION, encoding="utf-8")
                 print(f"✓ Created: {open_desc_path}")
                 success_count += 1
             except Exception as e:

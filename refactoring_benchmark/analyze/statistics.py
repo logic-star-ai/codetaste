@@ -5,10 +5,15 @@ import statistics
 
 from pydantic import BaseModel, Field
 
-from refactoring_benchmark.analyze.models import AnalysisData, AgentInstanceStats, MetricStatistics, AgentStatistics, CombinationStatistics, AllStatistics
+from refactoring_benchmark.analyze.models import (
+    AnalysisData,
+    AgentInstanceStats,
+    MetricStatistics,
+    AgentStatistics,
+    CombinationStatistics,
+    AllStatistics,
+)
 from refactoring_benchmark.analyze.validation import ValidityStatus
-
-
 
 
 def _compute_statistics(values: list[float]) -> MetricStatistics:
@@ -16,9 +21,7 @@ def _compute_statistics(values: list[float]) -> MetricStatistics:
     if not values:
         return MetricStatistics(mean=0.0, median=0.0, count=0)
 
-    return MetricStatistics(
-        mean=statistics.mean(values), median=statistics.median(values), count=len(values)
-    )
+    return MetricStatistics(mean=statistics.mean(values), median=statistics.median(values), count=len(values))
 
 
 def _filter_agent_data(
@@ -53,10 +56,7 @@ def _filter_agent_data(
         # Apply validity condition
         if validity_condition == "valid" and agent_data.validity_status != ValidityStatus.VALID:
             continue
-        elif (
-            validity_condition == "invalid"
-            and agent_data.validity_status == ValidityStatus.VALID
-        ):
+        elif validity_condition == "invalid" and agent_data.validity_status == ValidityStatus.VALID:
             continue
 
         filtered.append(agent_data)
@@ -162,8 +162,6 @@ def compute_all_agent_statistics(data: AnalysisData) -> AllStatistics:
     ]
 
     for combo_id, ifr_cond, validity_cond in combination_configs:
-        combinations[combo_id] = compute_combination_statistics(
-            data, combo_id, ifr_cond, validity_cond
-        )
+        combinations[combo_id] = compute_combination_statistics(data, combo_id, ifr_cond, validity_cond)
 
     return AllStatistics(combinations=combinations)

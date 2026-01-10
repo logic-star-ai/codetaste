@@ -70,12 +70,17 @@ def cleanup_all_containers() -> None:
 
             for container in containers_to_cleanup:
                 try:
-                    utils_logger.debug(f"Cleaning up container {container.id[:12]}... {len(_active_containers)} remaining.")
+                    utils_logger.debug(
+                        f"Cleaning up container {container.id[:12]}... {len(_active_containers)} remaining."
+                    )
                     stop_container(container)
-                    utils_logger.debug(f"✅ Cleaned up container {container.id[:12]}. {len(_active_containers)} remaining.")
+                    utils_logger.debug(
+                        f"✅ Cleaned up container {container.id[:12]}. {len(_active_containers)} remaining."
+                    )
                 except Exception as e:
                     utils_logger.warning(f"⚠️ Failed to cleanup container {container.id[:12]}: {e}")
     utils_logger.debug("Released lock after cleaning up all containers...")
+
 
 def stream_exec(
     container: PodmanContainer,

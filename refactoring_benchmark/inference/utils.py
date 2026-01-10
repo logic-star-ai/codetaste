@@ -112,9 +112,7 @@ def output_exists(output_dir: Path) -> bool:
     return prediction_path.exists()
 
 
-def augment_inference_metadata_with_description_type(
-    output_dir: Path, description_type: str
-) -> None:
+def augment_inference_metadata_with_description_type(output_dir: Path, description_type: str) -> None:
     """
     Augment inference_metadata.json with description_type field if it exists and is valid JSON.
 

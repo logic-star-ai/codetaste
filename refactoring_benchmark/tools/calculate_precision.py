@@ -97,7 +97,9 @@ def main():
             result = calculate_precision_instance_agent(instance, agent_name, output_dir, debug=args.debug)
             if result:
                 results.append(result)
-                print(f"  ✓ {instance.display_path}: added={result.metrics.precision_added:.4f} removed={result.metrics.precision_removed:.4f} overall={result.metrics.precision_overall:.4f}")
+                print(
+                    f"  ✓ {instance.display_path}: added={result.metrics.precision_added:.4f} removed={result.metrics.precision_removed:.4f} overall={result.metrics.precision_overall:.4f}"
+                )
             # Silently skip instances without files
         print()
 
@@ -124,7 +126,9 @@ def main():
         print(f"{agent_name}:")
         print(f"  Instances: {len(agent_results)}/{len(instances)}")
         print()
-        print(f"  Precision of Additions: 'Of all the new lines the agent added, how many match the 'good' patterns we expected?'")
+        print(
+            f"  Precision of Additions: 'Of all the new lines the agent added, how many match the 'good' patterns we expected?'"
+        )
         print(f"    (+ lines in {agent_name}/prediction.diff ∩ + lines matched by {agent_name}/rules_positive.sarif)")
         print(f"    ────────────────────────────────────────────────────────────────────────────")
         print(f"    (total + lines in {agent_name}/prediction.diff)")
@@ -133,7 +137,9 @@ def main():
         print(f"    Min: {min(precision_added_scores):.4f}")
         print(f"    Max: {max(precision_added_scores):.4f}")
         print()
-        print(f"  Precision of Deletions: 'Of all the lines the agent decided to delete, how many were actually 'bad' code?'")
+        print(
+            f"  Precision of Deletions: 'Of all the lines the agent decided to delete, how many were actually 'bad' code?'"
+        )
         print(f"    (- lines in {agent_name}/prediction.diff ∩ - lines matched by null_agent/rules_negative.sarif)")
         print(f"    ────────────────────────────────────────────────────────────────────────────")
         print(f"    (total - lines in {agent_name}/prediction.diff)")

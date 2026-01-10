@@ -36,10 +36,7 @@ class InstanceData(BaseModel):
     """Data for all agents on a single instance."""
 
     instance: ReducedInstanceRow = Field(description="Full instance row data")
-    agents: Dict[str, AgentInstanceStats] = Field(
-        default_factory=dict, description="Agent ID to IFR data mapping"
-    )
-
+    agents: Dict[str, AgentInstanceStats] = Field(default_factory=dict, description="Agent ID to IFR data mapping")
 
 
 class AnalysisData(BaseModel):
@@ -94,15 +91,11 @@ class CombinationStatistics(BaseModel):
 
     combination_id: int = Field(ge=1, le=6, description="Combination number (1-6)")
     ifr_condition: Literal["all", "ifr_gt_0"] = Field(description="IFR filtering condition")
-    validity_condition: Literal["all", "valid", "invalid"] = Field(
-        description="Test validity filtering condition"
-    )
+    validity_condition: Literal["all", "valid", "invalid"] = Field(description="Test validity filtering condition")
     agents: Dict[str, AgentStatistics] = Field(description="Statistics per agent")
 
 
 class AllStatistics(BaseModel):
     """Complete statistics for all 6 combinations."""
 
-    combinations: Dict[int, CombinationStatistics] = Field(
-        description="Statistics for each combination (1-6)"
-    )
+    combinations: Dict[int, CombinationStatistics] = Field(description="Statistics for each combination (1-6)")

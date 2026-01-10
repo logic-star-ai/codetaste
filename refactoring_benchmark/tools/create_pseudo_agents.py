@@ -67,7 +67,7 @@ def create_agent_output(
         json.dump(agent_config.model_dump(), f, indent=2)
 
     # Create inference_metadata.json with current timestamp
-    current_time = datetime.now(timezone.utc).isoformat(timespec='seconds')
+    current_time = datetime.now(timezone.utc).isoformat(timespec="seconds")
     metadata = InferenceMetadata(
         cost_usd=0.0,
         finish_reason="success",

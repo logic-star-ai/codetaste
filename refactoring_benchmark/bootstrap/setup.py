@@ -62,7 +62,7 @@ def bootstrap_run_setup_agent(
 
     # Clean up /tmp folder
     cleanup_tmp = ["bash", "-c", "sudo find /tmp -mindepth 1 -delete"]
-    podman_utils.podman_exec_logged(container, cleanup_tmp, logger)  
+    podman_utils.podman_exec_logged(container, cleanup_tmp, logger)
 
     if time.time() - ts_start >= int(timeout[:-1]) * 60:
         raise TimeoutError(f"Agent exceeded {timeout} time limit.")
@@ -167,7 +167,9 @@ def bootstrap_setup_phase(
             podman_utils.stop_container(container)
 
 
-def _finalize_fallback(container: PodmanContainer, setup_image: str, metadata: ExecutionInstanceMetadata, logger: logging.Logger) -> str:
+def _finalize_fallback(
+    container: PodmanContainer, setup_image: str, metadata: ExecutionInstanceMetadata, logger: logging.Logger
+) -> str:
     """
     Commits the current container state as the setup image and marks as fallback.
 

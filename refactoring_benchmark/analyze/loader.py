@@ -60,10 +60,7 @@ def load_all_results(
     return results
 
 
-def organize_data(
-    results: List[EvaluationResult],
-    filters: Sequence[ResultFilter] | None = None
-) -> AnalysisData:
+def organize_data(results: List[EvaluationResult], filters: Sequence[ResultFilter] | None = None) -> AnalysisData:
     """
     Organize evaluation results by instance and agent, optionally applying filters.
 
@@ -98,18 +95,15 @@ def organize_data(
 
         validity_status = check_test_validity(result)
         instance = ReducedInstanceRow(
-            owner=result.instance_metadata.owner, 
-            repo=result.instance_metadata.repo, 
-            golden_commit_hash=result.instance_metadata.golden_hash, 
-            commit_hash=result.instance_metadata.base_hash
+            owner=result.instance_metadata.owner,
+            repo=result.instance_metadata.repo,
+            golden_commit_hash=result.instance_metadata.golden_hash,
+            commit_hash=result.instance_metadata.base_hash,
         )
         if instance.display_path not in analysis_data.instances:
             analysis_data.instances[instance.display_path] = InstanceData(instance=instance)
         # Add agent data using factory method
-        agent_data = AgentInstanceStats.from_rule_metrics(
-            result.agent_rule_metrics,
-            validity_status
-        )
+        agent_data = AgentInstanceStats.from_rule_metrics(result.agent_rule_metrics, validity_status)
         analysis_data.instances[instance.display_path].agents[agent_id] = agent_data
 
     return analysis_data

@@ -53,12 +53,14 @@ class InstanceRow(BaseModel):
         """Asset directory: {base_path}/{asset_type}/{owner}/{repo}/{short_hash}"""
         return os.path.join(base_path, asset_type, self.owner, self.repo, self.short_hash)
 
+
 class ReducedInstanceRow(BaseModel):
     """
     A simplified representation of an instance row.
     Ignores extra fields like 'category' and 'language'.
     """
-    model_config = ConfigDict(extra='ignore')
+
+    model_config = ConfigDict(extra="ignore")
 
     owner: str
     repo: str
@@ -102,6 +104,7 @@ class ReducedInstanceRow(BaseModel):
     def asset_dir(self, asset_type: str, base_path: str = "assets") -> str:
         """Asset directory: {base_path}/{asset_type}/{owner}/{repo}/{short_hash}"""
         return os.path.join(base_path, asset_type, self.owner, self.repo, self.short_hash)
+
 
 class Metrics(BaseModel):
     """Test execution metrics."""

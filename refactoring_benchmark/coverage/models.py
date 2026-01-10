@@ -1,6 +1,7 @@
 from typing import List, Optional, Set
 from pydantic import BaseModel, Field, ConfigDict
 
+
 # Line
 class Line(BaseModel):
     """Represents a single line in a commit."""
@@ -18,54 +19,65 @@ class Line(BaseModel):
         """Compare Lines for equality (excludes commit and content)."""
         if not isinstance(other, Line):
             return False
-        return (
-            self.uri == other.uri
-            and self.line_number == other.line_number
-            and self.commit == other.commit
-        )
+        return self.uri == other.uri and self.line_number == other.line_number and self.commit == other.commit
+
 
 # Opengrep
 class SARIFMessage(BaseModel):
     text: str
 
+
 class SARIFDescriptor(BaseModel):
     id: str
+
 
 class SARIFToolExecutionNotification(BaseModel):
     descriptor: SARIFDescriptor
     level: str
     message: SARIFMessage
 
+
 class SARIFInvocation(BaseModel):
     executionSuccessful: bool
     toolExecutionNotifications: Optional[List[SARIFToolExecutionNotification]] = Field(default_factory=list)
 
+
 class SARIFResult(BaseModel):
-    model_config = ConfigDict(extra='allow')
+    model_config = ConfigDict(extra="allow")
 
     ruleId: Optional[str] = None
     message: Optional[dict] = None
     locations: Optional[List[dict]] = Field(default_factory=list)
 
+
 class SARIFRun(BaseModel):
-    model_config = ConfigDict(extra='allow')
+    model_config = ConfigDict(extra="allow")
 
     invocations: Optional[List[SARIFInvocation]] = Field(default_factory=list)
     results: Optional[List[SARIFResult]] = Field(default_factory=list)
     tool: Optional[dict] = None
 
-class SARIFOpengrep(BaseModel):
-    model_config = ConfigDict(extra='ignore')
 
-    schema_: Optional[str] = Field(None, alias='$schema')
+class SARIFOpengrep(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    schema_: Optional[str] = Field(None, alias="$schema")
     version: str
     runs: List[SARIFRun]
 
+
 # Precision Metrics
 class PrecisionInput(BaseModel):
-    sarif_addition_rules_path: Optional[str] = Field(None, description="Path to SARIF file with addition rules on **Post**-Refactoring codebase.")
-    sarif_removal_rules_path: Optional[str] = Field(None, description="Path to SARIF file with negative findings on **Pre**-Refactoring codebase.")
-    prediction_diff_path: Optional[str] = Field(None, description="Path to the diff file between **Pre**-Refactoring and **Post**-Refactoring codebases.")
+    sarif_addition_rules_path: Optional[str] = Field(
+        None, description="Path to SARIF file with addition rules on **Post**-Refactoring codebase."
+    )
+    sarif_removal_rules_path: Optional[str] = Field(
+        None, description="Path to SARIF file with negative findings on **Pre**-Refactoring codebase."
+    )
+    prediction_diff_path: Optional[str] = Field(
+        None, description="Path to the diff file between **Pre**-Refactoring and **Post**-Refactoring codebases."
+    )
+
 
 class PrecisionMetrics(BaseModel):
     """Line-level precision metrics for refactoring changes.
@@ -75,17 +87,30 @@ class PrecisionMetrics(BaseModel):
 
     Note: lines_added and lines_removed are disjoint (different commits: base vs predicted).
     """
-    lines_added: Set[Line] = Field(default_factory=set, description="Set of lines that were added (+) by the prediction.diff.")
-    lines_removed: Set[Line] = Field(default_factory=set, description="Set of lines that were removed (-) by the prediction.diff.")
-    lines_matched_by_addition_rules: Set[Line] = Field(default_factory=set, description="Set of lines in Post-Refactoring codebase that are matched by findings in the SARIF Report with addition rules.")
-    lines_matched_by_removal_rules: Set[Line] = Field(default_factory=set, description="Set of lines in Pre-Refactoring codebase that are matched by findings in the SARIF Report with removal rules.")
+
+    lines_added: Set[Line] = Field(
+        default_factory=set, description="Set of lines that were added (+) by the prediction.diff."
+    )
+    lines_removed: Set[Line] = Field(
+        default_factory=set, description="Set of lines that were removed (-) by the prediction.diff."
+    )
+    lines_matched_by_addition_rules: Set[Line] = Field(
+        default_factory=set,
+        description="Set of lines in Post-Refactoring codebase that are matched by findings in the SARIF Report with addition rules.",
+    )
+    lines_matched_by_removal_rules: Set[Line] = Field(
+        default_factory=set,
+        description="Set of lines in Pre-Refactoring codebase that are matched by findings in the SARIF Report with removal rules.",
+    )
 
     @property
     def relevant_added_lines(self) -> Set[Line]:
         """Set of lines that were added (+) by the prediction.diff and are matched by findings in the SARIF Report on Post-Refactoring codebase."""
         if not self.lines_added or not self.lines_matched_by_addition_rules:
             return set()
-        assert list(self.lines_added)[0].commit == list(self.lines_matched_by_addition_rules)[0].commit, "Commits of added lines and matched addition rules do not match."
+        assert (
+            list(self.lines_added)[0].commit == list(self.lines_matched_by_addition_rules)[0].commit
+        ), "Commits of added lines and matched addition rules do not match."
         return self.lines_added & self.lines_matched_by_addition_rules
 
     @property
@@ -93,7 +118,9 @@ class PrecisionMetrics(BaseModel):
         """Set of lines that were removed (-) by the prediction.diff and are matched by findings in the SARIF Report on Pre-Refactoring codebase."""
         if not self.lines_removed or not self.lines_matched_by_removal_rules:
             return set()
-        assert list(self.lines_removed)[0].commit == list(self.lines_matched_by_removal_rules)[0].commit, "Commits of removed lines and matched removal rules do not match."
+        assert (
+            list(self.lines_removed)[0].commit == list(self.lines_matched_by_removal_rules)[0].commit
+        ), "Commits of removed lines and matched removal rules do not match."
         return self.lines_removed & self.lines_matched_by_removal_rules
 
     @property
@@ -129,15 +156,18 @@ class PrecisionMetrics(BaseModel):
         total_relevant = len(self.relevant_added_lines) + len(self.relevant_removed_lines)
         return total_relevant / total_lines
 
+
 class PrecisionResult(BaseModel):
     precision_input: PrecisionInput
     precision_metrics: PrecisionMetrics
+
 
 class InstanceAgentPrecision(BaseModel):
     """Precision metrics summary for a single instance-agent pair.
 
     Used for aggregating and reporting results across multiple instances.
     """
+
     instance: str = Field(description="Instance display path (e.g., 'apache/arrow/e434536e')")
     agent: str = Field(description="Agent name")
     metrics: PrecisionMetrics = Field(description="Precision metrics for this instance-agent pair")

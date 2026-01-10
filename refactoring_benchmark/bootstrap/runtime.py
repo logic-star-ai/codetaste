@@ -50,7 +50,12 @@ def bootstrap_runtime_phase(
 
     try:
         container = podman_utils.safe_container_run(
-            client, setup_image, detach=True, working_dir="/testbed", remove=True, environment={"ANTHROPIC_API_KEY": ''},
+            client,
+            setup_image,
+            detach=True,
+            working_dir="/testbed",
+            remove=True,
+            environment={"ANTHROPIC_API_KEY": ""},
         )
 
         # 1. Inject Entrypoint

@@ -116,39 +116,33 @@ Examples:
 
   # Use custom output directory and instances CSV
   python -m refactoring_benchmark.scripts.analyze --output-dir ./custom/output --instances-csv ./custom_instances.csv
-        """
+        """,
     )
     parser.add_argument(
         "--output-dir",
         type=Path,
         default=Path("./output"),
-        help="Directory containing evaluation results (default: ./output). By default, only loads instances listed in instances.csv."
+        help="Directory containing evaluation results (default: ./output). By default, only loads instances listed in instances.csv.",
     )
     parser.add_argument(
         "--include-no-exec-env",
         action="store_true",
-        help="Include instances without execution environment (default: False)"
+        help="Include instances without execution environment (default: False)",
     )
+    parser.add_argument("--statistics", action="store_true", help="Compute and print statistics summary for all agents")
     parser.add_argument(
-        "--statistics",
-        action="store_true",
-        help="Compute and print statistics summary for all agents"
-    )
-    parser.add_argument(
-        "--successful-only",
-        action="store_true",
-        help="Only include inference runs with finish_reason='success'"
+        "--successful-only", action="store_true", help="Only include inference runs with finish_reason='success'"
     )
     parser.add_argument(
         "--with-precision",
         action="store_true",
-        help="Load and include precision metrics in statistics (requires instances.csv and null_agent)"
+        help="Load and include precision metrics in statistics (requires instances.csv and null_agent)",
     )
     parser.add_argument(
         "--instances-csv",
         type=Path,
         default=Path("./instances.csv"),
-        help="Path to instances.csv file (default: ./instances.csv). Required for loading evaluation results and precision metrics."
+        help="Path to instances.csv file (default: ./instances.csv). Required for loading evaluation results and precision metrics.",
     )
     args = parser.parse_args()
 

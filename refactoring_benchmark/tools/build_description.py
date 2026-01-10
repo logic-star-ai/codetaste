@@ -51,13 +51,17 @@ def parse_markdown_sections(content: str) -> Dict[str, Tuple[str, int]]:
 
     # Special case: Check if first line is plain text title (no header marker)
     # Pattern: "Title text\n\nSummary\n---"
-    if (len(lines) >= 3 and
-        lines[0].strip() and
-        not lines[0].startswith('#') and
-        not lines[0].startswith('**') and
-        (lines[1].strip() == '' or lines[1].strip() == '') and
-        (lines[2].strip().lower() in ['summary', 'why', 'scope'] or
-         (len(lines) >= 4 and re.match(r'^[=-]+\s*$', lines[3])))):
+    if (
+        len(lines) >= 3
+        and lines[0].strip()
+        and not lines[0].startswith("#")
+        and not lines[0].startswith("**")
+        and (lines[1].strip() == "" or lines[1].strip() == "")
+        and (
+            lines[2].strip().lower() in ["summary", "why", "scope"]
+            or (len(lines) >= 4 and re.match(r"^[=-]+\s*$", lines[3]))
+        )
+    ):
         # Line 0 is an implicit title
         first_header = lines[0].strip()
         # Don't set current_section yet, let normal parsing handle the rest
@@ -67,7 +71,7 @@ def parse_markdown_sections(content: str) -> Dict[str, Tuple[str, int]]:
         line = lines[i]
 
         # Check for ATX-style header (# Header)
-        atx_match = re.match(r'^(#{1,6})\s+(.+)$', line)
+        atx_match = re.match(r"^(#{1,6})\s+(.+)$", line)
         if atx_match:
             # Save previous section
             if current_section is not None:
@@ -88,7 +92,7 @@ def parse_markdown_sections(content: str) -> Dict[str, Tuple[str, int]]:
             # Skip them if they exist
             if i + 1 < len(lines):
                 next_line = lines[i + 1]
-                if re.match(r'^[=-]+\s*$', next_line) and len(next_line.strip()) >= 3:
+                if re.match(r"^[=-]+\s*$", next_line) and len(next_line.strip()) >= 3:
                     i += 2  # Skip both the header and decorative underline
                     continue
 
@@ -100,7 +104,7 @@ def parse_markdown_sections(content: str) -> Dict[str, Tuple[str, int]]:
         if i + 1 < len(lines):
             next_line = lines[i + 1]
             # Check if next line is all = or all -
-            if re.match(r'^=+\s*$', next_line):
+            if re.match(r"^=+\s*$", next_line):
                 # Save previous section
                 if current_section is not None:
                     sections[current_section] = ("\n".join(current_content).strip(), position)
@@ -110,7 +114,7 @@ def parse_markdown_sections(content: str) -> Dict[str, Tuple[str, int]]:
                 # Handle both regular text and **Bold** text
                 section_name = line.strip()
                 # Remove bold markers if present
-                section_name = re.sub(r'^\*\*(.*?)\*\*$', r'\1', section_name)
+                section_name = re.sub(r"^\*\*(.*?)\*\*$", r"\1", section_name)
                 current_section = normalize_section_name(section_name)
                 current_content = []
 
@@ -120,7 +124,7 @@ def parse_markdown_sections(content: str) -> Dict[str, Tuple[str, int]]:
 
                 i += 2  # Skip both the header and underline
                 continue
-            elif re.match(r'^-+\s*$', next_line) and len(next_line.strip()) >= 3:
+            elif re.match(r"^-+\s*$", next_line) and len(next_line.strip()) >= 3:
                 # Save previous section
                 if current_section is not None:
                     sections[current_section] = ("\n".join(current_content).strip(), position)
@@ -130,7 +134,7 @@ def parse_markdown_sections(content: str) -> Dict[str, Tuple[str, int]]:
                 # Handle both regular text and **Bold** text
                 section_name = line.strip()
                 # Remove bold markers if present
-                section_name = re.sub(r'^\*\*(.*?)\*\*$', r'\1', section_name)
+                section_name = re.sub(r"^\*\*(.*?)\*\*$", r"\1", section_name)
                 current_section = normalize_section_name(section_name)
                 current_content = []
 
@@ -184,7 +188,7 @@ def get_section_title_from_original(content: str, section_key: str) -> Optional[
         line = lines[i]
 
         # Check ATX-style header
-        atx_match = re.match(r'^(#{1,6})\s+(.+)$', line)
+        atx_match = re.match(r"^(#{1,6})\s+(.+)$", line)
         if atx_match:
             header_text = atx_match.group(2).strip()
             if header_text.lower() == section_lower:
@@ -196,11 +200,11 @@ def get_section_title_from_original(content: str, section_key: str) -> Optional[
         # Check Setext-style header (but not if previous line was ATX)
         if i + 1 < len(lines):
             next_line = lines[i + 1]
-            if re.match(r'^[=-]+\s*$', next_line) and len(next_line.strip()) >= 3:
+            if re.match(r"^[=-]+\s*$", next_line) and len(next_line.strip()) >= 3:
                 # Make sure this isn't a decorative underline after ATX header
                 if i > 0:
                     prev_line = lines[i - 1]
-                    if re.match(r'^#{1,6}\s+', prev_line):
+                    if re.match(r"^#{1,6}\s+", prev_line):
                         # Skip - this is decorative
                         i += 1
                         continue
@@ -222,19 +226,16 @@ def has_explicit_title_section(content: str) -> bool:
     lines = content.split("\n")
     for i, line in enumerate(lines):
         # Check ATX-style "# Title"
-        if re.match(r'^#\s+Title\s*$', line, re.IGNORECASE):
+        if re.match(r"^#\s+Title\s*$", line, re.IGNORECASE):
             return True
         # Check Setext-style "Title\n----"
         if i + 1 < len(lines):
-            if re.match(r'^Title\s*$', line, re.IGNORECASE) and re.match(r'^[=-]+\s*$', lines[i + 1]):
+            if re.match(r"^Title\s*$", line, re.IGNORECASE) and re.match(r"^[=-]+\s*$", lines[i + 1]):
                 return True
     return False
 
 
-def build_filtered_description(
-    included_sections: List[str],
-    original_content: str
-) -> str:
+def build_filtered_description(included_sections: List[str], original_content: str) -> str:
     """
     Build a new description with standardized formatting:
     - Title: # <title text>
@@ -249,10 +250,10 @@ def build_filtered_description(
 
     # Define the standard order and format
     section_formats = {
-        "title": ("# {content}", 0),      # Level 1, no label
-        "summary": ("{content}", 1),       # No header at all
-        "why": ("## Why\n\n{content}", 2), # Level 2
-        "scope": ("## Scope\n\n{content}", 3), # Level 2
+        "title": ("# {content}", 0),  # Level 1, no label
+        "summary": ("{content}", 1),  # No header at all
+        "why": ("## Why\n\n{content}", 2),  # Level 2
+        "scope": ("## Scope\n\n{content}", 3),  # Level 2
     }
 
     # Sort by defined order
@@ -274,7 +275,7 @@ def process_instances(
     descriptions_dir: Path,
     description_name: str,
     output_base_dir: Path,
-    included_sections: List[str]
+    included_sections: List[str],
 ) -> Tuple[int, int, List[str]]:
     """
     Process all instances from CSV and generate filtered descriptions.
@@ -285,12 +286,12 @@ def process_instances(
     error_count = 0
     errors = []
 
-    with open(instances_csv, 'r') as f:
+    with open(instances_csv, "r") as f:
         reader = csv.DictReader(f)
         for row in reader:
-            owner = row['owner']
-            repo = row['repo']
-            commit_hash = row['commit_hash']
+            owner = row["owner"]
+            repo = row["repo"]
+            commit_hash = row["commit_hash"]
             short_hash = commit_hash[:8]
 
             # Source path
@@ -303,13 +304,10 @@ def process_instances(
 
             try:
                 # Read source description
-                original_content = source_desc.read_text(encoding='utf-8')
+                original_content = source_desc.read_text(encoding="utf-8")
 
                 # Build filtered description
-                filtered_content = build_filtered_description(
-                    included_sections,
-                    original_content
-                )
+                filtered_content = build_filtered_description(included_sections, original_content)
 
                 # Create output directory
                 output_dir = output_base_dir / owner / repo / short_hash
@@ -317,7 +315,7 @@ def process_instances(
 
                 # Write filtered description
                 output_file = output_dir / description_name
-                output_file.write_text(filtered_content, encoding='utf-8')
+                output_file.write_text(filtered_content, encoding="utf-8")
 
                 success_count += 1
 
@@ -349,41 +347,39 @@ Examples:
 
 Supported sections:
   title, summary, why, scope
-        """
+        """,
     )
 
     parser.add_argument(
-        '--include',
-        action='append',
-        dest='sections',
+        "--include",
+        action="append",
+        dest="sections",
         required=True,
-        help='Section to include (can be specified multiple times)'
+        help="Section to include (can be specified multiple times)",
     )
 
     parser.add_argument(
-        '--output-dir',
-        type=Path,
-        help='Custom output directory name (default: descriptions_{section1}_{section2}_...)'
+        "--output-dir", type=Path, help="Custom output directory name (default: descriptions_{section1}_{section2}_...)"
     )
 
     parser.add_argument(
-        '--instances-csv',
+        "--instances-csv",
         type=Path,
         default=Path(__file__).parent.parent.parent / "instances.csv",
-        help='Path to instances.csv (default: ./instances.csv)'
+        help="Path to instances.csv (default: ./instances.csv)",
     )
 
     parser.add_argument(
-        '--descriptions-dir',
+        "--descriptions-dir",
         type=Path,
         default=Path(__file__).parent.parent.parent / "assets" / "descriptions",
-        help='Path to source descriptions (default: ./assets/descriptions)'
+        help="Path to source descriptions (default: ./assets/descriptions)",
     )
     parser.add_argument(
-        '--description-name',
+        "--description-name",
         type=str,
-        default='description.md',
-        help='Name of the description file in each instance directory (default: description.md)'
+        default="description.md",
+        help="Name of the description file in each instance directory (default: description.md)",
     )
 
     args = parser.parse_args()
@@ -421,11 +417,7 @@ Supported sections:
 
     # Process instances
     success, errors, error_msgs = process_instances(
-        args.instances_csv,
-        args.descriptions_dir,
-        args.description_name,
-        output_dir,
-        included_sections
+        args.instances_csv, args.descriptions_dir, args.description_name, output_dir, included_sections
     )
 
     # Report results

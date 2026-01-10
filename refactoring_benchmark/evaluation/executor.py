@@ -103,21 +103,11 @@ def evaluate_single_instance(instance: InstanceRow, agent_id: str, config: Evalu
     with ThreadPoolExecutor(max_workers=2) as executor:
         # Submit both evaluations
         test_future = executor.submit(
-            run_test_evaluation,
-            instance,
-            prediction_diff,
-            eval_dir,
-            config.timeout_test,
-            instance_logger
+            run_test_evaluation, instance, prediction_diff, eval_dir, config.timeout_test, instance_logger
         )
 
         rule_future = executor.submit(
-            run_rule_evaluation,
-            instance,
-            prediction_diff,
-            eval_dir,
-            config.timeout_rule,
-            instance_logger
+            run_rule_evaluation, instance, prediction_diff, eval_dir, config.timeout_rule, instance_logger
         )
 
         # Wait for both to complete
@@ -149,7 +139,7 @@ def evaluate_single_instance(instance: InstanceRow, agent_id: str, config: Evalu
     except Exception as e:
         instance_logger.error(f"Failed to load instance metadata: {e}")
         return False
-    
+
     inference_metadata = None
     if inference_metadata_path.exists():
         try:

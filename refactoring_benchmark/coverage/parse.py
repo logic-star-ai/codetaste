@@ -42,12 +42,12 @@ def parse_diff(diff_content: str, base_commit: str, golden_commit: str) -> Tuple
 
         # Handle renames: "rename from old/path"
         if line.startswith("rename from "):
-            old_file = line[len("rename from "):]
+            old_file = line[len("rename from ") :]
             continue
 
         # Handle renames: "rename to new/path"
         if line.startswith("rename to "):
-            current_file = line[len("rename to "):]
+            current_file = line[len("rename to ") :]
             continue
 
         # Match hunk headers: @@ -10,5 +10,6 @@
@@ -118,31 +118,31 @@ def parse_sarif(sarif: SARIFOpengrep, commit: str) -> Set[Line]:
 
             for location in result.locations:
                 # Extract physical location
-                phys_loc = location.get('physicalLocation')
+                phys_loc = location.get("physicalLocation")
                 if not phys_loc:
                     continue
 
                 # Extract file URI
-                artifact = phys_loc.get('artifactLocation')
-                if not artifact or 'uri' not in artifact:
+                artifact = phys_loc.get("artifactLocation")
+                if not artifact or "uri" not in artifact:
                     continue
-                uri = artifact['uri']
+                uri = artifact["uri"]
 
                 # Extract region (line range)
-                region = phys_loc.get('region')
+                region = phys_loc.get("region")
                 if not region:
                     continue
 
-                start_line = region.get('startLine')
-                end_line = region.get('endLine', start_line)
+                start_line = region.get("startLine")
+                end_line = region.get("endLine", start_line)
 
                 if start_line is None:
                     continue
 
                 # Extract snippet text if available
-                snippet = region.get('snippet', {})
-                snippet_text = snippet.get('text', '') if isinstance(snippet, dict) else ''
-                
+                snippet = region.get("snippet", {})
+                snippet_text = snippet.get("text", "") if isinstance(snippet, dict) else ""
+
                 if snippet_text is not None and len(snippet_text.splitlines()) == end_line - start_line + 1:
                     for line_num, line_text in zip(range(start_line, end_line + 1), snippet_text.splitlines()):
                         lines.add(Line(uri=uri, commit=commit, line_number=line_num, content=line_text))
