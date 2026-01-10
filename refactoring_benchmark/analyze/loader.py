@@ -45,6 +45,9 @@ def load_all_results(
         for agent_id in agent_ids:
             instance_agent_dir = instance_dir / agent_id / "evaluation"
             json_path = instance_agent_dir / "evaluation_result.json"
+            if not json_path.is_file():
+                print(f"[WARN]: Skipping missing result file: {json_path}")
+                continue
             result = EvaluationResult.load_from_json(json_path)
             results.append(result)
 
