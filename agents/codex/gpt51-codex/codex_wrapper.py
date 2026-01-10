@@ -79,7 +79,7 @@ def compute_cost(usage_dict: Optional[Dict[str, Any]]) -> float:
     try:
         total_input = usage_dict.get("input_tokens", 0)
         cached_input = usage_dict.get("cached_input_tokens", 0)
-        output_tokens = usage_dict.get("output_tokens", 0) + usage_dict.get("reasoning_output_tokens", 0)
+        output_tokens = usage_dict.get("output_tokens", 0)
 
         standard_input = max(0, total_input - cached_input)
         cost = (
