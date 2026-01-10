@@ -1,0 +1,27 @@
+Autonomously identify and execute improvements to the **entire** codebase. Optimize structure, architecture, code quality and/or logic flow. Proceed directly to modifying the actual codebase; do not output analysis, plan, roadmap or similar files.
+The files that are look particularly concerning to me are amongst others the following:
+- Cargo.lock
+- rust/worker/src/segment/metadata_segment.rs
+- rust/worker/src/segment/types.rs
+- rust/worker/src/execution/operators/metadata_filtering.rs
+- Cargo.toml
+- rust/blockstore/Cargo.toml
+- rust/worker/src/execution/operators/merge_metadata_results.rs
+- rust/worker/Cargo.toml
+- rust/types/src/lib.rs
+- rust/types/src/metadata.rs
+- rust/storage/Cargo.toml
+- rust/types/src/record.rs
+- rust/blockstore/src/types.rs
+- rust/types/src/data_record.rs
+- rust/cache/src/lib.rs
+- rust/worker/Dockerfile
+- rust/worker/src/compactor/compaction_manager.rs
+- rust/types/Cargo.toml
+- rust/types/build.rs
+- rust/blockstore/src/provider.rs
+- rust/blockstore/src/arrow/provider.rs
+- rust/cache/Cargo.toml
+- rust/blockstore/src/positional_posting_list_value.rs
+- rust/worker/src/index/hnsw_provider.rs
+- rust/types/src/flush.rs

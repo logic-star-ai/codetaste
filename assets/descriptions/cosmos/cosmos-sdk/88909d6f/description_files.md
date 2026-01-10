@@ -1,0 +1,27 @@
+Autonomously identify and execute improvements to the **entire** codebase. Optimize structure, architecture, code quality and/or logic flow. Proceed directly to modifying the actual codebase; do not output analysis, plan, roadmap or similar files.
+The files that are look particularly concerning to me are amongst others the following:
+- crypto/codec/cmt.go
+- x/group/client/cli/tx_test.go
+- store/go.sum
+- x/staking/testutil/cmt.go
+- server/util.go
+- baseapp/abci_test.go
+- testutil/network/network.go
+- tests/integration/bank/keeper/keeper_test.go
+- tools/rosetta/converter.go
+- baseapp/baseapp_test.go
+- testutil/mock/types_module_module.go
+- server/start.go
+- x/group/simulation/operations_test.go
+- types/context.go
+- testutil/sims/app_helpers.go
+- x/gov/abci_test.go
+- testutil/network/util.go
+- tests/e2e/server/export_test.go
+- store/go.mod
+- x/bank/client/cli/query_test.go
+- x/bank/app_test.go
+- x/staking/app_test.go
+- x/staking/types/validator_test.go
+- x/bank/keeper/keeper_test.go
+- types/context_test.go
