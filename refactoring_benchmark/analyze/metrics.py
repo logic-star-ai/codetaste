@@ -11,9 +11,6 @@ from refactoring_benchmark.coverage.precision import calculate_precision_eval_re
 # Returns float value in [0, 1] range, or None if metric cannot be computed
 MetricFunction = Callable[[EvaluationResult], float | None]
 
-# Hardcoded path for pseudo agents
-PSEUDO_AGENTS_DIR = Path("./output_pseudo_agents")
-
 
 def metric_ifr(result: EvaluationResult) -> float:
     """Total IFR metric (0-1 range)."""
@@ -29,15 +26,7 @@ def metric_test_success(result: EvaluationResult) -> float | None:
 
 def _calculate_precision(result: EvaluationResult) -> InstanceAgentPrecision | None:
     """Helper to calculate precision metrics (requires ./output_pseudo_agents/)."""
-    if not PSEUDO_AGENTS_DIR.exists():
-        raise ValueError(
-            f"Precision metrics require pseudo agents but directory {PSEUDO_AGENTS_DIR.absolute()} does not exist.\n"
-            f"Hint: Run 'python -m refactoring_benchmark.tools.create_pseudo_agents --agent null --agent golden --output-dir output_pseudo_agents' first."
-        )
-
-    return calculate_precision_eval_result(
-        result,
-    )
+    return calculate_precision_eval_result(result)
 
 
 def metric_precision_added(result: EvaluationResult) -> float | None:

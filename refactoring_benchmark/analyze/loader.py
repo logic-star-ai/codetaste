@@ -112,9 +112,10 @@ def organize_data(
 
         # Extract agent_id and description_type
         agent_id = result.agent_config.id
-        description_type = "standard"  # Default
         if result.inference_metadata and result.inference_metadata.description_type:
             description_type = result.inference_metadata.description_type
+        else:
+            continue
 
         # Extract metric value
         metric_value = metric_fn(result)

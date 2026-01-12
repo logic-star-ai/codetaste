@@ -151,6 +151,10 @@ def calculate_precision_eval_result(
     Returns:
         InstanceAgentPrecision object with results, or None if files don't exist or calculation fails
     """
+    # Check if eval_dir is set
+    if result.eval_dir is None:
+        return None
+
     # Construct paths
     instance = ReducedInstanceRow(
         owner=result.instance_metadata.owner,
