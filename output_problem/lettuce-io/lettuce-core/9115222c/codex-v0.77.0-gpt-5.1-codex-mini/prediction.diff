@@ -1,0 +1,453 @@
+diff --git a/src/main/java/io/lettuce/core/resource/DefaultClientResources.java b/src/main/java/io/lettuce/core/resource/DefaultClientResources.java
+index 7400ee3..dcf7ceb 100644
+--- a/src/main/java/io/lettuce/core/resource/DefaultClientResources.java
++++ b/src/main/java/io/lettuce/core/resource/DefaultClientResources.java
+@@ -16,7 +16,11 @@
+ package io.lettuce.core.resource;
+ 
+ import static io.lettuce.core.resource.Futures.toBooleanPromise;
++import static io.lettuce.core.resource.Futures.toCompletableFuture;
+ 
++import java.util.ArrayList;
++import java.util.List;
++import java.util.concurrent.CompletableFuture;
+ import java.util.concurrent.TimeUnit;
+ import java.util.function.Supplier;
+ 
+@@ -601,22 +605,7 @@ public class DefaultClientResources implements ClientResources {
+         logger.debug("Initiate shutdown ({}, {}, {})", quietPeriod, timeout, timeUnit);
+ 
+         shutdownCalled = true;
+-        DefaultPromise<Boolean> overall = new DefaultPromise<Boolean>(GlobalEventExecutor.INSTANCE);
+-        DefaultPromise<Boolean> lastRelease = new DefaultPromise<Boolean>(GlobalEventExecutor.INSTANCE);
+-        Futures.PromiseAggregator<Boolean, Promise<Boolean>> aggregator = new Futures.PromiseAggregator<Boolean, Promise<Boolean>>(
+-                overall);
+-
+-        aggregator.expectMore(1);
+-
+-        if (!sharedEventLoopGroupProvider) {
+-            aggregator.expectMore(1);
+-        }
+-
+-        if (!sharedEventExecutor) {
+-            aggregator.expectMore(1);
+-        }
+-
+-        aggregator.arm();
++        List<CompletableFuture<Void>> releaseFutures = new ArrayList<>(2);
+ 
+         if (metricEventPublisher != null) {
+             metricEventPublisher.shutdown();
+@@ -628,26 +617,29 @@ public class DefaultClientResources implements ClientResources {
+ 
+         if (!sharedEventLoopGroupProvider) {
+             Future<Boolean> shutdown = eventLoopGroupProvider.shutdown(quietPeriod, timeout, timeUnit);
+-            if (shutdown instanceof Promise) {
+-                aggregator.add((Promise<Boolean>) shutdown);
+-            } else {
+-                aggregator.add(toBooleanPromise(shutdown));
+-            }
++            releaseFutures.add(toCompletableFuture(shutdown));
+         }
+ 
+         if (!sharedEventExecutor) {
+             Future<?> shutdown = eventExecutorGroup.shutdownGracefully(quietPeriod, timeout, timeUnit);
+-            aggregator.add(toBooleanPromise(shutdown));
++            releaseFutures.add(toCompletableFuture(shutdown));
+         }
+ 
+         if (!sharedCommandLatencyCollector) {
+             commandLatencyCollector.shutdown();
+         }
+ 
+-        aggregator.add(lastRelease);
+-        lastRelease.setSuccess(null);
++        DefaultPromise<Void> completion = new DefaultPromise<>(GlobalEventExecutor.INSTANCE);
++
++        if (releaseFutures.isEmpty()) {
++            completion.setSuccess(null);
++        } else {
++            CompletableFuture<Void> combined = CompletableFuture.allOf(
++                    releaseFutures.toArray(new CompletableFuture[0]));
++            Futures.completePromise(completion, combined);
++        }
+ 
+-        return toBooleanPromise(overall);
++        return toBooleanPromise(completion);
+     }
+ 
+     @Override
+diff --git a/src/main/java/io/lettuce/core/resource/DefaultEventLoopGroupProvider.java b/src/main/java/io/lettuce/core/resource/DefaultEventLoopGroupProvider.java
+index cf206ac..b5bcba8 100644
+--- a/src/main/java/io/lettuce/core/resource/DefaultEventLoopGroupProvider.java
++++ b/src/main/java/io/lettuce/core/resource/DefaultEventLoopGroupProvider.java
+@@ -16,9 +16,13 @@
+ package io.lettuce.core.resource;
+ 
+ import static io.lettuce.core.resource.Futures.toBooleanPromise;
++import static io.lettuce.core.resource.Futures.toCompletableFuture;
+ 
++import java.util.ArrayList;
+ import java.util.HashMap;
++import java.util.List;
+ import java.util.Map;
++import java.util.concurrent.CompletableFuture;
+ import java.util.concurrent.ConcurrentHashMap;
+ import java.util.concurrent.ExecutorService;
+ import java.util.concurrent.TimeUnit;
+@@ -205,22 +209,19 @@ public class DefaultEventLoopGroupProvider implements EventLoopGroupProvider {
+ 
+         Map<Class<? extends EventExecutorGroup>, EventExecutorGroup> copy = new HashMap<>(eventLoopGroups);
+ 
+-        DefaultPromise<Boolean> overall = new DefaultPromise<>(GlobalEventExecutor.INSTANCE);
+-        DefaultPromise<Boolean> lastRelease = new DefaultPromise<>(GlobalEventExecutor.INSTANCE);
+-        Futures.PromiseAggregator<Boolean, Promise<Boolean>> aggregator = new Futures.PromiseAggregator<>(overall);
+-
+-        aggregator.expectMore(1 + copy.size());
+-
+-        aggregator.arm();
+-
++        List<CompletableFuture<Void>> releaseFutures = new ArrayList<>(copy.size());
+         for (EventExecutorGroup executorGroup : copy.values()) {
+-            Promise<Boolean> shutdown = toBooleanPromise(release(executorGroup, quietPeriod, timeout, timeUnit));
+-            aggregator.add(shutdown);
++            releaseFutures.add(toCompletableFuture(release(executorGroup, quietPeriod, timeout, timeUnit)));
+         }
+ 
+-        aggregator.add(lastRelease);
+-        lastRelease.setSuccess(null);
++        DefaultPromise<Void> completion = new DefaultPromise<>(GlobalEventExecutor.INSTANCE);
++        if (releaseFutures.isEmpty()) {
++            completion.setSuccess(null);
++        } else {
++            CompletableFuture<Void> combined = CompletableFuture.allOf(releaseFutures.toArray(new CompletableFuture[0]));
++            Futures.completePromise(completion, combined);
++        }
+ 
+-        return toBooleanPromise(overall);
++        return toBooleanPromise(completion);
+     }
+ }
+diff --git a/src/main/java/io/lettuce/core/resource/Futures.java b/src/main/java/io/lettuce/core/resource/Futures.java
+index ddd549b..a576f3b 100644
+--- a/src/main/java/io/lettuce/core/resource/Futures.java
++++ b/src/main/java/io/lettuce/core/resource/Futures.java
+@@ -15,12 +15,14 @@
+  */
+ package io.lettuce.core.resource;
+ 
+-import java.util.LinkedHashSet;
+-import java.util.Set;
+-import java.util.concurrent.atomic.AtomicInteger;
++import java.util.concurrent.CompletableFuture;
++import java.util.concurrent.CompletionException;
+ 
+-import io.lettuce.core.internal.LettuceAssert;
+-import io.netty.util.concurrent.*;
++import io.netty.util.concurrent.DefaultPromise;
++import io.netty.util.concurrent.Future;
++import io.netty.util.concurrent.GenericFutureListener;
++import io.netty.util.concurrent.GlobalEventExecutor;
++import io.netty.util.concurrent.Promise;
+ 
+ /**
+  * Utility class to support netty's future handling.
+@@ -30,6 +32,9 @@ import io.netty.util.concurrent.*;
+  */
+ class Futures {
+ 
++    private Futures() {
++    }
++
+     /**
+      * Create a promise that emits a {@code Boolean} value on completion of the {@code future}
+      *
+@@ -51,7 +56,6 @@ class Futures {
+         }
+ 
+         future.addListener((GenericFutureListener<Future<Object>>) f -> {
+-
+             if (f.isSuccess()) {
+                 result.setSuccess(true);
+             } else {
+@@ -62,119 +66,69 @@ class Futures {
+     }
+ 
+     /**
+-     * Promise aggregator that aggregates multiple promises into one {@link Promise}. The aggregator workflow is:
+-     * <ol>
+-     * <li>Create a new instance of {@link io.lettuce.core.resource.Futures.PromiseAggregator}</li>
+-     * <li>Call {@link #expectMore(int)} until the number of expected futures is reached</li>
+-     * <li>Arm the aggregator using {@link #arm()}</li>
+-     * <li>Add the number of futures using {@link #add(Promise[])} until the expectation is met. The added futures can be either
+-     * done or in progress.</li>
+-     * <li>The {@code aggregatePromise} is released/finished as soon as the last future/promise completes</li>
++     * Create a promise that completes without value on completion of the {@code future}
+      *
+-     * </ol>
+-     *
+-     * @param <V> Result value type
+-     * @param <F> Future type
++     * @param future the future.
++     * @return Promise signaling completion of the {@code future}
+      */
+-    static class PromiseAggregator<V, F extends Future<V>> implements GenericFutureListener<F> {
+-
+-        private final Promise<?> aggregatePromise;
+-        private Set<Promise<V>> pendingPromises;
+-        private AtomicInteger expectedPromises = new AtomicInteger();
+-        private AtomicInteger processedPromises = new AtomicInteger();
+-        private boolean armed;
+-
+-        /**
+-         * Creates a new instance.
+-         *
+-         * @param aggregatePromise the {@link Promise} to notify
+-         */
+-        public PromiseAggregator(Promise<V> aggregatePromise) {
+-            LettuceAssert.notNull(aggregatePromise, "AggregatePromise must not be null");
+-            this.aggregatePromise = aggregatePromise;
+-        }
+-
+-        /**
+-         * Add the number of {@code count} to the count of expected promises.
+-         *
+-         * @param count number of futures/promises, that is added to the overall expectation count.
+-         * @throws IllegalStateException if the aggregator was armed
+-         */
+-        public void expectMore(int count) {
+-            LettuceAssert.assertState(!armed, "Aggregator is armed and does not allow any further expectations");
++    static Promise<Void> toVoidPromise(Future<?> future) {
+ 
+-            expectedPromises.addAndGet(count);
+-        }
++        DefaultPromise<Void> result = new DefaultPromise<>(GlobalEventExecutor.INSTANCE);
+ 
+-        /**
+-         * Arm the aggregator to expect completion of the futures.
+-         *
+-         * @throws IllegalStateException if the aggregator was armed
+-         */
+-        public void arm() {
+-            LettuceAssert.assertState(!armed, "Aggregator is already armed");
+-            armed = true;
++        if (future.isDone() || future.isCancelled()) {
++            if (future.isSuccess()) {
++                result.setSuccess(null);
++            } else {
++                result.setFailure(future.cause());
++            }
++            return result;
+         }
+ 
+-        /**
+-         * Add the given {@link Promise}s to the aggregator.
+-         *
+-         * @param promises the promises
+-         * @throws IllegalStateException if the aggregator was not armed
+-         */
+-        @SafeVarargs
+-        public final PromiseAggregator<V, F> add(Promise<V>... promises) {
+-
+-            LettuceAssert.notNull(promises, "Promises must not be null");
+-            LettuceAssert.assertState(armed,
+-                    "Aggregator is not armed and does not allow adding promises in that state. Call arm() first.");
+-
+-            if (promises.length == 0) {
+-                return this;
+-            }
+-            synchronized (this) {
+-                if (pendingPromises == null) {
+-                    int size;
+-                    if (promises.length > 1) {
+-                        size = promises.length;
+-                    } else {
+-                        size = 2;
+-                    }
+-                    pendingPromises = new LinkedHashSet<>(size);
+-                }
+-                for (Promise<V> p : promises) {
+-                    if (p == null) {
+-                        continue;
+-                    }
+-                    pendingPromises.add(p);
+-                    p.addListener(this);
+-                }
++        future.addListener((GenericFutureListener<Future<Object>>) f -> {
++            if (f.isSuccess()) {
++                result.setSuccess(null);
++            } else {
++                result.setFailure(f.cause());
+             }
+-            return this;
++        });
++        return result;
++    }
++
++    static CompletableFuture<Void> toCompletableFuture(Future<?> future) {
++
++        CompletableFuture<Void> result = new CompletableFuture<>();
++
++        if (future.isDone() || future.isCancelled()) {
++            complete(result, future);
++            return result;
+         }
+ 
+-        @Override
+-        public synchronized void operationComplete(F future) throws Exception {
+-            if (pendingPromises == null) {
+-                aggregatePromise.setSuccess(null);
++        future.addListener((GenericFutureListener<Future<Object>>) f -> complete(result, f));
++        return result;
++    }
++
++    static void completePromise(Promise<Void> promise, CompletableFuture<Void> future) {
++        future.whenComplete((ignored, throwable) -> {
++            if (throwable == null) {
++                promise.setSuccess(null);
+             } else {
+-                pendingPromises.remove(future);
+-                processedPromises.incrementAndGet();
+-                if (!future.isSuccess()) {
+-                    Throwable cause = future.cause();
+-                    aggregatePromise.setFailure(cause);
+-                    for (Promise<V> pendingFuture : pendingPromises) {
+-                        pendingFuture.setFailure(cause);
+-                    }
+-                } else if (processedPromises.get() == expectedPromises.get()) {
+-                    if (pendingPromises.isEmpty()) {
+-                        aggregatePromise.setSuccess(null);
+-                    } else {
+-                        throw new IllegalStateException(
+-                                "Processed promises == expected promises but pending promises is not empty. This should not have happened!");
+-                    }
+-                }
++                promise.setFailure(unwrap(throwable));
+             }
++        });
++    }
++
++    private static void complete(CompletableFuture<Void> promise, Future<?> future) {
++        if (future.isSuccess()) {
++            promise.complete(null);
++        } else {
++            promise.completeExceptionally(future.cause());
++        }
++    }
++
++    private static Throwable unwrap(Throwable throwable) {
++        if (throwable instanceof CompletionException && throwable.getCause() != null) {
++            return throwable.getCause();
+         }
++        return throwable;
+     }
+ }
+diff --git a/src/test/java/io/lettuce/core/resource/FuturesUnitTests.java b/src/test/java/io/lettuce/core/resource/FuturesUnitTests.java
+index 34745b1..f11d4ce 100644
+--- a/src/test/java/io/lettuce/core/resource/FuturesUnitTests.java
++++ b/src/test/java/io/lettuce/core/resource/FuturesUnitTests.java
+@@ -16,7 +16,6 @@
+ package io.lettuce.core.resource;
+ 
+ import static org.assertj.core.api.Assertions.assertThat;
+-import static org.assertj.core.api.Assertions.assertThatThrownBy;
+ 
+ import org.junit.jupiter.api.Test;
+ 
+@@ -32,55 +31,66 @@ import io.netty.util.concurrent.Promise;
+ class FuturesUnitTests {
+ 
+     @Test
+-    void testPromise() {
+-        assertThatThrownBy(() -> new Futures.PromiseAggregator(null)).isInstanceOf(IllegalArgumentException.class);
+-    }
++    void toBooleanPromiseSignalsSuccess() {
++        DefaultPromise<Void> delegate = new DefaultPromise<>(GlobalEventExecutor.INSTANCE);
++        Promise<Boolean> promise = Futures.toBooleanPromise(delegate);
+ 
+-    @Test
+-    void notArmed() {
++        delegate.setSuccess(null);
+ 
+-        Futures.PromiseAggregator<Boolean, Promise<Boolean>> sut = new Futures.PromiseAggregator<>(
+-                new DefaultPromise<>(ImmediateEventExecutor.INSTANCE));
+-        assertThatThrownBy(() -> sut.add(new DefaultPromise<>(ImmediateEventExecutor.INSTANCE))).isInstanceOf(
+-                IllegalStateException.class);
++        Wait.untilTrue(promise::isDone).waitOrTimeout();
++
++        assertThat(promise.isSuccess()).isTrue();
++        assertThat(promise.getNow()).isTrue();
+     }
+ 
+     @Test
+-    void expectAfterArmed() {
+-        Futures.PromiseAggregator<Boolean, Promise<Boolean>> sut = new Futures.PromiseAggregator<>(
+-                new DefaultPromise<>(ImmediateEventExecutor.INSTANCE));
+-        sut.arm();
++    void toBooleanPromiseSignalsFailure() {
++        DefaultPromise<Void> delegate = new DefaultPromise<>(GlobalEventExecutor.INSTANCE);
++        Promise<Boolean> promise = Futures.toBooleanPromise(delegate);
++
++        RuntimeException cause = new RuntimeException("boom");
++        delegate.setFailure(cause);
+ 
+-        assertThatThrownBy(() -> sut.expectMore(1)).isInstanceOf(IllegalStateException.class);
++        Wait.untilTrue(promise::isDone).waitOrTimeout();
++
++        assertThat(promise.isSuccess()).isFalse();
++        assertThat(promise.cause()).isSameAs(cause);
+     }
+ 
+     @Test
+-    void armTwice() {
++    void toBooleanPromiseHandlesAlreadyFinishedFuture() {
++        DefaultPromise<Void> delegate = new DefaultPromise<>(ImmediateEventExecutor.INSTANCE);
++        delegate.setSuccess(null);
+ 
+-        Futures.PromiseAggregator<Boolean, Promise<Boolean>> sut = new Futures.PromiseAggregator<>(
+-                new DefaultPromise<>(ImmediateEventExecutor.INSTANCE));
++        Promise<Boolean> promise = Futures.toBooleanPromise(delegate);
+ 
+-        sut.arm();
+-        assertThatThrownBy(sut::arm).isInstanceOf(IllegalStateException.class);
++        assertThat(promise.isDone()).isTrue();
+     }
+ 
+     @Test
+-    void regularUse() {
++    void toVoidPromiseSignalsSuccess() {
++        DefaultPromise<Void> delegate = new DefaultPromise<>(GlobalEventExecutor.INSTANCE);
++        Promise<Void> promise = Futures.toVoidPromise(delegate);
++
++        delegate.setSuccess(null);
+ 
+-        DefaultPromise<Boolean> target = new DefaultPromise<>(GlobalEventExecutor.INSTANCE);
+-        Futures.PromiseAggregator<Boolean, Promise<Boolean>> sut = new Futures.PromiseAggregator<>(target);
++        Wait.untilTrue(promise::isDone).waitOrTimeout();
+ 
+-        sut.expectMore(1);
+-        sut.arm();
+-        DefaultPromise<Boolean> part = new DefaultPromise<>(GlobalEventExecutor.INSTANCE);
+-        sut.add(part);
++        assertThat(promise.isSuccess()).isTrue();
++        assertThat(promise.getNow()).isNull();
++    }
+ 
+-        assertThat(target.isDone()).isFalse();
++    @Test
++    void toVoidPromiseSignalsFailure() {
++        DefaultPromise<Void> delegate = new DefaultPromise<>(GlobalEventExecutor.INSTANCE);
++        Promise<Void> promise = Futures.toVoidPromise(delegate);
+ 
+-        part.setSuccess(true);
++        RuntimeException cause = new RuntimeException("boom");
++        delegate.setFailure(cause);
+ 
+-        Wait.untilTrue(target::isDone).waitOrTimeout();
++        Wait.untilTrue(promise::isDone).waitOrTimeout();
+ 
+-        assertThat(target.isDone()).isTrue();
++        assertThat(promise.isSuccess()).isFalse();
++        assertThat(promise.cause()).isSameAs(cause);
+     }
+ }

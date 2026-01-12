@@ -1,0 +1,565 @@
+diff --git a/models/db/context.go b/models/db/context.go
+index 521857f..8e3ea95 100644
+--- a/models/db/context.go
++++ b/models/db/context.go
+@@ -131,7 +131,8 @@ func TxContext(parentCtx context.Context) (*Context, Committer, error) {
+ 		return nil, nil, err
+ 	}
+ 
+-	return newContext(DefaultContext, sess, true), sess, nil
++	// Use parentCtx instead of DefaultContext to enable request tracing and cancellation
++	return newContext(parentCtx, sess, true), sess, nil
+ }
+ 
+ // WithTx represents executing database operations on a transaction, if the transaction exist,
+diff --git a/models/issues/comment.go b/models/issues/comment.go
+index 8b1b180..959fef1 100644
+--- a/models/issues/comment.go
++++ b/models/issues/comment.go
+@@ -371,13 +371,20 @@ func (c *Comment) AfterDelete(ctx context.Context) {
+ }
+ 
+ // HTMLURL formats a URL-string to the issue-comment
++// Note: This method uses db.DefaultContext for template compatibility.
++// Use HTMLURLWithContext for proper request tracing.
+ func (c *Comment) HTMLURL() string {
+-	err := c.LoadIssue(db.DefaultContext)
++	return c.HTMLURLWithContext(db.DefaultContext)
++}
++
++// HTMLURLWithContext formats a URL-string to the issue-comment with proper context
++func (c *Comment) HTMLURLWithContext(ctx context.Context) string {
++	err := c.LoadIssue(ctx)
+ 	if err != nil { // Silently dropping errors :unamused:
+ 		log.Error("LoadIssue(%d): %v", c.IssueID, err)
+ 		return ""
+ 	}
+-	err = c.Issue.LoadRepo(db.DefaultContext)
++	err = c.Issue.LoadRepo(ctx)
+ 	if err != nil { // Silently dropping errors :unamused:
+ 		log.Error("loadRepo(%d): %v", c.Issue.RepoID, err)
+ 		return ""
+@@ -386,13 +393,20 @@ func (c *Comment) HTMLURL() string {
+ }
+ 
+ // Link formats a relative URL-string to the issue-comment
++// Note: This method uses db.DefaultContext for template compatibility.
++// Use LinkWithContext for proper request tracing.
+ func (c *Comment) Link() string {
+-	err := c.LoadIssue(db.DefaultContext)
++	return c.LinkWithContext(db.DefaultContext)
++}
++
++// LinkWithContext formats a relative URL-string to the issue-comment with proper context
++func (c *Comment) LinkWithContext(ctx context.Context) string {
++	err := c.LoadIssue(ctx)
+ 	if err != nil { // Silently dropping errors :unamused:
+ 		log.Error("LoadIssue(%d): %v", c.IssueID, err)
+ 		return ""
+ 	}
+-	err = c.Issue.LoadRepo(db.DefaultContext)
++	err = c.Issue.LoadRepo(ctx)
+ 	if err != nil { // Silently dropping errors :unamused:
+ 		log.Error("loadRepo(%d): %v", c.Issue.RepoID, err)
+ 		return ""
+@@ -406,7 +420,7 @@ func (c *Comment) hashLink() string {
+ 			return "/files#" + c.HashTag()
+ 		}
+ 		if c.Review == nil {
+-			if err := c.LoadReview(); err != nil {
++			if err := c.LoadReview(db.DefaultContext); err != nil {
+ 				log.Warn("LoadReview(%d): %v", c.ReviewID, err)
+ 				return "/files#" + c.HashTag()
+ 			}
+@@ -490,9 +504,9 @@ func (c *Comment) EventTag() string {
+ }
+ 
+ // LoadLabel if comment.Type is CommentTypeLabel, then load Label
+-func (c *Comment) LoadLabel() error {
++func (c *Comment) LoadLabel(ctx context.Context) error {
+ 	var label Label
+-	has, err := db.GetEngine(db.DefaultContext).ID(c.LabelID).Get(&label)
++	has, err := db.GetEngine(ctx).ID(c.LabelID).Get(&label)
+ 	if err != nil {
+ 		return err
+ 	} else if has {
+@@ -506,10 +520,10 @@ func (c *Comment) LoadLabel() error {
+ }
+ 
+ // LoadProject if comment.Type is CommentTypeProject, then load project.
+-func (c *Comment) LoadProject() error {
++func (c *Comment) LoadProject(ctx context.Context) error {
+ 	if c.OldProjectID > 0 {
+ 		var oldProject project_model.Project
+-		has, err := db.GetEngine(db.DefaultContext).ID(c.OldProjectID).Get(&oldProject)
++		has, err := db.GetEngine(ctx).ID(c.OldProjectID).Get(&oldProject)
+ 		if err != nil {
+ 			return err
+ 		} else if has {
+@@ -519,7 +533,7 @@ func (c *Comment) LoadProject() error {
+ 
+ 	if c.ProjectID > 0 {
+ 		var project project_model.Project
+-		has, err := db.GetEngine(db.DefaultContext).ID(c.ProjectID).Get(&project)
++		has, err := db.GetEngine(ctx).ID(c.ProjectID).Get(&project)
+ 		if err != nil {
+ 			return err
+ 		} else if has {
+@@ -569,21 +583,21 @@ func (c *Comment) LoadAttachments(ctx context.Context) error {
+ }
+ 
+ // UpdateAttachments update attachments by UUIDs for the comment
+-func (c *Comment) UpdateAttachments(uuids []string) error {
+-	ctx, committer, err := db.TxContext(db.DefaultContext)
++func (c *Comment) UpdateAttachments(ctx context.Context, uuids []string) error {
++	txCtx, committer, err := db.TxContext(ctx)
+ 	if err != nil {
+ 		return err
+ 	}
+ 	defer committer.Close()
+ 
+-	attachments, err := repo_model.GetAttachmentsByUUIDs(ctx, uuids)
++	attachments, err := repo_model.GetAttachmentsByUUIDs(txCtx, uuids)
+ 	if err != nil {
+ 		return fmt.Errorf("getAttachmentsByUUIDs [uuids: %v]: %w", uuids, err)
+ 	}
+ 	for i := 0; i < len(attachments); i++ {
+ 		attachments[i].IssueID = c.IssueID
+ 		attachments[i].CommentID = c.ID
+-		if err := repo_model.UpdateAttachment(ctx, attachments[i]); err != nil {
++		if err := repo_model.UpdateAttachment(txCtx, attachments[i]); err != nil {
+ 			return fmt.Errorf("update attachment [id: %d]: %w", attachments[i].ID, err)
+ 		}
+ 	}
+@@ -591,11 +605,11 @@ func (c *Comment) UpdateAttachments(uuids []string) error {
+ }
+ 
+ // LoadAssigneeUserAndTeam if comment.Type is CommentTypeAssignees, then load assignees
+-func (c *Comment) LoadAssigneeUserAndTeam() error {
++func (c *Comment) LoadAssigneeUserAndTeam(ctx context.Context) error {
+ 	var err error
+ 
+ 	if c.AssigneeID > 0 && c.Assignee == nil {
+-		c.Assignee, err = user_model.GetUserByID(db.DefaultContext, c.AssigneeID)
++		c.Assignee, err = user_model.GetUserByID(ctx, c.AssigneeID)
+ 		if err != nil {
+ 			if !user_model.IsErrUserNotExist(err) {
+ 				return err
+@@ -603,20 +617,20 @@ func (c *Comment) LoadAssigneeUserAndTeam() error {
+ 			c.Assignee = user_model.NewGhostUser()
+ 		}
+ 	} else if c.AssigneeTeamID > 0 && c.AssigneeTeam == nil {
+-		if err = c.LoadIssue(db.DefaultContext); err != nil {
++		if err = c.LoadIssue(ctx); err != nil {
+ 			return err
+ 		}
+ 
+-		if err = c.Issue.LoadRepo(db.DefaultContext); err != nil {
++		if err = c.Issue.LoadRepo(ctx); err != nil {
+ 			return err
+ 		}
+ 
+-		if err = c.Issue.Repo.LoadOwner(db.DefaultContext); err != nil {
++		if err = c.Issue.Repo.LoadOwner(ctx); err != nil {
+ 			return err
+ 		}
+ 
+ 		if c.Issue.Repo.Owner.IsOrganization() {
+-			c.AssigneeTeam, err = organization.GetTeamByID(db.DefaultContext, c.AssigneeTeamID)
++			c.AssigneeTeam, err = organization.GetTeamByID(ctx, c.AssigneeTeamID)
+ 			if err != nil && !organization.IsErrTeamNotExist(err) {
+ 				return err
+ 			}
+@@ -626,11 +640,11 @@ func (c *Comment) LoadAssigneeUserAndTeam() error {
+ }
+ 
+ // LoadResolveDoer if comment.Type is CommentTypeCode and ResolveDoerID not zero, then load resolveDoer
+-func (c *Comment) LoadResolveDoer() (err error) {
++func (c *Comment) LoadResolveDoer(ctx context.Context) (err error) {
+ 	if c.ResolveDoerID == 0 || c.Type != CommentTypeCode {
+ 		return nil
+ 	}
+-	c.ResolveDoer, err = user_model.GetUserByID(db.DefaultContext, c.ResolveDoerID)
++	c.ResolveDoer, err = user_model.GetUserByID(ctx, c.ResolveDoerID)
+ 	if err != nil {
+ 		if user_model.IsErrUserNotExist(err) {
+ 			c.ResolveDoer = user_model.NewGhostUser()
+@@ -646,21 +660,21 @@ func (c *Comment) IsResolved() bool {
+ }
+ 
+ // LoadDepIssueDetails loads Dependent Issue Details
+-func (c *Comment) LoadDepIssueDetails() (err error) {
++func (c *Comment) LoadDepIssueDetails(ctx context.Context) (err error) {
+ 	if c.DependentIssueID <= 0 || c.DependentIssue != nil {
+ 		return nil
+ 	}
+-	c.DependentIssue, err = GetIssueByID(db.DefaultContext, c.DependentIssueID)
++	c.DependentIssue, err = GetIssueByID(ctx, c.DependentIssueID)
+ 	return err
+ }
+ 
+ // LoadTime loads the associated time for a CommentTypeAddTimeManual
+-func (c *Comment) LoadTime() error {
++func (c *Comment) LoadTime(ctx context.Context) error {
+ 	if c.Time != nil || c.TimeID == 0 {
+ 		return nil
+ 	}
+ 	var err error
+-	c.Time, err = GetTrackedTimeByID(c.TimeID)
++	c.Time, err = GetTrackedTimeByID(ctx, c.TimeID)
+ 	return err
+ }
+ 
+@@ -683,8 +697,8 @@ func (c *Comment) loadReactions(ctx context.Context, repo *repo_model.Repository
+ }
+ 
+ // LoadReactions loads comment reactions
+-func (c *Comment) LoadReactions(repo *repo_model.Repository) error {
+-	return c.loadReactions(db.DefaultContext, repo)
++func (c *Comment) LoadReactions(ctx context.Context, repo *repo_model.Repository) error {
++	return c.loadReactions(ctx, repo)
+ }
+ 
+ func (c *Comment) loadReview(ctx context.Context) (err error) {
+@@ -698,8 +712,8 @@ func (c *Comment) loadReview(ctx context.Context) (err error) {
+ }
+ 
+ // LoadReview loads the associated review
+-func (c *Comment) LoadReview() error {
+-	return c.loadReview(db.DefaultContext)
++func (c *Comment) LoadReview(ctx context.Context) error {
++	return c.loadReview(ctx)
+ }
+ 
+ // DiffSide returns "previous" if Comment.Line is a LOC of the previous changes and "proposed" if it is a LOC of the proposed changes.
+@@ -719,13 +733,20 @@ func (c *Comment) UnsignedLine() uint64 {
+ }
+ 
+ // CodeCommentLink returns the url to a comment in code
++// Note: This method uses db.DefaultContext for template compatibility.
++// Use CodeCommentLinkWithContext for proper request tracing.
+ func (c *Comment) CodeCommentLink() string {
+-	err := c.LoadIssue(db.DefaultContext)
++	return c.CodeCommentLinkWithContext(db.DefaultContext)
++}
++
++// CodeCommentLinkWithContext returns the url to a comment in code with proper context
++func (c *Comment) CodeCommentLinkWithContext(ctx context.Context) string {
++	err := c.LoadIssue(ctx)
+ 	if err != nil { // Silently dropping errors :unamused:
+ 		log.Error("LoadIssue(%d): %v", c.IssueID, err)
+ 		return ""
+ 	}
+-	err = c.Issue.LoadRepo(db.DefaultContext)
++	err = c.Issue.LoadRepo(ctx)
+ 	if err != nil { // Silently dropping errors :unamused:
+ 		log.Error("loadRepo(%d): %v", c.Issue.RepoID, err)
+ 		return ""
+diff --git a/models/issues/comment_code.go b/models/issues/comment_code.go
+index d447d75..49927fb 100644
+--- a/models/issues/comment_code.go
++++ b/models/issues/comment_code.go
+@@ -99,11 +99,11 @@ func findCodeComments(ctx context.Context, opts FindCommentsOptions, issue *Issu
+ 		comments[n] = comment
+ 		n++
+ 
+-		if err := comment.LoadResolveDoer(); err != nil {
++		if err := comment.LoadResolveDoer(ctx); err != nil {
+ 			return nil, err
+ 		}
+ 
+-		if err := comment.LoadReactions(issue.Repo); err != nil {
++		if err := comment.LoadReactions(ctx, issue.Repo); err != nil {
+ 			return nil, err
+ 		}
+ 
+diff --git a/models/issues/tracked_time.go b/models/issues/tracked_time.go
+index 58c6b77..e5d16ee 100644
+--- a/models/issues/tracked_time.go
++++ b/models/issues/tracked_time.go
+@@ -315,9 +315,9 @@ func deleteTime(ctx context.Context, t *TrackedTime) error {
+ }
+ 
+ // GetTrackedTimeByID returns raw TrackedTime without loading attributes by id
+-func GetTrackedTimeByID(id int64) (*TrackedTime, error) {
++func GetTrackedTimeByID(ctx context.Context, id int64) (*TrackedTime, error) {
+ 	time := new(TrackedTime)
+-	has, err := db.GetEngine(db.DefaultContext).ID(id).Get(time)
++	has, err := db.GetEngine(ctx).ID(id).Get(time)
+ 	if err != nil {
+ 		return nil, err
+ 	} else if !has {
+diff --git a/models/org_team.go b/models/org_team.go
+index ea73918..422e811 100644
+--- a/models/org_team.go
++++ b/models/org_team.go
+@@ -430,14 +430,15 @@ func AddTeamMember(ctx context.Context, team *organization.Team, userID int64) e
+ 		if err := team.LoadRepositories(ctx); err != nil {
+ 			log.Error("team.LoadRepositories failed: %v", err)
+ 		}
+-		// FIXME: in the goroutine, it can't access the "ctx", it could only use db.DefaultContext at the moment
+-		go func(repos []*repo_model.Repository) {
++		// Use context.Background() for the goroutine to enable proper tracing
++		// The goroutine will continue even if the request context is canceled
++		go func(bgCtx context.Context, repos []*repo_model.Repository) {
+ 			for _, repo := range repos {
+-				if err = repo_model.WatchRepo(db.DefaultContext, userID, repo.ID, true); err != nil {
++				if err = repo_model.WatchRepo(bgCtx, userID, repo.ID, true); err != nil {
+ 					log.Error("watch repo failed: %v", err)
+ 				}
+ 			}
+-		}(team.Repos)
++		}(context.Background(), team.Repos)
+ 	}
+ 
+ 	return nil
+diff --git a/models/repo.go b/models/repo.go
+index de0f7ee..c2ab260 100644
+--- a/models/repo.go
++++ b/models/repo.go
+@@ -281,15 +281,15 @@ func UpdateRepoStats(ctx context.Context, id int64) error {
+ 	return nil
+ }
+ 
+-func updateUserStarNumbers(users []user_model.User) error {
+-	ctx, committer, err := db.TxContext(db.DefaultContext)
++func updateUserStarNumbers(ctx context.Context, users []user_model.User) error {
++	txCtx, committer, err := db.TxContext(ctx)
+ 	if err != nil {
+ 		return err
+ 	}
+ 	defer committer.Close()
+ 
+ 	for _, user := range users {
+-		if _, err = db.Exec(ctx, "UPDATE `user` SET num_stars=(SELECT COUNT(*) FROM `star` WHERE uid=?) WHERE id=?", user.ID, user.ID); err != nil {
++		if _, err = db.Exec(txCtx, "UPDATE `user` SET num_stars=(SELECT COUNT(*) FROM `star` WHERE uid=?) WHERE id=?", user.ID, user.ID); err != nil {
+ 			return err
+ 		}
+ 	}
+@@ -298,19 +298,19 @@ func updateUserStarNumbers(users []user_model.User) error {
+ }
+ 
+ // DoctorUserStarNum recalculate Stars number for all user
+-func DoctorUserStarNum() (err error) {
++func DoctorUserStarNum(ctx context.Context) (err error) {
+ 	const batchSize = 100
+ 
+ 	for start := 0; ; start += batchSize {
+ 		users := make([]user_model.User, 0, batchSize)
+-		if err = db.GetEngine(db.DefaultContext).Limit(batchSize, start).Where("type = ?", 0).Cols("id").Find(&users); err != nil {
++		if err = db.GetEngine(ctx).Limit(batchSize, start).Where("type = ?", 0).Cols("id").Find(&users); err != nil {
+ 			return err
+ 		}
+ 		if len(users) == 0 {
+ 			break
+ 		}
+ 
+-		if err = updateUserStarNumbers(users); err != nil {
++		if err = updateUserStarNumbers(ctx, users); err != nil {
+ 			return err
+ 		}
+ 	}
+diff --git a/models/repo_test.go b/models/repo_test.go
+index da66b16..2a8a4a7 100644
+--- a/models/repo_test.go
++++ b/models/repo_test.go
+@@ -20,5 +20,5 @@ func TestCheckRepoStats(t *testing.T) {
+ func TestDoctorUserStarNum(t *testing.T) {
+ 	assert.NoError(t, unittest.PrepareTestDatabase())
+ 
+-	assert.NoError(t, DoctorUserStarNum())
++	assert.NoError(t, DoctorUserStarNum(db.DefaultContext))
+ }
+diff --git a/modules/doctor/misc.go b/modules/doctor/misc.go
+index e01c3e1..f0b5966 100644
+--- a/modules/doctor/misc.go
++++ b/modules/doctor/misc.go
+@@ -74,7 +74,7 @@ func checkHooks(ctx context.Context, logger log.Logger, autofix bool) error {
+ 
+ func checkUserStarNum(ctx context.Context, logger log.Logger, autofix bool) error {
+ 	if autofix {
+-		if err := models.DoctorUserStarNum(); err != nil {
++		if err := models.DoctorUserStarNum(ctx); err != nil {
+ 			logger.Critical("Unable update User Stars numbers")
+ 			return err
+ 		}
+diff --git a/routers/api/v1/repo/issue_tracked_time.go b/routers/api/v1/repo/issue_tracked_time.go
+index ecbc5cf..269d057 100644
+--- a/routers/api/v1/repo/issue_tracked_time.go
++++ b/routers/api/v1/repo/issue_tracked_time.go
+@@ -356,7 +356,7 @@ func DeleteTime(ctx *context.APIContext) {
+ 		return
+ 	}
+ 
+-	time, err := issues_model.GetTrackedTimeByID(ctx.ParamsInt64(":id"))
++	time, err := issues_model.GetTrackedTimeByID(ctx, ctx.ParamsInt64(":id"))
+ 	if err != nil {
+ 		if db.IsErrNotExist(err) {
+ 			ctx.NotFound(err)
+diff --git a/routers/api/v1/repo/pull_review.go b/routers/api/v1/repo/pull_review.go
+index 4337982..4eaf9ed 100644
+--- a/routers/api/v1/repo/pull_review.go
++++ b/routers/api/v1/repo/pull_review.go
+@@ -713,7 +713,7 @@ func apiReviewRequest(ctx *context.APIContext, opts api.PullReviewRequestOptions
+ 		}
+ 
+ 		if comment != nil && isAdd {
+-			if err = comment.LoadReview(); err != nil {
++			if err = comment.LoadReview(ctx); err != nil {
+ 				ctx.ServerError("ReviewRequest", err)
+ 				return
+ 			}
+@@ -757,7 +757,7 @@ func apiReviewRequest(ctx *context.APIContext, opts api.PullReviewRequestOptions
+ 			}
+ 
+ 			if comment != nil && isAdd {
+-				if err = comment.LoadReview(); err != nil {
++				if err = comment.LoadReview(ctx); err != nil {
+ 					ctx.ServerError("ReviewRequest", err)
+ 					return
+ 				}
+diff --git a/routers/web/repo/issue.go b/routers/web/repo/issue.go
+index c360578..3542ded 100644
+--- a/routers/web/repo/issue.go
++++ b/routers/web/repo/issue.go
+@@ -1608,7 +1608,7 @@ func ViewIssue(ctx *context.Context) {
+ 			marked[comment.PosterID] = comment.ShowRole
+ 			participants = addParticipant(comment.Poster, participants)
+ 		} else if comment.Type == issues_model.CommentTypeLabel {
+-			if err = comment.LoadLabel(); err != nil {
++			if err = comment.LoadLabel(ctx); err != nil {
+ 				ctx.ServerError("LoadLabel", err)
+ 				return
+ 			}
+@@ -1629,7 +1629,7 @@ func ViewIssue(ctx *context.Context) {
+ 			}
+ 		} else if comment.Type == issues_model.CommentTypeProject {
+ 
+-			if err = comment.LoadProject(); err != nil {
++			if err = comment.LoadProject(ctx); err != nil {
+ 				ctx.ServerError("LoadProject", err)
+ 				return
+ 			}
+@@ -1648,12 +1648,12 @@ func ViewIssue(ctx *context.Context) {
+ 			}
+ 
+ 		} else if comment.Type == issues_model.CommentTypeAssignees || comment.Type == issues_model.CommentTypeReviewRequest {
+-			if err = comment.LoadAssigneeUserAndTeam(); err != nil {
++			if err = comment.LoadAssigneeUserAndTeam(ctx); err != nil {
+ 				ctx.ServerError("LoadAssigneeUserAndTeam", err)
+ 				return
+ 			}
+ 		} else if comment.Type == issues_model.CommentTypeRemoveDependency || comment.Type == issues_model.CommentTypeAddDependency {
+-			if err = comment.LoadDepIssueDetails(); err != nil {
++			if err = comment.LoadDepIssueDetails(ctx); err != nil {
+ 				if !issues_model.IsErrIssueNotExist(err) {
+ 					ctx.ServerError("LoadDepIssueDetails", err)
+ 					return
+@@ -1670,7 +1670,7 @@ func ViewIssue(ctx *context.Context) {
+ 				ctx.ServerError("RenderString", err)
+ 				return
+ 			}
+-			if err = comment.LoadReview(); err != nil && !issues_model.IsErrReviewNotExist(err) {
++			if err = comment.LoadReview(ctx); err != nil && !issues_model.IsErrReviewNotExist(err) {
+ 				ctx.ServerError("LoadReview", err)
+ 				return
+ 			}
+@@ -1709,7 +1709,7 @@ func ViewIssue(ctx *context.Context) {
+ 					}
+ 				}
+ 			}
+-			if err = comment.LoadResolveDoer(); err != nil {
++			if err = comment.LoadResolveDoer(ctx); err != nil {
+ 				ctx.ServerError("LoadResolveDoer", err)
+ 				return
+ 			}
+@@ -1723,7 +1723,7 @@ func ViewIssue(ctx *context.Context) {
+ 			comment.Type == issues_model.CommentTypeStopTracking ||
+ 			comment.Type == issues_model.CommentTypeDeleteTimeManual {
+ 			// drop error since times could be pruned from DB..
+-			_ = comment.LoadTime()
++			_ = comment.LoadTime(ctx)
+ 			if comment.Content != "" {
+ 				// Content before v1.21 did store the formated string instead of seconds,
+ 				// so "|" is used as delimeter to mark the new format
+@@ -3319,7 +3319,7 @@ func ChangeCommentReaction(ctx *context.Context) {
+ 		}
+ 		// Reload new reactions
+ 		comment.Reactions = nil
+-		if err = comment.LoadReactions(ctx.Repo.Repository); err != nil {
++		if err = comment.LoadReactions(ctx, ctx.Repo.Repository); err != nil {
+ 			log.Info("comment.LoadReactions: %s", err)
+ 			break
+ 		}
+@@ -3333,7 +3333,7 @@ func ChangeCommentReaction(ctx *context.Context) {
+ 
+ 		// Reload new reactions
+ 		comment.Reactions = nil
+-		if err = comment.LoadReactions(ctx.Repo.Repository); err != nil {
++		if err = comment.LoadReactions(ctx, ctx.Repo.Repository); err != nil {
+ 			log.Info("comment.LoadReactions: %s", err)
+ 			break
+ 		}
+@@ -3461,7 +3461,7 @@ func updateAttachments(ctx *context.Context, item any, files []string) error {
+ 		case *issues_model.Issue:
+ 			err = issues_model.UpdateIssueAttachments(content.ID, files)
+ 		case *issues_model.Comment:
+-			err = content.UpdateAttachments(files)
++			err = content.UpdateAttachments(ctx, files)
+ 		default:
+ 			return fmt.Errorf("unknown Type: %T", content)
+ 		}
+diff --git a/routers/web/repo/issue_timetrack.go b/routers/web/repo/issue_timetrack.go
+index 04ca65d..a14707d 100644
+--- a/routers/web/repo/issue_timetrack.go
++++ b/routers/web/repo/issue_timetrack.go
+@@ -61,7 +61,7 @@ func DeleteTime(c *context.Context) {
+ 		return
+ 	}
+ 
+-	t, err := issues_model.GetTrackedTimeByID(c.ParamsInt64(":timeid"))
++	t, err := issues_model.GetTrackedTimeByID(c, c.ParamsInt64(":timeid"))
+ 	if err != nil {
+ 		if db.IsErrNotExist(err) {
+ 			c.NotFound("time not found", err)
+diff --git a/services/convert/issue_comment.go b/services/convert/issue_comment.go
+index 1308051..17d8bab 100644
+--- a/services/convert/issue_comment.go
++++ b/services/convert/issue_comment.go
+@@ -37,31 +37,31 @@ func ToTimelineComment(ctx context.Context, repo *repo_model.Repository, c *issu
+ 		return nil
+ 	}
+ 
+-	err = c.LoadAssigneeUserAndTeam()
++	err = c.LoadAssigneeUserAndTeam(ctx)
+ 	if err != nil {
+ 		log.Error("LoadAssigneeUserAndTeam: %v", err)
+ 		return nil
+ 	}
+ 
+-	err = c.LoadResolveDoer()
++	err = c.LoadResolveDoer(ctx)
+ 	if err != nil {
+ 		log.Error("LoadResolveDoer: %v", err)
+ 		return nil
+ 	}
+ 
+-	err = c.LoadDepIssueDetails()
++	err = c.LoadDepIssueDetails(ctx)
+ 	if err != nil {
+ 		log.Error("LoadDepIssueDetails: %v", err)
+ 		return nil
+ 	}
+ 
+-	err = c.LoadTime()
++	err = c.LoadTime(ctx)
+ 	if err != nil {
+ 		log.Error("LoadTime: %v", err)
+ 		return nil
+ 	}
+ 
+-	err = c.LoadLabel()
++	err = c.LoadLabel(ctx)
+ 	if err != nil {
+ 		log.Error("LoadLabel: %v", err)
+ 		return nil
