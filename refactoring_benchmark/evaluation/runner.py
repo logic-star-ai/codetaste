@@ -56,6 +56,7 @@ def run_test_evaluation(
             },
             remove=False,
         )
+        logger.debug(f"Running equivalent to: podman run --detach -v {prediction_diff}:/input/patch.diff -v {eval_dir}:/output {instance.runtime_image} eval_test")
         try:
             exit_code = container.wait(timeout=timeout)
         except Exception as e:
