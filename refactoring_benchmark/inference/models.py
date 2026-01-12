@@ -58,6 +58,7 @@ class InferenceMetadata(BaseModel):
     finish_time: Optional[str] = None
     start_time: Optional[str] = None
     additional: Optional[Dict[str, Any]] = None
+    description_type: Optional[str] = None
 
     class Config:
         populate_by_name = True
