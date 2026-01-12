@@ -1,0 +1,213 @@
+diff --git a/saleor/attribute/tasks.py b/saleor/attribute/tasks.py
+index de2020b..6cd2781 100644
+--- a/saleor/attribute/tasks.py
++++ b/saleor/attribute/tasks.py
+@@ -26,6 +26,6 @@ def update_associated_products_search_vector(attribute_value_pk: int):
+         Exists(instance.variantassignments.filter(variant_id=OuterRef("id")))
+     )
+     Product.objects.filter(
+-        Q(Exists(instance.productassignments.filter(product_id=OuterRef("id"))))
++        Q(Exists(instance.productvalueassignment.filter(product_id=OuterRef("id"))))
+         | Q(Exists(variants.filter(product_id=OuterRef("id"))))
+     ).update(search_index_dirty=True)
+diff --git a/saleor/graphql/attribute/bulk_mutations.py b/saleor/graphql/attribute/bulk_mutations.py
+index b6c0e9a..7629bfd 100644
+--- a/saleor/graphql/attribute/bulk_mutations.py
++++ b/saleor/graphql/attribute/bulk_mutations.py
+@@ -51,11 +51,10 @@ class AttributeBulkDelete(ModelBulkDeleteMutation):
+ 
+     @classmethod
+     def get_product_ids_to_update(cls, attribute_pks):
+-        attribute_product = models.AttributeProduct.objects.filter(
+-            attribute_id__in=attribute_pks
+-        )
+-        assigned_product_attrs = models.AssignedProductAttribute.objects.filter(
+-            Exists(attribute_product.filter(id=OuterRef("assignment_id")))
++        assigned_product_values = (
++            models.AssignedProductAttributeValue.objects.filter(
++                value__attribute_id__in=attribute_pks
++            )
+         )
+ 
+         attribute_variant = models.AttributeVariant.objects.filter(
+@@ -69,7 +68,7 @@ class AttributeBulkDelete(ModelBulkDeleteMutation):
+         )
+ 
+         product_ids = product_models.Product.objects.filter(
+-            Exists(assigned_product_attrs.filter(product_id=OuterRef("id")))
++            Exists(assigned_product_values.filter(product_id=OuterRef("id")))
+             | Q(Exists(variants.filter(product_id=OuterRef("id"))))
+         ).values_list("id", flat=True)
+         return list(product_ids)
+@@ -142,9 +141,6 @@ class AttributeValueBulkDelete(ModelBulkDeleteMutation):
+         assigned_product_values = models.AssignedProductAttributeValue.objects.filter(
+             value_id__in=value_pks
+         )
+-        assigned_product_attrs = models.AssignedProductAttribute.objects.filter(
+-            Exists(assigned_product_values.filter(assignment_id=OuterRef("id")))
+-        )
+ 
+         assigned_variant_values = models.AssignedVariantAttributeValue.objects.filter(
+             value_id__in=value_pks
+@@ -157,7 +153,7 @@ class AttributeValueBulkDelete(ModelBulkDeleteMutation):
+         )
+ 
+         product_ids = product_models.Product.objects.filter(
+-            Exists(assigned_product_attrs.filter(product_id=OuterRef("id")))
++            Exists(assigned_product_values.filter(product_id=OuterRef("id")))
+             | Q(Exists(variants.filter(product_id=OuterRef("id"))))
+         ).values_list("id", flat=True)
+         return list(product_ids)
+diff --git a/saleor/graphql/attribute/mutations/attribute_value_delete.py b/saleor/graphql/attribute/mutations/attribute_value_delete.py
+index 81832b3..f921417 100644
+--- a/saleor/graphql/attribute/mutations/attribute_value_delete.py
++++ b/saleor/graphql/attribute/mutations/attribute_value_delete.py
+@@ -65,7 +65,7 @@ class AttributeValueDelete(ModelDeleteMutation, ModelWithExtRefMutation):
+             Exists(instance.variantassignments.filter(variant_id=OuterRef("id")))
+         )
+         product_ids = product_models.Product.objects.filter(
+-            Q(Exists(instance.productassignments.filter(product_id=OuterRef("id"))))
++            Q(Exists(instance.productvalueassignment.filter(product_id=OuterRef("id"))))
+             | Q(Exists(variants.filter(product_id=OuterRef("id"))))
+         ).values_list("id", flat=True)
+         return list(product_ids)
+diff --git a/saleor/graphql/attribute/mutations/attribute_value_update.py b/saleor/graphql/attribute/mutations/attribute_value_update.py
+index 34b0fb0..70917ab 100644
+--- a/saleor/graphql/attribute/mutations/attribute_value_update.py
++++ b/saleor/graphql/attribute/mutations/attribute_value_update.py
+@@ -106,7 +106,7 @@ class AttributeValueUpdate(AttributeValueCreate, ModelWithExtRefMutation):
+                     & (
+                         Q(
+                             Exists(
+-                                instance.productassignments.filter(
++                                instance.productvalueassignment.filter(
+                                     product_id=OuterRef("id")
+                                 )
+                             )
+diff --git a/saleor/graphql/product/bulk_mutations/product_bulk_delete.py b/saleor/graphql/product/bulk_mutations/product_bulk_delete.py
+index 1cdee6c..acd4d0d 100644
+--- a/saleor/graphql/product/bulk_mutations/product_bulk_delete.py
++++ b/saleor/graphql/product/bulk_mutations/product_bulk_delete.py
+@@ -81,7 +81,7 @@ class ProductBulkDelete(ModelBulkDeleteMutation):
+     @staticmethod
+     def delete_assigned_attribute_values(instance_pks):
+         attribute_models.AttributeValue.objects.filter(
+-            productassignments__product_id__in=instance_pks,
++            productvalueassignment__product_id__in=instance_pks,
+             attribute__input_type__in=AttributeInputType.TYPES_WITH_UNIQUE_VALUES,
+         ).delete()
+ 
+diff --git a/saleor/graphql/product/bulk_mutations/product_type_bulk_delete.py b/saleor/graphql/product/bulk_mutations/product_type_bulk_delete.py
+index df83286..a8899d9 100644
+--- a/saleor/graphql/product/bulk_mutations/product_type_bulk_delete.py
++++ b/saleor/graphql/product/bulk_mutations/product_type_bulk_delete.py
+@@ -1,6 +1,6 @@
+ import graphene
+ from django.core.exceptions import ValidationError
+-from django.db.models import Q
++from django.db.models import Exists, OuterRef, Q
+ 
+ from ....attribute import AttributeInputType
+ from ....attribute import models as attribute_models
+@@ -43,10 +43,15 @@ class ProductTypeBulkDelete(ModelBulkDeleteMutation):
+ 
+     @staticmethod
+     def delete_assigned_attribute_values(instance_pks):
+-        attribute_models.AttributeValue.objects.filter(
+-            Q(attribute__input_type__in=AttributeInputType.TYPES_WITH_UNIQUE_VALUES)
+-            & (
+-                Q(productassignments__assignment__product_type_id__in=instance_pks)
+-                | Q(variantassignments__assignment__product_type_id__in=instance_pks)
++        product_assignment_exists = (
++            attribute_models.AssignedProductAttributeValue.objects.filter(
++                value_id=OuterRef("pk"),
++                product__product_type_id__in=instance_pks,
+             )
++        )
++        attribute_models.AttributeValue.objects.filter(
++            attribute__input_type__in=AttributeInputType.TYPES_WITH_UNIQUE_VALUES
++        ).filter(
++            Q(Exists(product_assignment_exists))
++            | Q(variantassignments__assignment__product_type_id__in=instance_pks)
+         ).delete()
+diff --git a/saleor/graphql/product/filters.py b/saleor/graphql/product/filters.py
+index a4b8e9e..1eebd95 100644
+--- a/saleor/graphql/product/filters.py
++++ b/saleor/graphql/product/filters.py
+@@ -14,7 +14,6 @@ from django.utils import timezone
+ 
+ from ...attribute import AttributeInputType
+ from ...attribute.models import (
+-    AssignedProductAttribute,
+     AssignedProductAttributeValue,
+     AssignedVariantAttribute,
+     AssignedVariantAttributeValue,
+@@ -216,17 +215,13 @@ def _clean_product_attributes_boolean_filter_input(filter_value, queries):
+ def filter_products_by_attributes_values(qs, queries: T_PRODUCT_FILTER_QUERIES):
+     filters = []
+     for values in queries.values():
+-        assigned_product_attribute_values = (
+-            AssignedProductAttributeValue.objects.filter(value_id__in=values)
+-        )
+-        assigned_product_attributes = AssignedProductAttribute.objects.filter(
++        product_attribute_filter = Q(
+             Exists(
+-                assigned_product_attribute_values.filter(assignment_id=OuterRef("pk"))
++                AssignedProductAttributeValue.objects.filter(
++                    product_id=OuterRef("pk"), value_id__in=values
++                )
+             )
+         )
+-        product_attribute_filter = Q(
+-            Exists(assigned_product_attributes.filter(product_id=OuterRef("pk")))
+-        )
+ 
+         assigned_variant_attribute_values = (
+             AssignedVariantAttributeValue.objects.filter(value_id__in=values)
+@@ -249,14 +244,12 @@ def filter_products_by_attributes_values(qs, queries: T_PRODUCT_FILTER_QUERIES):
+ 
+ 
+ def filter_products_by_attributes_values_qs(qs, values_qs):
+-    assigned_product_attribute_values = AssignedProductAttributeValue.objects.filter(
+-        value__in=values_qs
+-    )
+-    assigned_product_attributes = AssignedProductAttribute.objects.filter(
+-        Exists(assigned_product_attribute_values.filter(assignment_id=OuterRef("pk")))
+-    )
+     product_attribute_filter = Q(
+-        Exists(assigned_product_attributes.filter(product_id=OuterRef("pk")))
++        Exists(
++            AssignedProductAttributeValue.objects.filter(
++                product_id=OuterRef("pk"), value__in=values_qs
++            )
++        )
+     )
+ 
+     assigned_variant_attribute_values = AssignedVariantAttributeValue.objects.filter(
+diff --git a/saleor/graphql/product/mutations/product/product_delete.py b/saleor/graphql/product/mutations/product/product_delete.py
+index 3c6a987..76793dc 100644
+--- a/saleor/graphql/product/mutations/product/product_delete.py
++++ b/saleor/graphql/product/mutations/product/product_delete.py
+@@ -83,6 +83,6 @@ class ProductDelete(ModelDeleteMutation, ModelWithExtRefMutation):
+     @staticmethod
+     def delete_assigned_attribute_values(instance):
+         attribute_models.AttributeValue.objects.filter(
+-            productassignments__product_id=instance.id,
++            productvalueassignment__product_id=instance.id,
+             attribute__input_type__in=AttributeInputType.TYPES_WITH_UNIQUE_VALUES,
+         ).delete()
+diff --git a/saleor/graphql/product/mutations/product_type/product_type_delete.py b/saleor/graphql/product/mutations/product_type/product_type_delete.py
+index 14baee6..6adfce1 100644
+--- a/saleor/graphql/product/mutations/product_type/product_type_delete.py
++++ b/saleor/graphql/product/mutations/product_type/product_type_delete.py
+@@ -59,7 +59,9 @@ class ProductTypeDelete(ModelDeleteMutation):
+         attribute_models.AttributeValue.objects.filter(
+             Q(attribute__input_type__in=AttributeInputType.TYPES_WITH_UNIQUE_VALUES)
+             & (
+-                Q(productassignments__assignment__product_type_id=instance_pk)
++                Q(
++                    productvalueassignment__product__product_type_id=instance_pk
++                )
+                 | Q(variantassignments__assignment__product_type_id=instance_pk)
+             )
+         ).delete()

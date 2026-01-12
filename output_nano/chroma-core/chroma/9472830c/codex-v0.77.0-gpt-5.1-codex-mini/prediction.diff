@@ -1,0 +1,726 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index bc724ce..89e6adc 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -1,5 +1,6 @@
+ [workspace]
+ 
+ members = [
+-   "rust/worker/"
++   "rust/worker/worker-core",
++   "rust/worker/worker-bin",
+ ]
+diff --git a/rust/worker/Dockerfile b/rust/worker/Dockerfile
+index 5081ace..15fb154 100644
+--- a/rust/worker/Dockerfile
++++ b/rust/worker/Dockerfile
+@@ -14,7 +14,8 @@ WORKDIR /chroma/
+ COPY Cargo.toml Cargo.toml
+ COPY Cargo.lock Cargo.lock
+ COPY idl/ idl/
+-COPY /rust/worker/Cargo.toml rust/worker/Cargo.toml
++COPY /rust/worker/worker-core/Cargo.toml rust/worker/worker-core/Cargo.toml
++COPY /rust/worker/worker-bin/Cargo.toml rust/worker/worker-bin/Cargo.toml
+ ENV PROTOC_ZIP=protoc-25.1-linux-x86_64.zip
+ RUN curl -OL https://github.com/protocolbuffers/protobuf/releases/download/v25.1/$PROTOC_ZIP \
+     && unzip -o $PROTOC_ZIP -d /usr/local bin/protoc \
+@@ -23,12 +24,12 @@ RUN curl -OL https://github.com/protocolbuffers/protobuf/releases/download/v25.1
+ 
+ FROM builder as query_service_builder
+ # We need to replace the query node's real main() with a dummy at the expected location.
+-RUN mkdir -p rust/worker/src/bin/ && echo "fn main() {}" > rust/worker/src/bin/query_service.rs
++RUN mkdir -p rust/worker/worker-bin/src/bin/ && echo "fn main() {}" > rust/worker/worker-bin/src/bin/query_service.rs
+ RUN if [ "$RELEASE_MODE" = "1" ]; then cargo build --bin query_service --release; else cargo build --bin query_service; fi
+ RUN rm -rf rust/
+ 
+ COPY rust/ rust/
+-RUN touch rust/worker/src/bin/query_service.rs
++RUN touch rust/worker/worker-bin/src/bin/query_service.rs
+ RUN if [ "$RELEASE_MODE" = "1" ]; then cargo build --bin query_service --release; else cargo build --bin query_service; fi
+ RUN if [ "$RELEASE_MODE" = "1" ]; then mv target/release/query_service .; else mv target/debug/query_service .; fi
+ 
+@@ -36,19 +37,19 @@ FROM debian:bookworm-slim as query_service
+ 
+ RUN apt-get update && apt-get install -y libssl-dev ca-certificates
+ COPY --from=query_service_builder /chroma/query_service .
+-COPY --from=query_service_builder /chroma/rust/worker/chroma_config.yaml .
++COPY --from=query_service_builder /chroma/rust/worker/worker-core/chroma_config.yaml .
+ 
+ ENTRYPOINT [ "./query_service" ]
+ 
+ FROM builder as compaction_service_builder
+ 
+ # We need to replace the compaction node's real main() with a dummy at the expected location.
+-RUN mkdir -p rust/worker/src/bin/ && echo "fn main() {}" > rust/worker/src/bin/compaction_service.rs
++RUN mkdir -p rust/worker/worker-bin/src/bin/ && echo "fn main() {}" > rust/worker/worker-bin/src/bin/compaction_service.rs
+ RUN if [ "$RELEASE_MODE" = "1" ]; then cargo build --bin compaction_service --release; else cargo build --bin compaction_service; fi
+ RUN rm -rf rust/
+ 
+ COPY rust/ rust/
+-RUN touch rust/worker/src/bin/compaction_service.rs
++RUN touch rust/worker/worker-bin/src/bin/compaction_service.rs
+ RUN if [ "$RELEASE_MODE" = "1" ]; then cargo build --bin compaction_service --release; else cargo build --bin compaction_service; fi
+ RUN if [ "$RELEASE_MODE" = "1" ]; then mv target/release/compaction_service .; else mv target/debug/compaction_service .; fi
+ 
+@@ -56,6 +57,6 @@ FROM debian:bookworm-slim as compaction_service
+ 
+ RUN apt-get update && apt-get install -y libssl-dev ca-certificates
+ COPY --from=compaction_service_builder /chroma/compaction_service .
+-COPY --from=compaction_service_builder /chroma/rust/worker/chroma_config.yaml .
++COPY --from=compaction_service_builder /chroma/rust/worker/worker-core/chroma_config.yaml .
+ 
+ ENTRYPOINT [ "./compaction_service" ]
+diff --git a/rust/worker/README.md b/rust/worker/README.md
+index eb23338..94f0ec4 100644
+--- a/rust/worker/README.md
++++ b/rust/worker/README.md
+@@ -1,14 +1,26 @@
+ # Readme
+ 
+-This folder houses the Rust code for the query and compactor nodes. It is a standard rust crate managed using cargo.
++This folder now contains a Rust workspace that separates the shared logic from the binaries:
++
++- `worker-core` exposes the library used by both services.
++- `worker-bin` wraps the `query_service` and `compaction_service` binaries.
+ 
+ ### Testing
+ 
+-`cargo test`
++Use the core crate’s test suite from the repository root:
++
++```
++cargo test -p worker-core
++```
+ 
+ ### Building
+ 
+-`cargo build`
++Build the binaries explicitly so they can be run or packaged:
++
++```
++cargo build -p worker-bin --bin query_service
++cargo build -p worker-bin --bin compaction_service
++```
+ 
+ ### Rust version
+ 
+diff --git a/rust/worker/worker-bin/Cargo.toml b/rust/worker/worker-bin/Cargo.toml
+new file mode 100644
+index 0000000..801efbd
+--- /dev/null
++++ b/rust/worker/worker-bin/Cargo.toml
+@@ -0,0 +1,16 @@
++[package]
++name = "worker-bin"
++version = "0.1.0"
++edition = "2021"
++
++[[bin]]
++name = "query_service"
++path = "src/bin/query_service.rs"
++
++[[bin]]
++name = "compaction_service"
++path = "src/bin/compaction_service.rs"
++
++[dependencies]
++tokio = { version = "1.0", features = ["macros", "rt-multi-thread"] }
++worker = { path = "../worker-core" }
+diff --git a/rust/worker/src/bin/compaction_service.rs b/rust/worker/worker-bin/src/bin/compaction_service.rs
+similarity index 100%
+rename from rust/worker/src/bin/compaction_service.rs
+rename to rust/worker/worker-bin/src/bin/compaction_service.rs
+diff --git a/rust/worker/src/bin/query_service.rs b/rust/worker/worker-bin/src/bin/query_service.rs
+similarity index 100%
+rename from rust/worker/src/bin/query_service.rs
+rename to rust/worker/worker-bin/src/bin/query_service.rs
+diff --git a/rust/worker/Cargo.toml b/rust/worker/worker-core/Cargo.toml
+similarity index 92%
+rename from rust/worker/Cargo.toml
+rename to rust/worker/worker-core/Cargo.toml
+index 8dab7f7..c716065 100644
+--- a/rust/worker/Cargo.toml
++++ b/rust/worker/worker-core/Cargo.toml
+@@ -3,14 +3,6 @@ name = "worker"
+ version = "0.1.0"
+ edition = "2021"
+ 
+-[[bin]]
+-name = "query_service"
+-path = "src/bin/query_service.rs"
+-
+-[[bin]]
+-name = "compaction_service"
+-path = "src/bin/compaction_service.rs"
+-
+ [[bench]]
+ name = "distance_metrics"
+ path = "src/benches/distance_metrics.rs"
+diff --git a/rust/worker/bindings.cpp b/rust/worker/worker-core/bindings.cpp
+similarity index 100%
+rename from rust/worker/bindings.cpp
+rename to rust/worker/worker-core/bindings.cpp
+diff --git a/rust/worker/build.rs b/rust/worker/worker-core/build.rs
+similarity index 100%
+rename from rust/worker/build.rs
+rename to rust/worker/worker-core/build.rs
+diff --git a/rust/worker/chroma_config.yaml b/rust/worker/worker-core/chroma_config.yaml
+similarity index 100%
+rename from rust/worker/chroma_config.yaml
+rename to rust/worker/worker-core/chroma_config.yaml
+diff --git a/rust/worker/proptest-regressions/blockstore/arrow/blockfile.txt b/rust/worker/worker-core/proptest-regressions/blockstore/arrow/blockfile.txt
+similarity index 100%
+rename from rust/worker/proptest-regressions/blockstore/arrow/blockfile.txt
+rename to rust/worker/worker-core/proptest-regressions/blockstore/arrow/blockfile.txt
+diff --git a/rust/worker/src/assignment/assignment_policy.rs b/rust/worker/worker-core/src/assignment/assignment_policy.rs
+similarity index 100%
+rename from rust/worker/src/assignment/assignment_policy.rs
+rename to rust/worker/worker-core/src/assignment/assignment_policy.rs
+diff --git a/rust/worker/src/assignment/config.rs b/rust/worker/worker-core/src/assignment/config.rs
+similarity index 100%
+rename from rust/worker/src/assignment/config.rs
+rename to rust/worker/worker-core/src/assignment/config.rs
+diff --git a/rust/worker/src/assignment/mod.rs b/rust/worker/worker-core/src/assignment/mod.rs
+similarity index 100%
+rename from rust/worker/src/assignment/mod.rs
+rename to rust/worker/worker-core/src/assignment/mod.rs
+diff --git a/rust/worker/src/assignment/rendezvous_hash.rs b/rust/worker/worker-core/src/assignment/rendezvous_hash.rs
+similarity index 100%
+rename from rust/worker/src/assignment/rendezvous_hash.rs
+rename to rust/worker/worker-core/src/assignment/rendezvous_hash.rs
+diff --git a/rust/worker/src/benches/distance_metrics.rs b/rust/worker/worker-core/src/benches/distance_metrics.rs
+similarity index 100%
+rename from rust/worker/src/benches/distance_metrics.rs
+rename to rust/worker/worker-core/src/benches/distance_metrics.rs
+diff --git a/rust/worker/src/blockstore/arrow/block/bool_key.rs b/rust/worker/worker-core/src/blockstore/arrow/block/bool_key.rs
+similarity index 100%
+rename from rust/worker/src/blockstore/arrow/block/bool_key.rs
+rename to rust/worker/worker-core/src/blockstore/arrow/block/bool_key.rs
+diff --git a/rust/worker/src/blockstore/arrow/block/data_record_value.rs b/rust/worker/worker-core/src/blockstore/arrow/block/data_record_value.rs
+similarity index 100%
+rename from rust/worker/src/blockstore/arrow/block/data_record_value.rs
+rename to rust/worker/worker-core/src/blockstore/arrow/block/data_record_value.rs
+diff --git a/rust/worker/src/blockstore/arrow/block/delta.rs b/rust/worker/worker-core/src/blockstore/arrow/block/delta.rs
+similarity index 100%
+rename from rust/worker/src/blockstore/arrow/block/delta.rs
+rename to rust/worker/worker-core/src/blockstore/arrow/block/delta.rs
+diff --git a/rust/worker/src/blockstore/arrow/block/delta_storage.rs b/rust/worker/worker-core/src/blockstore/arrow/block/delta_storage.rs
+similarity index 100%
+rename from rust/worker/src/blockstore/arrow/block/delta_storage.rs
+rename to rust/worker/worker-core/src/blockstore/arrow/block/delta_storage.rs
+diff --git a/rust/worker/src/blockstore/arrow/block/f32_key.rs b/rust/worker/worker-core/src/blockstore/arrow/block/f32_key.rs
+similarity index 100%
+rename from rust/worker/src/blockstore/arrow/block/f32_key.rs
+rename to rust/worker/worker-core/src/blockstore/arrow/block/f32_key.rs
+diff --git a/rust/worker/src/blockstore/arrow/block/int32array_value.rs b/rust/worker/worker-core/src/blockstore/arrow/block/int32array_value.rs
+similarity index 100%
+rename from rust/worker/src/blockstore/arrow/block/int32array_value.rs
+rename to rust/worker/worker-core/src/blockstore/arrow/block/int32array_value.rs
+diff --git a/rust/worker/src/blockstore/arrow/block/mod.rs b/rust/worker/worker-core/src/blockstore/arrow/block/mod.rs
+similarity index 100%
+rename from rust/worker/src/blockstore/arrow/block/mod.rs
+rename to rust/worker/worker-core/src/blockstore/arrow/block/mod.rs
+diff --git a/rust/worker/src/blockstore/arrow/block/roaring_bitmap_value.rs b/rust/worker/worker-core/src/blockstore/arrow/block/roaring_bitmap_value.rs
+similarity index 100%
+rename from rust/worker/src/blockstore/arrow/block/roaring_bitmap_value.rs
+rename to rust/worker/worker-core/src/blockstore/arrow/block/roaring_bitmap_value.rs
+diff --git a/rust/worker/src/blockstore/arrow/block/str_key.rs b/rust/worker/worker-core/src/blockstore/arrow/block/str_key.rs
+similarity index 100%
+rename from rust/worker/src/blockstore/arrow/block/str_key.rs
+rename to rust/worker/worker-core/src/blockstore/arrow/block/str_key.rs
+diff --git a/rust/worker/src/blockstore/arrow/block/str_value.rs b/rust/worker/worker-core/src/blockstore/arrow/block/str_value.rs
+similarity index 100%
+rename from rust/worker/src/blockstore/arrow/block/str_value.rs
+rename to rust/worker/worker-core/src/blockstore/arrow/block/str_value.rs
+diff --git a/rust/worker/src/blockstore/arrow/block/types.rs b/rust/worker/worker-core/src/blockstore/arrow/block/types.rs
+similarity index 100%
+rename from rust/worker/src/blockstore/arrow/block/types.rs
+rename to rust/worker/worker-core/src/blockstore/arrow/block/types.rs
+diff --git a/rust/worker/src/blockstore/arrow/block/u32_key.rs b/rust/worker/worker-core/src/blockstore/arrow/block/u32_key.rs
+similarity index 100%
+rename from rust/worker/src/blockstore/arrow/block/u32_key.rs
+rename to rust/worker/worker-core/src/blockstore/arrow/block/u32_key.rs
+diff --git a/rust/worker/src/blockstore/arrow/block/u32_value.rs b/rust/worker/worker-core/src/blockstore/arrow/block/u32_value.rs
+similarity index 100%
+rename from rust/worker/src/blockstore/arrow/block/u32_value.rs
+rename to rust/worker/worker-core/src/blockstore/arrow/block/u32_value.rs
+diff --git a/rust/worker/src/blockstore/arrow/blockfile.rs b/rust/worker/worker-core/src/blockstore/arrow/blockfile.rs
+similarity index 100%
+rename from rust/worker/src/blockstore/arrow/blockfile.rs
+rename to rust/worker/worker-core/src/blockstore/arrow/blockfile.rs
+diff --git a/rust/worker/src/blockstore/arrow/concurrency_test.rs b/rust/worker/worker-core/src/blockstore/arrow/concurrency_test.rs
+similarity index 100%
+rename from rust/worker/src/blockstore/arrow/concurrency_test.rs
+rename to rust/worker/worker-core/src/blockstore/arrow/concurrency_test.rs
+diff --git a/rust/worker/src/blockstore/arrow/config.rs b/rust/worker/worker-core/src/blockstore/arrow/config.rs
+similarity index 100%
+rename from rust/worker/src/blockstore/arrow/config.rs
+rename to rust/worker/worker-core/src/blockstore/arrow/config.rs
+diff --git a/rust/worker/src/blockstore/arrow/flusher.rs b/rust/worker/worker-core/src/blockstore/arrow/flusher.rs
+similarity index 100%
+rename from rust/worker/src/blockstore/arrow/flusher.rs
+rename to rust/worker/worker-core/src/blockstore/arrow/flusher.rs
+diff --git a/rust/worker/src/blockstore/arrow/mod.rs b/rust/worker/worker-core/src/blockstore/arrow/mod.rs
+similarity index 100%
+rename from rust/worker/src/blockstore/arrow/mod.rs
+rename to rust/worker/worker-core/src/blockstore/arrow/mod.rs
+diff --git a/rust/worker/src/blockstore/arrow/provider.rs b/rust/worker/worker-core/src/blockstore/arrow/provider.rs
+similarity index 100%
+rename from rust/worker/src/blockstore/arrow/provider.rs
+rename to rust/worker/worker-core/src/blockstore/arrow/provider.rs
+diff --git a/rust/worker/src/blockstore/arrow/sparse_index.rs b/rust/worker/worker-core/src/blockstore/arrow/sparse_index.rs
+similarity index 100%
+rename from rust/worker/src/blockstore/arrow/sparse_index.rs
+rename to rust/worker/worker-core/src/blockstore/arrow/sparse_index.rs
+diff --git a/rust/worker/src/blockstore/arrow/types.rs b/rust/worker/worker-core/src/blockstore/arrow/types.rs
+similarity index 100%
+rename from rust/worker/src/blockstore/arrow/types.rs
+rename to rust/worker/worker-core/src/blockstore/arrow/types.rs
+diff --git a/rust/worker/src/blockstore/config.rs b/rust/worker/worker-core/src/blockstore/config.rs
+similarity index 100%
+rename from rust/worker/src/blockstore/config.rs
+rename to rust/worker/worker-core/src/blockstore/config.rs
+diff --git a/rust/worker/src/blockstore/key.rs b/rust/worker/worker-core/src/blockstore/key.rs
+similarity index 100%
+rename from rust/worker/src/blockstore/key.rs
+rename to rust/worker/worker-core/src/blockstore/key.rs
+diff --git a/rust/worker/src/blockstore/memory/mod.rs b/rust/worker/worker-core/src/blockstore/memory/mod.rs
+similarity index 100%
+rename from rust/worker/src/blockstore/memory/mod.rs
+rename to rust/worker/worker-core/src/blockstore/memory/mod.rs
+diff --git a/rust/worker/src/blockstore/memory/provider.rs b/rust/worker/worker-core/src/blockstore/memory/provider.rs
+similarity index 100%
+rename from rust/worker/src/blockstore/memory/provider.rs
+rename to rust/worker/worker-core/src/blockstore/memory/provider.rs
+diff --git a/rust/worker/src/blockstore/memory/reader_writer.rs b/rust/worker/worker-core/src/blockstore/memory/reader_writer.rs
+similarity index 100%
+rename from rust/worker/src/blockstore/memory/reader_writer.rs
+rename to rust/worker/worker-core/src/blockstore/memory/reader_writer.rs
+diff --git a/rust/worker/src/blockstore/memory/storage.rs b/rust/worker/worker-core/src/blockstore/memory/storage.rs
+similarity index 100%
+rename from rust/worker/src/blockstore/memory/storage.rs
+rename to rust/worker/worker-core/src/blockstore/memory/storage.rs
+diff --git a/rust/worker/src/blockstore/mod.rs b/rust/worker/worker-core/src/blockstore/mod.rs
+similarity index 100%
+rename from rust/worker/src/blockstore/mod.rs
+rename to rust/worker/worker-core/src/blockstore/mod.rs
+diff --git a/rust/worker/src/blockstore/positional_posting_list_value.rs b/rust/worker/worker-core/src/blockstore/positional_posting_list_value.rs
+similarity index 100%
+rename from rust/worker/src/blockstore/positional_posting_list_value.rs
+rename to rust/worker/worker-core/src/blockstore/positional_posting_list_value.rs
+diff --git a/rust/worker/src/blockstore/provider.rs b/rust/worker/worker-core/src/blockstore/provider.rs
+similarity index 100%
+rename from rust/worker/src/blockstore/provider.rs
+rename to rust/worker/worker-core/src/blockstore/provider.rs
+diff --git a/rust/worker/src/blockstore/types.rs b/rust/worker/worker-core/src/blockstore/types.rs
+similarity index 100%
+rename from rust/worker/src/blockstore/types.rs
+rename to rust/worker/worker-core/src/blockstore/types.rs
+diff --git a/rust/worker/src/cache/cache.rs b/rust/worker/worker-core/src/cache/cache.rs
+similarity index 100%
+rename from rust/worker/src/cache/cache.rs
+rename to rust/worker/worker-core/src/cache/cache.rs
+diff --git a/rust/worker/src/cache/config.rs b/rust/worker/worker-core/src/cache/config.rs
+similarity index 100%
+rename from rust/worker/src/cache/config.rs
+rename to rust/worker/worker-core/src/cache/config.rs
+diff --git a/rust/worker/src/cache/mod.rs b/rust/worker/worker-core/src/cache/mod.rs
+similarity index 100%
+rename from rust/worker/src/cache/mod.rs
+rename to rust/worker/worker-core/src/cache/mod.rs
+diff --git a/rust/worker/src/compactor/compaction_manager.rs b/rust/worker/worker-core/src/compactor/compaction_manager.rs
+similarity index 100%
+rename from rust/worker/src/compactor/compaction_manager.rs
+rename to rust/worker/worker-core/src/compactor/compaction_manager.rs
+diff --git a/rust/worker/src/compactor/config.rs b/rust/worker/worker-core/src/compactor/config.rs
+similarity index 100%
+rename from rust/worker/src/compactor/config.rs
+rename to rust/worker/worker-core/src/compactor/config.rs
+diff --git a/rust/worker/src/compactor/mod.rs b/rust/worker/worker-core/src/compactor/mod.rs
+similarity index 100%
+rename from rust/worker/src/compactor/mod.rs
+rename to rust/worker/worker-core/src/compactor/mod.rs
+diff --git a/rust/worker/src/compactor/scheduler.rs b/rust/worker/worker-core/src/compactor/scheduler.rs
+similarity index 100%
+rename from rust/worker/src/compactor/scheduler.rs
+rename to rust/worker/worker-core/src/compactor/scheduler.rs
+diff --git a/rust/worker/src/compactor/scheduler_policy.rs b/rust/worker/worker-core/src/compactor/scheduler_policy.rs
+similarity index 100%
+rename from rust/worker/src/compactor/scheduler_policy.rs
+rename to rust/worker/worker-core/src/compactor/scheduler_policy.rs
+diff --git a/rust/worker/src/compactor/types.rs b/rust/worker/worker-core/src/compactor/types.rs
+similarity index 100%
+rename from rust/worker/src/compactor/types.rs
+rename to rust/worker/worker-core/src/compactor/types.rs
+diff --git a/rust/worker/src/config.rs b/rust/worker/worker-core/src/config.rs
+similarity index 100%
+rename from rust/worker/src/config.rs
+rename to rust/worker/worker-core/src/config.rs
+diff --git a/rust/worker/src/distance/distance_avx.rs b/rust/worker/worker-core/src/distance/distance_avx.rs
+similarity index 100%
+rename from rust/worker/src/distance/distance_avx.rs
+rename to rust/worker/worker-core/src/distance/distance_avx.rs
+diff --git a/rust/worker/src/distance/distance_neon.rs b/rust/worker/worker-core/src/distance/distance_neon.rs
+similarity index 100%
+rename from rust/worker/src/distance/distance_neon.rs
+rename to rust/worker/worker-core/src/distance/distance_neon.rs
+diff --git a/rust/worker/src/distance/distance_sse.rs b/rust/worker/worker-core/src/distance/distance_sse.rs
+similarity index 100%
+rename from rust/worker/src/distance/distance_sse.rs
+rename to rust/worker/worker-core/src/distance/distance_sse.rs
+diff --git a/rust/worker/src/distance/mod.rs b/rust/worker/worker-core/src/distance/mod.rs
+similarity index 100%
+rename from rust/worker/src/distance/mod.rs
+rename to rust/worker/worker-core/src/distance/mod.rs
+diff --git a/rust/worker/src/distance/types.rs b/rust/worker/worker-core/src/distance/types.rs
+similarity index 100%
+rename from rust/worker/src/distance/types.rs
+rename to rust/worker/worker-core/src/distance/types.rs
+diff --git a/rust/worker/src/errors.rs b/rust/worker/worker-core/src/errors.rs
+similarity index 100%
+rename from rust/worker/src/errors.rs
+rename to rust/worker/worker-core/src/errors.rs
+diff --git a/rust/worker/src/execution/config.rs b/rust/worker/worker-core/src/execution/config.rs
+similarity index 100%
+rename from rust/worker/src/execution/config.rs
+rename to rust/worker/worker-core/src/execution/config.rs
+diff --git a/rust/worker/src/execution/data/data_chunk.rs b/rust/worker/worker-core/src/execution/data/data_chunk.rs
+similarity index 100%
+rename from rust/worker/src/execution/data/data_chunk.rs
+rename to rust/worker/worker-core/src/execution/data/data_chunk.rs
+diff --git a/rust/worker/src/execution/data/mod.rs b/rust/worker/worker-core/src/execution/data/mod.rs
+similarity index 100%
+rename from rust/worker/src/execution/data/mod.rs
+rename to rust/worker/worker-core/src/execution/data/mod.rs
+diff --git a/rust/worker/src/execution/dispatcher.rs b/rust/worker/worker-core/src/execution/dispatcher.rs
+similarity index 100%
+rename from rust/worker/src/execution/dispatcher.rs
+rename to rust/worker/worker-core/src/execution/dispatcher.rs
+diff --git a/rust/worker/src/execution/mod.rs b/rust/worker/worker-core/src/execution/mod.rs
+similarity index 100%
+rename from rust/worker/src/execution/mod.rs
+rename to rust/worker/worker-core/src/execution/mod.rs
+diff --git a/rust/worker/src/execution/operator.rs b/rust/worker/worker-core/src/execution/operator.rs
+similarity index 100%
+rename from rust/worker/src/execution/operator.rs
+rename to rust/worker/worker-core/src/execution/operator.rs
+diff --git a/rust/worker/src/execution/operators/brute_force_knn.rs b/rust/worker/worker-core/src/execution/operators/brute_force_knn.rs
+similarity index 100%
+rename from rust/worker/src/execution/operators/brute_force_knn.rs
+rename to rust/worker/worker-core/src/execution/operators/brute_force_knn.rs
+diff --git a/rust/worker/src/execution/operators/count_records.rs b/rust/worker/worker-core/src/execution/operators/count_records.rs
+similarity index 100%
+rename from rust/worker/src/execution/operators/count_records.rs
+rename to rust/worker/worker-core/src/execution/operators/count_records.rs
+diff --git a/rust/worker/src/execution/operators/flush_s3.rs b/rust/worker/worker-core/src/execution/operators/flush_s3.rs
+similarity index 100%
+rename from rust/worker/src/execution/operators/flush_s3.rs
+rename to rust/worker/worker-core/src/execution/operators/flush_s3.rs
+diff --git a/rust/worker/src/execution/operators/get_vectors_operator.rs b/rust/worker/worker-core/src/execution/operators/get_vectors_operator.rs
+similarity index 100%
+rename from rust/worker/src/execution/operators/get_vectors_operator.rs
+rename to rust/worker/worker-core/src/execution/operators/get_vectors_operator.rs
+diff --git a/rust/worker/src/execution/operators/hnsw_knn.rs b/rust/worker/worker-core/src/execution/operators/hnsw_knn.rs
+similarity index 100%
+rename from rust/worker/src/execution/operators/hnsw_knn.rs
+rename to rust/worker/worker-core/src/execution/operators/hnsw_knn.rs
+diff --git a/rust/worker/src/execution/operators/merge_knn_results.rs b/rust/worker/worker-core/src/execution/operators/merge_knn_results.rs
+similarity index 100%
+rename from rust/worker/src/execution/operators/merge_knn_results.rs
+rename to rust/worker/worker-core/src/execution/operators/merge_knn_results.rs
+diff --git a/rust/worker/src/execution/operators/merge_metadata_results.rs b/rust/worker/worker-core/src/execution/operators/merge_metadata_results.rs
+similarity index 100%
+rename from rust/worker/src/execution/operators/merge_metadata_results.rs
+rename to rust/worker/worker-core/src/execution/operators/merge_metadata_results.rs
+diff --git a/rust/worker/src/execution/operators/metadata_filtering.rs b/rust/worker/worker-core/src/execution/operators/metadata_filtering.rs
+similarity index 100%
+rename from rust/worker/src/execution/operators/metadata_filtering.rs
+rename to rust/worker/worker-core/src/execution/operators/metadata_filtering.rs
+diff --git a/rust/worker/src/execution/operators/mod.rs b/rust/worker/worker-core/src/execution/operators/mod.rs
+similarity index 100%
+rename from rust/worker/src/execution/operators/mod.rs
+rename to rust/worker/worker-core/src/execution/operators/mod.rs
+diff --git a/rust/worker/src/execution/operators/normalize_vectors.rs b/rust/worker/worker-core/src/execution/operators/normalize_vectors.rs
+similarity index 100%
+rename from rust/worker/src/execution/operators/normalize_vectors.rs
+rename to rust/worker/worker-core/src/execution/operators/normalize_vectors.rs
+diff --git a/rust/worker/src/execution/operators/partition.rs b/rust/worker/worker-core/src/execution/operators/partition.rs
+similarity index 100%
+rename from rust/worker/src/execution/operators/partition.rs
+rename to rust/worker/worker-core/src/execution/operators/partition.rs
+diff --git a/rust/worker/src/execution/operators/pull_log.rs b/rust/worker/worker-core/src/execution/operators/pull_log.rs
+similarity index 100%
+rename from rust/worker/src/execution/operators/pull_log.rs
+rename to rust/worker/worker-core/src/execution/operators/pull_log.rs
+diff --git a/rust/worker/src/execution/operators/record_segment_prefetch.rs b/rust/worker/worker-core/src/execution/operators/record_segment_prefetch.rs
+similarity index 100%
+rename from rust/worker/src/execution/operators/record_segment_prefetch.rs
+rename to rust/worker/worker-core/src/execution/operators/record_segment_prefetch.rs
+diff --git a/rust/worker/src/execution/operators/register.rs b/rust/worker/worker-core/src/execution/operators/register.rs
+similarity index 100%
+rename from rust/worker/src/execution/operators/register.rs
+rename to rust/worker/worker-core/src/execution/operators/register.rs
+diff --git a/rust/worker/src/execution/operators/write_segments.rs b/rust/worker/worker-core/src/execution/operators/write_segments.rs
+similarity index 100%
+rename from rust/worker/src/execution/operators/write_segments.rs
+rename to rust/worker/worker-core/src/execution/operators/write_segments.rs
+diff --git a/rust/worker/src/execution/orchestration/common.rs b/rust/worker/worker-core/src/execution/orchestration/common.rs
+similarity index 100%
+rename from rust/worker/src/execution/orchestration/common.rs
+rename to rust/worker/worker-core/src/execution/orchestration/common.rs
+diff --git a/rust/worker/src/execution/orchestration/compact.rs b/rust/worker/worker-core/src/execution/orchestration/compact.rs
+similarity index 100%
+rename from rust/worker/src/execution/orchestration/compact.rs
+rename to rust/worker/worker-core/src/execution/orchestration/compact.rs
+diff --git a/rust/worker/src/execution/orchestration/get_vectors.rs b/rust/worker/worker-core/src/execution/orchestration/get_vectors.rs
+similarity index 100%
+rename from rust/worker/src/execution/orchestration/get_vectors.rs
+rename to rust/worker/worker-core/src/execution/orchestration/get_vectors.rs
+diff --git a/rust/worker/src/execution/orchestration/hnsw.rs b/rust/worker/worker-core/src/execution/orchestration/hnsw.rs
+similarity index 100%
+rename from rust/worker/src/execution/orchestration/hnsw.rs
+rename to rust/worker/worker-core/src/execution/orchestration/hnsw.rs
+diff --git a/rust/worker/src/execution/orchestration/metadata.rs b/rust/worker/worker-core/src/execution/orchestration/metadata.rs
+similarity index 100%
+rename from rust/worker/src/execution/orchestration/metadata.rs
+rename to rust/worker/worker-core/src/execution/orchestration/metadata.rs
+diff --git a/rust/worker/src/execution/orchestration/mod.rs b/rust/worker/worker-core/src/execution/orchestration/mod.rs
+similarity index 100%
+rename from rust/worker/src/execution/orchestration/mod.rs
+rename to rust/worker/worker-core/src/execution/orchestration/mod.rs
+diff --git a/rust/worker/src/execution/worker_thread.rs b/rust/worker/worker-core/src/execution/worker_thread.rs
+similarity index 100%
+rename from rust/worker/src/execution/worker_thread.rs
+rename to rust/worker/worker-core/src/execution/worker_thread.rs
+diff --git a/rust/worker/src/index/config.rs b/rust/worker/worker-core/src/index/config.rs
+similarity index 100%
+rename from rust/worker/src/index/config.rs
+rename to rust/worker/worker-core/src/index/config.rs
+diff --git a/rust/worker/src/index/fulltext/mod.rs b/rust/worker/worker-core/src/index/fulltext/mod.rs
+similarity index 100%
+rename from rust/worker/src/index/fulltext/mod.rs
+rename to rust/worker/worker-core/src/index/fulltext/mod.rs
+diff --git a/rust/worker/src/index/fulltext/tokenizer.rs b/rust/worker/worker-core/src/index/fulltext/tokenizer.rs
+similarity index 100%
+rename from rust/worker/src/index/fulltext/tokenizer.rs
+rename to rust/worker/worker-core/src/index/fulltext/tokenizer.rs
+diff --git a/rust/worker/src/index/fulltext/types.rs b/rust/worker/worker-core/src/index/fulltext/types.rs
+similarity index 100%
+rename from rust/worker/src/index/fulltext/types.rs
+rename to rust/worker/worker-core/src/index/fulltext/types.rs
+diff --git a/rust/worker/src/index/hnsw.rs b/rust/worker/worker-core/src/index/hnsw.rs
+similarity index 100%
+rename from rust/worker/src/index/hnsw.rs
+rename to rust/worker/worker-core/src/index/hnsw.rs
+diff --git a/rust/worker/src/index/hnsw_provider.rs b/rust/worker/worker-core/src/index/hnsw_provider.rs
+similarity index 100%
+rename from rust/worker/src/index/hnsw_provider.rs
+rename to rust/worker/worker-core/src/index/hnsw_provider.rs
+diff --git a/rust/worker/src/index/metadata/mod.rs b/rust/worker/worker-core/src/index/metadata/mod.rs
+similarity index 100%
+rename from rust/worker/src/index/metadata/mod.rs
+rename to rust/worker/worker-core/src/index/metadata/mod.rs
+diff --git a/rust/worker/src/index/metadata/types.rs b/rust/worker/worker-core/src/index/metadata/types.rs
+similarity index 100%
+rename from rust/worker/src/index/metadata/types.rs
+rename to rust/worker/worker-core/src/index/metadata/types.rs
+diff --git a/rust/worker/src/index/mod.rs b/rust/worker/worker-core/src/index/mod.rs
+similarity index 100%
+rename from rust/worker/src/index/mod.rs
+rename to rust/worker/worker-core/src/index/mod.rs
+diff --git a/rust/worker/src/index/types.rs b/rust/worker/worker-core/src/index/types.rs
+similarity index 100%
+rename from rust/worker/src/index/types.rs
+rename to rust/worker/worker-core/src/index/types.rs
+diff --git a/rust/worker/src/index/utils.rs b/rust/worker/worker-core/src/index/utils.rs
+similarity index 100%
+rename from rust/worker/src/index/utils.rs
+rename to rust/worker/worker-core/src/index/utils.rs
+diff --git a/rust/worker/src/lib.rs b/rust/worker/worker-core/src/lib.rs
+similarity index 100%
+rename from rust/worker/src/lib.rs
+rename to rust/worker/worker-core/src/lib.rs
+diff --git a/rust/worker/src/log/config.rs b/rust/worker/worker-core/src/log/config.rs
+similarity index 100%
+rename from rust/worker/src/log/config.rs
+rename to rust/worker/worker-core/src/log/config.rs
+diff --git a/rust/worker/src/log/log.rs b/rust/worker/worker-core/src/log/log.rs
+similarity index 100%
+rename from rust/worker/src/log/log.rs
+rename to rust/worker/worker-core/src/log/log.rs
+diff --git a/rust/worker/src/log/mod.rs b/rust/worker/worker-core/src/log/mod.rs
+similarity index 100%
+rename from rust/worker/src/log/mod.rs
+rename to rust/worker/worker-core/src/log/mod.rs
+diff --git a/rust/worker/src/memberlist/config.rs b/rust/worker/worker-core/src/memberlist/config.rs
+similarity index 100%
+rename from rust/worker/src/memberlist/config.rs
+rename to rust/worker/worker-core/src/memberlist/config.rs
+diff --git a/rust/worker/src/memberlist/memberlist_provider.rs b/rust/worker/worker-core/src/memberlist/memberlist_provider.rs
+similarity index 100%
+rename from rust/worker/src/memberlist/memberlist_provider.rs
+rename to rust/worker/worker-core/src/memberlist/memberlist_provider.rs
+diff --git a/rust/worker/src/memberlist/mod.rs b/rust/worker/worker-core/src/memberlist/mod.rs
+similarity index 100%
+rename from rust/worker/src/memberlist/mod.rs
+rename to rust/worker/worker-core/src/memberlist/mod.rs
+diff --git a/rust/worker/src/segment/config.rs b/rust/worker/worker-core/src/segment/config.rs
+similarity index 100%
+rename from rust/worker/src/segment/config.rs
+rename to rust/worker/worker-core/src/segment/config.rs
+diff --git a/rust/worker/src/segment/distributed_hnsw_segment.rs b/rust/worker/worker-core/src/segment/distributed_hnsw_segment.rs
+similarity index 100%
+rename from rust/worker/src/segment/distributed_hnsw_segment.rs
+rename to rust/worker/worker-core/src/segment/distributed_hnsw_segment.rs
+diff --git a/rust/worker/src/segment/metadata_segment.rs b/rust/worker/worker-core/src/segment/metadata_segment.rs
+similarity index 100%
+rename from rust/worker/src/segment/metadata_segment.rs
+rename to rust/worker/worker-core/src/segment/metadata_segment.rs
+diff --git a/rust/worker/src/segment/mod.rs b/rust/worker/worker-core/src/segment/mod.rs
+similarity index 100%
+rename from rust/worker/src/segment/mod.rs
+rename to rust/worker/worker-core/src/segment/mod.rs
+diff --git a/rust/worker/src/segment/record_segment.rs b/rust/worker/worker-core/src/segment/record_segment.rs
+similarity index 100%
+rename from rust/worker/src/segment/record_segment.rs
+rename to rust/worker/worker-core/src/segment/record_segment.rs
+diff --git a/rust/worker/src/segment/types.rs b/rust/worker/worker-core/src/segment/types.rs
+similarity index 100%
+rename from rust/worker/src/segment/types.rs
+rename to rust/worker/worker-core/src/segment/types.rs
+diff --git a/rust/worker/src/server.rs b/rust/worker/worker-core/src/server.rs
+similarity index 100%
+rename from rust/worker/src/server.rs
+rename to rust/worker/worker-core/src/server.rs
+diff --git a/rust/worker/src/storage/config.rs b/rust/worker/worker-core/src/storage/config.rs
+similarity index 100%
+rename from rust/worker/src/storage/config.rs
+rename to rust/worker/worker-core/src/storage/config.rs
+diff --git a/rust/worker/src/storage/local.rs b/rust/worker/worker-core/src/storage/local.rs
+similarity index 100%
+rename from rust/worker/src/storage/local.rs
+rename to rust/worker/worker-core/src/storage/local.rs
+diff --git a/rust/worker/src/storage/mod.rs b/rust/worker/worker-core/src/storage/mod.rs
+similarity index 100%
+rename from rust/worker/src/storage/mod.rs
+rename to rust/worker/worker-core/src/storage/mod.rs
+diff --git a/rust/worker/src/storage/s3.rs b/rust/worker/worker-core/src/storage/s3.rs
+similarity index 100%
+rename from rust/worker/src/storage/s3.rs
+rename to rust/worker/worker-core/src/storage/s3.rs
+diff --git a/rust/worker/src/storage/stream.rs b/rust/worker/worker-core/src/storage/stream.rs
+similarity index 100%
+rename from rust/worker/src/storage/stream.rs
+rename to rust/worker/worker-core/src/storage/stream.rs
+diff --git a/rust/worker/src/sysdb/config.rs b/rust/worker/worker-core/src/sysdb/config.rs
+similarity index 100%
+rename from rust/worker/src/sysdb/config.rs
+rename to rust/worker/worker-core/src/sysdb/config.rs
+diff --git a/rust/worker/src/sysdb/mod.rs b/rust/worker/worker-core/src/sysdb/mod.rs
+similarity index 100%
+rename from rust/worker/src/sysdb/mod.rs
+rename to rust/worker/worker-core/src/sysdb/mod.rs
+diff --git a/rust/worker/src/sysdb/sysdb.rs b/rust/worker/worker-core/src/sysdb/sysdb.rs
+similarity index 100%
+rename from rust/worker/src/sysdb/sysdb.rs
+rename to rust/worker/worker-core/src/sysdb/sysdb.rs
+diff --git a/rust/worker/src/sysdb/test_sysdb.rs b/rust/worker/worker-core/src/sysdb/test_sysdb.rs
+similarity index 100%
+rename from rust/worker/src/sysdb/test_sysdb.rs
+rename to rust/worker/worker-core/src/sysdb/test_sysdb.rs
+diff --git a/rust/worker/src/system/executor.rs b/rust/worker/worker-core/src/system/executor.rs
+similarity index 100%
+rename from rust/worker/src/system/executor.rs
+rename to rust/worker/worker-core/src/system/executor.rs
+diff --git a/rust/worker/src/system/mod.rs b/rust/worker/worker-core/src/system/mod.rs
+similarity index 100%
+rename from rust/worker/src/system/mod.rs
+rename to rust/worker/worker-core/src/system/mod.rs
+diff --git a/rust/worker/src/system/receiver.rs b/rust/worker/worker-core/src/system/receiver.rs
+similarity index 100%
+rename from rust/worker/src/system/receiver.rs
+rename to rust/worker/worker-core/src/system/receiver.rs
+diff --git a/rust/worker/src/system/scheduler.rs b/rust/worker/worker-core/src/system/scheduler.rs
+similarity index 100%
+rename from rust/worker/src/system/scheduler.rs
+rename to rust/worker/worker-core/src/system/scheduler.rs
+diff --git a/rust/worker/src/system/system.rs b/rust/worker/worker-core/src/system/system.rs
+similarity index 100%
+rename from rust/worker/src/system/system.rs
+rename to rust/worker/worker-core/src/system/system.rs
+diff --git a/rust/worker/src/system/types.rs b/rust/worker/worker-core/src/system/types.rs
+similarity index 100%
+rename from rust/worker/src/system/types.rs
+rename to rust/worker/worker-core/src/system/types.rs
+diff --git a/rust/worker/src/system/wrapped_message.rs b/rust/worker/worker-core/src/system/wrapped_message.rs
+similarity index 100%
+rename from rust/worker/src/system/wrapped_message.rs
+rename to rust/worker/worker-core/src/system/wrapped_message.rs
+diff --git a/rust/worker/src/tracing/mod.rs b/rust/worker/worker-core/src/tracing/mod.rs
+similarity index 100%
+rename from rust/worker/src/tracing/mod.rs
+rename to rust/worker/worker-core/src/tracing/mod.rs
+diff --git a/rust/worker/src/tracing/opentelemetry_config.rs b/rust/worker/worker-core/src/tracing/opentelemetry_config.rs
+similarity index 100%
+rename from rust/worker/src/tracing/opentelemetry_config.rs
+rename to rust/worker/worker-core/src/tracing/opentelemetry_config.rs
+diff --git a/rust/worker/src/tracing/util.rs b/rust/worker/worker-core/src/tracing/util.rs
+similarity index 100%
+rename from rust/worker/src/tracing/util.rs
+rename to rust/worker/worker-core/src/tracing/util.rs
+diff --git a/rust/worker/src/types/collection.rs b/rust/worker/worker-core/src/types/collection.rs
+similarity index 100%
+rename from rust/worker/src/types/collection.rs
+rename to rust/worker/worker-core/src/types/collection.rs
+diff --git a/rust/worker/src/types/flush.rs b/rust/worker/worker-core/src/types/flush.rs
+similarity index 100%
+rename from rust/worker/src/types/flush.rs
+rename to rust/worker/worker-core/src/types/flush.rs
+diff --git a/rust/worker/src/types/metadata.rs b/rust/worker/worker-core/src/types/metadata.rs
+similarity index 100%
+rename from rust/worker/src/types/metadata.rs
+rename to rust/worker/worker-core/src/types/metadata.rs
+diff --git a/rust/worker/src/types/mod.rs b/rust/worker/worker-core/src/types/mod.rs
+similarity index 100%
+rename from rust/worker/src/types/mod.rs
+rename to rust/worker/worker-core/src/types/mod.rs
+diff --git a/rust/worker/src/types/operation.rs b/rust/worker/worker-core/src/types/operation.rs
+similarity index 100%
+rename from rust/worker/src/types/operation.rs
+rename to rust/worker/worker-core/src/types/operation.rs
+diff --git a/rust/worker/src/types/record.rs b/rust/worker/worker-core/src/types/record.rs
+similarity index 100%
+rename from rust/worker/src/types/record.rs
+rename to rust/worker/worker-core/src/types/record.rs
+diff --git a/rust/worker/src/types/scalar_encoding.rs b/rust/worker/worker-core/src/types/scalar_encoding.rs
+similarity index 100%
+rename from rust/worker/src/types/scalar_encoding.rs
+rename to rust/worker/worker-core/src/types/scalar_encoding.rs
+diff --git a/rust/worker/src/types/segment.rs b/rust/worker/worker-core/src/types/segment.rs
+similarity index 100%
+rename from rust/worker/src/types/segment.rs
+rename to rust/worker/worker-core/src/types/segment.rs
+diff --git a/rust/worker/src/types/segment_scope.rs b/rust/worker/worker-core/src/types/segment_scope.rs
+similarity index 100%
+rename from rust/worker/src/types/segment_scope.rs
+rename to rust/worker/worker-core/src/types/segment_scope.rs
+diff --git a/rust/worker/src/types/tenant.rs b/rust/worker/worker-core/src/types/tenant.rs
+similarity index 100%
+rename from rust/worker/src/types/tenant.rs
+rename to rust/worker/worker-core/src/types/tenant.rs
+diff --git a/rust/worker/src/types/types.rs b/rust/worker/worker-core/src/types/types.rs
+similarity index 100%
+rename from rust/worker/src/types/types.rs
+rename to rust/worker/worker-core/src/types/types.rs
+diff --git a/rust/worker/src/utils/mod.rs b/rust/worker/worker-core/src/utils/mod.rs
+similarity index 100%
+rename from rust/worker/src/utils/mod.rs
+rename to rust/worker/worker-core/src/utils/mod.rs
+diff --git a/rust/worker/src/utils/panic.rs b/rust/worker/worker-core/src/utils/panic.rs
+similarity index 100%
+rename from rust/worker/src/utils/panic.rs
+rename to rust/worker/worker-core/src/utils/panic.rs
+diff --git a/rust/worker/src/utils/vec.rs b/rust/worker/worker-core/src/utils/vec.rs
+similarity index 100%
+rename from rust/worker/src/utils/vec.rs
+rename to rust/worker/worker-core/src/utils/vec.rs
