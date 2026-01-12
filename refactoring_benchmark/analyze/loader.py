@@ -1,55 +1,76 @@
-"""Load and organize evaluation results."""
+"""Load and organize evaluation results for description-type based analysis."""
 
-import csv
 from pathlib import Path
-from typing import List, Sequence
-
-from pydantic import ValidationError
+from typing import Sequence
 
 from refactoring_benchmark.evaluation.models import EvaluationResult
-from refactoring_benchmark.analyze.models import AnalysisData, InstanceData, AgentInstanceStats
-from refactoring_benchmark.analyze.validation import check_test_validity
+from refactoring_benchmark.analyze.models import AnalysisData
+from refactoring_benchmark.analyze.metrics import get_metric_function
 from refactoring_benchmark.analyze.filters import ResultFilter
-from refactoring_benchmark.coverage.precision import calculate_precision_instance_agent
-from refactoring_benchmark.utils.models import InstanceRow, ReducedInstanceRow
+from refactoring_benchmark.utils.models import InstanceRow
+
+
+def discover_output_dirs(cwd: Path = Path.cwd()) -> list[Path]:
+    """Discover all directories starting with 'output' in the current working directory.
+
+    Args:
+        cwd: Working directory to search (defaults to current directory)
+
+    Returns:
+        List of directories matching 'output*' pattern, sorted by name
+    """
+    return sorted([d for d in cwd.iterdir() if d.is_dir() and d.name.startswith("output")])
 
 
 def load_all_results(
-    output_dir: Path,
-    instances: List[InstanceRow],
+    output_dirs: list[Path],
+    instances: list[InstanceRow],
     agent_ids: Sequence[str] | None = None,
-) -> List[EvaluationResult]:
-    """
-    Load evaluation_result.json files from the specified output directory.
+) -> list[EvaluationResult]:
+    """Load evaluation_result.json files from multiple output directories.
 
     Args:
-        output_dir: Directory to search for evaluation_result.json files
-        instances: list of instances to load.
+        output_dirs: List of directories to search for evaluation_result.json files
+        instances: List of instances to load
+        agent_ids: Optional list of agent IDs to load (defaults to all agents in first directory)
 
     Returns:
         List of successfully loaded EvaluationResult objects
     """
-    # Create set of instance keys for fast lookup if instances provided
     if not instances:
         raise ValueError("No instances provided for loading results")
 
     results = []
     errors = []
+
+    # If no agent_ids specified, discover them from the first output_dir
     if not agent_ids:
         instance = instances[0]
-        instance_dir = Path(instance.instance_dir(output_dir))
-        agent_ids = [d.name for d in instance_dir.iterdir() if d.is_dir()]
+        instance_dir = Path(instance.instance_dir(output_dirs[0]))
+        if instance_dir.exists():
+            agent_ids = [d.name for d in instance_dir.iterdir() if d.is_dir()]
+        else:
+            agent_ids = []
 
-    for instance in instances:
-        instance_dir = Path(instance.instance_dir(output_dir))
-        for agent_id in agent_ids:
-            instance_agent_dir = instance_dir / agent_id / "evaluation"
-            json_path = instance_agent_dir / "evaluation_result.json"
-            if not json_path.is_file():
-                print(f"[WARN]: Skipping missing result file: {json_path}")
+
+    # Load from all output directories
+    for output_dir in output_dirs:
+        for instance in instances:
+            instance_dir = Path(instance.instance_dir(output_dir))
+            if not instance_dir.exists():
                 continue
-            result = EvaluationResult.load_from_json(json_path)
-            results.append(result)
+
+            for agent_id in agent_ids:
+                instance_agent_dir = instance_dir / agent_id / "evaluation"
+                json_path = instance_agent_dir / "evaluation_result.json"
+                if not json_path.is_file():
+                    continue
+
+                try:
+                    result = EvaluationResult.load_from_json(json_path)
+                    results.append(result)
+                except Exception as e:
+                    errors.append((json_path, str(e)))
 
     # Report errors at the end for cleaner output
     if errors:
@@ -60,29 +81,27 @@ def load_all_results(
     return results
 
 
-def organize_data(results: List[EvaluationResult], filters: Sequence[ResultFilter] | None = None) -> AnalysisData:
-    """
-    Organize evaluation results by instance and agent, optionally applying filters.
+def organize_data(
+    results: list[EvaluationResult],
+    metric_name: str,
+    filters: Sequence[ResultFilter] | None = None,
+) -> AnalysisData:
+    """Organize evaluation results by (agent_id, description_type) with the given metric.
 
     Args:
         results: List of evaluation results to organize
-        filters: Optional list of filter functions to apply. Only results that pass
-                all filters (AND logic) will be included.
+        metric_name: Name of the metric to extract (e.g., "ifr", "test_success", "precision_overall")
+        filters: Optional list of filter functions to apply (AND logic)
 
     Returns:
-        AnalysisData containing organized IFR metrics by instance and agent
+        AnalysisData containing organized metric values grouped by agent and description type
 
     Example:
-        >>> from refactoring_benchmark.analyze.filters import filter_by_agent_id, filter_has_execution_environment
-        >>> # Only include specific agent with execution environment
-        >>> data = organize_data(
-        ...     results,
-        ...     filters=[
-        ...         filter_by_agent_id("claude-code-v2.0.76-sonnet45"),
-        ...         filter_has_execution_environment(True)
-        ...     ]
-        ... )
+        >>> from refactoring_benchmark.analyze.filters import filter_successful_only
+        >>> data = organize_data(results, "ifr", filters=[filter_successful_only()])
     """
+    # Get metric function
+    metric_fn = get_metric_function(metric_name)
     analysis_data = AnalysisData()
 
     for result in results:
@@ -91,55 +110,83 @@ def organize_data(results: List[EvaluationResult], filters: Sequence[ResultFilte
             if not all(filter_fn(result) for filter_fn in filters):
                 continue
 
+        # Extract agent_id and description_type
         agent_id = result.agent_config.id
+        description_type = "standard"  # Default
+        if result.inference_metadata and result.inference_metadata.description_type:
+            description_type = result.inference_metadata.description_type
 
-        validity_status = check_test_validity(result)
-        instance = ReducedInstanceRow(
-            owner=result.instance_metadata.owner,
-            repo=result.instance_metadata.repo,
-            golden_commit_hash=result.instance_metadata.golden_hash,
-            commit_hash=result.instance_metadata.base_hash,
-        )
-        if instance.display_path not in analysis_data.instances:
-            analysis_data.instances[instance.display_path] = InstanceData(instance=instance)
-        # Add agent data using factory method
-        agent_data = AgentInstanceStats.from_rule_metrics(result.agent_rule_metrics, validity_status)
-        if result.inference_metadata is not None:
-            agent_data.cost_usd = result.inference_metadata.cost_usd
-        analysis_data.instances[instance.display_path].agents[agent_id] = agent_data
+        # Extract metric value
+        metric_value = metric_fn(result)
+        if metric_value is None:
+            # Skip this result if metric cannot be computed
+            continue
+
+        # Create instance key
+        instance_key = f"{result.instance_metadata.owner}/{result.instance_metadata.repo}/{result.instance_metadata.base_hash[:8]}"
+
+        # Add to analysis data
+        analysis_data.add_metric_point(agent_id, description_type, instance_key, metric_value)
 
     return analysis_data
 
 
-def load_and_merge_precision_data(
-    analysis_data: AnalysisData,
-    output_dir: Path,
-    debug: bool = False,
+def validate_analysis_data(
+    data: AnalysisData,
+    agent_ids: list[str] | None = None,
+    description_types: list[str] | None = None,
 ) -> None:
-    """
-    Load precision metrics and merge them into existing analysis data.
-
-    Modifies analysis_data in-place by adding precision metrics to AgentIFRData
-    where they can be calculated.
+    """Validate analysis data and print warnings/errors about missing combinations.
 
     Args:
-        analysis_data: Analysis data to merge precision into (modified in-place)
-        output_dir: Base output directory containing agent results
-        debug: Whether to print debug information
+        data: Analysis data to validate
+        agent_ids: Expected agent IDs (defaults to all found in data)
+        description_types: Expected description types (defaults to all found in data)
+
+    Raises:
+        ValueError: If an expected agent has no data at all
     """
-    # Calculate precision for each instance-agent pair in analysis_data
-    for instance_data in analysis_data.instances.values():
-        # Calculate precision for each agent
-        for agent_id, agent_data in instance_data.agents.items():
-            precision_result = calculate_precision_instance_agent(
-                instance_data.instance,
-                agent_id,
-                output_dir,
-                debug=debug,
+    if agent_ids is None:
+        agent_ids = data.get_agent_ids()
+    if description_types is None:
+        description_types = data.get_description_types()
+
+    # Check for completely missing agents
+    for agent_id in agent_ids:
+        agent_data = [v for k, v in data.data.items() if k[0] == agent_id]
+        if not agent_data:
+            available_agents = ", ".join(data.get_agent_ids())
+            raise ValueError(
+                f"Agent '{agent_id}' has no data. Available agents: {available_agents}\n"
+                f"Hint: Use --agent-id flag to specify available agents."
             )
 
-            if precision_result:
-                # Merge precision metrics into agent_data (convert from 0-1 to 0-100 scale)
-                agent_data.precision_added = precision_result.metrics.precision_added * 100
-                agent_data.precision_removed = precision_result.metrics.precision_removed * 100
-                agent_data.precision_overall = precision_result.metrics.precision_overall * 100
+    # Check for missing description types and print warnings
+    max_count_per_agent = {}
+    for agent_id in agent_ids:
+        counts = []
+        for desc_type in description_types:
+            agent_desc_data = data.get_data(agent_id, desc_type)
+            if agent_desc_data:
+                counts.append(agent_desc_data.count)
+        max_count_per_agent[agent_id] = max(counts) if counts else 0
+
+    overall_max = max(max_count_per_agent.values()) if max_count_per_agent else 0
+
+    for agent_id in agent_ids:
+        agent_max = max_count_per_agent.get(agent_id, 0)
+        if agent_max < overall_max:
+            print(
+                f"WARNING: Agent '{agent_id}' has fewer data points ({agent_max}) "
+                f"than other agents ({overall_max})"
+            )            
+
+        # Check which description types are missing
+        missing_desc_types = []
+        for desc_type in description_types:
+            agent_desc_data = data.get_data(agent_id, desc_type)
+            if not agent_desc_data or agent_desc_data.count == 0:
+                missing_desc_types.append(desc_type)
+
+        if missing_desc_types:
+            print(f"WARNING: Agent '{agent_id}' missing data for: {', '.join(missing_desc_types)}")
