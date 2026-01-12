@@ -49,6 +49,7 @@ def create_fallback_inference_metadata(
     finish_reason: str,
     cost_usd: float = -1.0,
     additional: Optional[dict] = None,
+    description_type: Optional[str] = None,
 ) -> None:
     """
     Create a fallback inference_metadata.json file for crashed or incomplete runs.
@@ -58,6 +59,7 @@ def create_fallback_inference_metadata(
         finish_reason: Reason for inference ending (e.g., "crashed", "unknown", "timeout")
         cost_usd: Cost in USD (default: -1.0 for unknown)
         additional: Optional additional metadata
+        description_type: Optional description type to include in metadata
     """
     metadata = InferenceMetadata(
         cost_usd=cost_usd,
@@ -67,11 +69,17 @@ def create_fallback_inference_metadata(
     )
 
     output_path = output_dir / "inference_metadata.json"
+    metadata_dict = metadata.model_dump(by_alias=True)
+
+    # Add description_type if provided
+    if description_type is not None:
+        metadata_dict["description_type"] = description_type
+
     with open(output_path, "w") as f:
-        json.dump(metadata.model_dump(by_alias=True), f, indent=2)
+        json.dump(metadata_dict, f, indent=2)
 
 
-def ensure_inference_metadata_exists(output_dir: Path) -> None:
+def ensure_inference_metadata_exists(output_dir: Path, description_type: Optional[str] = None) -> None:
     """
     Check if inference_metadata.json exists, create fallback if missing.
 
@@ -80,6 +88,7 @@ def ensure_inference_metadata_exists(output_dir: Path) -> None:
 
     Args:
         output_dir: Output directory to check
+        description_type: Optional description type to include in fallback metadata
     """
     metadata_path = output_dir / "inference_metadata.json"
     prediction_path = output_dir / "prediction.diff"
@@ -95,6 +104,7 @@ def ensure_inference_metadata_exists(output_dir: Path) -> None:
             finish_reason="unknown",
             cost_usd=-1.0,
             additional={"note": "Metadata file was missing, created as fallback"},
+            description_type=description_type,
         )
 
 
@@ -118,7 +128,7 @@ def augment_inference_metadata_with_description_type(output_dir: Path, descripti
 
     Args:
         output_dir: Output directory containing inference_metadata.json
-        description_type: Type of description used ("standard", "minimal", "nano" or "open")
+        description_type: Type of description used ("standard", "minimal", "nano", "open", "files", or "problem")
     """
     metadata_path = output_dir / "inference_metadata.json"
     if not metadata_path.exists():

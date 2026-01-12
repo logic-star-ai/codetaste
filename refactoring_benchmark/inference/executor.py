@@ -110,7 +110,7 @@ def run_single_instance(instance: InstanceRow, config: InferenceConfig) -> bool:
         except Exception as timeout_error:
             instance_logger.error(f"Container execution timed out after {config.timeout}s: {timeout_error}")
             # Create fallback metadata for timeout
-            create_fallback_inference_metadata(output_dir, finish_reason="timeout")
+            create_fallback_inference_metadata(output_dir, finish_reason="timeout", description_type=config.description_type)
             return False
 
         # container output to log
@@ -124,7 +124,7 @@ def run_single_instance(instance: InstanceRow, config: InferenceConfig) -> bool:
         prediction_path = output_dir / "prediction.diff"
         if exit_code == 0 and prediction_path.exists():
             instance_logger.info("Inference completed successfully")
-            ensure_inference_metadata_exists(output_dir)  # TODO : Validate Format
+            ensure_inference_metadata_exists(output_dir, description_type=config.description_type)
             augment_inference_metadata_with_description_type(output_dir, config.description_type)
             return True
         else:
@@ -132,17 +132,17 @@ def run_single_instance(instance: InstanceRow, config: InferenceConfig) -> bool:
             # Check if prediction.diff exists to determine fallback reason
             if prediction_path.exists():
                 # Agent produced output but failed
-                ensure_inference_metadata_exists(output_dir)
+                ensure_inference_metadata_exists(output_dir, description_type=config.description_type)
                 augment_inference_metadata_with_description_type(output_dir, config.description_type)
             else:
                 # Agent crashed without producing output
-                create_fallback_inference_metadata(output_dir, finish_reason="crashed")
+                create_fallback_inference_metadata(output_dir, finish_reason="crashed", description_type=config.description_type)
             return False
 
     except Exception as e:
         instance_logger.error(f"Unexpected error during inference: {e}")
         # Create fallback metadata for crash
-        create_fallback_inference_metadata(output_dir, finish_reason="crashed", additional={"error": str(e)})
+        create_fallback_inference_metadata(output_dir, finish_reason="crashed", additional={"error": str(e)}, description_type=config.description_type)
         return False
 
     finally:
