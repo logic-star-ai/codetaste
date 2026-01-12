@@ -75,9 +75,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--description-type",
         type=str,
-        choices=["standard", "minimal", "open", "nano", "files"],
+        choices=["standard", "minimal", "open", "nano", "files", "problem"],
         default="standard",
-        help="Type of task description to use (standard: full description, minimal: title and summary only, open: open-ended refactoring prompt, nano: very brief description, files: open-ended with key files from golden diff)",
+        help="Type of task description to use (standard: full description, minimal: title and summary only, open: open-ended refactoring prompt, nano: very brief description, files: open-ended with key files from golden diff, problem: autonomous problem-solving prompt)",
     )
 
     args = parser.parse_args()
@@ -94,6 +94,8 @@ def parse_args() -> argparse.Namespace:
             args.output_dir = Path("./output_nano")
         elif args.description_type == "files":
             args.output_dir = Path("./output_files")
+        elif args.description_type == "problem":
+            args.output_dir = Path("./output_problem")
     args.agent_dir = args.agent_dir.resolve()
     args.output_dir = args.output_dir.resolve()
     args.instances_csv = args.instances_csv.resolve()
