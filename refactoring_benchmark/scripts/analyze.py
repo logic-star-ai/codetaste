@@ -1,163 +1,158 @@
-"""CLI script to generate IFR plots from evaluation results."""
+"""CLI script to analyze evaluation results and generate plots by description type."""
 
 import argparse
 from pathlib import Path
-from refactoring_benchmark.analyze import (
+
+from refactoring_benchmark.analyze.loader import (
+    discover_output_dirs,
     load_all_results,
     organize_data,
-    load_and_merge_precision_data,
-    load_instances_from_csv,
-    create_ifr_plots,
-    filter_has_execution_environment,
-    filter_successful_only,
-    compute_all_agent_statistics,
+    validate_analysis_data,
 )
-
-
-def print_statistics_summary(all_stats):
-    """Print formatted statistics summary."""
-    combination_names = {
-        1: "All instances + All validity statuses",
-        2: "All instances + Valid tests only",
-        3: "All instances + Invalid tests only",
-        4: "IFR > 0 + All validity statuses",
-        5: "IFR > 0 + Valid tests only",
-        6: "IFR > 0 + Invalid tests only",
-    }
-
-    for combo_id in range(1, 7):
-        combo_stats = all_stats.combinations[combo_id]
-        print(f"\n{'='*80}")
-        print(f"Combination {combo_id}: {combination_names[combo_id]}")
-        print(f"{'='*80}")
-
-        # Print header
-        print(f"\n{'Agent':<40} {'Metric':<20} {'Mean':>10} {'Median':>10} {'Count':>8}")
-        print("-" * 88)
-
-        # Print statistics for each agent
-        for agent_id in sorted(combo_stats.agents.keys()):
-            agent_stats = combo_stats.agents[agent_id]
-
-            # Print Total IFR
-            print(
-                f"{agent_id:<40} {'Total IFR':<20} "
-                f"{agent_stats.total_ifr.mean:>10.2f} "
-                f"{agent_stats.total_ifr.median:>10.2f} "
-                f"{agent_stats.total_ifr.count:>8d}"
-            )
-
-            # Print Positive IFR
-            print(
-                f"{'':40} {'Positive IFR':<20} "
-                f"{agent_stats.positive_ifr.mean:>10.2f} "
-                f"{agent_stats.positive_ifr.median:>10.2f} "
-                f"{agent_stats.positive_ifr.count:>8d}"
-            )
-
-            # Print Negative IFR
-            print(
-                f"{'':40} {'Negative IFR':<20} "
-                f"{agent_stats.negative_ifr.mean:>10.2f} "
-                f"{agent_stats.negative_ifr.median:>10.2f} "
-                f"{agent_stats.negative_ifr.count:>8d}"
-            )
-
-            # Print precision metrics if available
-            if agent_stats.precision_overall.count > 0:
-                print(
-                    f"{'':40} {'Precision Added':<20} "
-                    f"{agent_stats.precision_added.mean:>10.2f} "
-                    f"{agent_stats.precision_added.median:>10.2f} "
-                    f"{agent_stats.precision_added.count:>8d}"
-                )
-
-                print(
-                    f"{'':40} {'Precision Removed':<20} "
-                    f"{agent_stats.precision_removed.mean:>10.2f} "
-                    f"{agent_stats.precision_removed.median:>10.2f} "
-                    f"{agent_stats.precision_removed.count:>8d}"
-                )
-
-                print(
-                    f"{'':40} {'Precision Overall':<20} "
-                    f"{agent_stats.precision_overall.mean:>10.2f} "
-                    f"{agent_stats.precision_overall.median:>10.2f} "
-                    f"{agent_stats.precision_overall.count:>8d}"
-                )
-
-            # Print cost metric
-            print(
-                f"{'':40} {'Avg Cost USD':<20} "
-                f"{agent_stats.avg_cost_usd.mean:>10.4f} "
-                f"{agent_stats.avg_cost_usd.median:>10.4f} "
-                f"{agent_stats.avg_cost_usd.count:>8d}"
-            )
-
-            print("-" * 88)
+from refactoring_benchmark.analyze.metrics import ALL_METRICS
+from refactoring_benchmark.analyze.plotting import create_plot, save_plot
+from refactoring_benchmark.analyze.config import PlotConfig
+from refactoring_benchmark.analyze.filters import filter_successful_only
+from refactoring_benchmark.utils.common import load_instances_from_csv
 
 
 def main():
-    """Generate all IFR plots."""
+    """Analyze evaluation results and generate plots."""
     parser = argparse.ArgumentParser(
-        description="Generate IFR plots from evaluation results",
+        description="Analyze evaluation results by description type",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Default: only instances from instances.csv with execution environment
+  # Use default: auto-discover all 'output*' directories
   python -m refactoring_benchmark.scripts.analyze
 
-  # Include all instances (even without execution environment)
-  python -m refactoring_benchmark.scripts.analyze --include-no-exec-env
+  # Specify output directories
+  python -m refactoring_benchmark.scripts.analyze --output-dir output --output-dir output_nano
 
-  # Only include successful inference runs
+  # Filter by agent
+  python -m refactoring_benchmark.scripts.analyze --agent-id agent1 --agent-id agent2
+
+  # Filter by description type
+  python -m refactoring_benchmark.scripts.analyze --description-type standard --description-type minimal
+
+  # Generate specific metrics with bar chart
+  python -m refactoring_benchmark.scripts.analyze --metric ifr --plot-type bar
+
+  # Use median aggregation
+  python -m refactoring_benchmark.scripts.analyze --aggregation median
+
+  # Only successful inference runs
   python -m refactoring_benchmark.scripts.analyze --successful-only
 
-  # Compute and print statistics summary
-  python -m refactoring_benchmark.scripts.analyze --statistics
+  # Plot precision metrics (requires null agent)
+  python -m refactoring_benchmark.scripts.analyze --metric precision_overall
 
-  # Compute statistics with precision metrics
-  python -m refactoring_benchmark.scripts.analyze --statistics --with-precision
-
-  # Combine filters: successful runs with statistics and precision
-  python -m refactoring_benchmark.scripts.analyze --successful-only --statistics --with-precision
-
-  # Use custom output directory and instances CSV
-  python -m refactoring_benchmark.scripts.analyze --output-dir ./custom/output --instances-csv ./custom_instances.csv
+  # Custom instances CSV
+  python -m refactoring_benchmark.scripts.analyze --instances-csv ./custom_instances.csv
         """,
     )
+
+    # Output directory arguments
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("./output"),
-        help="Directory containing evaluation results (default: ./output). By default, only loads instances listed in instances.csv.",
+        action="append",
+        dest="output_dirs",
+        help="Output directory containing evaluation results (can be specified multiple times). "
+        "Default: auto-discover all directories starting with 'output' in current directory.",
+    )
+
+    # Filtering arguments
+    parser.add_argument(
+        "--agent-id",
+        action="append",
+        dest="agent_ids",
+        help="Filter by agent ID (can be specified multiple times). Default: all agents found in data.",
     )
     parser.add_argument(
-        "--include-no-exec-env",
+        "--description-type",
+        action="append",
+        dest="description_types",
+        help="Filter by description type (can be specified multiple times). "
+        "Default: all description types found in data.",
+    )
+    parser.add_argument(
+        "--successful-only",
         action="store_true",
-        help="Include instances without execution environment (default: False)",
+        help="Only include inference runs with finish_reason='success'",
     )
-    parser.add_argument("--statistics", action="store_true", help="Compute and print statistics summary for all agents")
+
+    # Metric arguments
     parser.add_argument(
-        "--successful-only", action="store_true", help="Only include inference runs with finish_reason='success'"
+        "--metric",
+        action="append",
+        dest="metrics",
+        choices=ALL_METRICS,
+        help=f"Metrics to plot (can be specified multiple times). "
+        f"Default: ifr, test_success (precision metrics require null agent). "
+        f"Available: {', '.join(ALL_METRICS)}",
+    )
+
+    # Plot arguments
+    parser.add_argument(
+        "--plot-type",
+        type=str,
+        default="line",
+        choices=["line", "bar", "scatter"],
+        help="Type of plot to generate (default: line)",
     )
     parser.add_argument(
-        "--with-precision",
+        "--aggregation",
+        type=str,
+        default="mean",
+        choices=["mean", "median"],
+        help="How to aggregate metric values (default: mean)",
+    )
+    parser.add_argument(
+        "--no-error-bars",
         action="store_true",
-        help="Load and include precision metrics in statistics (requires instances.csv and null_agent)",
+        help="Disable standard error error bars",
     )
+
+    # Other arguments
     parser.add_argument(
         "--instances-csv",
         type=Path,
         default=Path("./instances.csv"),
-        help="Path to instances.csv file (default: ./instances.csv). Required for loading evaluation results and precision metrics.",
+        help="Path to instances.csv file (default: ./instances.csv)",
     )
+    parser.add_argument(
+        "--plots-dir",
+        type=Path,
+        default=Path("./analyze"),
+        help="Directory to save plots (default: ./analyze)",
+    )
+    parser.add_argument(
+        "--dpi",
+        type=int,
+        default=300,
+        help="Resolution for saved plots (default: 300)",
+    )
+
     args = parser.parse_args()
 
-    output_dir = args.output_dir.resolve()
-    if not output_dir.exists():
-        print(f"Error: Output directory {output_dir} does not exist")
-        return
+    # Determine output directories
+    if args.output_dirs:
+        output_dirs = [d.resolve() for d in args.output_dirs]
+        for output_dir in output_dirs:
+            if not output_dir.exists():
+                print(f"Error: Output directory {output_dir} does not exist")
+                return
+    else:
+        # Auto-discover
+        output_dirs = discover_output_dirs()
+        if not output_dirs:
+            print("Error: No directories starting with 'output' found in current directory")
+            print("Hint: Use --output-dir to specify directories manually")
+            return
+        print(f"Auto-discovered {len(output_dirs)} output directories:")
+        for d in output_dirs:
+            print(f"  - {d}")
 
     # Load instances from CSV
     instances_csv = args.instances_csv.resolve()
@@ -176,52 +171,85 @@ Examples:
         print("Error: No instances found in CSV")
         return
 
-    print(f"Scanning {output_dir} for evaluation results...")
-    results = load_all_results(output_dir, instances)
+    # Determine metrics to plot (default: non-precision metrics only)
+    if args.metrics:
+        metrics_to_plot = args.metrics
+    else:
+        # Default: ifr and test_success (not precision metrics by default since they require null agent)
+        metrics_to_plot = ["ifr", "test_success"]
+    print(f"Metrics to plot: {', '.join(metrics_to_plot)}")
+
+    # Load evaluation results
+    print(f"Scanning {len(output_dirs)} output director{'y' if len(output_dirs) == 1 else 'ies'} for evaluation results...")
+    results = load_all_results(output_dirs, instances, agent_ids=args.agent_ids)
     print(f"Found {len(results)} evaluation results")
 
     if not results:
         print("No evaluation results found")
         return
 
+    # Prepare filters
     filters = []
-    if not args.include_no_exec_env:
-        filters.append(filter_has_execution_environment(True))
-        print("Filtering: Only instances with execution environment")
-
     if args.successful_only:
         filters.append(filter_successful_only())
         print("Filtering: Only successful inference runs (finish_reason='success')")
 
-    print("Organizing data...")
-    data = organize_data(results, filters=filters if filters else None)
-    print(f"Found {len(data.instances)} unique instances")
-    if len(data.instances) == 0:
-        print("No instances to plot after filtering")
-        return
+    # Create plot configuration
+    plot_config = PlotConfig(show_error_bars=not args.no_error_bars)
 
-    # Load and merge precision data if requested
-    if args.with_precision:
-        print("Loading precision metrics...")
-        load_and_merge_precision_data(data, output_dir)
-        print("Precision metrics loaded")
+    # Process each metric
+    for metric_name in metrics_to_plot:
+        print(f"\nProcessing metric: {metric_name}")
 
-    # Compute and print statistics if requested
-    if args.statistics:
-        print("\nComputing statistics...")
-        all_stats = compute_all_agent_statistics(data)
-        print_statistics_summary(all_stats)
-        print("\n")  # Extra newline before plotting section
+        # Organize data for this metric
+        print("  Organizing data...")
+        try:
+            data = organize_data(results, metric_name, filters=filters if filters else None)
+        except ValueError as e:
+            print(f"  Error: {e}")
+            continue
 
-    plots_dir = Path("./analyze")
+        # Apply agent and description type filters
+        if args.agent_ids:
+            data = data.filter_agents(args.agent_ids)
+        if args.description_types:
+            data = data.filter_description_types(args.description_types)
 
-    print("Generating plots...")
-    create_ifr_plots(data, plots_dir)
+        # Validate data
+        try:
+            validate_analysis_data(data, args.agent_ids, args.description_types)
+        except ValueError as e:
+            print(f"  Error: {e}")
+            return
 
-    print("Done!")
+        # Print summary
+        print(f"  Found {len(data.get_agent_ids())} agents: {', '.join(data.get_agent_ids())}")
+        print(f"  Found {len(data.get_description_types())} description types: {', '.join(data.get_description_types())}")
+
+        # Generate plot
+        print(f"  Generating {args.plot_type} plot with {args.aggregation} aggregation...")
+        try:
+            fig = create_plot(
+                data,
+                metric_name,
+                plot_type=args.plot_type,
+                aggregation=args.aggregation,
+                config=plot_config,
+            )
+
+            # Save plot
+            output_filename = f"{metric_name}_{args.plot_type}_{args.aggregation}.png"
+            output_path = args.plots_dir / output_filename
+            save_plot(fig, output_path, dpi=args.dpi)
+            print(f"  Saved plot to {output_path}")
+
+        except Exception as e:
+            print(f"  Error generating plot: {e}")
+            import traceback
+            traceback.print_exc()
+
+    print("\nDone!")
 
 
 if __name__ == "__main__":
     main()
-
-# TODO : Handle Finish Reasons --> What if error, budget exceeded, etc.
