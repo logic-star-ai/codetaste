@@ -1,0 +1,238 @@
+diff --git a/REFACTORING_SUMMARY.md b/REFACTORING_SUMMARY.md
+new file mode 100644
+index 0000000..a5b2b74
+--- /dev/null
++++ b/REFACTORING_SUMMARY.md
+@@ -0,0 +1,83 @@
++# Template Functions Refactoring: Explicit Context Parameter
++
++## Summary
++Refactored template functions to accept explicit context parameters instead of requiring context to be passed from templates. This improves the template API by allowing functions to access context implicitly during template execution.
++
++## Changes Made
++
++### 1. Updated `modules/templates/helper.go`
++- **Added import**: `repo_model "code.gitea.io/gitea/models/repo"`
++- **Modified `NewFuncMap()` function**: Changed `MirrorRemoteAddress` registration from the actual function to a placeholder function that matches the desired signature without context parameter:
++  ```go
++  "MirrorRemoteAddress": func(m *repo_model.Repository, remoteName string, ignoreOriginalURL bool) remoteAddress {
++      return remoteAddress{}
++  }, // placeholder, replaced at execution time
++  ```
++
++### 2. Updated `modules/templates/htmlrenderer.go`
++- **Added import**: `repo_model "code.gitea.io/gitea/models/repo"`
++- **Added wrapper function** `mirrorRemoteAddressWithContext()`: This function handles type assertion and calls the actual `mirrorRemoteAddress` function with context:
++  ```go
++  func mirrorRemoteAddressWithContext(ctx context.Context, m interface{}, remoteName string, ignoreOriginalURL bool) interface{} {
++      if repo, ok := m.(*repo_model.Repository); ok {
++          return mirrorRemoteAddress(ctx, repo, remoteName, ignoreOriginalURL)
++      }
++      log.Error("MirrorRemoteAddress: invalid repository type")
++      return remoteAddress{}
++  }
++  ```
++- **Modified `TemplateLookup()` function**: Added context injection for `MirrorRemoteAddress` similar to the existing pattern for `ctx`:
++  ```go
++  m["MirrorRemoteAddress"] = func(m interface{}, remoteName string, ignoreOriginalURL bool) interface{} {
++      return mirrorRemoteAddressWithContext(ctx, m, remoteName, ignoreOriginalURL)
++  }
++  ```
++
++### 3. Updated `templates/repo/settings/options.tmpl`
++- **Modified template call**: Removed explicit context parameter from `MirrorRemoteAddress` call:
++  - **Before**: `{{$address := MirrorRemoteAddress $.Context .Repository .PullMirror.GetRemoteName false}}`
++  - **After**: `{{$address := MirrorRemoteAddress .Repository .PullMirror.GetRemoteName false}}`
++
++### 4. Added `modules/templates/mirror_test.go`
++- Created comprehensive test suite for the refactored functionality
++- Tests cover:
++  - Basic functionality with HTTPS URLs
++  - SSH URL handling (no credential extraction)
++  - Context wrapper function
++  - Invalid type handling
++
++## Design Pattern
++
++The refactoring follows the existing pattern in Gitea's template system:
++
++1. **Registration**: Functions are registered in `NewFuncMap()` with a placeholder/default implementation
++2. **Context Injection**: At template execution time (in `TemplateLookup()`), context-aware functions are replaced with closures that have context bound
++3. **Template Usage**: Templates can call functions without explicitly passing context
++
++This pattern is already used for the `ctx()` function, and now `MirrorRemoteAddress` follows the same approach.
++
++## Benefits
++
++1. **Cleaner Template Code**: Templates don't need to pass `$.Context` explicitly to functions that need context
++2. **Consistent API**: Follows the same pattern as other context-aware functions in the template system
++3. **Type Safety**: The wrapper function provides proper type checking at runtime
++4. **Backward Compatibility**: The underlying `mirrorRemoteAddress` function still accepts explicit context, so direct Go code calls remain unchanged
++
++## Testing
++
++All tests pass:
++- ✅ `go build ./modules/templates` - Package compiles successfully
++- ✅ `go test ./modules/templates` - All existing tests pass
++- ✅ New mirror tests added and passing:
++  - `TestMirrorRemoteAddress`
++  - `TestMirrorRemoteAddressSSH`
++  - `TestMirrorRemoteAddressWithContextWrapper`
++  - `TestMirrorRemoteAddressWithInvalidType`
++
++## Future Considerations
++
++This pattern can be applied to other template functions that currently require explicit context parameters, such as:
++- Render functions (though they already accept context explicitly)
++- Any future functions that need request context
++
++The key is that the function needs context at execution time but shouldn't burden template authors with passing it explicitly.
+diff --git a/modules/templates/helper.go b/modules/templates/helper.go
+index bb1411c..6086b31 100644
+--- a/modules/templates/helper.go
++++ b/modules/templates/helper.go
+@@ -12,6 +12,7 @@ import (
+ 	"strings"
+ 	"time"
+ 
++	repo_model "code.gitea.io/gitea/models/repo"
+ 	"code.gitea.io/gitea/modules/base"
+ 	"code.gitea.io/gitea/modules/emoji"
+ 	"code.gitea.io/gitea/modules/markup"
+@@ -169,7 +170,7 @@ func NewFuncMap() template.FuncMap {
+ 		"ActionContent2Commits":    ActionContent2Commits,
+ 		"IsMultilineCommitMessage": IsMultilineCommitMessage,
+ 		"CommentMustAsDiff":        gitdiff.CommentMustAsDiff,
+-		"MirrorRemoteAddress":      mirrorRemoteAddress,
++		"MirrorRemoteAddress":      func(m *repo_model.Repository, remoteName string, ignoreOriginalURL bool) remoteAddress { return remoteAddress{} }, // placeholder, replaced at execution time
+ 
+ 		"FilenameIsImage": FilenameIsImage,
+ 		"TabSizeClass":    TabSizeClass,
+diff --git a/modules/templates/htmlrenderer.go b/modules/templates/htmlrenderer.go
+index 5ab46cb..4714b61 100644
+--- a/modules/templates/htmlrenderer.go
++++ b/modules/templates/htmlrenderer.go
+@@ -19,6 +19,7 @@ import (
+ 	"sync/atomic"
+ 	texttemplate "text/template"
+ 
++	repo_model "code.gitea.io/gitea/models/repo"
+ 	"code.gitea.io/gitea/modules/assetfs"
+ 	"code.gitea.io/gitea/modules/graceful"
+ 	"code.gitea.io/gitea/modules/log"
+@@ -54,6 +55,15 @@ func (h *HTMLRender) HTML(w io.Writer, status int, name string, data any, ctx co
+ 	return t.Execute(w, data)
+ }
+ 
++// mirrorRemoteAddressWithContext is a wrapper that calls mirrorRemoteAddress with proper type assertion
++func mirrorRemoteAddressWithContext(ctx context.Context, m interface{}, remoteName string, ignoreOriginalURL bool) interface{} {
++	if repo, ok := m.(*repo_model.Repository); ok {
++		return mirrorRemoteAddress(ctx, repo, remoteName, ignoreOriginalURL)
++	}
++	log.Error("MirrorRemoteAddress: invalid repository type")
++	return remoteAddress{}
++}
++
+ func (h *HTMLRender) TemplateLookup(name string, ctx context.Context) (TemplateExecutor, error) { //nolint:revive
+ 	tmpls := h.templates.Load()
+ 	if tmpls == nil {
+@@ -61,6 +71,10 @@ func (h *HTMLRender) TemplateLookup(name string, ctx context.Context) (TemplateE
+ 	}
+ 	m := NewFuncMap()
+ 	m["ctx"] = func() any { return ctx }
++	// Inject context-aware functions that need explicit context parameter
++	m["MirrorRemoteAddress"] = func(m interface{}, remoteName string, ignoreOriginalURL bool) interface{} {
++		return mirrorRemoteAddressWithContext(ctx, m, remoteName, ignoreOriginalURL)
++	}
+ 	return tmpls.Executor(name, m)
+ }
+ 
+diff --git a/modules/templates/mirror_test.go b/modules/templates/mirror_test.go
+new file mode 100644
+index 0000000..ac2c498
+--- /dev/null
++++ b/modules/templates/mirror_test.go
+@@ -0,0 +1,70 @@
++// Copyright 2024 The Gitea Authors. All rights reserved.
++// SPDX-License-Identifier: MIT
++
++package templates
++
++import (
++	"context"
++	"testing"
++
++	repo_model "code.gitea.io/gitea/models/repo"
++	"github.com/stretchr/testify/assert"
++)
++
++func TestMirrorRemoteAddress(t *testing.T) {
++	// Test the mirrorRemoteAddress function with explicit context
++	ctx := context.Background()
++
++	repo := &repo_model.Repository{
++		OriginalURL: "https://user:password@github.com/test/repo.git",
++	}
++
++	addr := mirrorRemoteAddress(ctx, repo, "origin", false)
++
++	assert.Equal(t, "https://github.com/test/repo.git", addr.Address)
++	assert.Equal(t, "user", addr.Username)
++	assert.Equal(t, "password", addr.Password)
++}
++
++func TestMirrorRemoteAddressSSH(t *testing.T) {
++	// Test SSH URL which should not extract credentials
++	ctx := context.Background()
++
++	repo := &repo_model.Repository{
++		OriginalURL: "ssh://git@github.com/test/repo.git",
++	}
++
++	addr := mirrorRemoteAddress(ctx, repo, "origin", false)
++
++	assert.Equal(t, "ssh://git@github.com/test/repo.git", addr.Address)
++	assert.Equal(t, "", addr.Username)
++	assert.Equal(t, "", addr.Password)
++}
++
++func TestMirrorRemoteAddressWithContextWrapper(t *testing.T) {
++	// Test the wrapper function that accepts interface{}
++	ctx := context.Background()
++
++	repo := &repo_model.Repository{
++		OriginalURL: "https://user:password@github.com/test/repo.git",
++	}
++
++	result := mirrorRemoteAddressWithContext(ctx, repo, "origin", false)
++
++	addr, ok := result.(remoteAddress)
++	assert.True(t, ok, "Result should be of type remoteAddress")
++	assert.Equal(t, "https://github.com/test/repo.git", addr.Address)
++	assert.Equal(t, "user", addr.Username)
++	assert.Equal(t, "password", addr.Password)
++}
++
++func TestMirrorRemoteAddressWithInvalidType(t *testing.T) {
++	// Test the wrapper with invalid type
++	ctx := context.Background()
++
++	result := mirrorRemoteAddressWithContext(ctx, "invalid", "origin", false)
++
++	addr, ok := result.(remoteAddress)
++	assert.True(t, ok, "Result should be of type remoteAddress")
++	assert.Equal(t, "", addr.Address, "Address should be empty for invalid input")
++}
+diff --git a/templates/repo/settings/options.tmpl b/templates/repo/settings/options.tmpl
+index 85ff82f..717805a 100644
+--- a/templates/repo/settings/options.tmpl
++++ b/templates/repo/settings/options.tmpl
+@@ -151,7 +151,7 @@
+ 										<label for="interval">{{ctx.Locale.Tr "repo.mirror_interval" .MinimumMirrorInterval}}</label>
+ 										<input id="interval" name="interval" value="{{.PullMirror.Interval}}">
+ 									</div>
+-									{{$address := MirrorRemoteAddress $.Context .Repository .PullMirror.GetRemoteName false}}
++									{{$address := MirrorRemoteAddress .Repository .PullMirror.GetRemoteName false}}
+ 									<div class="field {{if .Err_MirrorAddress}}error{{end}}">
+ 										<label for="mirror_address">{{ctx.Locale.Tr "repo.mirror_address"}}</label>
+ 										<input id="mirror_address" name="mirror_address" value="{{$address.Address}}" required>
