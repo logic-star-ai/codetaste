@@ -10,6 +10,7 @@ from refactoring_benchmark.coverage.models import (
     InstanceAgentPrecision,
 )
 from refactoring_benchmark.coverage.parse import parse_diff, parse_sarif
+from refactoring_benchmark.evaluation.models import EvaluationResult
 from refactoring_benchmark.utils.models import ReducedInstanceRow
 
 
@@ -131,10 +132,9 @@ def calculate_precision(
     return metrics
 
 
-def calculate_precision_instance_agent(
-    instance: ReducedInstanceRow,
-    agent_name: str,
-    output_dir: Path,
+def calculate_precision_eval_result(
+    result: EvaluationResult,
+    null_agent_dir: Path = Path("output_pseudo_agents"),
     debug: bool = False,
 ) -> Optional[InstanceAgentPrecision]:
     """
@@ -144,26 +144,29 @@ def calculate_precision_instance_agent(
     and agent-specific positive SARIF.
 
     Args:
-        instance: Instance row from CSV
-        agent_name: Name of the agent
-        output_dir: Base output directory
+        result: EvaluationResult object
+        null_agent_dir: Directory containing pseudo agents
         debug: Whether to print debug information
 
     Returns:
         InstanceAgentPrecision object with results, or None if files don't exist or calculation fails
     """
     # Construct paths
-    instance_dir = output_dir / instance.owner / instance.repo / instance.short_hash
-    instance_agent_dir = instance_dir / agent_name
-    eval_dir = instance_agent_dir / "evaluation"
+    instance = ReducedInstanceRow(
+        owner=result.instance_metadata.owner,
+        repo=result.instance_metadata.repo,
+        golden_commit_hash=result.instance_metadata.golden_hash,
+        commit_hash=result.instance_metadata.base_hash,
+    )
+    pseudo_agent_instance_dir = null_agent_dir / instance.owner / instance.repo / instance.short_hash
 
     # Use null_agent for baseline negative SARIF (bad patterns in base code)
-    null_agent_dir = instance_dir / "null_agent"
-    sarif_negative_path = null_agent_dir / "evaluation" / "rules_negative.sarif"
+    instance_null_agent_dir = pseudo_agent_instance_dir / "null_agent"
+    sarif_negative_path = instance_null_agent_dir / "evaluation" / "rules_negative.sarif"
 
     # Use agent-specific positive SARIF (good patterns in agent's solution)
-    sarif_positive_path = eval_dir / "rules_positive.sarif"
-    diff_path = instance_agent_dir / "prediction.diff"
+    sarif_positive_path = result.eval_dir / "rules_positive.sarif"
+    diff_path = result.eval_dir.parent / "prediction.diff"
 
     # Check if all required files exist
     if not sarif_negative_path.exists():
@@ -183,9 +186,9 @@ def calculate_precision_instance_agent(
 
         return InstanceAgentPrecision(
             instance=instance.display_path,
-            agent=agent_name,
+            agent=result.agent_config.id,
             metrics=metrics,
         )
     except Exception as e:
-        print(f"  Warning: Failed to calculate precision for {instance.display_path}/{agent_name}: {e}")
+        print(f"  Warning: Failed to calculate precision for {instance.display_path}/{result.agent_config.id}: {e}")
         return None

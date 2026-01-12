@@ -1,105 +1,239 @@
-"""Generate IFR plots by agent and instance."""
+"""Generate plots comparing agents across description types."""
 
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
 
-from refactoring_benchmark.analyze.models import AnalysisData
-from refactoring_benchmark.analyze.config import IFRPlotConfig, IFRMetricType, IFR_PLOT_DEFINITIONS
-from refactoring_benchmark.analyze.validation import ValidityStatus
+from refactoring_benchmark.analyze.models import AnalysisData, AggregationType
+from refactoring_benchmark.analyze.config import PlotConfig, PlotType
 
 
-def create_ifr_plot(
-    data: AnalysisData, metric_key: IFRMetricType, title: str, config: IFRPlotConfig = IFRPlotConfig()
+def create_plot(
+    data: AnalysisData,
+    metric_name: str,
+    plot_type: PlotType = "line",
+    aggregation: AggregationType = "mean",
+    config: PlotConfig = PlotConfig(),
 ) -> plt.Figure:
-    """
-    Create a bar chart for a specific IFR metric.
+    """Create a plot comparing agents across description types.
 
     Args:
-        data: Analysis data containing IFR metrics
-        metric_key: Which IFR metric to plot
-        title: Plot title
+        data: Analysis data containing metric values grouped by agent and description type
+        metric_name: Name of the metric being plotted (for axis labels)
+        plot_type: Type of plot ("line", "bar", "scatter")
+        aggregation: How to aggregate values ("mean" or "median")
         config: Plot configuration settings
 
     Returns:
         Matplotlib figure object
     """
-    instances = data.get_instance_keys_sorted()
-    agents = data.get_agent_ids_sorted()
+    agents = data.get_agent_ids()
+    description_types = data.get_description_types()
 
-    # Calculate figure size
-    fig_width = max(config.min_width, len(instances) * config.width_per_instance)
-    fig, ax = plt.subplots(figsize=(fig_width, config.height))
+    if not agents or not description_types:
+        raise ValueError("No data to plot")
 
-    x = np.arange(len(instances))
-    width = config.bar_width_ratio / len(agents)
+    # Create figure
+    fig, ax = plt.subplots(figsize=(config.width, config.height))
+
+    # Prepare colors for agents
     colors = plt.cm.tab10(np.linspace(0, 1, len(agents)))
 
-    for i, agent in enumerate(agents):
-        values = []
-        validity_statuses = []
-
-        for instance in instances:
-            agent_data = data.get_agent_data(instance, agent)
-            if agent_data:
-                values.append(getattr(agent_data, metric_key))
-                validity_statuses.append(agent_data.validity_status)
-            else:
-                values.append(0)
-                validity_statuses.append(ValidityStatus.VALID)
-
-        bars = ax.bar(x + i * width, values, width, label=agent, color=colors[i], alpha=config.bar_alpha)
-
-        # Apply hatching based on validity status
-        for bar, status in zip(bars, validity_statuses):
-            if status == ValidityStatus.INVALID_TESTS:
-                bar.set_hatch(config.hatch_pattern)
-                bar.set_edgecolor(config.invalid_tests_edge_color)
-                bar.set_linewidth(config.edge_linewidth)
-            elif status == ValidityStatus.NO_EXEC_ENV:
-                bar.set_hatch(config.hatch_pattern)
-                bar.set_edgecolor(config.no_exec_env_edge_color)
-                bar.set_linewidth(config.edge_linewidth)
-            elif status == ValidityStatus.NO_TEST_RESULTS:
-                bar.set_hatch(config.hatch_pattern)
-                bar.set_edgecolor(config.no_test_results_edge_color)
-                bar.set_linewidth(config.edge_linewidth)
+    if plot_type == "line":
+        _plot_line(ax, data, agents, description_types, colors, aggregation, config)
+    elif plot_type == "bar":
+        _plot_bar(ax, data, agents, description_types, colors, aggregation, config)
+    elif plot_type == "scatter":
+        _plot_scatter(ax, data, agents, description_types, colors, aggregation, config)
+    else:
+        raise ValueError(f"Unknown plot type: {plot_type}")
 
     # Configure axes
-    ax.set_xlabel("Instance (owner/repo/hash)", fontsize=config.xlabel_fontsize)
-    ax.set_ylabel("IFR (%)", fontsize=config.ylabel_fontsize)
-    ax.set_title(title, fontsize=config.title_fontsize, fontweight="bold")
-    ax.set_xticks(x + width * (len(agents) - 1) / 2)
-    ax.set_xticklabels(instances, rotation=45, ha="right", fontsize=config.tick_fontsize)
-    ax.set_ylim(0, 100)
-    ax.legend(loc="upper left", bbox_to_anchor=(1, 1), fontsize=config.legend_fontsize)
+    ax.set_xlabel("Description Type", fontsize=config.xlabel_fontsize)
+    ax.set_ylabel(f"{metric_name.upper()} ({aggregation})", fontsize=config.ylabel_fontsize)
+    ax.set_title(
+        f"{metric_name.upper()} by Description Type ({aggregation})",
+        fontsize=config.title_fontsize,
+        fontweight="bold",
+    )
+    ax.set_ylim(config.ylim_min, config.ylim_max)
+    ax.legend(loc="best", fontsize=config.legend_fontsize)
     ax.grid(axis="y", alpha=config.grid_alpha, linestyle=config.grid_linestyle)
-
-    # Add footer text
-    fig.text(0.99, 0.01, config.footer_text, ha="right", va="bottom", fontsize=config.footer_fontsize, style="italic")
 
     plt.tight_layout()
     return fig
 
 
-def create_ifr_plots(data: AnalysisData, output_dir: Path, config: IFRPlotConfig = IFRPlotConfig(), dpi: int = 300):
-    """
-    Generate and save all three IFR plots.
+def _plot_line(
+    ax: plt.Axes,
+    data: AnalysisData,
+    agents: list[str],
+    description_types: list[str],
+    colors: np.ndarray,
+    aggregation: AggregationType,
+    config: PlotConfig,
+) -> None:
+    """Plot line chart with error bars."""
+    x = np.arange(len(description_types))
+
+    for i, agent_id in enumerate(agents):
+        values = []
+        errors = []
+
+        for desc_type in description_types:
+            agent_desc_data = data.get_data(agent_id, desc_type)
+            if agent_desc_data and agent_desc_data.count > 0:
+                if aggregation == "mean":
+                    values.append(agent_desc_data.mean)
+                    errors.append(agent_desc_data.std / np.sqrt(agent_desc_data.count) if config.show_error_bars else 0.0)
+                else:  # median
+                    values.append(agent_desc_data.median)
+                    errors.append(0.0)
+            else:
+                # Use np.nan for missing data (matplotlib handles this gracefully)
+                values.append(np.nan)
+                errors.append(np.nan)
+
+        # Plot line
+        ax.plot(
+            x,
+            values,
+            label=agent_id,
+            color=colors[i],
+            linewidth=config.line_width,
+            marker=config.marker_style,
+            markersize=config.marker_size,
+            alpha=config.alpha,
+        )
+
+        # Plot error bars
+        if config.show_error_bars:
+            ax.errorbar(
+                x,
+                values,
+                yerr=errors,
+                fmt="none",
+                ecolor=colors[i],
+                capsize=config.error_bar_capsize,
+                alpha=config.error_bar_alpha,
+            )
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(description_types, fontsize=config.tick_fontsize)
+
+
+def _plot_bar(
+    ax: plt.Axes,
+    data: AnalysisData,
+    agents: list[str],
+    description_types: list[str],
+    colors: np.ndarray,
+    aggregation: AggregationType,
+    config: PlotConfig,
+) -> None:
+    """Plot bar chart with error bars."""
+    x = np.arange(len(description_types))
+    width = config.bar_width / len(agents)
+
+    for i, agent_id in enumerate(agents):
+        values = []
+        errors = []
+
+        for desc_type in description_types:
+            agent_desc_data = data.get_data(agent_id, desc_type)
+            if agent_desc_data and agent_desc_data.count > 0:
+                if aggregation == "mean":
+                    values.append(agent_desc_data.mean)
+                    errors.append(agent_desc_data.std / np.sqrt(agent_desc_data.count) if config.show_error_bars else 0.0)
+                else:  # median
+                    values.append(agent_desc_data.median)
+                    errors.append(0.0)
+            else:
+                values.append(0.0)
+                errors.append(0.0)
+
+        # Plot bars
+        ax.bar(
+            x + i * width,
+            values,
+            width,
+            label=agent_id,
+            color=colors[i],
+            alpha=config.bar_alpha,
+            yerr=errors if config.show_error_bars else None,
+            capsize=config.error_bar_capsize,
+        )
+
+    ax.set_xticks(x + width * (len(agents) - 1) / 2)
+    ax.set_xticklabels(description_types, fontsize=config.tick_fontsize)
+
+
+def _plot_scatter(
+    ax: plt.Axes,
+    data: AnalysisData,
+    agents: list[str],
+    description_types: list[str],
+    colors: np.ndarray,
+    aggregation: AggregationType,
+    config: PlotConfig,
+) -> None:
+    """Plot scatter chart with error bars."""
+    x = np.arange(len(description_types))
+
+    for i, agent_id in enumerate(agents):
+        values = []
+        errors = []
+
+        for desc_type in description_types:
+            agent_desc_data = data.get_data(agent_id, desc_type)
+            if agent_desc_data and agent_desc_data.count > 0:
+                if aggregation == "mean":
+                    values.append(agent_desc_data.mean)
+                    errors.append(agent_desc_data.std / np.sqrt(agent_desc_data.count) if config.show_error_bars else 0.0)
+                else:  # median
+                    values.append(agent_desc_data.median)
+                    errors.append(0.0)
+            else:
+                # Use np.nan for missing data (matplotlib handles this gracefully)
+                values.append(np.nan)
+                errors.append(np.nan)
+
+        # Plot scatter points
+        ax.scatter(
+            x,
+            values,
+            label=agent_id,
+            color=colors[i],
+            s=config.marker_size**2,
+            marker=config.marker_style,
+            alpha=config.alpha,
+        )
+
+        # Plot error bars
+        if config.show_error_bars:
+            ax.errorbar(
+                x,
+                values,
+                yerr=errors,
+                fmt="none",
+                ecolor=colors[i],
+                capsize=config.error_bar_capsize,
+                alpha=config.error_bar_alpha,
+            )
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(description_types, fontsize=config.tick_fontsize)
+
+
+def save_plot(fig: plt.Figure, output_path: Path, dpi: int = 300) -> None:
+    """Save plot to file.
 
     Args:
-        data: Analysis data to plot
-        output_dir: Directory to save plots
-        config: Plot configuration settings
-        dpi: Resolution for saved plots
+        fig: Matplotlib figure to save
+        output_path: Path to save the plot
+        dpi: Resolution for saved plot
     """
-    output_dir.mkdir(exist_ok=True)
-
-    for metric_key, title in IFR_PLOT_DEFINITIONS:
-        print(f"  - {title}")
-        fig = create_ifr_plot(data, metric_key, title, config)
-
-        output_file = output_dir / f"{metric_key}_plot.png"
-        fig.savefig(output_file, dpi=dpi, bbox_inches="tight")
-        print(f"    Saved to {output_file}")
-        plt.close(fig)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=dpi, bbox_inches="tight")
+    plt.close(fig)

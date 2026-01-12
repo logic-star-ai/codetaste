@@ -1,11 +1,35 @@
-"""Analysis package for evaluation results and IFR plotting."""
+"""Analysis package for evaluation results - description type based analysis."""
 
-from .loader import load_all_results, organize_data, load_and_merge_precision_data
-from refactoring_benchmark.utils.common import load_instances_from_csv
-from .plotting import create_ifr_plots, create_ifr_plot
-from .models import AnalysisData, InstanceData, AgentInstanceStats
-from .validation import ValidityStatus, check_test_validity
-from .config import IFRPlotConfig, IFRMetricType, IFR_PLOT_DEFINITIONS
+# Data loading and organization
+from .loader import (
+    discover_output_dirs,
+    load_all_results,
+    organize_data,
+    validate_analysis_data,
+)
+
+# Metrics
+from .metrics import (
+    METRICS,
+    ALL_METRICS,
+    get_metric_function,
+    metric_ifr,
+    metric_test_success,
+)
+
+# Data models
+from .models import (
+    AnalysisData,
+    AgentDescriptionData,
+    MetricPoint,
+    AggregationType,
+)
+
+# Plotting
+from .plotting import create_plot, save_plot
+from .config import PlotConfig, PlotType
+
+# Filters (keeping existing filter functionality)
 from .filters import (
     ResultFilter,
     combine_filters,
@@ -18,35 +42,36 @@ from .filters import (
     filter_by_finish_reason,
     filter_successful_only,
 )
-from .statistics import (
-    MetricStatistics,
-    AgentStatistics,
-    CombinationStatistics,
-    AllStatistics,
-    compute_combination_statistics,
-    compute_all_agent_statistics,
-)
+
+# Validation (keeping existing validation functionality)
+from .validation import ValidityStatus, check_test_validity
+
+# Utilities
+from refactoring_benchmark.utils.common import load_instances_from_csv
 
 __all__ = [
-    # Data loading and organization
+    # Data loading
+    "discover_output_dirs",
     "load_all_results",
     "organize_data",
-    "load_and_merge_precision_data",
+    "validate_analysis_data",
     "load_instances_from_csv",
-    # Plotting
-    "create_ifr_plots",
-    "create_ifr_plot",
+    # Metrics
+    "METRICS",
+    "ALL_METRICS",
+    "get_metric_function",
+    "metric_ifr",
+    "metric_test_success",
     # Data models
     "AnalysisData",
-    "InstanceData",
-    "AgentInstanceStats",
-    # Validation
-    "ValidityStatus",
-    "check_test_validity",
-    # Configuration
-    "IFRPlotConfig",
-    "IFRMetricType",
-    "IFR_PLOT_DEFINITIONS",
+    "AgentDescriptionData",
+    "MetricPoint",
+    "AggregationType",
+    # Plotting
+    "create_plot",
+    "save_plot",
+    "PlotConfig",
+    "PlotType",
     # Filters
     "ResultFilter",
     "combine_filters",
@@ -58,11 +83,7 @@ __all__ = [
     "filter_by_ifr_threshold",
     "filter_by_finish_reason",
     "filter_successful_only",
-    # Statistics
-    "MetricStatistics",
-    "AgentStatistics",
-    "CombinationStatistics",
-    "AllStatistics",
-    "compute_combination_statistics",
-    "compute_all_agent_statistics",
+    # Validation
+    "ValidityStatus",
+    "check_test_validity",
 ]

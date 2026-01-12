@@ -1,104 +1,137 @@
-"""Data models for analysis results."""
+"""Data models for description-type based analysis."""
 
+import statistics
 from typing import Dict, Literal
-from pydantic import BaseModel, Field, computed_field
 
-from refactoring_benchmark.evaluation.models import RuleMetrics
-from refactoring_benchmark.analyze.validation import ValidityStatus
-from refactoring_benchmark.utils.models import ReducedInstanceRow
+from pydantic import BaseModel, Field
 
 
-class AgentInstanceStats(BaseModel):
-    """IFR metrics and validity status for a single agent on a single instance."""
+class MetricPoint(BaseModel):
+    """Single metric value for one instance."""
 
-    positive_ifr: float = Field(ge=0, le=100, description="Positive IFR percentage")
-    negative_ifr: float = Field(ge=0, le=100, description="Negative IFR percentage")
-    total_ifr: float = Field(ge=0, le=100, description="Total IFR percentage")
-    validity_status: ValidityStatus = Field(description="Test validity status")
-
-    # Optional precision metrics
-    precision_added: float | None = Field(None, ge=0, le=100, description="Precision of additions percentage")
-    precision_removed: float | None = Field(None, ge=0, le=100, description="Precision of deletions percentage")
-    precision_overall: float | None = Field(None, ge=0, le=100, description="Overall precision percentage")
-
-    cost_usd: float = Field(default=-1.0, description="Cost in USD, -1 if missing, 0 for pseudo agents")
-
-    @classmethod
-    def from_rule_metrics(cls, metrics: RuleMetrics, validity_status: ValidityStatus) -> "AgentInstanceStats":
-        """Create AgentIFRData from RuleMetrics, converting to percentages."""
-        return cls(
-            positive_ifr=metrics.positive_ifr * 100,
-            negative_ifr=metrics.negative_ifr * 100,
-            total_ifr=metrics.ifr * 100,
-            validity_status=validity_status,
-        )
+    instance_key: str = Field(description="Instance identifier (owner/repo/hash)")
+    value: float = Field(ge=0, le=1, description="Metric value in [0, 1] range")
 
 
-class InstanceData(BaseModel):
-    """Data for all agents on a single instance."""
+class AgentDescriptionData(BaseModel):
+    """All metric values for one (agent_id, description_type) combination."""
 
-    instance: ReducedInstanceRow = Field(description="Full instance row data")
-    agents: Dict[str, AgentInstanceStats] = Field(default_factory=dict, description="Agent ID to IFR data mapping")
+    agent_id: str = Field(description="Agent identifier")
+    description_type: str = Field(description="Description type (standard, minimal, nano, open)")
+    metric_values: list[MetricPoint] = Field(default_factory=list, description="One value per instance")
+
+    @property
+    def count(self) -> int:
+        """Number of data points."""
+        return len(self.metric_values)
+
+    @property
+    def mean(self) -> float:
+        """Mean of metric values."""
+        if not self.metric_values:
+            return 0.0
+        return statistics.mean([p.value for p in self.metric_values])
+
+    @property
+    def median(self) -> float:
+        """Median of metric values."""
+        if not self.metric_values:
+            return 0.0
+        return statistics.median([p.value for p in self.metric_values])
+
+    @property
+    def std(self) -> float:
+        """Standard deviation of metric values."""
+        if len(self.metric_values) <= 1:
+            return 0.0
+        return statistics.stdev([p.value for p in self.metric_values])
+
+    @property
+    def min(self) -> float:
+        """Minimum metric value."""
+        if not self.metric_values:
+            return 0.0
+        return min(p.value for p in self.metric_values)
+
+    @property
+    def max(self) -> float:
+        """Maximum metric value."""
+        if not self.metric_values:
+            return 0.0
+        return max(p.value for p in self.metric_values)
 
 
 class AnalysisData(BaseModel):
-    """Complete analysis data for all instances and agents."""
+    """Complete analysis data grouped by (agent_id, description_type)."""
 
-    instances: Dict[str, InstanceData] = Field(
-        default_factory=dict, description="Instance key to instance data mapping"
+    # Key: (agent_id, description_type)
+    data: Dict[tuple[str, str], AgentDescriptionData] = Field(
+        default_factory=dict, description="Grouped data by agent and description type"
     )
 
-    def get_instance_keys_sorted(self) -> list[str]:
-        """Get sorted list of instance keys."""
-        return sorted(self.instances.keys())
+    def add_metric_point(self, agent_id: str, description_type: str, instance_key: str, value: float) -> None:
+        """Add a metric point to the analysis data.
 
-    def get_agent_ids_sorted(self) -> list[str]:
-        """Get sorted list of unique agent IDs across all instances."""
-        agents = set()
-        for instance_data in self.instances.values():
-            agents.update(instance_data.agents.keys())
-        return sorted(agents)
+        Args:
+            agent_id: Agent identifier
+            description_type: Description type
+            instance_key: Instance identifier
+            value: Metric value in [0, 1] range
+        """
+        key = (agent_id, description_type)
+        if key not in self.data:
+            self.data[key] = AgentDescriptionData(agent_id=agent_id, description_type=description_type)
+        self.data[key].metric_values.append(MetricPoint(instance_key=instance_key, value=value))
 
-    def get_agent_data(self, instance_key: str, agent_id: str) -> AgentInstanceStats | None:
-        """Get agent data for a specific instance and agent."""
-        instance = self.instances.get(instance_key)
-        if instance is None:
-            return None
-        return instance.agents.get(agent_id)
+    def get_agent_ids(self) -> list[str]:
+        """Get sorted list of unique agent IDs."""
+        return sorted(set(k[0] for k in self.data.keys()))
+
+    def get_description_types(self) -> list[str]:
+        """Get sorted list of unique description types."""
+        return sorted(set(k[1] for k in self.data.keys()))
+
+    def get_data(self, agent_id: str, description_type: str) -> AgentDescriptionData | None:
+        """Get data for a specific (agent_id, description_type) combination.
+
+        Args:
+            agent_id: Agent identifier
+            description_type: Description type
+
+        Returns:
+            AgentDescriptionData if exists, None otherwise
+        """
+        return self.data.get((agent_id, description_type))
+
+    def filter_agents(self, agent_ids: list[str]) -> "AnalysisData":
+        """Create a new AnalysisData containing only specified agents.
+
+        Args:
+            agent_ids: List of agent IDs to keep
+
+        Returns:
+            New AnalysisData with filtered agents
+        """
+        filtered_data = AnalysisData()
+        for (agent_id, description_type), agent_data in self.data.items():
+            if agent_id in agent_ids:
+                filtered_data.data[(agent_id, description_type)] = agent_data
+        return filtered_data
+
+    def filter_description_types(self, description_types: list[str]) -> "AnalysisData":
+        """Create a new AnalysisData containing only specified description types.
+
+        Args:
+            description_types: List of description types to keep
+
+        Returns:
+            New AnalysisData with filtered description types
+        """
+        filtered_data = AnalysisData()
+        for (agent_id, description_type), agent_data in self.data.items():
+            if description_type in description_types:
+                filtered_data.data[(agent_id, description_type)] = agent_data
+        return filtered_data
 
 
-##
-class MetricStatistics(BaseModel):
-    """Statistics for a single IFR metric."""
-
-    mean: float = Field(description="Average value")
-    median: float = Field(description="Median value")
-    count: int = Field(ge=0, description="Number of instances included")
-
-
-class AgentStatistics(BaseModel):
-    """Complete statistics for one agent under specific filtering conditions."""
-
-    agent_id: str = Field(description="Agent identifier")
-    total_ifr: MetricStatistics = Field(description="Total IFR statistics")
-    positive_ifr: MetricStatistics = Field(description="Positive IFR statistics")
-    negative_ifr: MetricStatistics = Field(description="Negative IFR statistics")
-    precision_added: MetricStatistics = Field(description="Precision of additions statistics")
-    precision_removed: MetricStatistics = Field(description="Precision of deletions statistics")
-    precision_overall: MetricStatistics = Field(description="Overall precision statistics")
-    avg_cost_usd: MetricStatistics = Field(description="Average cost in USD statistics")
-
-
-class CombinationStatistics(BaseModel):
-    """Statistics for all agents under one filtering combination."""
-
-    combination_id: int = Field(ge=1, le=6, description="Combination number (1-6)")
-    ifr_condition: Literal["all", "ifr_gt_0"] = Field(description="IFR filtering condition")
-    validity_condition: Literal["all", "valid", "invalid"] = Field(description="Test validity filtering condition")
-    agents: Dict[str, AgentStatistics] = Field(description="Statistics per agent")
-
-
-class AllStatistics(BaseModel):
-    """Complete statistics for all 6 combinations."""
-
-    combinations: Dict[int, CombinationStatistics] = Field(description="Statistics for each combination (1-6)")
+AggregationType = Literal["mean", "median"]

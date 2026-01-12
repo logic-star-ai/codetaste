@@ -103,6 +103,7 @@ class EvaluationResult(BaseModel):
     agent_rule_metrics: RuleMetrics
     inference_metadata: Optional[InferenceMetadata] = None
     evaluation_timestamp: str = Field(default_factory=lambda: datetime.utcnow().isoformat() + "Z")
+    eval_dir: Optional[Path] = Field(default=None, exclude=True)
 
     class Config:
         arbitrary_types_allowed = True
@@ -127,14 +128,17 @@ class EvaluationResult(BaseModel):
         with path.open("r", encoding="utf-8") as f:
             result = cls.model_validate_json(f.read())
 
-        # Try to load inference metadata from parent directory
-        inference_metadata_path = path.parent.parent / "inference_metadata.json"
-        if inference_metadata_path.exists():
-            try:
-                with inference_metadata_path.open("r", encoding="utf-8") as f:
-                    result.inference_metadata = InferenceMetadata.model_validate_json(f.read())
-            except Exception:
-                # If loading fails, leave it as None
-                pass
+        # Path structure: {output_dir}/{owner}/{repo}/{hash}/{agent_id}/evaluation/evaluation_result.json
+        result.eval_dir = path.parent
+
+        # If no embedded metadata, try to load from standalone file
+        if result.inference_metadata is None:
+            inference_metadata_path = path.parent.parent / "inference_metadata.json"
+            if inference_metadata_path.exists():
+                try:
+                    with inference_metadata_path.open("r", encoding="utf-8") as f:
+                        result.inference_metadata = InferenceMetadata.model_validate_json(f.read())
+                except Exception:
+                    pass
 
         return result
