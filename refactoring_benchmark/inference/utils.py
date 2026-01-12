@@ -141,4 +141,4 @@ def augment_inference_metadata_with_description_type(output_dir: Path, descripti
         with open(metadata_path, "w") as f:
             json.dump(metadata, f, indent=2)
     except (json.JSONDecodeError, Exception):
-        pass
+        raise ValueError(f"Failed to augment inference metadata with description_type in {metadata_path}")
