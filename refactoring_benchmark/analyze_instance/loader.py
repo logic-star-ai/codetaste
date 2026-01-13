@@ -84,7 +84,6 @@ def organize_data(results: List[EvaluationResult], filters: Sequence[ResultFilte
         ... )
     """
     analysis_data = AnalysisData()
-
     for result in results:
         # Apply filters if provided
         if filters:
