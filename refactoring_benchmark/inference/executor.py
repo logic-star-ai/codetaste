@@ -12,7 +12,7 @@ import podman
 from podman.domain.containers import Container as PodmanContainer
 from tqdm import tqdm
 
-from refactoring_benchmark.inference.models import InferenceConfig
+from refactoring_benchmark.inference.models import InferenceConfig, InferenceMetadata
 from refactoring_benchmark.inference.utils import (
     augment_inference_metadata_with_description_type,
     copy_agent_config,
@@ -135,6 +135,15 @@ def run_single_instance(instance: InstanceRow, config: InferenceConfig) -> bool:
                 # Agent produced output but failed
                 ensure_inference_metadata_exists(output_dir, description_type=config.description_type)
                 augment_inference_metadata_with_description_type(output_dir, config.description_type)
+                try:
+                    metadata: InferenceMetadata = InferenceMetadata.load_from_json(output_dir / "inference_metadata.json")
+                    fr = metadata.finish_reason.lower()
+                    if exit_code != 0 and not "success" in fr and not "budget" in fr:
+                        instance_logger.error("Agent process failed during inference. Removing prediction.diff.")
+                        prediction_path.unlink(missing_ok=True)
+                    return False
+                except Exception as e:
+                    instance_logger.error(f"Failed to load inference metadata: {e}")
             else:
                 # Agent crashed without producing output
                 create_fallback_inference_metadata(output_dir, finish_reason="crashed", description_type=config.description_type)

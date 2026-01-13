@@ -63,3 +63,12 @@ class InferenceMetadata(BaseModel):
     class Config:
         populate_by_name = True
         extra = "allow"
+
+
+    def load_from_json(json_path: Path) -> "InferenceMetadata":
+        """Load InferenceMetadata from a JSON file."""
+        import json
+
+        with open(json_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return InferenceMetadata.model_validate(data)
