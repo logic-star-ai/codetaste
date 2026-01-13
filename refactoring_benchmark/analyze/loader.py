@@ -3,6 +3,7 @@
 from pathlib import Path
 from typing import Sequence
 
+from refactoring_benchmark.coverage import precision
 from refactoring_benchmark.evaluation.models import EvaluationResult
 from refactoring_benchmark.analyze.models import AnalysisData
 from refactoring_benchmark.analyze.metrics import get_metric_function
@@ -81,6 +82,9 @@ def load_all_results(
     return results
 
 
+def is_valid_instance(results: list[EvaluationResult], instance_hash: str) -> bool:
+    return True
+
 def organize_data(
     results: list[EvaluationResult],
     metric_name: str,
@@ -103,13 +107,15 @@ def organize_data(
     # Get metric function
     metric_fn = get_metric_function(metric_name)
     analysis_data = AnalysisData()
-
+    instances = set(res.instance_metadata.base_hash for res in results)
+    valid_instances = set(inst for inst in instances if is_valid_instance(results, inst))
     for result in results:
         # Apply filters if provided
+        if result.instance_metadata.base_hash not in valid_instances:
+            continue
         if filters:
             if not all(filter_fn(result) for filter_fn in filters):
                 continue
-
         # Extract agent_id and description_type
         agent_id = result.agent_config.id
         if result.inference_metadata and result.inference_metadata.description_type:
@@ -127,8 +133,7 @@ def organize_data(
         instance_key = f"{result.instance_metadata.owner}/{result.instance_metadata.repo}/{result.instance_metadata.base_hash[:8]}"
 
         # Add to analysis data
-        analysis_data.add_metric_point(agent_id, description_type, instance_key, metric_value)
-
+        analysis_data.add_metric_point(agent_id, description_type, instance_key, metric_value) 
     return analysis_data
 
 

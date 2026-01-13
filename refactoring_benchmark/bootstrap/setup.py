@@ -112,7 +112,7 @@ def bootstrap_setup_phase(
             # Flow 1: Reuse existing image
             logger.info(f"Reusing existing setup image: {setup_image}")
             container = podman_utils.safe_container_run(
-                client, setup_image, detach=True, working_dir="/testbed", remove=True
+                client, setup_image, detach=True, working_dir="/testbed", remove=True, nano_cpus=int(16e9)
             )
         elif reuse_only and not use_base_image:
             # Error: reuse_only but image doesn't exist

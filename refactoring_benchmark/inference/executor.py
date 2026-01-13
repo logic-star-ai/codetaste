@@ -102,6 +102,7 @@ def run_single_instance(instance: InstanceRow, config: InferenceConfig) -> bool:
             },
             working_dir="/testbed",
             remove=False,
+            nano_cpus=int(8e9)
         )
 
         # Wait for container to finish with timeout

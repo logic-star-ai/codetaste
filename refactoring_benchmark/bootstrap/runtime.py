@@ -56,6 +56,7 @@ def bootstrap_runtime_phase(
             working_dir="/testbed",
             remove=True,
             environment={"ANTHROPIC_API_KEY": ""},
+            nano_cpus=int(16e9)
         )
 
         # 1. Inject Entrypoint
