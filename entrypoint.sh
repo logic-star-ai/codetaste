@@ -120,6 +120,7 @@ case "$1" in
 
         echo "[Security] Transferring repo ownership to agent_user..."
         sudo chown -R agent_user:agent_user "$REPO_ROOT"
+        sudo chown -R agent_user:agent_user /tmp
         
         # Restricted Execution
         if sudo -E -u agent_user bash -c "
