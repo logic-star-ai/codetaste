@@ -12,7 +12,7 @@ class MetricPoint(BaseModel):
     """Single metric value for one instance."""
 
     instance_key: str = Field(description="Instance identifier (owner/repo/hash)")
-    value: float = Field(ge=0, le=1, description="Metric value in [0, 1] range")
+    value: float # = Field(ge=0, le=1, description="Metric value in [0, 1] range")
 
 
 class AgentDescriptionData(BaseModel):

@@ -53,6 +53,11 @@ def metric_precision_overall(result: EvaluationResult) -> float | None:
     precision_result = _calculate_precision(result)
     return precision_result.metrics.precision_overall if precision_result else None
 
+def metric_cost(result: EvaluationResult) -> float | None:
+    """Cost in USD (None if not available)."""
+    if result.inference_metadata is None:
+        return None
+    return result.inference_metadata.cost_usd
 
 # Registry of available metrics
 METRICS: dict[str, MetricFunction] = {
@@ -63,6 +68,7 @@ METRICS: dict[str, MetricFunction] = {
     "precision_added": metric_precision_added,
     "precision_removed": metric_precision_removed,
     "precision_overall": metric_precision_overall,
+    "cost": metric_cost
 }
 
 # All available metrics

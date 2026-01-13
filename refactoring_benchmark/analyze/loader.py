@@ -82,8 +82,6 @@ def load_all_results(
     return results
 
 
-def is_valid_instance(results: list[EvaluationResult], instance_hash: str) -> bool:
-    return True
 
 def organize_data(
     results: list[EvaluationResult],
@@ -107,12 +105,8 @@ def organize_data(
     # Get metric function
     metric_fn = get_metric_function(metric_name)
     analysis_data = AnalysisData()
-    instances = set(res.instance_metadata.base_hash for res in results)
-    valid_instances = set(inst for inst in instances if is_valid_instance(results, inst))
     for result in results:
         # Apply filters if provided
-        if result.instance_metadata.base_hash not in valid_instances:
-            continue
         if filters:
             if not all(filter_fn(result) for filter_fn in filters):
                 continue
