@@ -119,7 +119,7 @@ def output_exists(output_dir: Path) -> bool:
         True if prediction.diff exists, False otherwise
     """
     prediction_path = output_dir / "prediction.diff"
-    return prediction_path.exists()
+    return prediction_path.exists() and prediction_path.stat().st_size > 3
 
 
 def augment_inference_metadata_with_description_type(output_dir: Path, description_type: str) -> None:
