@@ -74,28 +74,28 @@ def _plot_line(
     aggregation: AggregationType,
     config: PlotConfig,
 ) -> None:
-    """Plot line chart with error bars."""
+    """Plot line chart with symmetric 95% CI error bars."""
     x = np.arange(len(description_types))
 
     for i, agent_id in enumerate(agents):
         values = []
-        errors = []
+        margins = []
 
         for desc_type in description_types:
             agent_desc_data = data.get_data(agent_id, desc_type)
+            
             if agent_desc_data and agent_desc_data.count > 0:
-                if aggregation == "mean":
-                    values.append(agent_desc_data.mean)
-                    errors.append(agent_desc_data.std / np.sqrt(agent_desc_data.count) if config.show_error_bars else 0.0)
-                else:  # median
-                    values.append(agent_desc_data.median)
-                    errors.append(0.0)
+                val = agent_desc_data.mean if aggregation == "mean" else agent_desc_data.median
+                values.append(val)
+                if config.show_error_bars and aggregation == "mean":
+                    low, _ = agent_desc_data.confidence_interval()
+                    margins.append(val - low)
+                else:
+                    margins.append(0.0)
             else:
-                # Use np.nan for missing data (matplotlib handles this gracefully)
                 values.append(np.nan)
-                errors.append(np.nan)
+                margins.append(np.nan)
 
-        # Plot line
         ax.plot(
             x,
             values,
@@ -107,12 +107,11 @@ def _plot_line(
             alpha=config.alpha,
         )
 
-        # Plot error bars
         if config.show_error_bars:
             ax.errorbar(
                 x,
                 values,
-                yerr=errors,
+                yerr=margins,
                 fmt="none",
                 ecolor=colors[i],
                 capsize=config.error_bar_capsize,
@@ -132,28 +131,32 @@ def _plot_bar(
     aggregation: AggregationType,
     config: PlotConfig,
 ) -> None:
-    """Plot bar chart with error bars."""
+    """Plot bar chart with symmetric 95% CI error bars."""
     x = np.arange(len(description_types))
     width = config.bar_width / len(agents)
 
     for i, agent_id in enumerate(agents):
         values = []
-        errors = []
+        margins = []
 
         for desc_type in description_types:
             agent_desc_data = data.get_data(agent_id, desc_type)
+            
             if agent_desc_data and agent_desc_data.count > 0:
-                if aggregation == "mean":
-                    values.append(agent_desc_data.mean)
-                    errors.append(agent_desc_data.std / np.sqrt(agent_desc_data.count) if config.show_error_bars else 0.0)
-                else:  # median
-                    values.append(agent_desc_data.median)
-                    errors.append(0.0)
+                val = agent_desc_data.mean if aggregation == "mean" else agent_desc_data.median
+                values.append(val)
+                
+                # Use symmetric margin from CI logic
+                if config.show_error_bars and aggregation == "mean":
+                    low, _ = agent_desc_data.confidence_interval()
+                    margins.append(val - low)
+                else:
+                    margins.append(0.0)
             else:
                 values.append(0.0)
-                errors.append(0.0)
+                margins.append(0.0)
 
-        # Plot bars
+        # Matplotlib handles yerr as +/- the value provided
         ax.bar(
             x + i * width,
             values,
@@ -161,13 +164,13 @@ def _plot_bar(
             label=agent_id,
             color=colors[i],
             alpha=config.bar_alpha,
-            yerr=errors if config.show_error_bars else None,
+            yerr=margins if config.show_error_bars else None,
             capsize=config.error_bar_capsize,
+            error_kw={'alpha': config.error_bar_alpha} # Cleanly apply error bar transparency
         )
 
     ax.set_xticks(x + width * (len(agents) - 1) / 2)
     ax.set_xticklabels(description_types, fontsize=config.tick_fontsize)
-
 
 def _plot_scatter(
     ax: plt.Axes,
@@ -178,53 +181,57 @@ def _plot_scatter(
     aggregation: AggregationType,
     config: PlotConfig,
 ) -> None:
-    """Plot scatter chart with error bars."""
+    """Plot scatter chart with symmetric 95% CI error bars."""
     x = np.arange(len(description_types))
 
     for i, agent_id in enumerate(agents):
         values = []
-        errors = []
+        margins = []
 
         for desc_type in description_types:
             agent_desc_data = data.get_data(agent_id, desc_type)
+            
             if agent_desc_data and agent_desc_data.count > 0:
-                if aggregation == "mean":
-                    values.append(agent_desc_data.mean)
-                    errors.append(agent_desc_data.std / np.sqrt(agent_desc_data.count) if config.show_error_bars else 0.0)
-                else:  # median
-                    values.append(agent_desc_data.median)
-                    errors.append(0.0)
+                val = agent_desc_data.mean if aggregation == "mean" else agent_desc_data.median
+                values.append(val)
+                
+                if config.show_error_bars and aggregation == "mean":
+                    low, _ = agent_desc_data.confidence_interval()
+                    margins.append(val - low)
+                else:
+                    margins.append(0.0)
             else:
-                # Use np.nan for missing data (matplotlib handles this gracefully)
                 values.append(np.nan)
-                errors.append(np.nan)
+                margins.append(np.nan)
 
-        # Plot scatter points
+        # Small jitter so points/bars don't stack perfectly on top of each other
+        x_pos = x + (i - len(agents)/2) * 0.1 
+
         ax.scatter(
-            x,
+            x_pos,
             values,
             label=agent_id,
             color=colors[i],
             s=config.marker_size**2,
             marker=config.marker_style,
             alpha=config.alpha,
+            zorder=3
         )
 
-        # Plot error bars
         if config.show_error_bars:
             ax.errorbar(
-                x,
+                x_pos,
                 values,
-                yerr=errors,
+                yerr=margins,
                 fmt="none",
                 ecolor=colors[i],
                 capsize=config.error_bar_capsize,
                 alpha=config.error_bar_alpha,
+                zorder=2
             )
 
     ax.set_xticks(x)
     ax.set_xticklabels(description_types, fontsize=config.tick_fontsize)
-
 
 def save_plot(fig: plt.Figure, output_path: Path, dpi: int = 300) -> None:
     """Save plot to file.

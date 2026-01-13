@@ -16,6 +16,13 @@ def metric_ifr(result: EvaluationResult) -> float:
     """Total IFR metric (0-1 range)."""
     return result.agent_rule_metrics.ifr
 
+def metric_ifr_added(result: EvaluationResult) -> float:
+    """IFR for added lines only (0-1 range)."""
+    return result.agent_rule_metrics.positive_ifr
+
+def metric_ifr_removed(result: EvaluationResult) -> float:
+    """IFR for removed lines only (0-1 range)."""
+    return result.agent_rule_metrics.negative_ifr
 
 def metric_test_success(result: EvaluationResult) -> float | None:
     """Test success metric (1.0 if valid, 0.0 otherwise, None if no test data)."""
@@ -50,6 +57,8 @@ def metric_precision_overall(result: EvaluationResult) -> float | None:
 # Registry of available metrics
 METRICS: dict[str, MetricFunction] = {
     "ifr": metric_ifr,
+    "ifr_added": metric_ifr_added,
+    "ifr_removed": metric_ifr_removed,
     "test_success": metric_test_success,
     "precision_added": metric_precision_added,
     "precision_removed": metric_precision_removed,

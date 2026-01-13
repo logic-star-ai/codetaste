@@ -1,9 +1,11 @@
 """Data models for description-type based analysis."""
 
+import math
 import statistics
 from typing import Dict, Literal
 
 from pydantic import BaseModel, Field
+from scipy import stats
 
 
 class MetricPoint(BaseModel):
@@ -31,6 +33,27 @@ class AgentDescriptionData(BaseModel):
         if not self.metric_values:
             return 0.0
         return statistics.mean([p.value for p in self.metric_values])
+
+    @property
+    def standard_error(self) -> float:
+        """Standard error of the mean: sigma / sqrt(n)."""
+        if self.count <= 1:
+            return 0.0
+        return self.std / math.sqrt(self.count)
+
+    def confidence_interval(self, confidence: float = 0.95) -> tuple[float, float]:
+        """Calculate confidence interval for the mean using a T-distribution."""
+        n = self.count
+        if n <= 1:
+            m = self.mean
+            return (m, m)
+        
+        m = self.mean
+        se = self.standard_error
+        
+        # Use t-distribution for small samples, which approaches Z as n grows
+        h = se * stats.t.ppf((1 + confidence) / 2., n - 1)
+        return m - h, m + h
 
     @property
     def median(self) -> float:
