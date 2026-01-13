@@ -1,0 +1,116 @@
+diff --git a/saleor/attribute/models/base.py b/saleor/attribute/models/base.py
+index 67e49a1..9b8e164 100644
+--- a/saleor/attribute/models/base.py
++++ b/saleor/attribute/models/base.py
+@@ -312,9 +312,11 @@ class AttributeValueTranslation(Translation):
+                 elif assigned_product_attribute_value := (
+                     attribute_value.productvalueassignment.first()
+                 ):
+-                    if product_id := (
+-                        assigned_product_attribute_value.assignment.product_id
+-                    ):
++                    product_id = (
++                        assigned_product_attribute_value.product_id
++                        or assigned_product_attribute_value.assignment.product_id
++                    )
++                    if product_id:
+                         context["product_id"] = product_id
+             elif attribute.type == AttributeType.PAGE_TYPE:
+                 if assigned_page_attribute_value := (
+diff --git a/saleor/core/utils/random_data.py b/saleor/core/utils/random_data.py
+index 8a155b5..cabfbad 100644
+--- a/saleor/core/utils/random_data.py
++++ b/saleor/core/utils/random_data.py
+@@ -376,11 +376,26 @@ def assign_attributes_to_products(product_attributes):
+ 
+ 
+ def assign_attribute_values_to_products(values):
++    assignment_ids = {
++        value["fields"].get("assignment")
++        for value in values
++        if "fields" in value and value["fields"].get("assignment") is not None
++    }
++    assignments_map = {
++        assignment.pk: assignment.product_id
++        for assignment in AssignedProductAttribute.objects.filter(
++            pk__in=assignment_ids
++        )
++    }
++
+     for value in values:
+         pk = value["pk"]
+         defaults = dict(value["fields"])
+         defaults["value_id"] = defaults.pop("value")
+-        defaults["assignment_id"] = defaults.pop("assignment")
++        assignment_id = defaults.pop("assignment")
++        product_id = defaults.pop("product", None)
++        defaults["assignment_id"] = assignment_id
++        defaults["product_id"] = product_id or assignments_map.get(assignment_id)
+         AssignedProductAttributeValue.objects.update_or_create(pk=pk, defaults=defaults)
+ 
+ 
+diff --git a/saleor/graphql/attribute/bulk_mutations.py b/saleor/graphql/attribute/bulk_mutations.py
+index b6c0e9a..0ff7390 100644
+--- a/saleor/graphql/attribute/bulk_mutations.py
++++ b/saleor/graphql/attribute/bulk_mutations.py
+@@ -142,9 +142,6 @@ class AttributeValueBulkDelete(ModelBulkDeleteMutation):
+         assigned_product_values = models.AssignedProductAttributeValue.objects.filter(
+             value_id__in=value_pks
+         )
+-        assigned_product_attrs = models.AssignedProductAttribute.objects.filter(
+-            Exists(assigned_product_values.filter(assignment_id=OuterRef("id")))
+-        )
+ 
+         assigned_variant_values = models.AssignedVariantAttributeValue.objects.filter(
+             value_id__in=value_pks
+@@ -157,7 +154,7 @@ class AttributeValueBulkDelete(ModelBulkDeleteMutation):
+         )
+ 
+         product_ids = product_models.Product.objects.filter(
+-            Exists(assigned_product_attrs.filter(product_id=OuterRef("id")))
++            Exists(assigned_product_values.filter(product_id=OuterRef("id")))
+             | Q(Exists(variants.filter(product_id=OuterRef("id"))))
+         ).values_list("id", flat=True)
+         return list(product_ids)
+diff --git a/saleor/graphql/product/filters.py b/saleor/graphql/product/filters.py
+index a4b8e9e..e3b387e 100644
+--- a/saleor/graphql/product/filters.py
++++ b/saleor/graphql/product/filters.py
+@@ -14,7 +14,6 @@ from django.utils import timezone
+ 
+ from ...attribute import AttributeInputType
+ from ...attribute.models import (
+-    AssignedProductAttribute,
+     AssignedProductAttributeValue,
+     AssignedVariantAttribute,
+     AssignedVariantAttributeValue,
+@@ -219,14 +218,11 @@ def filter_products_by_attributes_values(qs, queries: T_PRODUCT_FILTER_QUERIES):
+         assigned_product_attribute_values = (
+             AssignedProductAttributeValue.objects.filter(value_id__in=values)
+         )
+-        assigned_product_attributes = AssignedProductAttribute.objects.filter(
++        product_attribute_filter = Q(
+             Exists(
+-                assigned_product_attribute_values.filter(assignment_id=OuterRef("pk"))
++                assigned_product_attribute_values.filter(product_id=OuterRef("pk"))
+             )
+         )
+-        product_attribute_filter = Q(
+-            Exists(assigned_product_attributes.filter(product_id=OuterRef("pk")))
+-        )
+ 
+         assigned_variant_attribute_values = (
+             AssignedVariantAttributeValue.objects.filter(value_id__in=values)
+@@ -252,11 +248,8 @@ def filter_products_by_attributes_values_qs(qs, values_qs):
+     assigned_product_attribute_values = AssignedProductAttributeValue.objects.filter(
+         value__in=values_qs
+     )
+-    assigned_product_attributes = AssignedProductAttribute.objects.filter(
+-        Exists(assigned_product_attribute_values.filter(assignment_id=OuterRef("pk")))
+-    )
+     product_attribute_filter = Q(
+-        Exists(assigned_product_attributes.filter(product_id=OuterRef("pk")))
++        Exists(assigned_product_attribute_values.filter(product_id=OuterRef("pk")))
+     )
+ 
+     assigned_variant_attribute_values = AssignedVariantAttributeValue.objects.filter(

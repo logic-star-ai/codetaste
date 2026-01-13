@@ -1,0 +1,1498 @@
+diff --git a/core/src/main/java/com/linecorp/armeria/client/AllInOneClientFactory.java b/core/src/main/java/com/linecorp/armeria/client/AllInOneClientFactory.java
+index 1cadd37..f22ab40 100644
+--- a/core/src/main/java/com/linecorp/armeria/client/AllInOneClientFactory.java
++++ b/core/src/main/java/com/linecorp/armeria/client/AllInOneClientFactory.java
+@@ -58,43 +58,41 @@ public class AllInOneClientFactory extends NonDecoratingClientFactory {
+     private final Map<Scheme, ClientFactory> clientFactories;
+ 
+     /**
+-     * Creates a new instance with the default {@link SessionOptions}.
++     * Creates a new instance with the default {@link ClientFactoryOptions}.
+      */
+     public AllInOneClientFactory() {
+         this(false);
+     }
+ 
+     /**
+-     * Creates a new instance with the default {@link SessionOptions}.
++     * Creates a new instance with the default {@link ClientFactoryOptions}.
+      *
+      * @param useDaemonThreads whether to create I/O event loop threads as daemon threads
+      */
+     public AllInOneClientFactory(boolean useDaemonThreads) {
+-        this(SessionOptions.DEFAULT, useDaemonThreads);
++        this(ClientFactoryOptions.DEFAULT, useDaemonThreads);
+     }
+ 
+     /**
+-     * Creates a new instance with the specified {@link SessionOptions}.
++     * Creates a new instance with the specified {@link ClientFactoryOptions}.
+      */
+-    public AllInOneClientFactory(SessionOptions options) {
++    public AllInOneClientFactory(ClientFactoryOptions options) {
+         this(options, false);
+     }
+ 
+     /**
+-     * Creates a new instance with the specified {@link SessionOptions}.
++     * Creates a new instance with the specified {@link ClientFactoryOptions}.
+      *
+      * @param useDaemonThreads whether to create I/O event loop threads as daemon threads
+      */
+-    public AllInOneClientFactory(SessionOptions options, boolean useDaemonThreads) {
++    public AllInOneClientFactory(ClientFactoryOptions options, boolean useDaemonThreads) {
+         super(options, useDaemonThreads);
+ 
+-        // TODO(trustin): Allow specifying different options for different session protocols.
+-        //                We have only one session protocol at the moment, so this is OK so far.
+-
+         // Do not let the delegates create or manage event loops by specifying the EventLoop explicitly.
+         // See NonDecoratingClientFactory.closeEventLoopGroup for more information.
+-        final SessionOptions delegateOptions =
+-                SessionOptions.of(options, SessionOption.EVENT_LOOP_GROUP.newValue(eventLoopGroup()));
++        final ClientFactoryOptions delegateOptions = options.toBuilder()
++                .eventLoopGroup(eventLoopGroup())
++                .build();
+ 
+         final List<ClientFactoryProvider> providers =
+                 Streams.stream(ServiceLoader.load(ClientFactoryProvider.class,
+diff --git a/core/src/main/java/com/linecorp/armeria/client/ClientFactory.java b/core/src/main/java/com/linecorp/armeria/client/ClientFactory.java
+index 98bacd7..1359b06 100644
+--- a/core/src/main/java/com/linecorp/armeria/client/ClientFactory.java
++++ b/core/src/main/java/com/linecorp/armeria/client/ClientFactory.java
+@@ -68,9 +68,9 @@ public interface ClientFactory extends AutoCloseable {
+     Set<Scheme> supportedSchemes();
+ 
+     /**
+-     * Returns the session-layer options of the connections created by this {@link ClientFactory}.
++     * Returns the options of this {@link ClientFactory}.
+      */
+-    SessionOptions options();
++    ClientFactoryOptions options();
+ 
+     /**
+      * Returns the {@link EventLoopGroup} being used by this {@link ClientFactory}. Can be used to, e.g.,
+diff --git a/core/src/main/java/com/linecorp/armeria/client/ClientFactoryOptions.java b/core/src/main/java/com/linecorp/armeria/client/ClientFactoryOptions.java
+new file mode 100644
+index 0000000..64a69c9
+--- /dev/null
++++ b/core/src/main/java/com/linecorp/armeria/client/ClientFactoryOptions.java
+@@ -0,0 +1,365 @@
++/*
++ * Copyright 2015 LINE Corporation
++ *
++ * LINE Corporation licenses this file to you under the Apache License,
++ * version 2.0 (the "License"); you may not use this file except in compliance
++ * with the License. You may obtain a copy of the License at:
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++ * License for the specific language governing permissions and limitations
++ * under the License.
++ */
++package com.linecorp.armeria.client;
++
++import static java.util.Objects.requireNonNull;
++
++import java.net.InetSocketAddress;
++import java.time.Duration;
++import java.util.Optional;
++import java.util.function.Consumer;
++import java.util.function.Function;
++
++import javax.annotation.Nullable;
++import javax.net.ssl.TrustManagerFactory;
++
++import com.linecorp.armeria.client.pool.KeyedChannelPoolHandler;
++import com.linecorp.armeria.client.pool.PoolKey;
++import com.linecorp.armeria.common.Flags;
++
++import io.netty.channel.EventLoopGroup;
++import io.netty.handler.ssl.SslContextBuilder;
++import io.netty.resolver.AddressResolverGroup;
++
++/**
++ * Options that affect the HTTP session management of a {@link ClientFactory}.
++ */
++public final class ClientFactoryOptions {
++
++    private static final Duration DEFAULT_CONNECT_TIMEOUT = Duration.ofMillis(3200);
++    private static final Duration DEFAULT_IDLE_TIMEOUT = Duration.ofSeconds(10);
++
++    /**
++     * The default {@link ClientFactoryOptions}.
++     */
++    public static final ClientFactoryOptions DEFAULT = new ClientFactoryOptions(
++            DEFAULT_CONNECT_TIMEOUT,
++            DEFAULT_IDLE_TIMEOUT,
++            null,
++            null,
++            null,
++            null,
++            null,
++            Flags.defaultUseHttp2Preface(),
++            Flags.defaultUseHttp1Pipelining()
++    );
++
++    private final Duration connectTimeout;
++    private final Duration idleTimeout;
++    @Nullable
++    private final TrustManagerFactory trustManagerFactory;
++    @Nullable
++    private final Consumer<SslContextBuilder> sslContextCustomizer;
++    @Nullable
++    private final AddressResolverGroup<? extends InetSocketAddress> addressResolverGroup;
++    @Nullable
++    private final EventLoopGroup eventLoopGroup;
++    @Nullable
++    private final Function<KeyedChannelPoolHandler<PoolKey>, KeyedChannelPoolHandler<PoolKey>> poolHandlerDecorator;
++    private final boolean useHttp2Preface;
++    private final boolean useHttp1Pipelining;
++
++    private ClientFactoryOptions(
++            Duration connectTimeout,
++            Duration idleTimeout,
++            @Nullable TrustManagerFactory trustManagerFactory,
++            @Nullable Consumer<SslContextBuilder> sslContextCustomizer,
++            @Nullable AddressResolverGroup<? extends InetSocketAddress> addressResolverGroup,
++            @Nullable EventLoopGroup eventLoopGroup,
++            @Nullable Function<KeyedChannelPoolHandler<PoolKey>, KeyedChannelPoolHandler<PoolKey>> poolHandlerDecorator,
++            boolean useHttp2Preface,
++            boolean useHttp1Pipelining) {
++        this.connectTimeout = connectTimeout;
++        this.idleTimeout = idleTimeout;
++        this.trustManagerFactory = trustManagerFactory;
++        this.sslContextCustomizer = sslContextCustomizer;
++        this.addressResolverGroup = addressResolverGroup;
++        this.eventLoopGroup = eventLoopGroup;
++        this.poolHandlerDecorator = poolHandlerDecorator;
++        this.useHttp2Preface = useHttp2Preface;
++        this.useHttp1Pipelining = useHttp1Pipelining;
++    }
++
++    /**
++     * Returns a new {@link ClientFactoryOptionsBuilder}.
++     */
++    public static ClientFactoryOptionsBuilder builder() {
++        return new ClientFactoryOptionsBuilder();
++    }
++
++    /**
++     * Returns a new {@link ClientFactoryOptionsBuilder} initialized with this options.
++     */
++    public ClientFactoryOptionsBuilder toBuilder() {
++        return new ClientFactoryOptionsBuilder(this);
++    }
++
++    /**
++     * Returns the timeout of a socket connection attempt.
++     */
++    public Duration connectTimeout() {
++        return connectTimeout;
++    }
++
++    /**
++     * Returns the timeout of a socket connection attempt as milliseconds.
++     */
++    public long connectTimeoutMillis() {
++        return connectTimeout.toMillis();
++    }
++
++    /**
++     * Returns the idle timeout of a socket connection. The connection is closed if there is no invocation
++     * in progress for this amount of time.
++     */
++    public Duration idleTimeout() {
++        return idleTimeout;
++    }
++
++    /**
++     * Returns the idle timeout of a socket connection as milliseconds.
++     */
++    public long idleTimeoutMillis() {
++        return idleTimeout.toMillis();
++    }
++
++    /**
++     * Returns the {@link TrustManagerFactory} of a TLS connection.
++     *
++     * @deprecated Use {@link #sslContextCustomizer()} instead.
++     */
++    @Deprecated
++    public Optional<TrustManagerFactory> trustManagerFactory() {
++        return Optional.ofNullable(trustManagerFactory);
++    }
++
++    /**
++     * Returns the {@link Consumer} which can arbitrarily configure the {@link SslContextBuilder} that will
++     * be applied to the factory's SSL context.
++     */
++    public Optional<Consumer<SslContextBuilder>> sslContextCustomizer() {
++        return Optional.ofNullable(sslContextCustomizer);
++    }
++
++    /**
++     * Returns the {@link AddressResolverGroup} to use to resolve remote addresses into
++     * {@link InetSocketAddress}es.
++     */
++    public Optional<AddressResolverGroup<InetSocketAddress>> addressResolverGroup() {
++        @SuppressWarnings("unchecked")
++        final AddressResolverGroup<InetSocketAddress> castValue =
++                (AddressResolverGroup<InetSocketAddress>) addressResolverGroup;
++        return Optional.ofNullable(castValue);
++    }
++
++    /**
++     * Returns the {@link EventLoopGroup} that will provide the {@link io.netty.channel.EventLoop} for I/O
++     * and asynchronous invocations.
++     */
++    public Optional<EventLoopGroup> eventLoopGroup() {
++        return Optional.ofNullable(eventLoopGroup);
++    }
++
++    /**
++     * Returns the {@link Function} that decorates the {@link KeyedChannelPoolHandler}.
++     */
++    public Function<KeyedChannelPoolHandler<PoolKey>, KeyedChannelPoolHandler<PoolKey>> poolHandlerDecorator() {
++        return poolHandlerDecorator != null ? poolHandlerDecorator : Function.identity();
++    }
++
++    /**
++     * Returns whether to send an HTTP/2 preface string instead of an HTTP/1 upgrade request to negotiate
++     * the protocol version of a cleartext HTTP connection.
++     */
++    public boolean useHttp2Preface() {
++        return useHttp2Preface;
++    }
++
++    /**
++     * Returns whether to use HTTP pipelining for HTTP/1 connections.
++     */
++    public boolean useHttp1Pipelining() {
++        return useHttp1Pipelining;
++    }
++
++    @Override
++    public String toString() {
++        return "ClientFactoryOptions{" +
++               "connectTimeout=" + connectTimeout +
++               ", idleTimeout=" + idleTimeout +
++               ", trustManagerFactory=" + trustManagerFactory +
++               ", sslContextCustomizer=" + sslContextCustomizer +
++               ", addressResolverGroup=" + addressResolverGroup +
++               ", eventLoopGroup=" + eventLoopGroup +
++               ", poolHandlerDecorator=" + poolHandlerDecorator +
++               ", useHttp2Preface=" + useHttp2Preface +
++               ", useHttp1Pipelining=" + useHttp1Pipelining +
++               '}';
++    }
++
++    /**
++     * A builder for {@link ClientFactoryOptions}.
++     */
++    public static final class ClientFactoryOptionsBuilder {
++
++        private Duration connectTimeout = DEFAULT_CONNECT_TIMEOUT;
++        private Duration idleTimeout = DEFAULT_IDLE_TIMEOUT;
++        @Nullable
++        private TrustManagerFactory trustManagerFactory;
++        @Nullable
++        private Consumer<SslContextBuilder> sslContextCustomizer;
++        @Nullable
++        private AddressResolverGroup<? extends InetSocketAddress> addressResolverGroup;
++        @Nullable
++        private EventLoopGroup eventLoopGroup;
++        @Nullable
++        private Function<KeyedChannelPoolHandler<PoolKey>, KeyedChannelPoolHandler<PoolKey>> poolHandlerDecorator;
++        private boolean useHttp2Preface = Flags.defaultUseHttp2Preface();
++        private boolean useHttp1Pipelining = Flags.defaultUseHttp1Pipelining();
++
++        ClientFactoryOptionsBuilder() {}
++
++        ClientFactoryOptionsBuilder(ClientFactoryOptions options) {
++            connectTimeout = options.connectTimeout;
++            idleTimeout = options.idleTimeout;
++            trustManagerFactory = options.trustManagerFactory;
++            sslContextCustomizer = options.sslContextCustomizer;
++            addressResolverGroup = options.addressResolverGroup;
++            eventLoopGroup = options.eventLoopGroup;
++            poolHandlerDecorator = options.poolHandlerDecorator;
++            useHttp2Preface = options.useHttp2Preface;
++            useHttp1Pipelining = options.useHttp1Pipelining;
++        }
++
++        /**
++         * Sets the timeout of a socket connection attempt.
++         */
++        public ClientFactoryOptionsBuilder connectTimeout(Duration connectTimeout) {
++            requireNonNull(connectTimeout, "connectTimeout");
++            if (connectTimeout.isNegative() || connectTimeout.isZero()) {
++                throw new IllegalArgumentException("connectTimeout: " + connectTimeout + " (expected: > 0)");
++            }
++            this.connectTimeout = connectTimeout;
++            return this;
++        }
++
++        /**
++         * Sets the timeout of a socket connection attempt in milliseconds.
++         */
++        public ClientFactoryOptionsBuilder connectTimeoutMillis(long connectTimeoutMillis) {
++            return connectTimeout(Duration.ofMillis(connectTimeoutMillis));
++        }
++
++        /**
++         * Sets the idle timeout of a socket connection.
++         */
++        public ClientFactoryOptionsBuilder idleTimeout(Duration idleTimeout) {
++            requireNonNull(idleTimeout, "idleTimeout");
++            if (idleTimeout.isNegative()) {
++                throw new IllegalArgumentException("idleTimeout: " + idleTimeout + " (expected: >= 0)");
++            }
++            this.idleTimeout = idleTimeout;
++            return this;
++        }
++
++        /**
++         * Sets the idle timeout of a socket connection in milliseconds.
++         */
++        public ClientFactoryOptionsBuilder idleTimeoutMillis(long idleTimeoutMillis) {
++            return idleTimeout(Duration.ofMillis(idleTimeoutMillis));
++        }
++
++        /**
++         * Sets the {@link TrustManagerFactory} of a TLS connection.
++         *
++         * @deprecated Use {@link #sslContextCustomizer(Consumer)} instead.
++         */
++        @Deprecated
++        public ClientFactoryOptionsBuilder trustManagerFactory(TrustManagerFactory trustManagerFactory) {
++            this.trustManagerFactory = requireNonNull(trustManagerFactory, "trustManagerFactory");
++            return this;
++        }
++
++        /**
++         * Sets a {@link Consumer} which can arbitrarily configure the {@link SslContextBuilder} that will
++         * be applied to the factory's SSL context.
++         */
++        public ClientFactoryOptionsBuilder sslContextCustomizer(
++                Consumer<SslContextBuilder> sslContextCustomizer) {
++            this.sslContextCustomizer = requireNonNull(sslContextCustomizer, "sslContextCustomizer");
++            return this;
++        }
++
++        /**
++         * Sets the {@link AddressResolverGroup} to use to resolve remote addresses.
++         */
++        public ClientFactoryOptionsBuilder addressResolverGroup(
++                AddressResolverGroup<? extends InetSocketAddress> addressResolverGroup) {
++            this.addressResolverGroup = requireNonNull(addressResolverGroup, "addressResolverGroup");
++            return this;
++        }
++
++        /**
++         * Sets the {@link EventLoopGroup} to use for I/O and asynchronous invocations.
++         */
++        public ClientFactoryOptionsBuilder eventLoopGroup(EventLoopGroup eventLoopGroup) {
++            this.eventLoopGroup = requireNonNull(eventLoopGroup, "eventLoopGroup");
++            return this;
++        }
++
++        /**
++         * Sets a {@link Function} that decorates the {@link KeyedChannelPoolHandler}.
++         */
++        public ClientFactoryOptionsBuilder poolHandlerDecorator(
++                Function<KeyedChannelPoolHandler<PoolKey>, KeyedChannelPoolHandler<PoolKey>> poolHandlerDecorator) {
++            this.poolHandlerDecorator = requireNonNull(poolHandlerDecorator, "poolHandlerDecorator");
++            return this;
++        }
++
++        /**
++         * Sets whether to send an HTTP/2 preface string instead of an HTTP/1 upgrade request.
++         */
++        public ClientFactoryOptionsBuilder useHttp2Preface(boolean useHttp2Preface) {
++            this.useHttp2Preface = useHttp2Preface;
++            return this;
++        }
++
++        /**
++         * Sets whether to use HTTP pipelining for HTTP/1 connections.
++         */
++        public ClientFactoryOptionsBuilder useHttp1Pipelining(boolean useHttp1Pipelining) {
++            this.useHttp1Pipelining = useHttp1Pipelining;
++            return this;
++        }
++
++        /**
++         * Returns a newly created {@link ClientFactoryOptions} with the configured options.
++         */
++        public ClientFactoryOptions build() {
++            return new ClientFactoryOptions(
++                    connectTimeout,
++                    idleTimeout,
++                    trustManagerFactory,
++                    sslContextCustomizer,
++                    addressResolverGroup,
++                    eventLoopGroup,
++                    poolHandlerDecorator,
++                    useHttp2Preface,
++                    useHttp1Pipelining
++            );
++        }
++    }
++}
+diff --git a/core/src/main/java/com/linecorp/armeria/client/ClientFactoryProvider.java b/core/src/main/java/com/linecorp/armeria/client/ClientFactoryProvider.java
+index c69b6a9..0187498 100644
+--- a/core/src/main/java/com/linecorp/armeria/client/ClientFactoryProvider.java
++++ b/core/src/main/java/com/linecorp/armeria/client/ClientFactoryProvider.java
+@@ -28,12 +28,12 @@ public interface ClientFactoryProvider {
+     /**
+      * Creates a new {@link ClientFactory}.
+      */
+-    ClientFactory newFactory(SessionOptions options, Map<Class<?>, ClientFactory> dependencies);
++    ClientFactory newFactory(ClientFactoryOptions options, Map<Class<?>, ClientFactory> dependencies);
+ 
+     /**
+      * Returns the type of the {@link ClientFactory} required for this provider to create a new
+      * {@link ClientFactory}. The {@link Map} which is given when
+-     * {@link #newFactory(SessionOptions, Map)} is invoked will contain the entries
++     * {@link #newFactory(ClientFactoryOptions, Map)} is invoked will contain the entries
+      * for the classes returned by this method and their respective instances.
+      */
+     default Set<Class<? extends ClientFactory>> dependencies() {
+diff --git a/core/src/main/java/com/linecorp/armeria/client/DecoratingClientFactory.java b/core/src/main/java/com/linecorp/armeria/client/DecoratingClientFactory.java
+index 134ffae..03f1465 100644
+--- a/core/src/main/java/com/linecorp/armeria/client/DecoratingClientFactory.java
++++ b/core/src/main/java/com/linecorp/armeria/client/DecoratingClientFactory.java
+@@ -55,7 +55,7 @@ public class DecoratingClientFactory extends AbstractClientFactory {
+     }
+ 
+     @Override
+-    public SessionOptions options() {
++    public ClientFactoryOptions options() {
+         return delegate().options();
+     }
+ 
+diff --git a/core/src/main/java/com/linecorp/armeria/client/HttpClientDelegate.java b/core/src/main/java/com/linecorp/armeria/client/HttpClientDelegate.java
+index ff839ae..0d36836 100644
+--- a/core/src/main/java/com/linecorp/armeria/client/HttpClientDelegate.java
++++ b/core/src/main/java/com/linecorp/armeria/client/HttpClientDelegate.java
+@@ -172,7 +172,7 @@ final class HttpClientDelegate implements Client<HttpRequest, HttpResponse> {
+ 
+         return map.computeIfAbsent(eventLoop, e -> {
+             final Bootstrap bootstrap = factory.newBootstrap();
+-            final SessionOptions options = factory.options();
++            final ClientFactoryOptions options = factory.options();
+ 
+             bootstrap.group(eventLoop);
+ 
+diff --git a/core/src/main/java/com/linecorp/armeria/client/HttpClientFactory.java b/core/src/main/java/com/linecorp/armeria/client/HttpClientFactory.java
+index 88b5f41..510dfac 100644
+--- a/core/src/main/java/com/linecorp/armeria/client/HttpClientFactory.java
++++ b/core/src/main/java/com/linecorp/armeria/client/HttpClientFactory.java
+@@ -42,34 +42,34 @@ public final class HttpClientFactory extends NonDecoratingClientFactory {
+                   .collect(toImmutableSet());
+ 
+     /**
+-     * Creates a new instance with the default {@link SessionOptions}.
++     * Creates a new instance with the default {@link ClientFactoryOptions}.
+      */
+     public HttpClientFactory() {
+         this(false);
+     }
+ 
+     /**
+-     * Creates a new instance with the default {@link SessionOptions}.
++     * Creates a new instance with the default {@link ClientFactoryOptions}.
+      *
+      * @param useDaemonThreads whether to create I/O event loop threads as daemon threads
+      */
+     public HttpClientFactory(boolean useDaemonThreads) {
+-        this(SessionOptions.DEFAULT, useDaemonThreads);
++        this(ClientFactoryOptions.DEFAULT, useDaemonThreads);
+     }
+ 
+     /**
+-     * Creates a new instance with the specified {@link SessionOptions}.
++     * Creates a new instance with the specified {@link ClientFactoryOptions}.
+      */
+-    public HttpClientFactory(SessionOptions options) {
++    public HttpClientFactory(ClientFactoryOptions options) {
+         this(options, false);
+     }
+ 
+     /**
+-     * Creates a new instance with the specified {@link SessionOptions}.
++     * Creates a new instance with the specified {@link ClientFactoryOptions}.
+      *
+      * @param useDaemonThreads whether to create I/O event loop threads as daemon threads
+      */
+-    public HttpClientFactory(SessionOptions options, boolean useDaemonThreads) {
++    public HttpClientFactory(ClientFactoryOptions options, boolean useDaemonThreads) {
+         super(options, useDaemonThreads);
+     }
+ 
+diff --git a/core/src/main/java/com/linecorp/armeria/client/HttpClientFactoryProvider.java b/core/src/main/java/com/linecorp/armeria/client/HttpClientFactoryProvider.java
+index dd942fb..aec3d39 100644
+--- a/core/src/main/java/com/linecorp/armeria/client/HttpClientFactoryProvider.java
++++ b/core/src/main/java/com/linecorp/armeria/client/HttpClientFactoryProvider.java
+@@ -23,7 +23,7 @@ import java.util.Map;
+  */
+ public final class HttpClientFactoryProvider implements ClientFactoryProvider {
+     @Override
+-    public ClientFactory newFactory(SessionOptions options, Map<Class<?>, ClientFactory> dependencies) {
++    public ClientFactory newFactory(ClientFactoryOptions options, Map<Class<?>, ClientFactory> dependencies) {
+         return new HttpClientFactory(options);
+     }
+ }
+diff --git a/core/src/main/java/com/linecorp/armeria/client/HttpClientPipelineConfigurator.java b/core/src/main/java/com/linecorp/armeria/client/HttpClientPipelineConfigurator.java
+index aa19a2f..1aaae1d 100644
+--- a/core/src/main/java/com/linecorp/armeria/client/HttpClientPipelineConfigurator.java
++++ b/core/src/main/java/com/linecorp/armeria/client/HttpClientPipelineConfigurator.java
+@@ -112,10 +112,10 @@ final class HttpClientPipelineConfigurator extends ChannelDuplexHandler {
+ 
+     private final SslContext sslCtx;
+     private final HttpPreference httpPreference;
+-    private final SessionOptions options;
++    private final ClientFactoryOptions options;
+     private InetSocketAddress remoteAddress;
+ 
+-    HttpClientPipelineConfigurator(SessionProtocol sessionProtocol, SessionOptions options) {
++    HttpClientPipelineConfigurator(SessionProtocol sessionProtocol, ClientFactoryOptions options) {
+         if (sessionProtocol == HTTP || sessionProtocol == HTTPS) {
+             httpPreference = HttpPreference.HTTP2_PREFERRED;
+         } else if (sessionProtocol == H1 || sessionProtocol == H1C) {
+diff --git a/core/src/main/java/com/linecorp/armeria/client/HttpSessionChannelFactory.java b/core/src/main/java/com/linecorp/armeria/client/HttpSessionChannelFactory.java
+index 71f9cd1..688027e 100644
+--- a/core/src/main/java/com/linecorp/armeria/client/HttpSessionChannelFactory.java
++++ b/core/src/main/java/com/linecorp/armeria/client/HttpSessionChannelFactory.java
+@@ -43,9 +43,9 @@ class HttpSessionChannelFactory implements Function<PoolKey, Future<Channel>> {
+     private final Bootstrap baseBootstrap;
+     private final EventLoop eventLoop;
+     private final Map<SessionProtocol, Bootstrap> bootstrapMap;
+-    private final SessionOptions options;
++    private final ClientFactoryOptions options;
+ 
+-    HttpSessionChannelFactory(Bootstrap bootstrap, SessionOptions options) {
++    HttpSessionChannelFactory(Bootstrap bootstrap, ClientFactoryOptions options) {
+         baseBootstrap = requireNonNull(bootstrap);
+         eventLoop = (EventLoop) bootstrap.config().group();
+ 
+diff --git a/core/src/main/java/com/linecorp/armeria/client/NonDecoratingClientFactory.java b/core/src/main/java/com/linecorp/armeria/client/NonDecoratingClientFactory.java
+index 5fb930d..0b2be93 100644
+--- a/core/src/main/java/com/linecorp/armeria/client/NonDecoratingClientFactory.java
++++ b/core/src/main/java/com/linecorp/armeria/client/NonDecoratingClientFactory.java
+@@ -19,7 +19,6 @@ package com.linecorp.armeria.client;
+ import static java.util.Objects.requireNonNull;
+ 
+ import java.net.InetSocketAddress;
+-import java.util.Optional;
+ import java.util.concurrent.ThreadFactory;
+ import java.util.function.Function;
+ import java.util.function.Supplier;
+@@ -44,7 +43,7 @@ public abstract class NonDecoratingClientFactory extends AbstractClientFactory {
+ 
+     private final EventLoopGroup eventLoopGroup;
+     private final boolean closeEventLoopGroup;
+-    private final SessionOptions options;
++    private final ClientFactoryOptions options;
+     private final Bootstrap baseBootstrap;
+ 
+     // FIXME(trustin): Reuse idle connections instead of creating a new connection for every event loop.
+@@ -56,25 +55,25 @@ public abstract class NonDecoratingClientFactory extends AbstractClientFactory {
+             () -> RequestContext.mapCurrent(RequestContext::eventLoop, () -> eventLoopGroup().next());
+ 
+     /**
+-     * Creates a new instance with the default {@link SessionOptions}.
++     * Creates a new instance with the default {@link ClientFactoryOptions}.
+      *
+      * @param useDaemonThreads whether to create I/O event loop threads as daemon threads
+      */
+     protected NonDecoratingClientFactory(boolean useDaemonThreads) {
+-        this(SessionOptions.DEFAULT, useDaemonThreads);
++        this(ClientFactoryOptions.DEFAULT, useDaemonThreads);
+     }
+ 
+     /**
+-     * Creates a new instance with the specified {@link SessionOptions}.
++     * Creates a new instance with the specified {@link ClientFactoryOptions}.
+      *
+      * @param useDaemonThreads whether to create I/O event loop threads as daemon threads
+      */
+-    protected NonDecoratingClientFactory(SessionOptions options, boolean useDaemonThreads) {
++    protected NonDecoratingClientFactory(ClientFactoryOptions options, boolean useDaemonThreads) {
+         this(options, type -> new DefaultThreadFactory("armeria-client-" + type.lowerCasedName(),
+                                                        useDaemonThreads));
+     }
+ 
+-    private NonDecoratingClientFactory(SessionOptions options,
++    private NonDecoratingClientFactory(ClientFactoryOptions options,
+                                        Function<TransportType, ThreadFactory> threadFactoryFactory) {
+ 
+         requireNonNull(options, "options");
+@@ -83,9 +82,8 @@ public abstract class NonDecoratingClientFactory extends AbstractClientFactory {
+         final Bootstrap baseBootstrap = new Bootstrap();
+ 
+         final TransportType transportType = TransportType.detectTransportType();
+-        final Optional<EventLoopGroup> eventLoopOption = options.eventLoopGroup();
+-        if (eventLoopOption.isPresent()) {
+-            eventLoopGroup = eventLoopOption.get();
++        if (options.eventLoopGroup().isPresent()) {
++            eventLoopGroup = options.eventLoopGroup().get();
+             closeEventLoopGroup = false;
+         } else {
+             eventLoopGroup = transportType.newEventLoopGroup(0, threadFactoryFactory);
+@@ -104,7 +102,7 @@ public abstract class NonDecoratingClientFactory extends AbstractClientFactory {
+     }
+ 
+     private static AddressResolverGroup<InetSocketAddress> addressResolverGroup(
+-            SessionOptions options, EventLoopGroup eventLoopGroup) {
++            ClientFactoryOptions options, EventLoopGroup eventLoopGroup) {
+ 
+         return options.addressResolverGroup().orElseGet(
+                 () -> new DnsAddressResolverGroup(
+@@ -118,7 +116,7 @@ public abstract class NonDecoratingClientFactory extends AbstractClientFactory {
+     }
+ 
+     @Override
+-    public final SessionOptions options() {
++    public final ClientFactoryOptions options() {
+         return options;
+     }
+ 
+diff --git a/core/src/main/java/com/linecorp/armeria/client/SessionOption.java b/core/src/main/java/com/linecorp/armeria/client/SessionOption.java
+deleted file mode 100644
+index f6beb2c..0000000
+--- a/core/src/main/java/com/linecorp/armeria/client/SessionOption.java
++++ /dev/null
+@@ -1,129 +0,0 @@
+-/*
+- * Copyright 2015 LINE Corporation
+- *
+- * LINE Corporation licenses this file to you under the Apache License,
+- * version 2.0 (the "License"); you may not use this file except in compliance
+- * with the License. You may obtain a copy of the License at:
+- *
+- *   http://www.apache.org/licenses/LICENSE-2.0
+- *
+- * Unless required by applicable law or agreed to in writing, software
+- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+- * License for the specific language governing permissions and limitations
+- * under the License.
+- */
+-package com.linecorp.armeria.client;
+-
+-import static java.util.Objects.requireNonNull;
+-
+-import java.net.InetSocketAddress;
+-import java.time.Duration;
+-import java.util.function.Consumer;
+-import java.util.function.Function;
+-
+-import javax.net.ssl.TrustManagerFactory;
+-
+-import com.linecorp.armeria.client.pool.KeyedChannelPoolHandler;
+-import com.linecorp.armeria.client.pool.PoolKey;
+-import com.linecorp.armeria.common.util.AbstractOption;
+-
+-import io.netty.channel.EventLoop;
+-import io.netty.channel.EventLoopGroup;
+-import io.netty.handler.ssl.SslContextBuilder;
+-import io.netty.resolver.AddressResolverGroup;
+-import io.netty.util.ConstantPool;
+-
+-/**
+- * An option that affects the session management of a {@link ClientFactory}.
+- *
+- * @param <T> the type of the option value
+- */
+-public final class SessionOption<T> extends AbstractOption<T> {
+-
+-    @SuppressWarnings("rawtypes")
+-    private static final ConstantPool pool = new ConstantPool() {
+-        @Override
+-        protected SessionOption<Object> newConstant(int id, String name) {
+-            return new SessionOption<>(id, name);
+-        }
+-    };
+-
+-    /**
+-     * The timeout of a socket connection attempt.
+-     */
+-    public static final SessionOption<Duration> CONNECT_TIMEOUT = valueOf("CONNECT_TIMEOUT");
+-
+-    /**
+-     * The idle timeout of a socket connection. The connection is closed if there is no invocation in progress
+-     * for this amount of time.
+-     */
+-    public static final SessionOption<Duration> IDLE_TIMEOUT = valueOf("IDLE_TIMEOUT");
+-
+-    /**
+-     * The {@link TrustManagerFactory} of a TLS connection.
+-     *
+-     * @deprecated Use {@link SessionOption#SSL_CONTEXT_CUSTOMIZER} instead.
+-     */
+-    @Deprecated
+-    public static final SessionOption<TrustManagerFactory> TRUST_MANAGER_FACTORY =
+-            valueOf("TRUST_MANAGER_FACTORY");
+-
+-    /**
+-     * A {@link Consumer} which can arbitrarily configure the {@link SslContextBuilder} that will be applied
+-     * to this session. For example, use {@link SslContextBuilder#trustManager} to configure a custom server CA
+-     * or {@link SslContextBuilder#keyManager} to configure a client certificate for SSL authorization.
+-     */
+-    public static final SessionOption<Consumer<SslContextBuilder>> SSL_CONTEXT_CUSTOMIZER =
+-            valueOf("SSL_CONTEXT_CUSTOMIZER");
+-
+-    /**
+-     * The {@link AddressResolverGroup} to use to resolve remote addresses into {@link InetSocketAddress}es.
+-     */
+-    public static final SessionOption<AddressResolverGroup<? extends InetSocketAddress>>
+-            ADDRESS_RESOLVER_GROUP = valueOf("ADDRESS_RESOLVER_GROUP");
+-
+-    /**
+-     * The {@link EventLoopGroup} that will provide the {@link EventLoop} for I/O and asynchronous invocations.
+-     * If unspecified, a new one is created automatically.
+-     */
+-    public static final SessionOption<EventLoopGroup> EVENT_LOOP_GROUP = valueOf("EVENT_LOOP_GROUP");
+-
+-    /**
+-     * The {@link Function} that decorates the {@link KeyedChannelPoolHandler}.
+-     */
+-    public static final SessionOption<Function<KeyedChannelPoolHandler<PoolKey>,
+-                KeyedChannelPoolHandler<PoolKey>>> POOL_HANDLER_DECORATOR = valueOf("POOL_HANDLER_DECORATOR");
+-
+-    /**
+-     * Whether to send an HTTP/2 preface string instead of an HTTP/1 upgrade request to negotiate the protocol
+-     * version of a cleartext HTTP connection.
+-     */
+-    public static final SessionOption<Boolean> USE_HTTP2_PREFACE = valueOf("USE_HTTP2_PREFACE");
+-
+-    /**
+-     * Whether to use <a href="https://en.wikipedia.org/wiki/HTTP_pipelining">HTTP pipelining</a> for HTTP/1
+-     * connections. This does not affect HTTP/2 connections. This option is enabled by default.
+-     */
+-    public static final SessionOption<Boolean> USE_HTTP1_PIPELINING = valueOf("USE_HTTP1_PIPELINING");
+-
+-    /**
+-     * Returns the {@link SessionOption} of the specified name.
+-     */
+-    @SuppressWarnings("unchecked")
+-    public static <T> SessionOption<T> valueOf(String name) {
+-        return (SessionOption<T>) pool.valueOf(name);
+-    }
+-
+-    private SessionOption(int id, String name) {
+-        super(id, name);
+-    }
+-
+-    /**
+-     * Creates a new value of this option.
+-     */
+-    public SessionOptionValue<T> newValue(T value) {
+-        requireNonNull(value, "value");
+-        return new SessionOptionValue<>(this, value);
+-    }
+-}
+diff --git a/core/src/main/java/com/linecorp/armeria/client/SessionOptionValue.java b/core/src/main/java/com/linecorp/armeria/client/SessionOptionValue.java
+deleted file mode 100644
+index e3fbed2..0000000
+--- a/core/src/main/java/com/linecorp/armeria/client/SessionOptionValue.java
++++ /dev/null
+@@ -1,30 +0,0 @@
+-/*
+- * Copyright 2015 LINE Corporation
+- *
+- * LINE Corporation licenses this file to you under the Apache License,
+- * version 2.0 (the "License"); you may not use this file except in compliance
+- * with the License. You may obtain a copy of the License at:
+- *
+- *   http://www.apache.org/licenses/LICENSE-2.0
+- *
+- * Unless required by applicable law or agreed to in writing, software
+- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+- * License for the specific language governing permissions and limitations
+- * under the License.
+- */
+-package com.linecorp.armeria.client;
+-
+-import com.linecorp.armeria.common.util.AbstractOptionValue;
+-
+-/**
+- * A value of a {@link SessionOption}.
+- *
+- * @param <T> the type of the option value
+- */
+-public final class SessionOptionValue<T> extends AbstractOptionValue<SessionOption<T>, T> {
+-
+-    SessionOptionValue(SessionOption<T> constant, T value) {
+-        super(constant, value);
+-    }
+-}
+diff --git a/core/src/main/java/com/linecorp/armeria/client/SessionOptions.java b/core/src/main/java/com/linecorp/armeria/client/SessionOptions.java
+deleted file mode 100644
+index c72a6dc..0000000
+--- a/core/src/main/java/com/linecorp/armeria/client/SessionOptions.java
++++ /dev/null
+@@ -1,282 +0,0 @@
+-/*
+- * Copyright 2015 LINE Corporation
+- *
+- * LINE Corporation licenses this file to you under the Apache License,
+- * version 2.0 (the "License"); you may not use this file except in compliance
+- * with the License. You may obtain a copy of the License at:
+- *
+- *   http://www.apache.org/licenses/LICENSE-2.0
+- *
+- * Unless required by applicable law or agreed to in writing, software
+- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+- * License for the specific language governing permissions and limitations
+- * under the License.
+- */
+-package com.linecorp.armeria.client;
+-
+-import static com.linecorp.armeria.client.SessionOption.ADDRESS_RESOLVER_GROUP;
+-import static com.linecorp.armeria.client.SessionOption.CONNECT_TIMEOUT;
+-import static com.linecorp.armeria.client.SessionOption.EVENT_LOOP_GROUP;
+-import static com.linecorp.armeria.client.SessionOption.IDLE_TIMEOUT;
+-import static com.linecorp.armeria.client.SessionOption.POOL_HANDLER_DECORATOR;
+-import static com.linecorp.armeria.client.SessionOption.SSL_CONTEXT_CUSTOMIZER;
+-import static com.linecorp.armeria.client.SessionOption.TRUST_MANAGER_FACTORY;
+-import static com.linecorp.armeria.client.SessionOption.USE_HTTP1_PIPELINING;
+-import static com.linecorp.armeria.client.SessionOption.USE_HTTP2_PREFACE;
+-import static java.util.Objects.requireNonNull;
+-
+-import java.net.InetSocketAddress;
+-import java.time.Duration;
+-import java.util.Map;
+-import java.util.Optional;
+-import java.util.function.Consumer;
+-import java.util.function.Function;
+-
+-import javax.net.ssl.TrustManagerFactory;
+-
+-import com.linecorp.armeria.client.pool.KeyedChannelPoolHandler;
+-import com.linecorp.armeria.client.pool.PoolKey;
+-import com.linecorp.armeria.common.Flags;
+-import com.linecorp.armeria.common.util.AbstractOptions;
+-
+-import io.netty.channel.EventLoopGroup;
+-import io.netty.handler.ssl.SslContextBuilder;
+-import io.netty.resolver.AddressResolverGroup;
+-
+-/**
+- * A set of {@link SessionOption}s and their respective values.
+- */
+-public final class SessionOptions extends AbstractOptions {
+-
+-    private static final Duration DEFAULT_CONNECTION_TIMEOUT = Duration.ofMillis(3200);
+-    private static final Duration DEFAULT_IDLE_TIMEOUT = Duration.ofSeconds(10);
+-
+-    private static final SessionOptionValue<?>[] DEFAULT_OPTION_VALUES = {
+-            CONNECT_TIMEOUT.newValue(DEFAULT_CONNECTION_TIMEOUT),
+-            IDLE_TIMEOUT.newValue(DEFAULT_IDLE_TIMEOUT),
+-            USE_HTTP2_PREFACE.newValue(Flags.defaultUseHttp2Preface())
+-    };
+-
+-    /**
+-     * The default {@link SessionOptions}.
+-     */
+-    public static final SessionOptions DEFAULT = new SessionOptions(DEFAULT_OPTION_VALUES);
+-
+-    /**
+-     * Creates a new {@link SessionOptions} with the specified {@link SessionOptionValue}s.
+-     */
+-    public static SessionOptions of(SessionOptionValue<?>... options) {
+-        return new SessionOptions(DEFAULT, options);
+-    }
+-
+-    /**
+-     * Returns the {@link SessionOptions} with the specified {@link SessionOptionValue}s.
+-     */
+-    public static SessionOptions of(Iterable<SessionOptionValue<?>> options) {
+-        return new SessionOptions(DEFAULT, options);
+-    }
+-
+-    /**
+-     * Merges the specified {@link SessionOptions} and {@link SessionOptionValue}s.
+-     *
+-     * @return the merged {@link SessionOptions}
+-     */
+-    public static SessionOptions of(SessionOptions baseOptions, SessionOptionValue<?>... options) {
+-        // TODO(trustin): Reduce the cost of creating a derived SessionOptions.
+-        requireNonNull(baseOptions, "baseOptions");
+-        requireNonNull(options, "options");
+-        if (options.length == 0) {
+-            return baseOptions;
+-        }
+-        return new SessionOptions(baseOptions, options);
+-    }
+-
+-    /**
+-     * Merges the specified {@link SessionOptions} and {@link SessionOptionValue}s.
+-     *
+-     * @return the merged {@link SessionOptions}
+-     */
+-    public static SessionOptions of(SessionOptions baseOptions, Iterable<SessionOptionValue<?>> options) {
+-        // TODO(trustin): Reduce the cost of creating a derived SessionOptions.
+-        requireNonNull(baseOptions, "baseOptions");
+-        requireNonNull(options, "options");
+-        return new SessionOptions(baseOptions, options);
+-    }
+-
+-    /**
+-     * Merges the specified two {@link SessionOptions} into one.
+-     *
+-     * @return the merged {@link SessionOptions}
+-     */
+-    public static SessionOptions of(SessionOptions baseOptions, SessionOptions options) {
+-        // TODO(trustin): Reduce the cost of creating a derived SessionOptions.
+-        requireNonNull(baseOptions, "baseOptions");
+-        requireNonNull(options, "options");
+-        return new SessionOptions(baseOptions, options);
+-    }
+-
+-    private static <T> SessionOptionValue<T> validateValue(SessionOptionValue<T> optionValue) {
+-        requireNonNull(optionValue, "value");
+-
+-        SessionOption<?> option = optionValue.option();
+-        T value = optionValue.value();
+-
+-        if (option == CONNECT_TIMEOUT) {
+-            validateConnectionTimeout((Duration) value);
+-        } else if (option == IDLE_TIMEOUT) {
+-            validateIdleTimeout((Duration) value);
+-        }
+-
+-        return optionValue;
+-    }
+-
+-    private static Duration validateConnectionTimeout(Duration connectionTimeout) {
+-        requireNonNull(connectionTimeout, "connectionTimeout");
+-        if (connectionTimeout.isNegative() || connectionTimeout.isZero()) {
+-            throw new IllegalArgumentException(
+-                    "connectTimeout: " + connectionTimeout + " (expected: > 0)");
+-        }
+-        return connectionTimeout;
+-    }
+-
+-    private static Duration validateIdleTimeout(Duration idleTimeout) {
+-        requireNonNull(idleTimeout, "idleTimeout");
+-        if (idleTimeout.isNegative()) {
+-            throw new IllegalArgumentException(
+-                    "idleTimeout: " + idleTimeout + " (expected: >= 0)");
+-        }
+-        return idleTimeout;
+-    }
+-
+-    private SessionOptions(SessionOptionValue<?>... options) {
+-        super(SessionOptions::validateValue, options);
+-    }
+-
+-    private SessionOptions(SessionOptions baseOptions, SessionOptionValue<?>... options) {
+-        super(SessionOptions::validateValue, baseOptions, options);
+-    }
+-
+-    private SessionOptions(
+-            SessionOptions baseOptions, Iterable<SessionOptionValue<?>> options) {
+-        super(SessionOptions::validateValue, baseOptions, options);
+-    }
+-
+-    private SessionOptions(SessionOptions clientOptions, SessionOptions options) {
+-        super(clientOptions, options);
+-    }
+-
+-    /**
+-     * Returns the value of the specified {@link SessionOption}.
+-     *
+-     * @return the value of the {@link SessionOption}, or
+-     *         {@link Optional#empty()} if the default value of the specified {@link SessionOption} is
+-     *         not available
+-     */
+-    public <T> Optional<T> get(SessionOption<T> option) {
+-        return get0(option);
+-    }
+-
+-    /**
+-     * Returns the value of the specified {@link SessionOption}.
+-     *
+-     * @return the value of the {@link SessionOption}, or
+-     *         {@code defaultValue} if the specified {@link SessionOption} is not set.
+-     */
+-    public <T> T getOrElse(SessionOption<T> option, T defaultValue) {
+-        return getOrElse0(option, defaultValue);
+-    }
+-
+-    /**
+-     * Converts this {@link SessionOptions} to a {@link Map}.
+-     */
+-    public Map<SessionOption<Object>, SessionOptionValue<Object>> asMap() {
+-        return asMap0();
+-    }
+-
+-    /**
+-     * Returns the {@link SessionOption#CONNECT_TIMEOUT} value.
+-     */
+-    public Duration connectTimeout() {
+-        return getOrElse(CONNECT_TIMEOUT, DEFAULT_CONNECTION_TIMEOUT);
+-    }
+-
+-    /**
+-     * Returns the {@link SessionOption#CONNECT_TIMEOUT} value as milliseconds.
+-     */
+-    public long connectTimeoutMillis() {
+-        return connectTimeout().toMillis();
+-    }
+-
+-    /**
+-     * Returns the {@link SessionOption#EVENT_LOOP_GROUP} if non-default was specified.
+-     */
+-    public Optional<EventLoopGroup> eventLoopGroup() {
+-        return get(EVENT_LOOP_GROUP);
+-    }
+-
+-    /**
+-     * Returns the {@link SessionOption#TRUST_MANAGER_FACTORY} if non-default was specified.
+-     *
+-     * @deprecated Use {@link SessionOptions#sslContextCustomizer()} instead.
+-     */
+-    @Deprecated
+-    public Optional<TrustManagerFactory> trustManagerFactory() {
+-        return get(TRUST_MANAGER_FACTORY);
+-    }
+-
+-    /**
+-     * Returns the {@link SessionOption#SSL_CONTEXT_CUSTOMIZER} if non-default was specified.
+-     */
+-    public Optional<Consumer<SslContextBuilder>> sslContextCustomizer() {
+-        return get(SSL_CONTEXT_CUSTOMIZER);
+-    }
+-
+-    /**
+-     * Returns the {@link SessionOption#ADDRESS_RESOLVER_GROUP} if non-default was specified.
+-     */
+-    public Optional<AddressResolverGroup<InetSocketAddress>> addressResolverGroup() {
+-        final Optional<AddressResolverGroup<? extends InetSocketAddress>> value = get(ADDRESS_RESOLVER_GROUP);
+-
+-        @SuppressWarnings("unchecked")
+-        final Optional<AddressResolverGroup<InetSocketAddress>> castValue =
+-                (Optional<AddressResolverGroup<InetSocketAddress>>) (Optional<?>) value;
+-
+-        return castValue;
+-    }
+-
+-    /**
+-     * Returns the {@link SessionOption#IDLE_TIMEOUT} value.
+-     */
+-    public Duration idleTimeout() {
+-        return getOrElse(IDLE_TIMEOUT, DEFAULT_IDLE_TIMEOUT);
+-    }
+-
+-    /**
+-     * Returns the {@link SessionOption#IDLE_TIMEOUT} value as milliseconds.
+-     */
+-    public long idleTimeoutMillis() {
+-        return idleTimeout().toMillis();
+-    }
+-
+-    /**
+-     * Returns the {@link SessionOption#POOL_HANDLER_DECORATOR}.
+-     */
+-    public Function<KeyedChannelPoolHandler<PoolKey>, KeyedChannelPoolHandler<PoolKey>> poolHandlerDecorator() {
+-        return getOrElse(POOL_HANDLER_DECORATOR, Function.identity());
+-    }
+-
+-    /**
+-     * Returns whether {@link SessionOption#USE_HTTP2_PREFACE} is enabled or not.
+-     */
+-    public boolean useHttp2Preface() {
+-        return getOrElse(USE_HTTP2_PREFACE, Flags.defaultUseHttp2Preface());
+-    }
+-
+-    /**
+-     * Returns whether {@link SessionOption#USE_HTTP1_PIPELINING} is enabled or not.
+-     */
+-    public boolean useHttp1Pipelining() {
+-        return getOrElse(USE_HTTP1_PIPELINING, Flags.defaultUseHttp1Pipelining());
+-    }
+-}
+diff --git a/core/src/main/java/com/linecorp/armeria/common/Flags.java b/core/src/main/java/com/linecorp/armeria/common/Flags.java
+index 076998d..5d9305c 100644
+--- a/core/src/main/java/com/linecorp/armeria/common/Flags.java
++++ b/core/src/main/java/com/linecorp/armeria/common/Flags.java
+@@ -26,7 +26,7 @@ import org.slf4j.LoggerFactory;
+ 
+ import com.google.common.base.Ascii;
+ 
+-import com.linecorp.armeria.client.SessionOption;
++import com.linecorp.armeria.client.ClientFactoryOptions;
+ import com.linecorp.armeria.client.retry.Backoff;
+ import com.linecorp.armeria.client.retry.RetryingClient;
+ 
+@@ -117,8 +117,9 @@ public final class Flags {
+     }
+ 
+     /**
+-     * Returns the default value of the {@link SessionOption#USE_HTTP2_PREFACE} option. Note that this value
+-     * has effect only if a user did not specify the {@link SessionOption#USE_HTTP2_PREFACE} option.
++     * Returns the default value of the {@link ClientFactoryOptions#useHttp2Preface()} option. Note that this
++     * value has effect only if a user did not specify the option via
++     * {@link ClientFactoryOptions.ClientFactoryOptionsBuilder#useHttp2Preface(boolean)}.
+      *
+      * <p>This flag is disabled by default. Specify the
+      * {@code -Dcom.linecorp.armeria.defaultUseHttp2Preface=true} to enable it.
+@@ -128,8 +129,9 @@ public final class Flags {
+     }
+ 
+     /**
+-     * Returns the default value of the {@link SessionOption#USE_HTTP1_PIPELINING} option. Note that this value
+-     * has effect only if a user did not specify the {@link SessionOption#USE_HTTP1_PIPELINING} option.
++     * Returns the default value of the {@link ClientFactoryOptions#useHttp1Pipelining()} option. Note that this
++     * value has effect only if a user did not specify the option via
++     * {@link ClientFactoryOptions.ClientFactoryOptionsBuilder#useHttp1Pipelining(boolean)}.
+      *
+      * <p>This flag is enabled by default. Specify the
+      * {@code -Dcom.linecorp.armeria.defaultUseHttp1Pipelining=false} to disable it.
+diff --git a/core/src/test/java/com/linecorp/armeria/client/SessionOptionsTest.java b/core/src/test/java/com/linecorp/armeria/client/ClientFactoryOptionsTest.java
+similarity index 58%
+rename from core/src/test/java/com/linecorp/armeria/client/SessionOptionsTest.java
+rename to core/src/test/java/com/linecorp/armeria/client/ClientFactoryOptionsTest.java
+index c517fe6..1a70518 100644
+--- a/core/src/test/java/com/linecorp/armeria/client/SessionOptionsTest.java
++++ b/core/src/test/java/com/linecorp/armeria/client/ClientFactoryOptionsTest.java
+@@ -15,10 +15,6 @@
+  */
+ package com.linecorp.armeria.client;
+ 
+-import static com.linecorp.armeria.client.SessionOption.CONNECT_TIMEOUT;
+-import static com.linecorp.armeria.client.SessionOption.EVENT_LOOP_GROUP;
+-import static com.linecorp.armeria.client.SessionOption.IDLE_TIMEOUT;
+-import static com.linecorp.armeria.client.SessionOption.SSL_CONTEXT_CUSTOMIZER;
+ import static org.hamcrest.MatcherAssert.assertThat;
+ import static org.hamcrest.Matchers.is;
+ import static org.hamcrest.Matchers.notNullValue;
+@@ -31,13 +27,13 @@ import javax.net.ssl.TrustManagerFactory;
+ 
+ import org.junit.Test;
+ 
+-import io.netty.channel.EventLoop;
++import io.netty.channel.EventLoopGroup;
+ 
+-public class SessionOptionsTest {
++public class ClientFactoryOptionsTest {
+ 
+     @Test
+     public void defaultTest() {
+-        SessionOptions options = SessionOptions.DEFAULT;
++        ClientFactoryOptions options = ClientFactoryOptions.DEFAULT;
+         assertThat(options.connectTimeout(), is(notNullValue()));
+         assertThat(options.idleTimeout(), is(notNullValue()));
+         assertThat(options.trustManagerFactory(), is(Optional.empty()));
+@@ -47,30 +43,28 @@ public class SessionOptionsTest {
+     public void valueOverrideTest() {
+         Duration connectionTimeout = Duration.ofMillis(10);
+         Duration idleTimeout = Duration.ofMillis(200);
+-        EventLoop eventLoop = mock(EventLoop.class);
++        EventLoopGroup eventLoopGroup = mock(EventLoopGroup.class);
+         TrustManagerFactory trustManagerFactory = mock(TrustManagerFactory.class);
+ 
+-        Integer maxConcurrency = 1;
+-        SessionOptions options = SessionOptions.of(
+-                CONNECT_TIMEOUT.newValue(connectionTimeout),
+-                IDLE_TIMEOUT.newValue(idleTimeout),
+-                EVENT_LOOP_GROUP.newValue(eventLoop),
+-                SSL_CONTEXT_CUSTOMIZER.newValue(b -> b.trustManager(trustManagerFactory))
+-        );
++        ClientFactoryOptions options = ClientFactoryOptions.builder()
++                .connectTimeout(connectionTimeout)
++                .idleTimeout(idleTimeout)
++                .eventLoopGroup(eventLoopGroup)
++                .sslContextCustomizer(b -> b.trustManager(trustManagerFactory))
++                .build();
+ 
+-        assertThat(options.get(CONNECT_TIMEOUT),is(Optional.of(connectionTimeout)));
+-        assertThat(options.get(IDLE_TIMEOUT),is(Optional.of(idleTimeout)));
+-        assertThat(options.get(EVENT_LOOP_GROUP),is(Optional.of(eventLoop)));
++        assertThat(options.connectTimeout(), is(connectionTimeout));
++        assertThat(options.idleTimeout(), is(idleTimeout));
++        assertThat(options.eventLoopGroup(), is(Optional.of(eventLoopGroup)));
+     }
+ 
+     @Test(expected = IllegalArgumentException.class)
+     public void testValidateFailConnectTimeout() {
+-        SessionOptions.of(CONNECT_TIMEOUT.newValue(Duration.ZERO));
++        ClientFactoryOptions.builder().connectTimeout(Duration.ZERO).build();
+     }
+ 
+     @Test(expected = IllegalArgumentException.class)
+     public void testValidateFailIdleTimeout() {
+-        SessionOptions.of(IDLE_TIMEOUT.newValue(Duration.ofMillis(-1)));
++        ClientFactoryOptions.builder().idleTimeout(Duration.ofMillis(-1)).build();
+     }
+ }
+-
+diff --git a/core/src/test/java/com/linecorp/armeria/client/HttpClientPipeliningTest.java b/core/src/test/java/com/linecorp/armeria/client/HttpClientPipeliningTest.java
+index aa4e33d..23f5c76 100644
+--- a/core/src/test/java/com/linecorp/armeria/client/HttpClientPipeliningTest.java
++++ b/core/src/test/java/com/linecorp/armeria/client/HttpClientPipeliningTest.java
+@@ -99,12 +99,16 @@ public class HttpClientPipeliningTest {
+         // Note: Each event loop has its own connection pool.
+         eventLoopGroup = new NioEventLoopGroup(1);
+         factoryWithPipelining = new AllInOneClientFactory(
+-                SessionOptions.of(SessionOption.EVENT_LOOP_GROUP.newValue(eventLoopGroup),
+-                                  SessionOption.USE_HTTP1_PIPELINING.newValue(true)));
++                ClientFactoryOptions.builder()
++                        .eventLoopGroup(eventLoopGroup)
++                        .useHttp1Pipelining(true)
++                        .build());
+ 
+         factoryWithoutPipelining = new AllInOneClientFactory(
+-                SessionOptions.of(SessionOption.EVENT_LOOP_GROUP.newValue(eventLoopGroup),
+-                                  SessionOption.USE_HTTP1_PIPELINING.newValue(false)));
++                ClientFactoryOptions.builder()
++                        .eventLoopGroup(eventLoopGroup)
++                        .useHttp1Pipelining(false)
++                        .build());
+     }
+ 
+     @AfterClass
+diff --git a/core/src/test/java/com/linecorp/armeria/client/HttpClientSniTest.java b/core/src/test/java/com/linecorp/armeria/client/HttpClientSniTest.java
+index 9e0bd00..b214c02 100644
+--- a/core/src/test/java/com/linecorp/armeria/client/HttpClientSniTest.java
++++ b/core/src/test/java/com/linecorp/armeria/client/HttpClientSniTest.java
+@@ -93,10 +93,10 @@ public class HttpClientSniTest {
+         httpsPort = server.activePorts().values().stream()
+                           .filter(p -> p.protocol() == HTTPS).findAny().get().localAddress()
+                           .getPort();
+-        clientFactory = new HttpClientFactory(SessionOptions.of(
+-                SessionOption.SSL_CONTEXT_CUSTOMIZER.newValue(
+-                        b -> b.trustManager(InsecureTrustManagerFactory.INSTANCE)),
+-                SessionOption.ADDRESS_RESOLVER_GROUP.newValue(new DummyAddressResolverGroup())));
++        clientFactory = new HttpClientFactory(ClientFactoryOptions.builder()
++                .sslContextCustomizer(b -> b.trustManager(InsecureTrustManagerFactory.INSTANCE))
++                .addressResolverGroup(new DummyAddressResolverGroup())
++                .build());
+     }
+ 
+     @AfterClass
+diff --git a/core/src/test/java/com/linecorp/armeria/client/HttpClientTimeoutTest.java b/core/src/test/java/com/linecorp/armeria/client/HttpClientTimeoutTest.java
+index 5e489d4..6997d43 100644
+--- a/core/src/test/java/com/linecorp/armeria/client/HttpClientTimeoutTest.java
++++ b/core/src/test/java/com/linecorp/armeria/client/HttpClientTimeoutTest.java
+@@ -45,7 +45,7 @@ public class HttpClientTimeoutTest {
+ 
+     @BeforeClass
+     public static void init() {
+-        factory = new HttpClientFactory(SessionOptions.of(SessionOption.USE_HTTP2_PREFACE.newValue(true)));
++        factory = new HttpClientFactory(ClientFactoryOptions.builder().useHttp2Preface(true).build());
+     }
+ 
+     @AfterClass
+diff --git a/core/src/test/java/com/linecorp/armeria/client/retry/RetryingHttpClientTest.java b/core/src/test/java/com/linecorp/armeria/client/retry/RetryingHttpClientTest.java
+index f6193e6..3c533f9 100644
+--- a/core/src/test/java/com/linecorp/armeria/client/retry/RetryingHttpClientTest.java
++++ b/core/src/test/java/com/linecorp/armeria/client/retry/RetryingHttpClientTest.java
+@@ -33,10 +33,9 @@ import com.google.common.base.Stopwatch;
+ 
+ import com.linecorp.armeria.client.ClientBuilder;
+ import com.linecorp.armeria.client.ClientFactory;
++import com.linecorp.armeria.client.ClientFactoryOptions;
+ import com.linecorp.armeria.client.HttpClient;
+ import com.linecorp.armeria.client.HttpClientFactory;
+-import com.linecorp.armeria.client.SessionOption;
+-import com.linecorp.armeria.client.SessionOptions;
+ import com.linecorp.armeria.common.AggregatedHttpMessage;
+ import com.linecorp.armeria.common.HttpHeaderNames;
+ import com.linecorp.armeria.common.HttpHeaders;
+@@ -228,7 +227,7 @@ public class RetryingHttpClientTest {
+         final RetryStrategy<HttpRequest, HttpResponse> strategy =
+                 RetryStrategy.onStatus(HttpStatus.SERVICE_UNAVAILABLE);
+         final ClientFactory factory = new HttpClientFactory(
+-                SessionOptions.of(SessionOption.IDLE_TIMEOUT.newValue(Duration.ofSeconds(5))));
++                ClientFactoryOptions.builder().idleTimeout(Duration.ofSeconds(5)).build());
+         final HttpClient client = new ClientBuilder(server.uri(SerializationFormat.NONE, "/"))
+                 .factory(factory)
+                 .defaultResponseTimeoutMillis(Duration.ofSeconds(5).toMillis())
+diff --git a/core/src/test/java/com/linecorp/armeria/server/HttpServerTest.java b/core/src/test/java/com/linecorp/armeria/server/HttpServerTest.java
+index 9ac7e79..d22f652 100644
+--- a/core/src/test/java/com/linecorp/armeria/server/HttpServerTest.java
++++ b/core/src/test/java/com/linecorp/armeria/server/HttpServerTest.java
+@@ -73,10 +73,9 @@ import com.google.common.io.ByteStreams;
+ 
+ import com.linecorp.armeria.client.ClientBuilder;
+ import com.linecorp.armeria.client.ClientFactory;
++import com.linecorp.armeria.client.ClientFactoryOptions;
+ import com.linecorp.armeria.client.HttpClient;
+ import com.linecorp.armeria.client.HttpClientFactory;
+-import com.linecorp.armeria.client.SessionOption;
+-import com.linecorp.armeria.client.SessionOptions;
+ import com.linecorp.armeria.common.AggregatedHttpMessage;
+ import com.linecorp.armeria.common.ClosedSessionException;
+ import com.linecorp.armeria.common.DefaultHttpRequest;
+@@ -114,15 +113,13 @@ import io.netty.util.concurrent.GlobalEventExecutor;
+ public class HttpServerTest {
+     private static final Logger logger = LoggerFactory.getLogger(HttpServerTest.class);
+ 
+-    // TODO(trustin): Add SessionOption.NUM_WORKER_THREADS
+     private static final ClientFactory clientFactory =
+-            new HttpClientFactory(SessionOptions.of(
+-                    SessionOption.SSL_CONTEXT_CUSTOMIZER.newValue(
+-                            b -> b.trustManager(InsecureTrustManagerFactory.INSTANCE)),
+-                    SessionOption.IDLE_TIMEOUT.newValue(Duration.ofSeconds(3)),
+-                    SessionOption.EVENT_LOOP_GROUP.newValue(
+-                            TransportType.detectTransportType().newEventLoopGroup(
+-                                    1, type -> new DefaultThreadFactory(type.name())))));
++            new HttpClientFactory(ClientFactoryOptions.builder()
++                    .sslContextCustomizer(b -> b.trustManager(InsecureTrustManagerFactory.INSTANCE))
++                    .idleTimeout(Duration.ofSeconds(3))
++                    .eventLoopGroup(TransportType.detectTransportType().newEventLoopGroup(
++                            1, type -> new DefaultThreadFactory(type.name())))
++                    .build());
+ 
+     private static final long MAX_CONTENT_LENGTH = 65536;
+     // Stream as much as twice of the heap. Stream less to avoid OOME when leak detection is enabled.
+diff --git a/grpc/src/main/java/com/linecorp/armeria/client/grpc/GrpcClientFactoryProvider.java b/grpc/src/main/java/com/linecorp/armeria/client/grpc/GrpcClientFactoryProvider.java
+index 1a918d2..55926bd 100644
+--- a/grpc/src/main/java/com/linecorp/armeria/client/grpc/GrpcClientFactoryProvider.java
++++ b/grpc/src/main/java/com/linecorp/armeria/client/grpc/GrpcClientFactoryProvider.java
+@@ -22,9 +22,9 @@ import java.util.Set;
+ import com.google.common.collect.ImmutableSet;
+ 
+ import com.linecorp.armeria.client.ClientFactory;
++import com.linecorp.armeria.client.ClientFactoryOptions;
+ import com.linecorp.armeria.client.ClientFactoryProvider;
+ import com.linecorp.armeria.client.HttpClientFactory;
+-import com.linecorp.armeria.client.SessionOptions;
+ 
+ /**
+  * {@link ClientFactoryProvider} that creates a {@link GrpcClientFactory}.
+@@ -32,7 +32,7 @@ import com.linecorp.armeria.client.SessionOptions;
+ public class GrpcClientFactoryProvider implements ClientFactoryProvider {
+ 
+     @Override
+-    public ClientFactory newFactory(SessionOptions options, Map<Class<?>, ClientFactory> dependencies) {
++    public ClientFactory newFactory(ClientFactoryOptions options, Map<Class<?>, ClientFactory> dependencies) {
+         return new GrpcClientFactory(dependencies.get(HttpClientFactory.class));
+     }
+ 
+diff --git a/testing/src/main/java/com/linecorp/armeria/testing/server/webapp/WebAppContainerTest.java b/testing/src/main/java/com/linecorp/armeria/testing/server/webapp/WebAppContainerTest.java
+index fcccc79..6679dba 100644
+--- a/testing/src/main/java/com/linecorp/armeria/testing/server/webapp/WebAppContainerTest.java
++++ b/testing/src/main/java/com/linecorp/armeria/testing/server/webapp/WebAppContainerTest.java
+@@ -40,10 +40,9 @@ import org.junit.ClassRule;
+ import org.junit.Test;
+ 
+ import com.linecorp.armeria.client.ClientFactory;
++import com.linecorp.armeria.client.ClientFactoryOptions;
+ import com.linecorp.armeria.client.HttpClient;
+ import com.linecorp.armeria.client.HttpClientFactory;
+-import com.linecorp.armeria.client.SessionOption;
+-import com.linecorp.armeria.client.SessionOptions;
+ import com.linecorp.armeria.common.AggregatedHttpMessage;
+ import com.linecorp.armeria.server.Server;
+ import com.linecorp.armeria.server.Service;
+@@ -148,9 +147,9 @@ public abstract class WebAppContainerTest {
+     @Test
+     public void https() throws Exception {
+         ClientFactory clientFactory =
+-                new HttpClientFactory(SessionOptions.of(
+-                        SessionOption.SSL_CONTEXT_CUSTOMIZER.newValue(
+-                                b -> b.trustManager(InsecureTrustManagerFactory.INSTANCE))));
++                new HttpClientFactory(ClientFactoryOptions.builder()
++                        .sslContextCustomizer(b -> b.trustManager(InsecureTrustManagerFactory.INSTANCE))
++                        .build());
+         HttpClient client = clientFactory.newClient(server().httpsUri(NONE, "/"), HttpClient.class);
+         AggregatedHttpMessage response = client.get("/jsp/index.jsp").aggregate().get();
+         final String actualContent = CR_OR_LF.matcher(response.content().toStringUtf8())
+diff --git a/thrift/src/main/java/com/linecorp/armeria/client/thrift/THttpClientFactoryProvider.java b/thrift/src/main/java/com/linecorp/armeria/client/thrift/THttpClientFactoryProvider.java
+index 6aa2f18..c1db3d2 100644
+--- a/thrift/src/main/java/com/linecorp/armeria/client/thrift/THttpClientFactoryProvider.java
++++ b/thrift/src/main/java/com/linecorp/armeria/client/thrift/THttpClientFactoryProvider.java
+@@ -22,16 +22,16 @@ import java.util.Set;
+ import com.google.common.collect.ImmutableSet;
+ 
+ import com.linecorp.armeria.client.ClientFactory;
++import com.linecorp.armeria.client.ClientFactoryOptions;
+ import com.linecorp.armeria.client.ClientFactoryProvider;
+ import com.linecorp.armeria.client.HttpClientFactory;
+-import com.linecorp.armeria.client.SessionOptions;
+ 
+ /**
+  * {@link ClientFactoryProvider} that creates a {@link THttpClientFactory}.
+  */
+ public final class THttpClientFactoryProvider implements ClientFactoryProvider {
+     @Override
+-    public ClientFactory newFactory(SessionOptions options, Map<Class<?>, ClientFactory> dependencies) {
++    public ClientFactory newFactory(ClientFactoryOptions options, Map<Class<?>, ClientFactory> dependencies) {
+         return new THttpClientFactory(dependencies.get(HttpClientFactory.class));
+     }
+ 
+diff --git a/thrift/src/test/java/com/linecorp/armeria/client/thrift/ThriftOverHttpClientTest.java b/thrift/src/test/java/com/linecorp/armeria/client/thrift/ThriftOverHttpClientTest.java
+index 1a27d14..7ec3c89 100644
+--- a/thrift/src/test/java/com/linecorp/armeria/client/thrift/ThriftOverHttpClientTest.java
++++ b/thrift/src/test/java/com/linecorp/armeria/client/thrift/ThriftOverHttpClientTest.java
+@@ -45,14 +45,12 @@ import org.junit.runners.Parameterized;
+ 
+ import com.linecorp.armeria.client.ClientDecorationBuilder;
+ import com.linecorp.armeria.client.ClientFactory;
++import com.linecorp.armeria.client.ClientFactoryOptions;
+ import com.linecorp.armeria.client.ClientOption;
+ import com.linecorp.armeria.client.ClientOptionValue;
+ import com.linecorp.armeria.client.ClientOptions;
+ import com.linecorp.armeria.client.Clients;
+ import com.linecorp.armeria.client.HttpClientFactory;
+-import com.linecorp.armeria.client.SessionOption;
+-import com.linecorp.armeria.client.SessionOptionValue;
+-import com.linecorp.armeria.client.SessionOptions;
+ import com.linecorp.armeria.client.logging.KeyedChannelPoolLoggingHandler;
+ import com.linecorp.armeria.client.logging.LoggingClient;
+ import com.linecorp.armeria.client.pool.KeyedChannelPoolHandler;
+@@ -252,27 +250,27 @@ public class ThriftOverHttpClientTest {
+                           .filter(p -> p.protocol() == HTTPS).findAny().get().localAddress()
+                           .getPort();
+ 
+-        final SessionOptionValue<Consumer<SslContextBuilder>> sslContextCustomizerOptVal =
+-                SessionOption.SSL_CONTEXT_CUSTOMIZER.newValue(
+-                        b -> b.trustManager(InsecureTrustManagerFactory.INSTANCE));
++        final Consumer<SslContextBuilder> sslContextCustomizer =
++                b -> b.trustManager(InsecureTrustManagerFactory.INSTANCE);
+ 
+-        final SessionOptionValue<Function<KeyedChannelPoolHandler<PoolKey>,
+-                                          KeyedChannelPoolHandler<PoolKey>>> poolHandlerDecoratorOptVal =
+-                SessionOption.POOL_HANDLER_DECORATOR.newValue(
+-                        ENABLE_LOGGING_DECORATORS ? KeyedChannelPoolLoggingHandler::new
+-                                                  : Function.identity());
++        final Function<KeyedChannelPoolHandler<PoolKey>,
++                       KeyedChannelPoolHandler<PoolKey>> poolHandlerDecorator =
++                ENABLE_LOGGING_DECORATORS ? KeyedChannelPoolLoggingHandler::new
++                                          : Function.identity();
+ 
+         clientFactoryWithUseHttp2Preface = new THttpClientFactory(
+-                new HttpClientFactory(SessionOptions.of(
+-                        sslContextCustomizerOptVal,
+-                        poolHandlerDecoratorOptVal,
+-                        SessionOption.USE_HTTP2_PREFACE.newValue(true))));
++                new HttpClientFactory(ClientFactoryOptions.builder()
++                        .sslContextCustomizer(sslContextCustomizer)
++                        .poolHandlerDecorator(poolHandlerDecorator)
++                        .useHttp2Preface(true)
++                        .build()));
+ 
+         clientFactoryWithoutUseHttp2Preface = new THttpClientFactory(
+-                new HttpClientFactory(SessionOptions.of(
+-                        sslContextCustomizerOptVal,
+-                        poolHandlerDecoratorOptVal,
+-                        SessionOption.USE_HTTP2_PREFACE.newValue(false))));
++                new HttpClientFactory(ClientFactoryOptions.builder()
++                        .sslContextCustomizer(sslContextCustomizer)
++                        .poolHandlerDecorator(poolHandlerDecorator)
++                        .useHttp2Preface(false)
++                        .build()));
+ 
+         final ClientDecorationBuilder decoBuilder = new ClientDecorationBuilder();
+         decoBuilder.add(RpcRequest.class, RpcResponse.class, (delegate, ctx, req) -> {

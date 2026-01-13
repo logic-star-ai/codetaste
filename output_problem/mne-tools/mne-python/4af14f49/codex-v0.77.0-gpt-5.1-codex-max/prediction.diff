@@ -1,0 +1,374 @@
+diff --git a/mne/_fiff/compensator.py b/mne/_fiff/compensator.py
+index 2a5334e..8bd3696 100644
+--- a/mne/_fiff/compensator.py
++++ b/mne/_fiff/compensator.py
+@@ -29,6 +29,26 @@ def set_current_comp(info, comp):
+             chan["coil_type"] = int(rem + (comp << 16))
+ 
+ 
++def _bad_chans_comp(info, ch_names):
++    """Check if channel names are consistent with current compensation status."""
++    if "comps" not in info:
++        return False, []
++
++    ch_names_s = set(ch_names)
++    comp_names = []
++    for comp in info["comps"]:
++        if len(ch_names_s.intersection(comp["data"]["row_names"])) > 0:
++            comp_names.extend(comp["data"]["col_names"])
++    comp_names = sorted(set(comp_names))
++
++    missing_ch_names = sorted(set(comp_names).difference(ch_names))
++
++    if get_current_comp(info) != 0 and len(missing_ch_names) > 0:
++        return True, missing_ch_names
++    else:
++        return False, []
++
++
+ def _make_compensator(info, grade):
+     """Auxiliary function for make_compensator."""
+     for k in range(len(info["comps"])):
+diff --git a/mne/_fiff/ctf_comp.py b/mne/_fiff/ctf_comp.py
+index a16d1c7..6e477cf 100644
+--- a/mne/_fiff/ctf_comp.py
++++ b/mne/_fiff/ctf_comp.py
+@@ -9,7 +9,7 @@ from copy import deepcopy
+ import numpy as np
+ 
+ from .constants import FIFF
+-from .tag import read_tag
++from .tag import _rename_list, read_tag
+ from .tree import dir_tree_find
+ from .write import start_block, end_block, write_int
+ from .matrix import write_named_matrix, _read_named_matrix
+@@ -56,6 +56,16 @@ def _calibrate_comp(
+     comp["data"]["data"] = row_cals[:, None] * comp["data"]["data"] * col_cals[None, :]
+ 
+ 
++def _rename_comp_channels(comps, ch_names_mapping):
++    """Rename compensation channel names in place."""
++    if not (comps and ch_names_mapping):
++        return
++    for comp in comps:
++        data = comp["data"]
++        for key in ("row_names", "col_names"):
++            data[key][:] = _rename_list(data[key], ch_names_mapping)
++
++
+ @verbose
+ def read_ctf_comp(fid, node, chs, verbose=None):
+     """Read the CTF software compensation data from the given node.
+@@ -100,8 +110,6 @@ def _read_ctf_comp(fid, node, chs, ch_names_mapping):
+     compdata : list
+         The compensation data
+     """
+-    from .meas_info import _rename_comps
+-
+     ch_names_mapping = dict() if ch_names_mapping is None else ch_names_mapping
+     compdata = []
+     comps = dir_tree_find(node, FIFF.FIFFB_MNE_CTF_COMP_DATA)
+@@ -134,7 +142,7 @@ def _read_ctf_comp(fid, node, chs, ch_names_mapping):
+ 
+         one["save_calibrated"] = bool(calibrated)
+         one["data"] = mat
+-        _rename_comps([one], ch_names_mapping)
++        _rename_comp_channels([one], ch_names_mapping)
+         if not calibrated:
+             #   Calibrate...
+             _calibrate_comp(one, chs, mat["row_names"], mat["col_names"])
+diff --git a/mne/_fiff/meas_info.py b/mne/_fiff/meas_info.py
+index f631bbc..e6b551d 100644
+--- a/mne/_fiff/meas_info.py
++++ b/mne/_fiff/meas_info.py
+@@ -98,7 +98,7 @@ from ._digitization import (
+     _read_dig_fif,
+ )
+ from ._digitization import write_dig, _get_data_as_dict_from_dig
+-from .compensator import get_current_comp
++from .compensator import _bad_chans_comp, get_current_comp
+ from ..defaults import _handle_default
+ 
+ 
+@@ -3506,52 +3506,6 @@ def anonymize_info(info, daysback=None, keep_his=False, verbose=None):
+     return info
+ 
+ 
+-@fill_doc
+-def _bad_chans_comp(info, ch_names):
+-    """Check if channel names are consistent with current compensation status.
+-
+-    Parameters
+-    ----------
+-    %(info_not_none)s
+-
+-    ch_names : list of str
+-        The channel names to check.
+-
+-    Returns
+-    -------
+-    status : bool
+-        True if compensation is *currently* in use but some compensation
+-            channels are not included in picks
+-
+-        False if compensation is *currently* not being used
+-            or if compensation is being used and all compensation channels
+-            in info and included in picks.
+-
+-    missing_ch_names: array-like of str, shape (n_missing,)
+-        The names of compensation channels not included in picks.
+-        Returns [] if no channels are missing.
+-
+-    """
+-    if "comps" not in info:
+-        # should this be thought of as a bug?
+-        return False, []
+-
+-    # only include compensation channels that would affect selected channels
+-    ch_names_s = set(ch_names)
+-    comp_names = []
+-    for comp in info["comps"]:
+-        if len(ch_names_s.intersection(comp["data"]["row_names"])) > 0:
+-            comp_names.extend(comp["data"]["col_names"])
+-    comp_names = sorted(set(comp_names))
+-
+-    missing_ch_names = sorted(set(comp_names).difference(ch_names))
+-
+-    if get_current_comp(info) != 0 and len(missing_ch_names) > 0:
+-        return True, missing_ch_names
+-
+-    return False, missing_ch_names
+-
+-
+ _DIG_CAST = dict(kind=int, ident=int, r=lambda x: x, coord_frame=int)
+ # key -> const, cast, write
+ _CH_INFO_MAP = OrderedDict(
+diff --git a/mne/_fiff/pick.py b/mne/_fiff/pick.py
+index 1a23433..a6cb4b6 100644
+--- a/mne/_fiff/pick.py
++++ b/mne/_fiff/pick.py
+@@ -6,6 +6,7 @@
+ 
+ from copy import deepcopy
+ import re
++from collections.abc import Mapping
+ 
+ import numpy as np
+ 
+@@ -640,8 +641,7 @@ def pick_info(info, sel=(), copy=True, verbose=None):
+     res : dict
+         Info structure restricted to a selection of channels.
+     """
+-    # avoid circular imports
+-    from .meas_info import _bad_chans_comp
++    from .compensator import _bad_chans_comp
+ 
+     info._check_consistency()
+     info = info.copy() if copy else info
+@@ -1065,16 +1065,13 @@ def _check_excludes_includes(chs, info=None, allow_bads=False):
+         Channels to be excluded/excluded. If allow_bads, and chs=="bads",
+         this will be the bad channels found in 'info'.
+     """
+-    from .meas_info import Info
+-
+     if not isinstance(chs, (list, tuple, set, np.ndarray)):
+         if allow_bads is True:
+-            if not isinstance(info, Info):
+-                raise ValueError("Supply an info object if allow_bads is true")
+-            elif chs != "bads":
++            if chs != "bads":
+                 raise ValueError('If chs is a string, it must be "bads"')
+-            else:
+-                chs = info["bads"]
++            if info is None or not isinstance(info, Mapping):
++                raise ValueError("Supply an info object if allow_bads is true")
++            chs = info["bads"]
+         else:
+             raise ValueError(
+                 'include/exclude must be list, tuple, ndarray, or "bads". '
+@@ -1228,16 +1225,14 @@ def _picks_to_idx(
+         'channels' (default) for error messages about selection of channels.
+         'components' for error messages about selection of components.
+     """
+-    from .meas_info import Info
+-
+     picked_ch_type_or_generic = False
+     #
+     # None -> all, data, or data_or_ica (ndarray of int)
+     #
+-    if isinstance(info, Info):
++    if isinstance(info, Mapping):
+         n_chan = info["nchan"]
+     else:
+-        info = _ensure_int(info, "info", "an int or Info")
++        info = _ensure_int(info, "info", "an int or Mapping")
+         n_chan = info
+     assert n_chan >= 0
+ 
+diff --git a/mne/_fiff/proj.py b/mne/_fiff/proj.py
+index 8a05895..8fd47f9 100644
+--- a/mne/_fiff/proj.py
++++ b/mne/_fiff/proj.py
+@@ -5,6 +5,7 @@
+ #
+ # License: BSD-3-Clause
+ 
++from collections.abc import Mapping
+ from copy import deepcopy
+ from itertools import count
+ import re
+@@ -1075,9 +1076,7 @@ def _has_eeg_average_ref_proj(
+     Optionally, set check_active=True to additionally check if the CAR
+     has already been applied.
+     """
+-    from .meas_info import Info
+-
+-    _validate_type(info, Info, "info")
++    _validate_type(info, Mapping, "info")
+     projs = info.get("projs", []) if projs is None else projs
+     if ch_type is None:
+         pick_kwargs = _EEG_AVREF_PICK_DICT
+diff --git a/mne/datasets/utils.py b/mne/datasets/utils.py
+index 041baf3..c8c5d46 100644
+--- a/mne/datasets/utils.py
++++ b/mne/datasets/utils.py
+@@ -83,6 +83,11 @@ _version_doc = """Get version of the local {name} dataset.
+ """
+ 
+ 
++def _get_fetch_dataset():
++    """Return fetch_dataset without creating a static dependency cycle."""
++    return importlib.import_module("mne.datasets._fetch").fetch_dataset
++
++
+ def _dataset_version(path, name):
+     """Get the version of the dataset."""
+     ver_fname = op.join(path, "version.txt")
+@@ -213,7 +218,8 @@ def _download_mne_dataset(
+ ):
+     """Aux function for downloading internal MNE datasets."""
+     import pooch
+-    from mne.datasets._fetch import fetch_dataset
++
++    fetch_dataset = _get_fetch_dataset()
+ 
+     _check_in_testing_and_raise(name, download)
+ 
+@@ -255,8 +261,6 @@ def _download_mne_dataset(
+ 
+ def _get_version(name):
+     """Get a dataset version."""
+-    from mne.datasets._fetch import fetch_dataset
+-
+     if not has_dataset(name):
+         return None
+     dataset_params = MNE_DATASETS[name]
+@@ -266,6 +270,7 @@ def _get_version(name):
+     # get download path for specific dataset
+     path = _get_path(path=None, key=config_key, name=name)
+ 
++    fetch_dataset = _get_fetch_dataset()
+     return fetch_dataset(dataset_params, path=path, return_version=True)[1]
+ 
+ 
+@@ -286,8 +291,6 @@ def has_dataset(name):
+     has : bool
+         True if the dataset is present.
+     """
+-    from mne.datasets._fetch import fetch_dataset
+-
+     if isinstance(name, dict):
+         dataset_name = name["dataset_name"]
+         dataset_params = name
+@@ -301,6 +304,7 @@ def has_dataset(name):
+     # get download path for specific dataset
+     path = _get_path(path=None, key=config_key, name=dataset_name)
+ 
++    fetch_dataset = _get_fetch_dataset()
+     dp = fetch_dataset(dataset_params, path=path, download=False, check_version=False)
+     if dataset_name.startswith("bst_"):
+         check = dataset_name
+@@ -339,15 +343,16 @@ def _download_all_example_data(verbose=True):
+         logger.info(f"[done {kind}]")
+ 
+     # Now for the exceptions:
+-    from . import (
+-        eegbci,
+-        sleep_physionet,
+-        limo,
+-        fetch_fsaverage,
+-        fetch_infant_template,
+-        fetch_hcp_mmp_parcellation,
+-        fetch_phantom,
+-    )
++    eegbci = importlib.import_module("mne.datasets.eegbci")
++    sleep_physionet = importlib.import_module("mne.datasets.sleep_physionet")
++    limo = importlib.import_module("mne.datasets.limo")
++    fetch_fsaverage = importlib.import_module(
++        "mne.datasets._fsaverage.base"
++    ).fetch_fsaverage
++    fetch_infant_template = importlib.import_module(
++        "mne.datasets._infant.base"
++    ).fetch_infant_template
++    fetch_phantom = importlib.import_module("mne.datasets._phantom.base").fetch_phantom
+ 
+     eegbci.load_data(1, [6, 10, 14], update_path=True)
+     for subj in range(4):
+diff --git a/mne/io/eyelink/_utils.py b/mne/io/eyelink/_utils.py
+index 29ef73c..1aa9e93 100644
+--- a/mne/io/eyelink/_utils.py
++++ b/mne/io/eyelink/_utils.py
+@@ -230,7 +230,12 @@ def _parse_validation_line(line):
+ 
+ 
+ def _parse_calibration(
+-    lines, screen_size=None, screen_distance=None, screen_resolution=None
++    lines,
++    screen_size=None,
++    screen_distance=None,
++    screen_resolution=None,
++    *,
++    calibration_cls,
+ ):
+     """Parse the lines in the given list and returns a list of Calibration instances.
+ 
+@@ -240,12 +245,9 @@ def _parse_calibration(
+ 
+     Returns
+     -------
+-        A list containing one or more Calibration instances,
+-        one for each calibration that was recorded in the eyelink ASCII file
+-        data.
++        A list containing one or more Calibration instances, one for each
++        calibration that was recorded in the eyelink ASCII file data.
+     """
+-    from ...preprocessing.eyetracking.calibration import Calibration
+-
+     regex = re.compile(r"\d+")  # for finding numeric characters
+     calibrations = list()
+     rec_start = float(_find_recording_start(lines).split()[1])
+@@ -280,7 +282,7 @@ def _parse_calibration(
+             offsets = np.array([point[2] for point in points])
+             gaze = np.array([point[3:] for point in points])
+             # create the Calibration instance
+-            calibration = Calibration(
++            calibration = calibration_cls(
+                 onset=onset,
+                 model=model,
+                 eye=this_eye,
+diff --git a/mne/preprocessing/eyetracking/calibration.py b/mne/preprocessing/eyetracking/calibration.py
+index fb666f9..1cdcac6 100644
+--- a/mne/preprocessing/eyetracking/calibration.py
++++ b/mne/preprocessing/eyetracking/calibration.py
+@@ -221,4 +221,10 @@ def read_eyelink_calibration(
+     fname = _check_fname(fname, overwrite="read", must_exist=True, name="fname")
+     logger.info("Reading calibration data from {}".format(fname))
+     lines = fname.read_text(encoding="ASCII").splitlines()
+-    return _parse_calibration(lines, screen_size, screen_distance, screen_resolution)
++    return _parse_calibration(
++        lines,
++        screen_size,
++        screen_distance,
++        screen_resolution,
++        calibration_cls=Calibration,
++    )

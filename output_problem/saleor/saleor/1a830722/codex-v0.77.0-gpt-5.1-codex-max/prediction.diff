@@ -1,0 +1,188 @@
+diff --git a/saleor/attribute/models/base.py b/saleor/attribute/models/base.py
+index 67e49a1..84f2db4 100644
+--- a/saleor/attribute/models/base.py
++++ b/saleor/attribute/models/base.py
+@@ -312,9 +312,7 @@ class AttributeValueTranslation(Translation):
+                 elif assigned_product_attribute_value := (
+                     attribute_value.productvalueassignment.first()
+                 ):
+-                    if product_id := (
+-                        assigned_product_attribute_value.assignment.product_id
+-                    ):
++                    if product_id := assigned_product_attribute_value.product_id:
+                         context["product_id"] = product_id
+             elif attribute.type == AttributeType.PAGE_TYPE:
+                 if assigned_page_attribute_value := (
+diff --git a/saleor/attribute/models/product.py b/saleor/attribute/models/product.py
+index 4687219..2f782d5 100644
+--- a/saleor/attribute/models/product.py
++++ b/saleor/attribute/models/product.py
+@@ -35,6 +35,8 @@ class AssignedProductAttributeValue(SortableModel):
+         ]
+ 
+     def get_ordering_queryset(self):
++        if self.product:
++            return self.product.attributevalues.all()
+         return self.assignment.productvalueassignment.all()
+ 
+ 
+diff --git a/saleor/attribute/utils.py b/saleor/attribute/utils.py
+index d87578f..dd1caea 100644
+--- a/saleor/attribute/utils.py
++++ b/saleor/attribute/utils.py
+@@ -116,17 +116,10 @@ def _associate_attribute_to_instance(
+         assignment, _ = AssignedProductAttribute.objects.get_or_create(
+             product=instance, assignment=attribute_rel
+         )
+-        assignment.values.set(values)
++        assignment.values.set(values, through_defaults={"product": instance})
+ 
+         sort_assigned_attribute_values_using_assignment(instance, assignment, values)
+ 
+-        # While migrating to a new structure we need to make sure we also
+-        # copy the assigned product to AssignedProductAttributeValue
+-        # where it will live after issue #12881 will be implemented
+-        AssignedProductAttributeValue.objects.filter(
+-            assignment_id=assignment.pk
+-        ).update(product_id=instance.pk)
+-
+         return assignment
+ 
+     if isinstance(instance, ProductVariant):
+diff --git a/saleor/graphql/product/dataloaders/attributes.py b/saleor/graphql/product/dataloaders/attributes.py
+index 26deb77..21911e8 100644
+--- a/saleor/graphql/product/dataloaders/attributes.py
++++ b/saleor/graphql/product/dataloaders/attributes.py
+@@ -106,7 +106,9 @@ class AttributeProductsByProductTypeIdLoader(DataLoader):
+             qs = AttributeProduct.objects.using(self.database_connection_name).filter(
+                 attribute__visible_in_storefront=True
+             )
+-        attribute_products = qs.filter(product_type_id__in=keys)
++        attribute_products = qs.filter(product_type_id__in=keys).select_related(
++            "attribute"
++        )
+         producttype_to_attributeproducts = defaultdict(list)
+         for attribute_product in attribute_products:
+             producttype_to_attributeproducts[attribute_product.product_type_id].append(
+@@ -251,81 +253,57 @@ class SelectedAttributesByProductIdLoader(DataLoader):
+     context_key = "selectedattributes_by_product"
+ 
+     def batch_load(self, keys):
+-        def with_products_and_assigned_attributes(result):
+-            products, product_attributes = result
+-            products = [product for product in products if product is not None]
+-            assigned_product_attribute_ids = [
+-                a.id for attrs in product_attributes for a in attrs
+-            ]
+-            product_type_ids = list({p.product_type_id for p in products})
+-            product_attributes = dict(zip(keys, product_attributes))
++        products = ProductByIdLoader(self.context).load_many(keys)
+ 
+-            def with_attributeproducts_and_values(result):
+-                attribute_products, attribute_values = result
+-                attribute_ids = list(
+-                    {ap.attribute_id for aps in attribute_products for ap in aps}
+-                )
+-                attribute_products = dict(zip(product_type_ids, attribute_products))
+-                attribute_values = dict(
+-                    zip(assigned_product_attribute_ids, attribute_values)
++        def with_products(products):
++            products = [product for product in products if product is not None]
++            product_type_ids = [p.product_type_id for p in products]
++            assignments = list(
++                AssignedProductAttributeValue.objects.using(
++                    self.database_connection_name
+                 )
++                .filter(product_id__in=keys)
++                .iterator()
++            )
++            value_ids = [a.value_id for a in assignments]
+ 
+-                def with_attributes(attributes):
+-                    id_to_attribute = dict(zip(attribute_ids, attributes))
+-                    selected_attributes_map = defaultdict(list)
+-                    for key, product in zip(keys, products):
+-                        assigned_producttype_attributes = attribute_products[
+-                            product.product_type_id
++            def with_attribute_products_and_values(result):
++                attribute_products, values = result
++                attribute_products_map = dict(zip(product_type_ids, attribute_products))
++                values_map = dict(zip(value_ids, values))
++                selected_attributes_map = defaultdict(list)
++
++                for product in products:
++                    attribute_products_for_type = attribute_products_map.get(
++                        product.product_type_id, []
++                    )
++                    product_values = [
++                        values_map.get(assignment.value_id)
++                        for assignment in assignments
++                        if assignment.product_id == product.id
++                    ]
++                    for attribute_product in attribute_products_for_type:
++                        attribute = attribute_product.attribute
++                        values_for_attribute = [
++                            value
++                            for value in product_values
++                            if value and value.attribute_id == attribute.id
+                         ]
+-                        assigned_product_attributes = product_attributes[key]
+-                        for (
+-                            assigned_producttype_attribute
+-                        ) in assigned_producttype_attributes:
+-                            product_assignment = next(
+-                                (
+-                                    apa
+-                                    for apa in assigned_product_attributes
+-                                    if apa.assignment_id
+-                                    == assigned_producttype_attribute.id
+-                                ),
+-                                None,
+-                            )
+-                            attribute = id_to_attribute[
+-                                assigned_producttype_attribute.attribute_id
+-                            ]
+-                            if product_assignment:
+-                                values = attribute_values[product_assignment.id]
+-                            else:
+-                                values = []
+-                            selected_attributes_map[key].append(
+-                                {"values": values, "attribute": attribute}
+-                            )
+-                    return [selected_attributes_map[key] for key in keys]
++                        selected_attributes_map[product.id].append(
++                            {"values": values_for_attribute, "attribute": attribute}
++                        )
+ 
+-                return (
+-                    AttributesByAttributeId(self.context)
+-                    .load_many(attribute_ids)
+-                    .then(with_attributes)
+-                )
++                return [selected_attributes_map[key] for key in keys]
+ 
+             attribute_products = AttributeProductsByProductTypeIdLoader(
+                 self.context
+             ).load_many(product_type_ids)
+-            attribute_values = AttributeValuesByAssignedProductAttributeIdLoader(
+-                self.context
+-            ).load_many(assigned_product_attribute_ids)
+-            return Promise.all([attribute_products, attribute_values]).then(
+-                with_attributeproducts_and_values
++            values = AttributeValueByIdLoader(self.context).load_many(value_ids)
++            return Promise.all([attribute_products, values]).then(
++                with_attribute_products_and_values
+             )
+ 
+-        products = ProductByIdLoader(self.context).load_many(keys)
+-        assigned_attributes = AssignedProductAttributesByProductIdLoader(
+-            self.context
+-        ).load_many(keys)
+-
+-        return Promise.all([products, assigned_attributes]).then(
+-            with_products_and_assigned_attributes
+-        )
++        return products.then(with_products)
+ 
+ 
+ class SelectedAttributesByProductVariantIdLoader(DataLoader):
