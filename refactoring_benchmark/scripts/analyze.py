@@ -111,7 +111,7 @@ Examples:
     parser.add_argument(
         "--no-error-bars",
         action="store_true",
-        help="Disable standard error error bars",
+        help="Disable 95% confidence interval error bars",
     )
 
     # Other arguments
