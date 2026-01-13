@@ -10,11 +10,55 @@ from refactoring_benchmark.analyze.loader import (
     validate_analysis_data,
 )
 from refactoring_benchmark.analyze.metrics import ALL_METRICS
+from refactoring_benchmark.analyze.models import AnalysisData, AgentDescriptionData
 from refactoring_benchmark.analyze.plotting import create_plot, save_plot
 from refactoring_benchmark.analyze.config import PlotConfig
 from refactoring_benchmark.analyze.filters import filter_successful_only
 from refactoring_benchmark.utils.common import load_instances_from_csv
 
+
+def print_statistics_table(data: AnalysisData, metric_name: str, aggregation: str) -> None:
+    """Print comparison table with agent statistics.
+
+    Args:
+        data: Analysis data containing metric values
+        metric_name: Name of the metric
+        aggregation: Aggregation type used
+    """
+    agents = data.get_agent_ids()
+    description_types = data.get_description_types()
+
+    if not agents or not description_types:
+        return
+
+    print(f"\n  Statistics for {metric_name.upper()} ({aggregation}):")
+    print("  " + "=" * 100)
+    print(f"  {'Agent':<50} {'Metric Mean':<15} {'Metric CI':<30}")
+    print("  " + "-" * 100)
+
+    for agent_id in agents:
+        # Collect all metric values across description types
+        all_metrics = []
+        for desc_type in description_types:
+            agent_desc_data = data.get_data(agent_id, desc_type)
+            if agent_desc_data:
+                all_metrics.extend(agent_desc_data.metric_values)
+
+        if all_metrics:
+            # Create temporary AgentDescriptionData to leverage existing methods
+            temp_data = AgentDescriptionData(
+                agent_id=agent_id,
+                description_type="aggregated",
+                metric_values=all_metrics
+            )
+
+            if aggregation == "mean":
+                ci_low, ci_high = temp_data.confidence_interval()
+                print(f"  {agent_id:<50} {temp_data.mean:<15.4f} [{ci_low:.4f}, {ci_high:.4f}]")
+            else:  # median
+                print(f"  {agent_id:<50} {temp_data.median:<15.4f} {'N/A (median)':<30}")
+
+    print("  " + "=" * 100)
 
 def main():
     """Analyze evaluation results and generate plots."""
@@ -51,7 +95,6 @@ Examples:
   python -m refactoring_benchmark.scripts.analyze --instances-csv ./custom_instances.csv
         """,
     )
-
     # Output directory arguments
     parser.add_argument(
         "--output-dir",
@@ -111,7 +154,7 @@ Examples:
     parser.add_argument(
         "--no-error-bars",
         action="store_true",
-        help="Disable 95% confidence interval error bars",
+        help="Disable 95 percent confidence interval error bars",
     )
 
     # Other arguments
@@ -132,6 +175,11 @@ Examples:
         type=int,
         default=300,
         help="Resolution for saved plots (default: 300)",
+    )
+    parser.add_argument(
+        "--statistics",
+        action="store_true",
+        help="Print comparison table with mean and confidence interval statistics",
     )
 
     args = parser.parse_args()
@@ -234,8 +282,12 @@ Examples:
                 metric_name,
                 plot_type=args.plot_type,
                 aggregation=args.aggregation,
-                config=plot_config,
+                config=plot_config if metric_name != "cost" else PlotConfig(show_error_bars=False, ylim_max=10)
             )
+
+            # Print statistics table if requested
+            if args.statistics:
+                print_statistics_table(data, metric_name, args.aggregation)
 
             # Save plot
             output_filename = f"{metric_name}_{args.plot_type}_{args.aggregation}.png"
