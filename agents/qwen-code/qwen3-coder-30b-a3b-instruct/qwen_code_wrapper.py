@@ -11,6 +11,10 @@ MAX_BUDGET_USD = float(os.environ.get("MAX_BUDGET_USD", 2.5))
 INPUT_TOKEN_PRICE = float(os.environ.get("INPUT_TOKEN_PRICE", 0.07 / 1e6))
 OUTPUT_TOKEN_PRICE = float(os.environ.get("OUTPUT_TOKEN_PRICE", 0.27 / 1e6))
 
+assert os.environ.get("OPENAI_API_KEY") is not None, "OPENAI_API_KEY environment variable must be set"
+assert os.environ.get("OPENAI_BASE_URL") is not None, "OPENAI_BASE_URL environment variable must be set"
+assert os.environ.get("OPENAI_MODEL") is not None, "OPENAI_MODEL environment variable must be set"
+
 def calculate_cost(input_tokens, output_tokens):
     """Calculate cost based on token counts."""
     return (input_tokens * INPUT_TOKEN_PRICE) + (output_tokens * OUTPUT_TOKEN_PRICE)
