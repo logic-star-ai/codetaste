@@ -28,17 +28,23 @@ def check_test_validity(result: EvaluationResult) -> ValidityStatus:
     if not result.instance_metadata.has_execution_environment:
         return ValidityStatus.NO_EXEC_ENV
 
-    if result.agent_test_metrics is None:
-        return ValidityStatus.NO_TEST_RESULTS
-
     agent_passed = result.agent_test_metrics.passed
+    agent_failed = result.agent_test_metrics.failed
     base_passed = result.instance_metadata.base_metrics.passed
+    base_failed = result.instance_metadata.base_metrics.failed
     golden_passed = result.instance_metadata.golden_metrics.passed
-
+    golden_failed = result.instance_metadata.golden_metrics.failed
     min_passed = min(base_passed, golden_passed)
     max_passed = max(base_passed, golden_passed)
+    max_failed = max(base_failed, golden_failed)
+    min_failed = min(base_failed, golden_failed)
 
-    if 0.9 * min_passed <= agent_passed <= 1.1 * max_passed: # Some Tolerance for now due to non-determinism
+
+    if min_failed == -1: # No valid test results in either base or golden, accept any results
+        return ValidityStatus.VALID
+    elif result.agent_test_metrics is None:
+        return ValidityStatus.NO_TEST_RESULTS
+    elif 0.9 * min_passed <= agent_passed <= 1.1 * max_passed and agent_failed <= max_failed:
         return ValidityStatus.VALID
     else:
         return ValidityStatus.INVALID_TESTS
