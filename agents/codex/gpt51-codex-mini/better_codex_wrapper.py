@@ -1,11 +1,10 @@
+import asyncio
 import os
-import subprocess
 import sys
 import json
 import argparse
 from pathlib import Path
 from datetime import datetime, timezone
-from time import sleep
 from typing import Dict, Any, Optional
 
 # --- Configuration ---
@@ -13,7 +12,7 @@ MAX_BUDGET_USD = float(os.environ.get("MAX_BUDGET_USD", 11))
 INPUT_TOKEN_PRICE = float(os.environ.get("INPUT_TOKEN_PRICE", 1.75 / 1e6))
 CACHED_INPUT_TOKEN_PRICE = float(os.environ.get("CACHED_INPUT_TOKEN_PRICE", 0.175 / 1e6))
 OUTPUT_TOKEN_PRICE = float(os.environ.get("OUTPUT_TOKEN_PRICE", 14.0 / 1e6))
-TIMEOUT_SEC = os.environ.get("TIMEOUT_SEC", "4800") # 80 minutes
+TIMEOUT_SEC = float(os.environ.get("TIMEOUT_SEC", 4800))  # 80 minutes
 SESSIONS_DIR = Path.home() / ".codex" / "sessions"
 
 print(f"Using MAX_BUDGET_USD={MAX_BUDGET_USD}, INPUT_TOKEN_PRICE={INPUT_TOKEN_PRICE}, CACHED_INPUT_TOKEN_PRICE={CACHED_INPUT_TOKEN_PRICE}, OUTPUT_TOKEN_PRICE={OUTPUT_TOKEN_PRICE}")
@@ -28,18 +27,15 @@ class SessionMonitor:
     def _find_latest_session(self):
         """Locates the newest jsonl file in the newest session directory."""
         try:
-            # 1. Find all 'jsonl' files recursively
             all_jsonl_files = list(SESSIONS_DIR.rglob("*.jsonl"))
             if not all_jsonl_files:
                 return
-            # 2. Get the file with the latest modification time
-            # This effectively finds the 'latest file' in the 'latest dir'
             latest_file = max(all_jsonl_files, key=lambda p: p.stat().st_mtime)
-            print(f"Latest session file found: {latest_file}")
             if self.jsonl_path != latest_file:
+                print(f"Monitoring session: {latest_file.name}")
                 self.jsonl_path = latest_file
-                self.last_pos = 0 # Reset if we switched to a newer session file
-        except Exception as e:
+                self.last_pos = 0
+        except Exception:
             pass
 
     def update(self):
@@ -57,13 +53,8 @@ class SessionMonitor:
                         msg_type = data.get("type")
                         payload = data.get("payload", {})
 
-                        # Extract Model from turn_context
                         if msg_type == "turn_context":
-                            if self.model != payload.get("model", self.model):
-                                print(f"Updated model to: {payload.get('model')}")
-                                self.model = payload.get("model", self.model)
-
-                        # Extract Tokens from token_count
+                            self.model = payload.get("model", self.model)
                         elif msg_type == "event_msg" and payload.get("type") == "token_count":
                             info = payload.get("info")
                             if info:
@@ -80,7 +71,6 @@ def compute_cost(usage_dict: Optional[Dict[str, Any]]) -> float:
         total_input = usage_dict.get("input_tokens", 0)
         cached_input = usage_dict.get("cached_input_tokens", 0)
         output_tokens = usage_dict.get("output_tokens", 0)
-
         standard_input = max(0, total_input - cached_input)
         cost = (
             (standard_input * INPUT_TOKEN_PRICE) +
@@ -94,57 +84,90 @@ def compute_cost(usage_dict: Optional[Dict[str, Any]]) -> float:
 def get_timestamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-def run_limited_task(prompt: str, unknown_args: list) -> bool:
+async def run_limited_task_async(prompt: str, unknown_args: list) -> bool:
     monitor = SessionMonitor()
-    start_time = get_timestamp()
-    cmd = ["timeout", TIMEOUT_SEC, "codex", "exec"] + unknown_args + ["--", prompt]
+    start_time_dt = datetime.now(timezone.utc)
+    last_read_dt = datetime.now(timezone.utc)
+    start_time_str = start_time_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
     
-    cmd_str = " ".join(cmd)
-    cmd_str = "\n".join(cmd_str.splitlines()[:5] + (["..."] if len(cmd_str.splitlines()) > 5 else []))
-    print(f"Running command: {cmd_str}")
+    # Execute codex directly without the shell 'timeout' command
+    cmd = ["codex", "exec"] + unknown_args + ["--", prompt]
+    print(f"Starting task: {' '.join(cmd[:10])}...")
+
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=sys.stdout.fileno(),
+        stderr=asyncio.subprocess.PIPE
+    )
+
+    reason = "success"
     current_cost = 0.0
+
     try:
-        with subprocess.Popen(
-            cmd, 
-            stdout=sys.stdout, 
-            stderr=subprocess.PIPE, 
-            text=True, 
-            bufsize=1
-        ) as proc:
-
-            for line in proc.stderr:
-                print(line, end="", flush=True)
-                # 1. Update metadata from session file
-                monitor.update()
-                
-                # 2. Check Budget
-                tmp_cost = compute_cost(monitor.tokens)
-                if tmp_cost != current_cost:
-                    print(f"\nUpdated Cost: ${tmp_cost:.4f}.")
-                    current_cost = tmp_cost
-                if current_cost >= MAX_BUDGET_USD:
-                    print(f"\n[!] KILL: Budget exceeded (${current_cost:.4f} > ${MAX_BUDGET_USD}).")
-                    proc.terminate()
-                    _finalize_output("budget_exceeded", monitor.tokens, monitor.model, start_time, 1)
-                    return True
-
-            status = proc.wait()
-            monitor.update()
-            
-            if status == 124:
+        # Loop as long as the process is running
+        while proc.returncode is None:
+            # 1. Check Clock
+            elapsed = (datetime.now(timezone.utc) - start_time_dt).total_seconds()
+            if elapsed > TIMEOUT_SEC:
+                print(f"\n[!] KILL: Time limit reached ({elapsed:.0f}s).")
+                proc.terminate()
                 reason = "timeout"
-            else:
-                reason = "success" if status == 0 else "error"
-                
-            _finalize_output(reason, monitor.tokens, monitor.model, start_time, status)
-            return True
+                break
+            
+            elapsed_since_last_read = (datetime.now(timezone.utc) - last_read_dt).total_seconds()
+            if elapsed_since_last_read > 20 * 60:
+                print(f"\n[!] No progress in 20min ({elapsed_since_last_read:.0f}s). Timeout.")
+                proc.terminate()
+                reason = "timeout"
+                break
+
+            # 2. Check Budget
+            monitor.update()
+            tmp_cost = compute_cost(monitor.tokens)
+            if tmp_cost != current_cost:
+                print(f"Cost: ${tmp_cost:.4f}")
+                current_cost = tmp_cost
+            
+            if current_cost >= MAX_BUDGET_USD:
+                print(f"\n[!] KILL: Budget exceeded (${current_cost:.4f}).")
+                proc.terminate()
+                reason = "budget_exceeded"
+                break
+
+            # 3. Read Stderr (Non-blocking)
+            try:
+                # We wait 1 second for output. If none, the loop restarts to re-check time/budget.
+                line_task = asyncio.create_task(proc.stderr.readline())
+                line = await asyncio.wait_for(line_task, timeout=1.0)
+                if line:
+                    print(line.decode(errors="replace"), file=sys.stderr, flush=True)
+                    last_read_dt = datetime.now(timezone.utc)
+                else:
+                    # EOF reached on stderr
+                    break
+            except asyncio.TimeoutError:
+                continue
+
+        # Wait for the process to actually exit after termination or completion
+        try:
+            exit_code = await asyncio.wait_for(proc.wait(), timeout=5.0)
+        except asyncio.TimeoutError:
+            print("[!] Process unresponsive. Sending SIGKILL.")
+            proc.kill()
+            exit_code = await proc.wait()
+
+        if reason == "success" and exit_code != 0:
+            reason = "error"
 
     except Exception as e:
         print(f"Execution Error: {e}")
-        _finalize_output("execution_error", monitor.tokens, monitor.model, start_time, 1)
-        return False
+        reason = "execution_error"
+        exit_code = 1
 
-def _finalize_output(reason: str, tokens: dict, model: str, start_time: str, exit_code: int):
+    _finalize_output(reason, monitor.tokens, monitor.model, start_time_str, exit_code, last_read_dt)
+    return True
+
+def _finalize_output(reason: str, tokens: dict, model: str, start_time: str, exit_code: int, last_read_dt: datetime):
     result = {
         "finish_reason": reason,
         "finish_time": get_timestamp(),
@@ -153,9 +176,12 @@ def _finalize_output(reason: str, tokens: dict, model: str, start_time: str, exi
         "additional": {
             "exit_code": exit_code,
             "tokens": tokens,
-            "model": model
+            "model": model,
+            "seconds_since_last_read": (datetime.now(timezone.utc) - last_read_dt).total_seconds()
         }
     }
+    print("\n--- FINAL RESULT ---")
+    print()
     print(json.dumps(result), flush=True)
 
 def main():
@@ -172,8 +198,11 @@ def main():
         print("Error: No prompt provided.")
         sys.exit(1)
 
-    success = run_limited_task(prompt, unknown)
-    sys.exit(0 if success else 1)
+    try:
+        asyncio.run(run_limited_task_async(prompt, unknown))
+    except KeyboardInterrupt:
+        sys.exit(130)
+    sys.exit(0)
 
 if __name__ == "__main__":
     main()

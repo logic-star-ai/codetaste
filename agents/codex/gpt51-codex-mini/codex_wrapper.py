@@ -13,6 +13,7 @@ MAX_BUDGET_USD = float(os.environ.get("MAX_BUDGET_USD", 7.5))
 INPUT_TOKEN_PRICE = float(os.environ.get("INPUT_TOKEN_PRICE", 1.25 / 1e6))
 CACHED_INPUT_TOKEN_PRICE = float(os.environ.get("CACHED_INPUT_TOKEN_PRICE", 0.125 / 1e6))
 OUTPUT_TOKEN_PRICE = float(os.environ.get("OUTPUT_TOKEN_PRICE", 10.0 / 1e6))
+TIMEOUT_SEC = os.environ.get("TIMEOUT_SEC", "4800") # 80 minutes
 SESSIONS_DIR = Path.home() / ".codex" / "sessions"
 
 print(f"Using MAX_BUDGET_USD={MAX_BUDGET_USD}, INPUT_TOKEN_PRICE={INPUT_TOKEN_PRICE}, CACHED_INPUT_TOKEN_PRICE={CACHED_INPUT_TOKEN_PRICE}, OUTPUT_TOKEN_PRICE={OUTPUT_TOKEN_PRICE}")
@@ -131,7 +132,10 @@ def run_limited_task(prompt: str, unknown_args: list) -> bool:
             # Final sync for last tokens
             monitor.update()
             
-            reason = "success" if status == 0 else "error"
+            if status == 124:
+                reason = "timeout"
+            else:
+                reason = "success" if status == 0 else "error"
             _finalize_output(reason, monitor.tokens, monitor.model, start_time, status)
             return True
 
