@@ -1,0 +1,195 @@
+diff --git a/config/.eslintrc.js b/config/.eslintrc.js
+index dcb242f..d61a500 100644
+--- a/config/.eslintrc.js
++++ b/config/.eslintrc.js
+@@ -8,5 +8,10 @@ module.exports = {
+     'plugin:react-hooks/recommended',
+     'plugin:react/jsx-runtime'
+   ],
+-  plugins: [...base.plugins, 'react', 'react-hooks']
++  plugins: [...base.plugins, 'react', 'react-hooks'],
++  settings: {
++    react: {
++      version: '18.0'
++    }
++  }
+ }
+diff --git a/integrations/google-translation/src/server.ts b/integrations/google-translation/src/server.ts
+index 8443667..5374f1d 100644
+--- a/integrations/google-translation/src/server.ts
++++ b/integrations/google-translation/src/server.ts
+@@ -46,7 +46,7 @@ export const createGoogleTranslationGraphQLServer = ({
+             return translation
+           } catch (e) {
+             // * Return null and log the error if the translation fails
+-            const { message } = e as Error
++            const message = e instanceof Error ? e.message : String(e)
+             logger(`Impossible to translate "${text}" from ${from} to ${to}: ${message}`)
+             return null
+           }
+diff --git a/integrations/stripe-graphql-js/src/utils.ts b/integrations/stripe-graphql-js/src/utils.ts
+index fd844ba..8ed808e 100644
+--- a/integrations/stripe-graphql-js/src/utils.ts
++++ b/integrations/stripe-graphql-js/src/utils.ts
+@@ -2,6 +2,7 @@ import jwt from 'jsonwebtoken'
+ import Stripe from 'stripe'
+ 
+ import { UserHasuraClaims } from './types'
++import type { JwtPayload } from 'jsonwebtoken'
+ 
+ if (!process.env.STRIPE_SECRET_KEY) {
+   throw new Error('STRIPE_SECRET_KEY env var is not set')
+@@ -25,10 +26,16 @@ export const getUserClaims = (req: Request): UserHasuraClaims | undefined => {
+       throw new Error('NHOST_JWT_SECRET env var is not set')
+     }
+ 
+-    const jwtSecret = JSON.parse(process.env.NHOST_JWT_SECRET)
++    const jwtSecret: unknown = JSON.parse(process.env.NHOST_JWT_SECRET)
++    if (!jwtSecret || typeof jwtSecret !== 'object' || !('key' in jwtSecret)) {
++      throw new Error('NHOST_JWT_SECRET is not a valid JSON object with a "key" property')
++    }
+ 
+-    const decodedToken = jwt.verify(accessToken, jwtSecret.key) as any
+-    return decodedToken['https://hasura.io/jwt/claims'] as UserHasuraClaims
++    const decodedToken = jwt.verify(accessToken, (jwtSecret as { key: string }).key)
++    if (typeof decodedToken === 'string') {
++      return undefined
++    }
++    return (decodedToken as JwtPayload)['https://hasura.io/jwt/claims'] as UserHasuraClaims
+   } catch (error) {
+     return undefined
+   }
+diff --git a/packages/hasura-auth-js/src/internal-client.ts b/packages/hasura-auth-js/src/internal-client.ts
+index 9a32299..3b37b48 100644
+--- a/packages/hasura-auth-js/src/internal-client.ts
++++ b/packages/hasura-auth-js/src/internal-client.ts
+@@ -19,8 +19,8 @@ export class AuthClient {
+   private _interpreter?: AuthInterpreter
+   private _started = false
+   private _channel?: BroadcastChannel
+-  private _subscriptionsQueue: Set<(client: AuthClient) => void> = new Set()
+-  private _subscriptions: Set<() => void> = new Set()
++  private _subscriptionFactories: Set<(client: AuthClient) => () => void> = new Set()
++  private _subscriptions: Map<(client: AuthClient) => () => void, () => void> = new Map()
+ 
+   constructor({
+     clientStorageType = 'web',
+@@ -90,10 +90,14 @@ export class AuthClient {
+     if (!this._started || typeof window === 'undefined') {
+       if (this._interpreter.initialized) {
+         this._interpreter.stop()
+-        this._subscriptions.forEach((fn) => fn())
++        this._subscriptions.forEach((unsubscribe) => unsubscribe())
++        this._subscriptions.clear()
+       }
+       this._interpreter.start(machineWithInitialContext.initialState)
+-      this._subscriptionsQueue.forEach((fn) => fn(this))
++      this._subscriptionFactories.forEach((factory) => {
++        const unsubscribe = factory(this)
++        this._subscriptions.set(factory, unsubscribe)
++      })
+     }
+ 
+     this._started = true
+@@ -112,19 +116,22 @@ export class AuthClient {
+   }
+ 
+   subscribe(fn: (client: AuthClient) => () => void): () => void {
++    this._subscriptionFactories.add(fn)
++
+     if (this.started) {
+-      // * The interpreter is already available: we can add the listener straight ahead
+-      const subscription = fn(this)
+-      this._subscriptions.add(subscription)
+-      return subscription
+-    } else {
+-      // * The interpreter is not yet available: we add the listener to a queue that will be started when setting the interpreter
+-      // * Note: in React, the Xstate interpreter does not start from the global state, but from the root component
+-      this._subscriptionsQueue.add(fn)
+-      return () => {
+-        console.log(
+-          'onTokenChanged was added before the interpreter started. Cannot unsubscribe listener.'
+-        )
++      const existingUnsubscribe = this._subscriptions.get(fn)
++      if (!existingUnsubscribe) {
++        const unsubscribe = fn(this)
++        this._subscriptions.set(fn, unsubscribe)
++      }
++    }
++
++    return () => {
++      this._subscriptionFactories.delete(fn)
++      const unsubscribe = this._subscriptions.get(fn)
++      if (unsubscribe) {
++        unsubscribe()
++        this._subscriptions.delete(fn)
+       }
+     }
+   }
+diff --git a/packages/hasura-auth-js/src/machines/enable-mfa.ts b/packages/hasura-auth-js/src/machines/enable-mfa.ts
+index aa670f5..eed91ba 100644
+--- a/packages/hasura-auth-js/src/machines/enable-mfa.ts
++++ b/packages/hasura-auth-js/src/machines/enable-mfa.ts
+@@ -3,6 +3,7 @@ import { INVALID_MFA_CODE_ERROR, INVALID_MFA_TYPE_ERROR } from '../errors'
+ import { AuthClient } from '../internal-client'
+ import { ErrorPayload } from '../types'
+ import { getFetch, postFetch } from '../utils'
++import type { DoneInvokeEvent } from 'xstate'
+ 
+ export type EnableMfaContext = {
+   error: ErrorPayload | null
+@@ -99,16 +100,15 @@ export const createEnableMfaMachine = ({ backendUrl, interpreter }: AuthClient)
+         saveInvalidMfaTypeError: assign({ error: (_) => INVALID_MFA_TYPE_ERROR }),
+         saveInvalidMfaCodeError: assign({ error: (_) => INVALID_MFA_CODE_ERROR }),
+         saveError: assign({
+-          error: (_, { data: { error } }: any) => error
++          error: (_, event: DoneInvokeEvent<{ error: ErrorPayload | null }>) => event.data.error
+         }),
+         saveGeneration: assign({
+-          imageUrl: (_, { data: { imageUrl } }: any) => imageUrl,
+-          secret: (_, { data: { totpSecret } }: any) => totpSecret
+-        }),
+-        reportError: send((ctx, event) => {
+-          console.log('REPORT', ctx, event)
+-          return { type: 'ERROR', error: ctx.error }
++          imageUrl: (_, event: DoneInvokeEvent<{ imageUrl: string; totpSecret: string }>) =>
++            event.data.imageUrl,
++          secret: (_, event: DoneInvokeEvent<{ imageUrl: string; totpSecret: string }>) =>
++            event.data.totpSecret
+         }),
++        reportError: send((ctx) => ({ type: 'ERROR', error: ctx.error })),
+         reportSuccess: send('SUCCESS'),
+         reportGeneratedSuccess: send('GENERATED'),
+         reportGeneratedError: send((ctx) => ({ type: 'GENERATED_ERROR', error: ctx.error }))
+diff --git a/turbo.json b/turbo.json
+index 3b5b424..aa69f54 100644
+--- a/turbo.json
++++ b/turbo.json
+@@ -4,6 +4,7 @@
+   "pipeline": {
+     "build": {
+       "dependsOn": ["^build"],
++      "inputs": ["$TURBO_DEFAULT$", "config/**"],
+       "outputs": ["dist/**", "umd/**", "build/**", ".next/**"]
+     },
+     "@nhost-examples/react-apollo#build": {
+@@ -35,6 +36,7 @@
+     },
+     "test": {
+       "dependsOn": ["^build"],
++      "inputs": ["$TURBO_DEFAULT$", "config/**"],
+       "outputs": ["coverage/**"]
+     },
+     "e2e": {
+@@ -50,9 +52,11 @@
+     },
+     "lint": {
+       "dependsOn": ["^build"],
++      "inputs": ["$TURBO_DEFAULT$", "config/**"],
+       "outputs": []
+     },
+     "lint:fix": {
++      "inputs": ["$TURBO_DEFAULT$", "config/**"],
+       "outputs": []
+     },
+     "start": {}

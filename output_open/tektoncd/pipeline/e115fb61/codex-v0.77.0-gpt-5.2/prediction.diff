@@ -1,0 +1,374 @@
+diff --git a/pkg/credentials/dockercreds/creds.go b/pkg/credentials/dockercreds/creds.go
+index 7f30ad0..84fb93e 100644
+--- a/pkg/credentials/dockercreds/creds.go
++++ b/pkg/credentials/dockercreds/creds.go
+@@ -23,6 +23,7 @@ import (
+ 	"fmt"
+ 	"os"
+ 	"path/filepath"
++	"sort"
+ 	"strings"
+ 
+ 	"github.com/tektoncd/pipeline/pkg/credentials"
+@@ -61,7 +62,13 @@ func (dc *basicDocker) String() string {
+ 		return ""
+ 	}
+ 	var urls []string
+-	for k, v := range dc.Entries {
++	var keys []string
++	for k := range dc.Entries {
++		keys = append(keys, k)
++	}
++	sort.Strings(keys)
++	for _, k := range keys {
++		v := dc.Entries[k]
+ 		urls = append(urls, fmt.Sprintf("%s=%s", v.Secret, k))
+ 	}
+ 	return strings.Join(urls, ",")
+@@ -69,22 +76,23 @@ func (dc *basicDocker) String() string {
+ 
+ // Set sets a secret for a URL from a value in the format of "secret=url"
+ func (dc *basicDocker) Set(value string) error {
+-	parts := strings.Split(value, "=")
+-	if len(parts) != 2 {
+-		return fmt.Errorf("expect entries of the form secret=url, got: %v", value)
++	if dc.Entries == nil {
++		dc.Entries = make(map[string]entry)
++	}
++	secret, registry, err := credentials.ParseSecretURLPair(value)
++	if err != nil {
++		return err
+ 	}
+-	secret := parts[0]
+-	url := parts[1]
+ 
+-	if _, ok := dc.Entries[url]; ok {
+-		return fmt.Errorf("multiple entries for url: %v", url)
++	if _, ok := dc.Entries[registry]; ok {
++		return fmt.Errorf("multiple entries for url: %v", registry)
+ 	}
+ 
+ 	e, err := newEntry(secret)
+ 	if err != nil {
+ 		return err
+ 	}
+-	dc.Entries[url] = *e
++	dc.Entries[registry] = *e
+ 	return nil
+ }
+ 
+@@ -170,9 +178,8 @@ func (*basicDockerBuilder) MatchingAnnotations(secret *corev1.Secret) []string {
+ // no entries exist then nothing will be written to disk.
+ func (*basicDockerBuilder) Write(directory string) error {
+ 	dockerDir := filepath.Join(directory, ".docker")
+-	basicDocker := filepath.Join(dockerDir, "config.json")
+-	cf := configFile{Auth: config.Entries}
+-	auth := map[string]entry{}
++	configPath := filepath.Join(dockerDir, "config.json")
++	auth := make(map[string]entry, len(config.Entries))
+ 
+ 	for _, secretName := range dockerCfg.Values {
+ 		dockerConfigAuthMap, err := authsFromDockerCfg(secretName)
+@@ -199,16 +206,15 @@ func (*basicDockerBuilder) Write(directory string) error {
+ 	if len(auth) == 0 {
+ 		return nil
+ 	}
+-	if err := os.MkdirAll(dockerDir, os.ModePerm); err != nil {
++	if err := os.MkdirAll(dockerDir, 0700); err != nil {
+ 		return err
+ 	}
+ 
+-	cf.Auth = auth
+-	content, err := json.Marshal(cf)
++	content, err := json.Marshal(configFile{Auth: auth})
+ 	if err != nil {
+ 		return err
+ 	}
+-	return os.WriteFile(basicDocker, content, 0600)
++	return os.WriteFile(configPath, content, 0600)
+ }
+ 
+ func authsFromDockerCfg(secret string) (map[string]entry, error) {
+diff --git a/pkg/credentials/dockercreds/creds_test.go b/pkg/credentials/dockercreds/creds_test.go
+index 4bf99ba..8a1fa17 100644
+--- a/pkg/credentials/dockercreds/creds_test.go
++++ b/pkg/credentials/dockercreds/creds_test.go
+@@ -154,17 +154,47 @@ func TestFlagHandlingURLCollision(t *testing.T) {
+ 	}
+ }
+ 
+-func TestMalformedValueTooMany(t *testing.T) {
++func TestFlagHandlingURLWithEquals(t *testing.T) {
++	credentials.VolumePath = t.TempDir()
++	dir := credentials.VolumeName("foo")
++	if err := os.MkdirAll(dir, os.ModePerm); err != nil {
++		t.Fatalf("os.MkdirAll(%s) = %v", dir, err)
++	}
++	if err := os.WriteFile(filepath.Join(dir, corev1.BasicAuthUsernameKey), []byte("bar"), 0777); err != nil {
++		t.Fatalf("os.WriteFile(username) = %v", err)
++	}
++	if err := os.WriteFile(filepath.Join(dir, corev1.BasicAuthPasswordKey), []byte("baz"), 0777); err != nil {
++		t.Fatalf("os.WriteFile(password) = %v", err)
++	}
++
+ 	cfg := basicDocker{make(map[string]entry)}
+-	if err := cfg.Set("bar=baz=blah"); err == nil {
+-		t.Error("Second Set(); got success, wanted error.")
++	withEquals := "https://us.gcr.io?x=y=z"
++	if err := cfg.Set("foo=" + withEquals); err != nil {
++		t.Fatalf("Set() = %v", err)
++	}
++	if _, ok := cfg.Entries[withEquals]; !ok {
++		t.Fatalf("entries missing key %q", withEquals)
++	}
++}
++
++func TestMalformedValueEmptyURL(t *testing.T) {
++	cfg := basicDocker{make(map[string]entry)}
++	if err := cfg.Set("bar="); err == nil {
++		t.Error("Set(); got success, wanted error.")
+ 	}
+ }
+ 
+ func TestMalformedValueTooFew(t *testing.T) {
+ 	cfg := basicDocker{make(map[string]entry)}
+ 	if err := cfg.Set("bar"); err == nil {
+-		t.Error("Second Set(); got success, wanted error.")
++		t.Error("Set(); got success, wanted error.")
++	}
++}
++
++func TestMalformedValueEmptySecret(t *testing.T) {
++	cfg := basicDocker{make(map[string]entry)}
++	if err := cfg.Set("=https://us.gcr.io"); err == nil {
++		t.Error("Set(); got success, wanted error.")
+ 	}
+ }
+ 
+diff --git a/pkg/credentials/gitcreds/basic.go b/pkg/credentials/gitcreds/basic.go
+index aee42c7..46c87f6 100644
+--- a/pkg/credentials/gitcreds/basic.go
++++ b/pkg/credentials/gitcreds/basic.go
+@@ -50,23 +50,24 @@ func (dc *basicGitConfig) String() string {
+ 
+ // Set sets a secret for a given URL from a "secret=url" value.
+ func (dc *basicGitConfig) Set(value string) error {
+-	parts := strings.Split(value, "=")
+-	if len(parts) != 2 {
+-		return fmt.Errorf("expect entries of the form secret=url, got: %v", value)
++	if dc.entries == nil {
++		dc.entries = make(map[string]basicEntry)
++	}
++	secret, repoURL, err := credentials.ParseSecretURLPair(value)
++	if err != nil {
++		return err
+ 	}
+-	secret := parts[0]
+-	url := parts[1]
+ 
+-	if _, ok := dc.entries[url]; ok {
+-		return fmt.Errorf("multiple entries for url: %v", url)
++	if _, ok := dc.entries[repoURL]; ok {
++		return fmt.Errorf("multiple entries for url: %v", repoURL)
+ 	}
+ 
+-	e, err := newBasicEntry(url, secret)
++	e, err := newBasicEntry(repoURL, secret)
+ 	if err != nil {
+ 		return err
+ 	}
+-	dc.entries[url] = *e
+-	dc.order = append(dc.order, url)
++	dc.entries[repoURL] = *e
++	dc.order = append(dc.order, repoURL)
+ 	return nil
+ }
+ 
+diff --git a/pkg/credentials/gitcreds/creds_test.go b/pkg/credentials/gitcreds/creds_test.go
+index c578656..21f9a1c 100644
+--- a/pkg/credentials/gitcreds/creds_test.go
++++ b/pkg/credentials/gitcreds/creds_test.go
+@@ -186,6 +186,29 @@ func TestBasicFlagHandlingURLCollision(t *testing.T) {
+ 	}
+ }
+ 
++func TestBasicFlagHandlingURLWithEquals(t *testing.T) {
++	credentials.VolumePath = t.TempDir()
++	dir := credentials.VolumeName("foo")
++	if err := os.MkdirAll(dir, os.ModePerm); err != nil {
++		t.Fatalf("os.MkdirAll(%s) = %v", dir, err)
++	}
++	if err := os.WriteFile(filepath.Join(dir, corev1.BasicAuthUsernameKey), []byte("bar"), 0777); err != nil {
++		t.Fatalf("os.WriteFile(username) = %v", err)
++	}
++	if err := os.WriteFile(filepath.Join(dir, corev1.BasicAuthPasswordKey), []byte("baz"), 0777); err != nil {
++		t.Fatalf("os.WriteFile(password) = %v", err)
++	}
++
++	cfg := basicGitConfig{entries: make(map[string]basicEntry)}
++	withEquals := "https://github.com?x=y=z"
++	if err := cfg.Set("foo=" + withEquals); err != nil {
++		t.Fatalf("Set() = %v", err)
++	}
++	if _, ok := cfg.entries[withEquals]; !ok {
++		t.Fatalf("entries missing key %q", withEquals)
++	}
++}
++
+ func TestSSHFlagHandling(t *testing.T) {
+ 	credentials.VolumePath = t.TempDir()
+ 	dir := credentials.VolumeName("foo")
+@@ -375,8 +398,9 @@ func TestSSHFlagHandlingMissingFiles(t *testing.T) {
+ 
+ func TestBasicMalformedValues(t *testing.T) {
+ 	tests := []string{
+-		"bar=baz=blah",
+ 		"bar",
++		"=github.com",
++		"bar=",
+ 	}
+ 	for _, test := range tests {
+ 		cfg := basicGitConfig{}
+@@ -388,8 +412,9 @@ func TestBasicMalformedValues(t *testing.T) {
+ 
+ func TestSshMalformedValues(t *testing.T) {
+ 	tests := []string{
+-		"bar=baz=blah",
+ 		"bar",
++		"=github.com",
++		"bar=",
+ 	}
+ 	for _, test := range tests {
+ 		cfg := sshGitConfig{}
+diff --git a/pkg/credentials/gitcreds/ssh.go b/pkg/credentials/gitcreds/ssh.go
+index afc337e..e38d3b3 100644
+--- a/pkg/credentials/gitcreds/ssh.go
++++ b/pkg/credentials/gitcreds/ssh.go
+@@ -53,21 +53,22 @@ func (dc *sshGitConfig) String() string {
+ 
+ // Set sets a secret for a given URL from a "secret=url" value.
+ func (dc *sshGitConfig) Set(value string) error {
+-	parts := strings.Split(value, "=")
+-	if len(parts) != 2 {
+-		return fmt.Errorf("expect entries of the form secret=url, got: %v", value)
++	if dc.entries == nil {
++		dc.entries = make(map[string][]sshEntry)
++	}
++	secretName, host, err := credentials.ParseSecretURLPair(value)
++	if err != nil {
++		return err
+ 	}
+-	secretName := parts[0]
+-	url := parts[1]
+ 
+-	e, err := newSSHEntry(url, secretName)
++	e, err := newSSHEntry(host, secretName)
+ 	if err != nil {
+ 		return err
+ 	}
+-	if _, exists := dc.entries[url]; !exists {
+-		dc.order = append(dc.order, url)
++	if _, exists := dc.entries[host]; !exists {
++		dc.order = append(dc.order, host)
+ 	}
+-	dc.entries[url] = append(dc.entries[url], *e)
++	dc.entries[host] = append(dc.entries[host], *e)
+ 	return nil
+ }
+ 
+@@ -78,7 +79,7 @@ func (dc *sshGitConfig) Write(directory string) error {
+ 		return nil
+ 	}
+ 	sshDir := filepath.Join(directory, ".ssh")
+-	if err := os.MkdirAll(sshDir, os.ModePerm); err != nil {
++	if err := os.MkdirAll(sshDir, 0700); err != nil {
+ 		return err
+ 	}
+ 
+diff --git a/pkg/credentials/initialize.go b/pkg/credentials/initialize.go
+index 6576cf7..aeb81fb 100644
+--- a/pkg/credentials/initialize.go
++++ b/pkg/credentials/initialize.go
+@@ -77,6 +77,16 @@ func SortAnnotations(secrets map[string]string, annotationPrefix string) []strin
+ 	return mk
+ }
+ 
++// ParseSecretURLPair parses a flag value of the form "secret=url".
++// It uses the first '=' as the delimiter, which allows '=' in the URL.
++func ParseSecretURLPair(value string) (secretName, url string, err error) {
++	secretName, url, ok := strings.Cut(value, "=")
++	if !ok || secretName == "" || url == "" {
++		return "", "", fmt.Errorf("expect entries of the form secret=url, got: %q", value)
++	}
++	return secretName, url, nil
++}
++
+ // CopyCredsToHome copies credentials from the /tekton/creds directory into
+ // the current Step's HOME directory. A list of credential paths to try and
+ // copy is given as an arg, for example, []string{".docker", ".ssh"}. A missing
+diff --git a/pkg/credentials/parse_test.go b/pkg/credentials/parse_test.go
+new file mode 100644
+index 0000000..b4b1f46
+--- /dev/null
++++ b/pkg/credentials/parse_test.go
+@@ -0,0 +1,60 @@
++package credentials
++
++import "testing"
++
++func TestParseSecretURLPair(t *testing.T) {
++	t.Parallel()
++
++	tests := []struct {
++		name       string
++		value      string
++		wantOK     bool
++		wantSecret string
++		wantURL    string
++	}{{
++		name:       "basic",
++		value:      "s=https://example.com",
++		wantOK:     true,
++		wantSecret: "s",
++		wantURL:    "https://example.com",
++	}, {
++		name:       "urlContainsEquals",
++		value:      "s=https://example.com?x=y=z",
++		wantOK:     true,
++		wantSecret: "s",
++		wantURL:    "https://example.com?x=y=z",
++	}, {
++		name:   "missingEquals",
++		value:  "nope",
++		wantOK: false,
++	}, {
++		name:   "emptySecret",
++		value:  "=https://example.com",
++		wantOK: false,
++	}, {
++		name:   "emptyURL",
++		value:  "s=",
++		wantOK: false,
++	}}
++
++	for _, tc := range tests {
++		tc := tc
++		t.Run(tc.name, func(t *testing.T) {
++			t.Parallel()
++
++			gotSecret, gotURL, err := ParseSecretURLPair(tc.value)
++			if tc.wantOK {
++				if err != nil {
++					t.Fatalf("ParseSecretURLPair(%q) err = %v", tc.value, err)
++				}
++				if gotSecret != tc.wantSecret || gotURL != tc.wantURL {
++					t.Fatalf("ParseSecretURLPair(%q) = (%q, %q), want (%q, %q)", tc.value, gotSecret, gotURL, tc.wantSecret, tc.wantURL)
++				}
++				return
++			}
++			if err == nil {
++				t.Fatalf("ParseSecretURLPair(%q) err = nil, want error", tc.value)
++			}
++		})
++	}
++}

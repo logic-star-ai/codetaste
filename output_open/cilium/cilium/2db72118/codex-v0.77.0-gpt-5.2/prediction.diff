@@ -1,0 +1,111 @@
+diff --git a/pkg/datapath/linux/probes/probes.go b/pkg/datapath/linux/probes/probes.go
+index b2e7477c..c24b2033 100644
+--- a/pkg/datapath/linux/probes/probes.go
++++ b/pkg/datapath/linux/probes/probes.go
+@@ -205,9 +205,22 @@ func (p *ProbeManager) SystemKernelHz() (int, error) {
+ // parameter real setting, so only return error log when kernel config file exists
+ // and kernel configuration parameter setting is disabled
+ func (p *ProbeManager) SystemConfigProbes() error {
+-	var notFound bool
+-	if !p.KernelConfigAvailable() {
+-		notFound = true
++	// If the kernel config isn't available on the running system, bpftool won't be
++	// able to populate CONFIG_* values and we shouldn't error on missing required
++	// options. However, callers (including unit tests) may inject CONFIG_* values
++	// directly into the ProbeManager; in that case, validate the provided values
++	// regardless of on-disk kernel config availability.
++	config := p.features.SystemConfig
++	kernelConfigPopulated := config.ConfigBpf != "" ||
++		config.ConfigBpfSyscall != "" ||
++		config.ConfigNetSchIngress != "" ||
++		config.ConfigNetClsBpf != "" ||
++		config.ConfigNetClsAct != "" ||
++		config.ConfigBpfJit != "" ||
++		config.ConfigHaveEbpfJit != ""
++
++	notFound := !p.KernelConfigAvailable() && !kernelConfigPopulated
++	if notFound {
+ 		log.Warn("Kernel Config file not found: If agent fail to start, Please check kernel requirements https://docs.cilium.io/en/stable/operations/system_requirements")
+ 	}
+ 	requiredParams := p.GetRequiredConfig()
+diff --git a/pkg/hubble/relay/pool/manager.go b/pkg/hubble/relay/pool/manager.go
+index 09858df7..16c1abd6 100644
+--- a/pkg/hubble/relay/pool/manager.go
++++ b/pkg/hubble/relay/pool/manager.go
+@@ -152,11 +152,11 @@ func (m *PeerManager) manageConnections() {
+ 			p := m.peers[name]
+ 			m.mu.RUnlock()
+ 			m.wg.Add(1)
+-			go func() {
++			go func(p *peer) {
+ 				defer m.wg.Done()
+ 				// a connection request has been made, make sure to attempt a connection
+ 				m.connect(p, true)
+-			}()
++			}(p)
+ 		case <-connTimer.After(m.opts.connCheckInterval):
+ 			m.mu.RLock()
+ 			now := time.Now()
+@@ -173,10 +173,10 @@ func (m *PeerManager) manageConnections() {
+ 				case p.nextConnAttempt.IsZero(), p.nextConnAttempt.Before(now):
+ 					p.mu.Unlock()
+ 					m.wg.Add(1)
+-					go func() {
++					go func(p *peer) {
+ 						defer m.wg.Done()
+ 						m.connect(p, false)
+-					}()
++					}(p)
+ 				default:
+ 					p.mu.Unlock()
+ 				}
+diff --git a/vendor/golang.org/x/net/internal/socket/sys_unix.go b/vendor/golang.org/x/net/internal/socket/sys_unix.go
+index d203e298..af988672 100644
+--- a/vendor/golang.org/x/net/internal/socket/sys_unix.go
++++ b/vendor/golang.org/x/net/internal/socket/sys_unix.go
+@@ -12,17 +12,37 @@ import (
+ 	"unsafe"
+ )
+ 
+-//go:linkname syscall_getsockopt syscall.getsockopt
+-func syscall_getsockopt(s, level, name int, val unsafe.Pointer, vallen *uint32) error
++func syscall_getsockopt(s, level, name int, val unsafe.Pointer, vallen *uint32) error {
++	_, _, errno := syscall.Syscall6(syscall.SYS_GETSOCKOPT, uintptr(s), uintptr(level), uintptr(name), uintptr(val), uintptr(unsafe.Pointer(vallen)), 0)
++	if errno != 0 {
++		return errno
++	}
++	return nil
++}
+ 
+-//go:linkname syscall_setsockopt syscall.setsockopt
+-func syscall_setsockopt(s, level, name int, val unsafe.Pointer, vallen uintptr) error
++func syscall_setsockopt(s, level, name int, val unsafe.Pointer, vallen uintptr) error {
++	_, _, errno := syscall.Syscall6(syscall.SYS_SETSOCKOPT, uintptr(s), uintptr(level), uintptr(name), uintptr(val), vallen, 0)
++	if errno != 0 {
++		return errno
++	}
++	return nil
++}
+ 
+-//go:linkname syscall_recvmsg syscall.recvmsg
+-func syscall_recvmsg(s int, msg *syscall.Msghdr, flags int) (int, error)
++func syscall_recvmsg(s int, msg *syscall.Msghdr, flags int) (int, error) {
++	n, _, errno := syscall.Syscall(syscall.SYS_RECVMSG, uintptr(s), uintptr(unsafe.Pointer(msg)), uintptr(flags))
++	if errno != 0 {
++		return int(n), errno
++	}
++	return int(n), nil
++}
+ 
+-//go:linkname syscall_sendmsg syscall.sendmsg
+-func syscall_sendmsg(s int, msg *syscall.Msghdr, flags int) (int, error)
++func syscall_sendmsg(s int, msg *syscall.Msghdr, flags int) (int, error) {
++	n, _, errno := syscall.Syscall(syscall.SYS_SENDMSG, uintptr(s), uintptr(unsafe.Pointer(msg)), uintptr(flags))
++	if errno != 0 {
++		return int(n), errno
++	}
++	return int(n), nil
++}
+ 
+ func getsockopt(s uintptr, level, name int, b []byte) (int, error) {
+ 	l := uint32(len(b))
