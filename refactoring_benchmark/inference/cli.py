@@ -54,7 +54,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--timeout",
         type=int,
-        default=3600,
+        default=5400,
         help="Timeout in seconds for each instance inference",
     )
 

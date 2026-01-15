@@ -117,7 +117,7 @@ def run_single_instance(instance: InstanceRow, config: InferenceConfig) -> bool:
         # container output to log
         raw_logs = container.logs(stream=False, follow=False)
         raw_logs = b"".join(raw_logs) if not isinstance(raw_logs, bytes) else raw_logs
-        stdout = raw_logs.decode("utf-8", errors="replace")
+        stdout = raw_logs.decode("utf-8", errors="replace") # stdout + stderr combined
         instance_logger.info(stdout)
         (output_dir / "inference.out").write_text(stdout, encoding="utf-8")
 

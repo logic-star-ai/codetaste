@@ -18,7 +18,7 @@ from refactoring_benchmark.utils.common import load_instances_from_csv
 
 
 def print_statistics_table(data: AnalysisData, metric_name: str, aggregation: str) -> None:
-    """Print comparison table with agent statistics.
+    """Print comparison table with agent statistics, including combined and individual breakdowns.
 
     Args:
         data: Analysis data containing metric values
@@ -32,33 +32,48 @@ def print_statistics_table(data: AnalysisData, metric_name: str, aggregation: st
         return
 
     print(f"\n  Statistics for {metric_name.upper()} ({aggregation}):")
-    print("  " + "=" * 100)
-    print(f"  {'Agent':<50} {'Metric Mean':<15} {'Metric CI':<30}")
-    print("  " + "-" * 100)
+    print("  " + "=" * 110)
+    # Added a "Type" column for clarity
+    print(f"  {'Agent / Description Type':<55} {'Metric Mean':<15} {'Metric CI':<30}")
+    print("  " + "-" * 110)
 
     for agent_id in agents:
-        # Collect all metric values across description types
         all_metrics = []
+        individual_results = []
+
+        # 1. Collect individual data and gather all metrics for aggregation
         for desc_type in description_types:
             agent_desc_data = data.get_data(agent_id, desc_type)
             if agent_desc_data:
                 all_metrics.extend(agent_desc_data.metric_values)
+                individual_results.append(agent_desc_data)
 
+        # 2. Print the Aggregated (Combined) row for this agent
         if all_metrics:
-            # Create temporary AgentDescriptionData to leverage existing methods
-            temp_data = AgentDescriptionData(
+            combined_data = AgentDescriptionData(
                 agent_id=agent_id,
-                description_type="aggregated",
+                description_type="COMBINED",
                 metric_values=all_metrics
             )
-
+            
+            # Print the header/combined row for the agent
             if aggregation == "mean":
-                ci_low, ci_high = temp_data.confidence_interval()
-                print(f"  {agent_id:<50} {temp_data.mean:<15.4f} [{ci_low:.4f}, {ci_high:.4f}]")
+                ci_low, ci_high = combined_data.confidence_interval()
+                print(f"  {agent_id:<55} {combined_data.mean:<15.4f} [{ci_low:.4f}, {ci_high:.4f}]")
             else:  # median
-                print(f"  {agent_id:<50} {temp_data.median:<15.4f} {'N/A (median)':<30}")
+                print(f"  {agent_id:<55} {combined_data.median:<15.4f} {'N/A (median)':<30}")
 
-    print("  " + "=" * 100)
+            # 3. Print the individual breakdown rows
+            for desc_data in individual_results:
+                label = f"   └─ {desc_data.description_type}"
+                if aggregation == "mean":
+                    ci_low, ci_high = desc_data.confidence_interval()
+                    print(f"  {label:<55} {desc_data.mean:<15.4f} [{ci_low:.4f}, {ci_high:.4f}]")
+                else:
+                    print(f"  {label:<55} {desc_data.median:<15.4f} {'N/A (median)':<30}")
+            # Add a small spacer between agents
+            print("  " + "." * 110)
+    print("  " + "=" * 110)
 
 def main():
     """Analyze evaluation results and generate plots."""

@@ -156,37 +156,26 @@ def validate_analysis_data(
         agent_data = [v for k, v in data.data.items() if k[0] == agent_id]
         if not agent_data:
             available_agents = ", ".join(data.get_agent_ids())
-            raise ValueError(
-                f"Agent '{agent_id}' has no data. Available agents: {available_agents}\n"
-                f"Hint: Use --agent-id flag to specify available agents."
-            )
+            raise ValueError(f"Agent '{agent_id}' has no data.")
 
-    # Check for missing description types and print warnings
-    max_count_per_agent = {}
-    for agent_id in agent_ids:
+    # 1. Calculate the maximum count for EACH description type across all agents
+    max_counts_per_type = {}
+    for desc_type in description_types:
         counts = []
-        for desc_type in description_types:
+        for agent_id in agent_ids:
             agent_desc_data = data.get_data(agent_id, desc_type)
-            if agent_desc_data:
-                counts.append(agent_desc_data.count)
-        max_count_per_agent[agent_id] = max(counts) if counts else 0
+            counts.append(agent_desc_data.count if agent_desc_data else 0)
+        max_counts_per_type[desc_type] = max(counts) if counts else 0
 
-    overall_max = max(max_count_per_agent.values()) if max_count_per_agent else 0
-
+    # 2. Compare each agent/type combo against that type's maximum
     for agent_id in agent_ids:
-        agent_max = max_count_per_agent.get(agent_id, 0)
-        if agent_max < overall_max:
-            print(
-                f"WARNING: Agent '{agent_id}' has fewer data points ({agent_max}) "
-                f"than other agents ({overall_max})"
-            )            
-
-        # Check which description types are missing
-        missing_desc_types = []
         for desc_type in description_types:
             agent_desc_data = data.get_data(agent_id, desc_type)
-            if not agent_desc_data or agent_desc_data.count == 0:
-                missing_desc_types.append(desc_type)
+            count = agent_desc_data.count if agent_desc_data else 0
+            max_val = max_counts_per_type[desc_type]
 
-        if missing_desc_types:
-            print(f"WARNING: Agent '{agent_id}' missing data for: {', '.join(missing_desc_types)}")
+            if count < max_val:
+                print(
+                    f"WARNING: Agent '{agent_id}' for '{desc_type}' has fewer data points "
+                    f"({count}) than the maximum ({max_val})"
+                )

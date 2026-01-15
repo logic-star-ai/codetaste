@@ -10,7 +10,7 @@ import csv
 from pathlib import Path
 
 # The open prompt text
-OPEN_DESCRIPTION = "Autonomously identify and execute improvements to the **entire** codebase, without user intervention. Refactor the codebase. Improve structure, architecture, code quality and/or logic flow. Perform modifications on the actual codebase; do NOT output analysis, plan, roadmap or similar files."
+OPEN_DESCRIPTION = "Without any user intervention. Improve and refactor the entire codebase. Perform modifications on the actual codebase; do NOT output analysis, plan, roadmap or similar files."
 
 
 def create_open_descriptions(instances_csv: Path, descriptions_dir: Path) -> None:

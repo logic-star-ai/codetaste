@@ -3,6 +3,7 @@
 from pathlib import Path
 from typing import Callable
 
+from refactoring_benchmark.analyze.validation import ValidityStatus, check_test_validity
 from refactoring_benchmark.evaluation.models import EvaluationResult
 from refactoring_benchmark.utils.models import ReducedInstanceRow
 from refactoring_benchmark.coverage.precision import calculate_precision_eval_result, InstanceAgentPrecision
@@ -26,10 +27,25 @@ def metric_ifr_removed(result: EvaluationResult) -> float:
 
 def metric_test_success(result: EvaluationResult) -> float | None:
     """Test success metric (1.0 if valid, 0.0 otherwise, None if no test data)."""
-    if result.agent_test_metrics is None:
-        return None
-    return 1.0 if result.agent_test_metrics.is_valid else 0.0
+    if check_test_validity(result) == ValidityStatus.VALID:
+        return 1.0
+    else:
+        return 0.0
 
+def metric_ifr_x_test_success(result: EvaluationResult) -> float | None:
+    """Combined IFR x Test Success metric."""
+    return metric_ifr(result) * metric_test_success(result)
+
+def metric_f1_score(result: EvaluationResult) -> float | None:
+    """Harmonic mean of precision and instruction following (recall)."""
+    p = metric_precision_overall(result)
+    r = metric_ifr(result) # Your TPR equivalent
+    
+    if p is not None and r is not None:
+        if (p + r) == 0:
+            return 0.0
+        return 2 * (p * r) / (p + r)
+    return None
 
 def _calculate_precision(result: EvaluationResult) -> InstanceAgentPrecision | None:
     """Helper to calculate precision metrics (requires ./output_pseudo_agents/)."""
@@ -61,7 +77,9 @@ def metric_cost(result: EvaluationResult) -> float | None:
 
 # Registry of available metrics
 METRICS: dict[str, MetricFunction] = {
+    "f1": metric_f1_score,
     "ifr": metric_ifr,
+    "ifr_x_test_success": metric_ifr_x_test_success,
     "ifr_added": metric_ifr_added,
     "ifr_removed": metric_ifr_removed,
     "test_success": metric_test_success,

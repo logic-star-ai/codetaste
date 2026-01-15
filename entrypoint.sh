@@ -101,13 +101,15 @@ case "$1" in
                     echo "Using standard description"
                     # Ensure this path is correct (Absolute vs Relative)
                     SRC_FILE="/task_description/description.md"
+                    cat "$SRC_FILE" > "$TASK_DESC_DIR/tmp_description.md"
+                    SRC_FILE="$TASK_DESC_DIR/tmp_description.md"
                     ;;
             esac
             HEADER="Perform the task described below. You are required to implement **all** the required changes, without user feedback. The changes must be performed directly on the codebase."
             echo "$HEADER" > "$TASK_DESC_DIR/description.md"
             cat "$SRC_FILE" >> "$TASK_DESC_DIR/description.md"
         fi
-        rm -f "$TASK_DESC_DIR/nano_description.md" "$TASK_DESC_DIR/minimal_description.md" "$TASK_DESC_DIR/open_description.md" "$TASK_DESC_DIR/files_description.md" "$TASK_DESC_DIR/problem_description.md"
+        rm -f "$TASK_DESC_DIR/nano_description.md" "$TASK_DESC_DIR/minimal_description.md" "$TASK_DESC_DIR/open_description.md" "$TASK_DESC_DIR/files_description.md" "$TASK_DESC_DIR/problem_description.md" "$TASK_DESC_DIR/tmp_description.md"
 
         create_restricted_user
         # Agent System Setup Script Can Still Use Github
