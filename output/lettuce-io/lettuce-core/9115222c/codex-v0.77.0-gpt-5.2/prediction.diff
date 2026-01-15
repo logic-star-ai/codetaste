@@ -1,0 +1,2684 @@
+diff --git a/src/main/java/io/lettuce/core/AbstractRedisClient.java b/src/main/java/io/lettuce/core/AbstractRedisClient.java
+index b9cb19c..d676aab 100644
+--- a/src/main/java/io/lettuce/core/AbstractRedisClient.java
++++ b/src/main/java/io/lettuce/core/AbstractRedisClient.java
+@@ -442,7 +442,7 @@ public abstract class AbstractRedisClient {
+ 
+     private CompletableFuture<Void> closeResources() {
+ 
+-        List<CompletableFuture<Void>> closeFutures = new ArrayList<>();
++        List<CompletionStage<?>> closeFutures = new ArrayList<>();
+ 
+         while (!closeableResources.isEmpty()) {
+             Closeable closeableResource = closeableResources.iterator().next();
+@@ -471,7 +471,7 @@ public abstract class AbstractRedisClient {
+         }
+ 
+         try {
+-            closeFutures.add(toCompletableFuture(channels.close()));
++            closeFutures.add(Futures.toCompletionStage(channels.close()));
+         } catch (Exception e) {
+             logger.debug("Cannot close channels", e);
+         }
+@@ -480,15 +480,15 @@ public abstract class AbstractRedisClient {
+     }
+ 
+     private CompletableFuture<Void> closeClientResources(long quietPeriod, long timeout, TimeUnit timeUnit) {
+-        List<CompletableFuture<Void>> groupCloseFutures = new ArrayList<>();
++        List<CompletionStage<?>> groupCloseFutures = new ArrayList<>();
+         if (!sharedResources) {
+             Future<?> groupCloseFuture = clientResources.shutdown(quietPeriod, timeout, timeUnit);
+-            groupCloseFutures.add(toCompletableFuture(groupCloseFuture));
++            groupCloseFutures.add(Futures.toCompletionStage(groupCloseFuture));
+         } else {
+             for (EventLoopGroup eventExecutors : eventLoopGroups.values()) {
+                 Future<?> groupCloseFuture = clientResources.eventLoopGroupProvider().release(eventExecutors, quietPeriod,
+                         timeout, timeUnit);
+-                groupCloseFutures.add(toCompletableFuture(groupCloseFuture));
++                groupCloseFutures.add(Futures.toCompletionStage(groupCloseFuture));
+             }
+         }
+         return Futures.allOf(groupCloseFutures);
+@@ -546,27 +546,4 @@ public abstract class AbstractRedisClient {
+         this.clientOptions = clientOptions;
+     }
+ 
+-    private static CompletableFuture<Void> toCompletableFuture(Future<?> future) {
+-
+-        CompletableFuture<Void> promise = new CompletableFuture<>();
+-
+-        if (future.isDone() || future.isCancelled()) {
+-            if (future.isSuccess()) {
+-                promise.complete(null);
+-            } else {
+-                promise.completeExceptionally(future.cause());
+-            }
+-            return promise;
+-        }
+-
+-        future.addListener(f -> {
+-            if (f.isSuccess()) {
+-                promise.complete(null);
+-            } else {
+-                promise.completeExceptionally(f.cause());
+-            }
+-        });
+-
+-        return promise;
+-    }
+ }
+diff --git a/src/main/java/io/lettuce/core/LettuceFutures.java b/src/main/java/io/lettuce/core/LettuceFutures.java
+index 44f6f0c..1ee145b 100644
+--- a/src/main/java/io/lettuce/core/LettuceFutures.java
++++ b/src/main/java/io/lettuce/core/LettuceFutures.java
+@@ -16,10 +16,10 @@
+ package io.lettuce.core;
+ 
+ import java.time.Duration;
+-import java.util.concurrent.ExecutionException;
+ import java.util.concurrent.Future;
+ import java.util.concurrent.TimeUnit;
+-import java.util.concurrent.TimeoutException;
++
++import io.lettuce.core.internal.Futures;
+ 
+ /**
+  * Utility to {@link #awaitAll(long, TimeUnit, Future[])} futures until they are done and to synchronize future execution using
+@@ -43,7 +43,7 @@ public class LettuceFutures {
+      * @since 5.0
+      */
+     public static boolean awaitAll(Duration timeout, Future<?>... futures) {
+-        return awaitAll(timeout.toNanos(), TimeUnit.NANOSECONDS, futures);
++        return Futures.awaitAll(timeout, futures);
+     }
+ 
+     /**
+@@ -56,43 +56,7 @@ public class LettuceFutures {
+      * @return {@literal true} if all futures complete in time, otherwise {@literal false}
+      */
+     public static boolean awaitAll(long timeout, TimeUnit unit, Future<?>... futures) {
+-
+-        try {
+-            long nanos = unit.toNanos(timeout);
+-            long time = System.nanoTime();
+-
+-            for (Future<?> f : futures) {
+-
+-                if (nanos < 0) {
+-                    return false;
+-                }
+-
+-                f.get(nanos, TimeUnit.NANOSECONDS);
+-
+-                long now = System.nanoTime();
+-                nanos -= now - time;
+-                time = now;
+-            }
+-
+-            return true;
+-        } catch (RuntimeException e) {
+-            throw e;
+-        } catch (TimeoutException e) {
+-            return false;
+-        } catch (ExecutionException e) {
+-
+-            if (e.getCause() instanceof RedisCommandExecutionException) {
+-                throw ExceptionFactory.createExecutionException(e.getCause().getMessage(), e.getCause());
+-            }
+-
+-            throw new RedisException(e.getCause());
+-        } catch (InterruptedException e) {
+-
+-            Thread.currentThread().interrupt();
+-            throw new RedisCommandInterruptedException(e);
+-        } catch (Exception e) {
+-            throw ExceptionFactory.createExecutionException(null, e);
+-        }
++        return Futures.awaitAll(timeout, unit, futures);
+     }
+ 
+     /**
+@@ -107,33 +71,7 @@ public class LettuceFutures {
+      * @return Result of the command.
+      */
+     public static <T> T awaitOrCancel(RedisFuture<T> cmd, long timeout, TimeUnit unit) {
+-
+-        try {
+-            if (!cmd.await(timeout, unit)) {
+-                cmd.cancel(true);
+-                throw ExceptionFactory.createTimeoutException(Duration.ofNanos(unit.toNanos(timeout)));
+-            }
+-            return cmd.get();
+-        } catch (RuntimeException e) {
+-            throw e;
+-        } catch (ExecutionException e) {
+-
+-            if (e.getCause() instanceof RedisCommandExecutionException) {
+-                throw ExceptionFactory.createExecutionException(e.getCause().getMessage(), e.getCause());
+-            }
+-
+-            if (e.getCause() instanceof RedisCommandTimeoutException) {
+-                throw new RedisCommandTimeoutException(e.getCause());
+-            }
+-
+-            throw new RedisException(e.getCause());
+-        } catch (InterruptedException e) {
+-
+-            Thread.currentThread().interrupt();
+-            throw new RedisCommandInterruptedException(e);
+-        } catch (Exception e) {
+-            throw ExceptionFactory.createExecutionException(null, e);
+-        }
++        return Futures.awaitOrCancel(cmd, timeout, unit);
+     }
+ 
+ }
+diff --git a/src/main/java/io/lettuce/core/internal/Futures.java b/src/main/java/io/lettuce/core/internal/Futures.java
+index c4750df..6f8e215 100644
+--- a/src/main/java/io/lettuce/core/internal/Futures.java
++++ b/src/main/java/io/lettuce/core/internal/Futures.java
+@@ -15,10 +15,23 @@
+  */
+ package io.lettuce.core.internal;
+ 
++import java.time.Duration;
+ import java.util.Collection;
+ import java.util.concurrent.CompletableFuture;
++import java.util.concurrent.CompletionStage;
++import java.util.concurrent.ExecutionException;
++import java.util.concurrent.Future;
++import java.util.concurrent.TimeUnit;
++import java.util.concurrent.TimeoutException;
+ 
++import io.lettuce.core.ExceptionFactory;
++import io.lettuce.core.RedisCommandExecutionException;
++import io.lettuce.core.RedisCommandInterruptedException;
++import io.lettuce.core.RedisCommandTimeoutException;
++import io.lettuce.core.RedisException;
++import io.lettuce.core.RedisFuture;
+ import io.netty.channel.ChannelFuture;
++import io.netty.util.concurrent.FutureListener;
+ 
+ /**
+  * Utility methods for {@link java.util.concurrent.Future} handling. This class is part of the internal API and may change
+@@ -41,11 +54,145 @@ public abstract class Futures {
+      * @since 5.1.1
+      */
+     @SuppressWarnings({ "unchecked", "rawtypes" })
+-    public static CompletableFuture<Void> allOf(Collection<? extends CompletableFuture<?>> futures) {
++    public static CompletableFuture<Void> allOf(Collection<? extends CompletionStage<?>> futures) {
+ 
+         LettuceAssert.notNull(futures, "Futures must not be null");
+ 
+-        return CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]));
++        CompletableFuture[] completableFutures = futures.stream().map(CompletionStage::toCompletableFuture)
++                .toArray(CompletableFuture[]::new);
++        return CompletableFuture.allOf(completableFutures);
++    }
++
++    /**
++     * Wait until futures are complete or the supplied timeout is reached. Commands are not canceled (in contrast to
++     * {@link #awaitOrCancel(RedisFuture, long, TimeUnit)}) when the timeout expires.
++     *
++     * @param timeout Maximum time to wait for futures to complete.
++     * @param futures Futures to wait for.
++     * @return {@literal true} if all futures complete in time, otherwise {@literal false}
++     * @since 5.0
++     */
++    public static boolean awaitAll(Duration timeout, Future<?>... futures) {
++        return awaitAll(timeout.toNanos(), TimeUnit.NANOSECONDS, futures);
++    }
++
++    /**
++     * Wait until futures are complete or the supplied timeout is reached. Commands are not canceled (in contrast to
++     * {@link #awaitOrCancel(RedisFuture, long, TimeUnit)}) when the timeout expires.
++     *
++     * @param timeout Maximum time to wait for futures to complete.
++     * @param unit Unit of time for the timeout.
++     * @param futures Futures to wait for.
++     * @return {@literal true} if all futures complete in time, otherwise {@literal false}
++     */
++    public static boolean awaitAll(long timeout, TimeUnit unit, Future<?>... futures) {
++
++        try {
++            long nanos = unit.toNanos(timeout);
++            long time = System.nanoTime();
++
++            for (Future<?> f : futures) {
++
++                if (nanos < 0) {
++                    return false;
++                }
++
++                f.get(nanos, TimeUnit.NANOSECONDS);
++
++                long now = System.nanoTime();
++                nanos -= now - time;
++                time = now;
++            }
++
++            return true;
++        } catch (RuntimeException e) {
++            throw e;
++        } catch (TimeoutException e) {
++            return false;
++        } catch (ExecutionException e) {
++
++            if (e.getCause() instanceof RedisCommandExecutionException) {
++                throw ExceptionFactory.createExecutionException(e.getCause().getMessage(), e.getCause());
++            }
++
++            throw new RedisException(e.getCause());
++        } catch (InterruptedException e) {
++
++            Thread.currentThread().interrupt();
++            throw new RedisCommandInterruptedException(e);
++        } catch (Exception e) {
++            throw ExceptionFactory.createExecutionException(null, e);
++        }
++    }
++
++    /**
++     * Wait until futures are complete or the supplied timeout is reached. Commands are canceled if the timeout is reached but
++     * the command is not finished.
++     *
++     * @param cmd Command to wait for
++     * @param timeout Maximum time to wait for futures to complete
++     * @param unit Unit of time for the timeout
++     * @param <T> Result type
++     *
++     * @return Result of the command.
++     */
++    public static <T> T awaitOrCancel(RedisFuture<T> cmd, long timeout, TimeUnit unit) {
++
++        try {
++            if (!cmd.await(timeout, unit)) {
++                cmd.cancel(true);
++                throw ExceptionFactory.createTimeoutException(Duration.ofNanos(unit.toNanos(timeout)));
++            }
++            return cmd.get();
++        } catch (RuntimeException e) {
++            throw e;
++        } catch (ExecutionException e) {
++
++            if (e.getCause() instanceof RedisCommandExecutionException) {
++                throw ExceptionFactory.createExecutionException(e.getCause().getMessage(), e.getCause());
++            }
++
++            if (e.getCause() instanceof RedisCommandTimeoutException) {
++                throw new RedisCommandTimeoutException(e.getCause());
++            }
++
++            throw new RedisException(e.getCause());
++        } catch (InterruptedException e) {
++
++            Thread.currentThread().interrupt();
++            throw new RedisCommandInterruptedException(e);
++        } catch (Exception e) {
++            throw ExceptionFactory.createExecutionException(null, e);
++        }
++    }
++
++    /**
++     * Await completion of the {@link CompletionStage}.
++     *
++     * @param completionStage must not be {@literal null}.
++     * @param <T> result type.
++     * @return the result.
++     */
++    public static <T> T await(CompletionStage<T> completionStage) {
++
++        LettuceAssert.notNull(completionStage, "CompletionStage must not be null");
++        return completionStage.toCompletableFuture().join();
++    }
++
++    /**
++     * Adapt Netty's {@link io.netty.util.concurrent.Future} into a {@link CompletionStage}.
++     *
++     * @param future the {@link io.netty.util.concurrent.Future} to adapt.
++     * @param <T> result type.
++     * @return the {@link CompletionStage}.
++     */
++    public static <T> CompletionStage<T> toCompletionStage(io.netty.util.concurrent.Future<T> future) {
++
++        LettuceAssert.notNull(future, "Future must not be null");
++
++        CompletableFuture<T> result = new CompletableFuture<>();
++        adapt(future, result);
++        return result;
+     }
+ 
+     /**
+@@ -74,10 +221,7 @@ public abstract class Futures {
+ 
+         LettuceAssert.notNull(future, "ChannelFuture must not be null");
+ 
+-        CompletableFuture<Void> result = new CompletableFuture<>();
+-        adapt(future, result);
+-
+-        return result;
++        return toCompletionStage(future).toCompletableFuture();
+     }
+ 
+     /**
+@@ -88,16 +232,28 @@ public abstract class Futures {
+      */
+     public static void adapt(ChannelFuture future, CompletableFuture<Void> target) {
+ 
+-        future.addListener(f -> {
++        adapt((io.netty.util.concurrent.Future<Void>) future, target);
++    }
++
++    /**
++     * Adapt Netty's {@link io.netty.util.concurrent.Future} into a {@link CompletableFuture}.
++     *
++     * @param future the source future.
++     * @param target the target future.
++     * @param <T> result type.
++     */
++    public static <T> void adapt(io.netty.util.concurrent.Future<T> future, CompletableFuture<T> target) {
++
++        future.addListener((FutureListener<T>) f -> {
+             if (f.isSuccess()) {
+-                target.complete(null);
++                target.complete(f.getNow());
+             } else {
+                 target.completeExceptionally(f.cause());
+             }
+         });
+ 
+         if (future.isSuccess()) {
+-            target.complete(null);
++            target.complete(future.getNow());
+         } else if (future.isCancelled()) {
+             target.cancel(false);
+         } else if (future.isDone() && !future.isSuccess()) {
+diff --git a/src/main/java/io/lettuce/core/resource/DefaultClientResources.java b/src/main/java/io/lettuce/core/resource/DefaultClientResources.java
+index 7400ee3..a017bf8 100644
+--- a/src/main/java/io/lettuce/core/resource/DefaultClientResources.java
++++ b/src/main/java/io/lettuce/core/resource/DefaultClientResources.java
+@@ -15,8 +15,10 @@
+  */
+ package io.lettuce.core.resource;
+ 
+-import static io.lettuce.core.resource.Futures.toBooleanPromise;
+-
++import java.util.ArrayList;
++import java.util.List;
++import java.util.concurrent.CompletableFuture;
++import java.util.concurrent.CompletionStage;
+ import java.util.concurrent.TimeUnit;
+ import java.util.function.Supplier;
+ 
+@@ -28,6 +30,7 @@ import io.lettuce.core.event.EventPublisherOptions;
+ import io.lettuce.core.event.metrics.DefaultCommandLatencyEventPublisher;
+ import io.lettuce.core.event.metrics.MetricEventPublisher;
+ import io.lettuce.core.internal.LettuceAssert;
++import io.lettuce.core.internal.Futures;
+ import io.lettuce.core.internal.LettuceLists;
+ import io.lettuce.core.metrics.CommandLatencyCollector;
+ import io.lettuce.core.metrics.CommandLatencyCollectorOptions;
+@@ -595,28 +598,12 @@ public class DefaultClientResources implements ClientResources {
+      * @param timeUnit the unit of {@code quietPeriod} and {@code timeout}
+      * @return eventually the success/failure of the shutdown without errors.
+      */
+-    @SuppressWarnings("unchecked")
++    @SuppressWarnings({ "unchecked", "rawtypes" })
+     public Future<Boolean> shutdown(long quietPeriod, long timeout, TimeUnit timeUnit) {
+ 
+         logger.debug("Initiate shutdown ({}, {}, {})", quietPeriod, timeout, timeUnit);
+ 
+         shutdownCalled = true;
+-        DefaultPromise<Boolean> overall = new DefaultPromise<Boolean>(GlobalEventExecutor.INSTANCE);
+-        DefaultPromise<Boolean> lastRelease = new DefaultPromise<Boolean>(GlobalEventExecutor.INSTANCE);
+-        Futures.PromiseAggregator<Boolean, Promise<Boolean>> aggregator = new Futures.PromiseAggregator<Boolean, Promise<Boolean>>(
+-                overall);
+-
+-        aggregator.expectMore(1);
+-
+-        if (!sharedEventLoopGroupProvider) {
+-            aggregator.expectMore(1);
+-        }
+-
+-        if (!sharedEventExecutor) {
+-            aggregator.expectMore(1);
+-        }
+-
+-        aggregator.arm();
+ 
+         if (metricEventPublisher != null) {
+             metricEventPublisher.shutdown();
+@@ -626,28 +613,25 @@ public class DefaultClientResources implements ClientResources {
+             timer.stop();
+         }
+ 
++        List<CompletionStage<?>> shutdownStages = new ArrayList<>();
++
+         if (!sharedEventLoopGroupProvider) {
+-            Future<Boolean> shutdown = eventLoopGroupProvider.shutdown(quietPeriod, timeout, timeUnit);
+-            if (shutdown instanceof Promise) {
+-                aggregator.add((Promise<Boolean>) shutdown);
+-            } else {
+-                aggregator.add(toBooleanPromise(shutdown));
+-            }
++            shutdownStages.add(Futures.toCompletionStage((io.netty.util.concurrent.Future) eventLoopGroupProvider.shutdown(quietPeriod,
++                    timeout, timeUnit)));
+         }
+ 
+         if (!sharedEventExecutor) {
+-            Future<?> shutdown = eventExecutorGroup.shutdownGracefully(quietPeriod, timeout, timeUnit);
+-            aggregator.add(toBooleanPromise(shutdown));
++            shutdownStages
++                    .add(Futures.toCompletionStage((io.netty.util.concurrent.Future) eventExecutorGroup.shutdownGracefully(quietPeriod,
++                            timeout, timeUnit)));
+         }
+ 
+         if (!sharedCommandLatencyCollector) {
+             commandLatencyCollector.shutdown();
+         }
+ 
+-        aggregator.add(lastRelease);
+-        lastRelease.setSuccess(null);
+-
+-        return toBooleanPromise(overall);
++        CompletableFuture<Void> all = Futures.allOf(shutdownStages);
++        return PromiseAdapter.toPromise(all.thenApply(it -> true));
+     }
+ 
+     @Override
+diff --git a/src/main/java/io/lettuce/core/resource/DefaultEventLoopGroupProvider.java b/src/main/java/io/lettuce/core/resource/DefaultEventLoopGroupProvider.java
+index cf206ac..bc62ce2 100644
+--- a/src/main/java/io/lettuce/core/resource/DefaultEventLoopGroupProvider.java
++++ b/src/main/java/io/lettuce/core/resource/DefaultEventLoopGroupProvider.java
+@@ -15,16 +15,19 @@
+  */
+ package io.lettuce.core.resource;
+ 
+-import static io.lettuce.core.resource.Futures.toBooleanPromise;
+-
+ import java.util.HashMap;
+ import java.util.Map;
++import java.util.ArrayList;
++import java.util.List;
++import java.util.concurrent.CompletableFuture;
++import java.util.concurrent.CompletionStage;
+ import java.util.concurrent.ConcurrentHashMap;
+ import java.util.concurrent.ExecutorService;
+ import java.util.concurrent.TimeUnit;
+ 
+ import io.lettuce.core.EpollProvider;
+ import io.lettuce.core.KqueueProvider;
++import io.lettuce.core.internal.Futures;
+ import io.netty.channel.EventLoopGroup;
+ import io.netty.channel.nio.NioEventLoopGroup;
+ import io.netty.util.concurrent.*;
+@@ -174,7 +177,8 @@ public class DefaultEventLoopGroupProvider implements EventLoopGroupProvider {
+         }
+ 
+         Future<?> shutdownFuture = eventLoopGroup.shutdownGracefully(quietPeriod, timeout, unit);
+-        return toBooleanPromise(shutdownFuture);
++        CompletionStage<Object> shutdownStage = Futures.toCompletionStage((io.netty.util.concurrent.Future) shutdownFuture);
++        return PromiseAdapter.toPromise(shutdownStage.thenApply(it -> true));
+     }
+ 
+     private Class<?> getKey(EventExecutorGroup eventLoopGroup) {
+@@ -196,7 +200,7 @@ public class DefaultEventLoopGroupProvider implements EventLoopGroupProvider {
+     }
+ 
+     @Override
+-    @SuppressWarnings("unchecked")
++    @SuppressWarnings({ "unchecked", "rawtypes" })
+     public Future<Boolean> shutdown(long quietPeriod, long timeout, TimeUnit timeUnit) {
+ 
+         logger.debug("Initiate shutdown ({}, {}, {})", quietPeriod, timeout, timeUnit);
+@@ -205,22 +209,13 @@ public class DefaultEventLoopGroupProvider implements EventLoopGroupProvider {
+ 
+         Map<Class<? extends EventExecutorGroup>, EventExecutorGroup> copy = new HashMap<>(eventLoopGroups);
+ 
+-        DefaultPromise<Boolean> overall = new DefaultPromise<>(GlobalEventExecutor.INSTANCE);
+-        DefaultPromise<Boolean> lastRelease = new DefaultPromise<>(GlobalEventExecutor.INSTANCE);
+-        Futures.PromiseAggregator<Boolean, Promise<Boolean>> aggregator = new Futures.PromiseAggregator<>(overall);
+-
+-        aggregator.expectMore(1 + copy.size());
+-
+-        aggregator.arm();
++        List<CompletionStage<?>> shutdownStages = new ArrayList<>();
+ 
+         for (EventExecutorGroup executorGroup : copy.values()) {
+-            Promise<Boolean> shutdown = toBooleanPromise(release(executorGroup, quietPeriod, timeout, timeUnit));
+-            aggregator.add(shutdown);
++            shutdownStages.add(Futures.toCompletionStage((io.netty.util.concurrent.Future) release(executorGroup, quietPeriod, timeout, timeUnit)));
+         }
+ 
+-        aggregator.add(lastRelease);
+-        lastRelease.setSuccess(null);
+-
+-        return toBooleanPromise(overall);
++        CompletableFuture<Void> all = Futures.allOf(shutdownStages);
++        return PromiseAdapter.toPromise(all.thenApply(it -> true));
+     }
+ }
+diff --git a/src/main/java/io/lettuce/core/resource/Futures.java b/src/main/java/io/lettuce/core/resource/Futures.java
+deleted file mode 100644
+index ddd549b..0000000
+--- a/src/main/java/io/lettuce/core/resource/Futures.java
++++ /dev/null
+@@ -1,180 +0,0 @@
+-/*
+- * Copyright 2011-2019 the original author or authors.
+- *
+- * Licensed under the Apache License, Version 2.0 (the "License");
+- * you may not use this file except in compliance with the License.
+- * You may obtain a copy of the License at
+- *
+- *      http://www.apache.org/licenses/LICENSE-2.0
+- *
+- * Unless required by applicable law or agreed to in writing, software
+- * distributed under the License is distributed on an "AS IS" BASIS,
+- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+- * See the License for the specific language governing permissions and
+- * limitations under the License.
+- */
+-package io.lettuce.core.resource;
+-
+-import java.util.LinkedHashSet;
+-import java.util.Set;
+-import java.util.concurrent.atomic.AtomicInteger;
+-
+-import io.lettuce.core.internal.LettuceAssert;
+-import io.netty.util.concurrent.*;
+-
+-/**
+- * Utility class to support netty's future handling.
+- *
+- * @author Mark Paluch
+- * @since 3.4
+- */
+-class Futures {
+-
+-    /**
+-     * Create a promise that emits a {@code Boolean} value on completion of the {@code future}
+-     *
+-     * @param future the future.
+-     * @return Promise emitting a {@code Boolean} value. {@literal true} if the {@code future} completed successfully, otherwise
+-     *         the cause wil be transported.
+-     */
+-    static Promise<Boolean> toBooleanPromise(Future<?> future) {
+-
+-        DefaultPromise<Boolean> result = new DefaultPromise<>(GlobalEventExecutor.INSTANCE);
+-
+-        if (future.isDone() || future.isCancelled()) {
+-            if (future.isSuccess()) {
+-                result.setSuccess(true);
+-            } else {
+-                result.setFailure(future.cause());
+-            }
+-            return result;
+-        }
+-
+-        future.addListener((GenericFutureListener<Future<Object>>) f -> {
+-
+-            if (f.isSuccess()) {
+-                result.setSuccess(true);
+-            } else {
+-                result.setFailure(f.cause());
+-            }
+-        });
+-        return result;
+-    }
+-
+-    /**
+-     * Promise aggregator that aggregates multiple promises into one {@link Promise}. The aggregator workflow is:
+-     * <ol>
+-     * <li>Create a new instance of {@link io.lettuce.core.resource.Futures.PromiseAggregator}</li>
+-     * <li>Call {@link #expectMore(int)} until the number of expected futures is reached</li>
+-     * <li>Arm the aggregator using {@link #arm()}</li>
+-     * <li>Add the number of futures using {@link #add(Promise[])} until the expectation is met. The added futures can be either
+-     * done or in progress.</li>
+-     * <li>The {@code aggregatePromise} is released/finished as soon as the last future/promise completes</li>
+-     *
+-     * </ol>
+-     *
+-     * @param <V> Result value type
+-     * @param <F> Future type
+-     */
+-    static class PromiseAggregator<V, F extends Future<V>> implements GenericFutureListener<F> {
+-
+-        private final Promise<?> aggregatePromise;
+-        private Set<Promise<V>> pendingPromises;
+-        private AtomicInteger expectedPromises = new AtomicInteger();
+-        private AtomicInteger processedPromises = new AtomicInteger();
+-        private boolean armed;
+-
+-        /**
+-         * Creates a new instance.
+-         *
+-         * @param aggregatePromise the {@link Promise} to notify
+-         */
+-        public PromiseAggregator(Promise<V> aggregatePromise) {
+-            LettuceAssert.notNull(aggregatePromise, "AggregatePromise must not be null");
+-            this.aggregatePromise = aggregatePromise;
+-        }
+-
+-        /**
+-         * Add the number of {@code count} to the count of expected promises.
+-         *
+-         * @param count number of futures/promises, that is added to the overall expectation count.
+-         * @throws IllegalStateException if the aggregator was armed
+-         */
+-        public void expectMore(int count) {
+-            LettuceAssert.assertState(!armed, "Aggregator is armed and does not allow any further expectations");
+-
+-            expectedPromises.addAndGet(count);
+-        }
+-
+-        /**
+-         * Arm the aggregator to expect completion of the futures.
+-         *
+-         * @throws IllegalStateException if the aggregator was armed
+-         */
+-        public void arm() {
+-            LettuceAssert.assertState(!armed, "Aggregator is already armed");
+-            armed = true;
+-        }
+-
+-        /**
+-         * Add the given {@link Promise}s to the aggregator.
+-         *
+-         * @param promises the promises
+-         * @throws IllegalStateException if the aggregator was not armed
+-         */
+-        @SafeVarargs
+-        public final PromiseAggregator<V, F> add(Promise<V>... promises) {
+-
+-            LettuceAssert.notNull(promises, "Promises must not be null");
+-            LettuceAssert.assertState(armed,
+-                    "Aggregator is not armed and does not allow adding promises in that state. Call arm() first.");
+-
+-            if (promises.length == 0) {
+-                return this;
+-            }
+-            synchronized (this) {
+-                if (pendingPromises == null) {
+-                    int size;
+-                    if (promises.length > 1) {
+-                        size = promises.length;
+-                    } else {
+-                        size = 2;
+-                    }
+-                    pendingPromises = new LinkedHashSet<>(size);
+-                }
+-                for (Promise<V> p : promises) {
+-                    if (p == null) {
+-                        continue;
+-                    }
+-                    pendingPromises.add(p);
+-                    p.addListener(this);
+-                }
+-            }
+-            return this;
+-        }
+-
+-        @Override
+-        public synchronized void operationComplete(F future) throws Exception {
+-            if (pendingPromises == null) {
+-                aggregatePromise.setSuccess(null);
+-            } else {
+-                pendingPromises.remove(future);
+-                processedPromises.incrementAndGet();
+-                if (!future.isSuccess()) {
+-                    Throwable cause = future.cause();
+-                    aggregatePromise.setFailure(cause);
+-                    for (Promise<V> pendingFuture : pendingPromises) {
+-                        pendingFuture.setFailure(cause);
+-                    }
+-                } else if (processedPromises.get() == expectedPromises.get()) {
+-                    if (pendingPromises.isEmpty()) {
+-                        aggregatePromise.setSuccess(null);
+-                    } else {
+-                        throw new IllegalStateException(
+-                                "Processed promises == expected promises but pending promises is not empty. This should not have happened!");
+-                    }
+-                }
+-            }
+-        }
+-    }
+-}
+diff --git a/src/main/java/io/lettuce/core/resource/PromiseAdapter.java b/src/main/java/io/lettuce/core/resource/PromiseAdapter.java
+new file mode 100644
+index 0000000..f53d6de
+--- /dev/null
++++ b/src/main/java/io/lettuce/core/resource/PromiseAdapter.java
+@@ -0,0 +1,60 @@
++/*
++ * Copyright 2011-2019 the original author or authors.
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package io.lettuce.core.resource;
++
++import java.util.concurrent.CompletionStage;
++
++import io.lettuce.core.internal.LettuceAssert;
++import io.netty.util.concurrent.DefaultPromise;
++import io.netty.util.concurrent.GlobalEventExecutor;
++import io.netty.util.concurrent.Promise;
++
++/**
++ * Utility class to support Netty promise handling.
++ *
++ * @author Mark Paluch
++ * @since 3.4
++ */
++final class PromiseAdapter {
++
++    private PromiseAdapter() {
++    }
++
++    /**
++     * Create a Netty {@link Promise} from a {@link CompletionStage}.
++     *
++     * @param completionStage must not be {@literal null}.
++     * @param <T> result type.
++     * @return a {@link Promise} that completes with the stage completion.
++     */
++    static <T> Promise<T> toPromise(CompletionStage<T> completionStage) {
++
++        LettuceAssert.notNull(completionStage, "CompletionStage must not be null");
++
++        DefaultPromise<T> result = new DefaultPromise<>(GlobalEventExecutor.INSTANCE);
++
++        completionStage.whenComplete((value, throwable) -> {
++            if (throwable == null) {
++                result.trySuccess(value);
++            } else {
++                result.tryFailure(throwable);
++            }
++        });
++
++        return result;
++    }
++}
++
+diff --git a/src/test/java/io/lettuce/core/AsyncConnectionIntegrationTests.java b/src/test/java/io/lettuce/core/AsyncConnectionIntegrationTests.java
+index 0d60be6..6d9df53 100644
+--- a/src/test/java/io/lettuce/core/AsyncConnectionIntegrationTests.java
++++ b/src/test/java/io/lettuce/core/AsyncConnectionIntegrationTests.java
+@@ -31,7 +31,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
+ import io.lettuce.core.api.StatefulRedisConnection;
+ import io.lettuce.core.api.async.RedisAsyncCommands;
+ import io.lettuce.test.Delay;
+-import io.lettuce.test.Futures;
++import io.lettuce.test.TestFutures;
+ import io.lettuce.test.LettuceExtension;
+ 
+ /**
+@@ -55,31 +55,31 @@ class AsyncConnectionIntegrationTests extends TestSupport {
+ 
+     @Test
+     void multi() {
+-        assertThat(Futures.get(async.multi())).isEqualTo("OK");
++        assertThat(TestFutures.get(async.multi())).isEqualTo("OK");
+         Future<String> set = async.set(key, value);
+         Future<Long> rpush = async.rpush("list", "1", "2");
+         Future<List<String>> lrange = async.lrange("list", 0, -1);
+ 
+         assertThat(!set.isDone() && !rpush.isDone() && !rpush.isDone()).isTrue();
+-        assertThat(Futures.get(async.exec())).contains("OK", 2L, list("1", "2"));
++        assertThat(TestFutures.get(async.exec())).contains("OK", 2L, list("1", "2"));
+ 
+-        assertThat(Futures.get(set)).isEqualTo("OK");
+-        assertThat(Futures.get(rpush)).isEqualTo(2L);
+-        assertThat(Futures.get(lrange)).isEqualTo(list("1", "2"));
++        assertThat(TestFutures.get(set)).isEqualTo("OK");
++        assertThat(TestFutures.get(rpush)).isEqualTo(2L);
++        assertThat(TestFutures.get(lrange)).isEqualTo(list("1", "2"));
+     }
+ 
+     @Test
+     void watch() {
+-        assertThat(Futures.get(async.watch(key))).isEqualTo("OK");
++        assertThat(TestFutures.get(async.watch(key))).isEqualTo("OK");
+ 
+         async.set(key, value + "X");
+ 
+         async.multi();
+         Future<String> set = async.set(key, value);
+         Future<Long> append = async.append(key, "foo");
+-        assertThat(Futures.get(async.exec())).isEmpty();
+-        assertThat(Futures.get(set)).isNull();
+-        assertThat(Futures.get(append)).isNull();
++        assertThat(TestFutures.get(async.exec())).isEmpty();
++        assertThat(TestFutures.get(set)).isNull();
++        assertThat(TestFutures.get(append)).isNull();
+     }
+ 
+     @Test
+@@ -95,11 +95,11 @@ class AsyncConnectionIntegrationTests extends TestSupport {
+             futures.add(async.lpush(key, "" + i));
+         }
+ 
+-        Futures.awaitAll(futures);
++        TestFutures.awaitAll(futures);
+ 
+         RedisAsyncCommands<String, String> connection = client.connect().async();
+ 
+-        Long len = Futures.get(connection.llen(key));
++        Long len = TestFutures.get(connection.llen(key));
+         assertThat(len.intValue()).isEqualTo(1000);
+ 
+         RedisFuture<List<String>> sort = connection.sort(key);
+@@ -107,7 +107,7 @@ class AsyncConnectionIntegrationTests extends TestSupport {
+ 
+         sort.thenRun(listener);
+ 
+-        Futures.await(sort);
++        TestFutures.await(sort);
+         Delay.delay(Duration.ofMillis(100));
+ 
+         assertThat(run).hasSize(1);
+@@ -130,7 +130,7 @@ class AsyncConnectionIntegrationTests extends TestSupport {
+         RedisAsyncCommands<String, String> connection = client.connect().async();
+ 
+         RedisFuture<String> set = connection.set(key, value);
+-        Futures.await(set);
++        TestFutures.await(set);
+ 
+         set.thenRun(listener);
+ 
+@@ -144,7 +144,7 @@ class AsyncConnectionIntegrationTests extends TestSupport {
+         async.multi();
+         Future<String> set = async.set(key, value);
+         async.discard();
+-        assertThat(Futures.get(set)).isNull();
++        assertThat(TestFutures.get(set)).isNull();
+     }
+ 
+     @Test
+@@ -157,10 +157,10 @@ class AsyncConnectionIntegrationTests extends TestSupport {
+ 
+         assertThat(LettuceFutures.awaitAll(1, TimeUnit.SECONDS, get1, set, get2, append)).isTrue();
+ 
+-        assertThat(Futures.get(get1)).isNull();
+-        assertThat(Futures.get(set)).isEqualTo("OK");
+-        assertThat(Futures.get(get2)).isEqualTo(value);
+-        assertThat(Futures.get(append).longValue()).isEqualTo(value.length() * 2);
++        assertThat(TestFutures.get(get1)).isNull();
++        assertThat(TestFutures.get(set)).isEqualTo("OK");
++        assertThat(TestFutures.get(get2)).isEqualTo(value);
++        assertThat(TestFutures.get(append).longValue()).isEqualTo(value.length() * 2);
+     }
+ 
+     @Test
+diff --git a/src/test/java/io/lettuce/core/ClientOptionsIntegrationTests.java b/src/test/java/io/lettuce/core/ClientOptionsIntegrationTests.java
+index 2868a19..b2c8176 100644
+--- a/src/test/java/io/lettuce/core/ClientOptionsIntegrationTests.java
++++ b/src/test/java/io/lettuce/core/ClientOptionsIntegrationTests.java
+@@ -43,7 +43,7 @@ import io.lettuce.core.api.sync.RedisCommands;
+ import io.lettuce.core.codec.StringCodec;
+ import io.lettuce.core.output.StatusOutput;
+ import io.lettuce.core.protocol.*;
+-import io.lettuce.test.Futures;
++import io.lettuce.test.TestFutures;
+ import io.lettuce.test.LettuceExtension;
+ import io.lettuce.test.Wait;
+ import io.lettuce.test.WithPassword;
+@@ -178,7 +178,7 @@ class ClientOptionsIntegrationTests extends TestSupport {
+         watchdog.scheduleReconnect();
+ 
+         for (RedisFuture<String> ping : pings) {
+-            assertThat(Futures.get(ping)).isEqualTo("PONG");
++            assertThat(TestFutures.get(ping)).isEqualTo("PONG");
+         }
+ 
+         connection.getStatefulConnection().close();
+@@ -212,10 +212,10 @@ class ClientOptionsIntegrationTests extends TestSupport {
+         watchdog.scheduleReconnect();
+ 
+         for (int i = 0; i < 10; i++) {
+-            assertThat(Futures.get(pings.get(i))).isEqualTo("PONG");
++            assertThat(TestFutures.get(pings.get(i))).isEqualTo("PONG");
+         }
+ 
+-        assertThatThrownBy(() -> Futures.await(pings.get(10))).hasCauseInstanceOf(IllegalStateException.class)
++        assertThatThrownBy(() -> TestFutures.await(pings.get(10))).hasCauseInstanceOf(IllegalStateException.class)
+                 .hasMessage("java.lang.IllegalStateException: Queue full");
+ 
+         connection.close();
+@@ -483,8 +483,8 @@ class ClientOptionsIntegrationTests extends TestSupport {
+         ConnectionWatchdog connectionWatchdog = getConnectionWatchdog(redisConnection);
+         connectionWatchdog.setReconnectSuspended(true);
+ 
+-        Futures.await(channel.close());
+-        Futures.await(sleep);
++        TestFutures.await(channel.close());
++        TestFutures.await(sleep);
+ 
+         redisConnection.async().get(key).cancel(true);
+ 
+@@ -495,8 +495,8 @@ class ClientOptionsIntegrationTests extends TestSupport {
+         connectionWatchdog.setReconnectSuspended(false);
+         connectionWatchdog.scheduleReconnect();
+ 
+-        assertThat(Futures.get(getFuture1)).isEqualTo("value1");
+-        assertThat(Futures.get(getFuture2)).isEqualTo("value2");
++        assertThat(TestFutures.get(getFuture1)).isEqualTo("value1");
++        assertThat(TestFutures.get(getFuture2)).isEqualTo("value2");
+ 
+         controlConnection.close();
+         redisConnection.close();
+@@ -528,8 +528,8 @@ class ClientOptionsIntegrationTests extends TestSupport {
+                     ConnectionWatchdog connectionWatchdog = getConnectionWatchdog(redisConnection);
+                     connectionWatchdog.setReconnectSuspended(true);
+ 
+-                    Futures.await(channel.close());
+-                    Futures.await(sleep);
++                    TestFutures.await(channel.close());
++                    TestFutures.await(sleep);
+ 
+                     redisConnection.async().get(key).cancel(true);
+ 
+@@ -540,8 +540,8 @@ class ClientOptionsIntegrationTests extends TestSupport {
+                     connectionWatchdog.setReconnectSuspended(false);
+                     connectionWatchdog.scheduleReconnect();
+ 
+-                    assertThat(Futures.get(getFuture1)).isEqualTo("value1");
+-                    assertThat(Futures.get(getFuture2)).isEqualTo("value2");
++                    assertThat(TestFutures.get(getFuture1)).isEqualTo("value1");
++                    assertThat(TestFutures.get(getFuture2)).isEqualTo("value2");
+ 
+                     controlConnection.close();
+                     redisConnection.close();
+diff --git a/src/test/java/io/lettuce/core/ConnectionCommandIntegrationTests.java b/src/test/java/io/lettuce/core/ConnectionCommandIntegrationTests.java
+index 42f9a50..6177eba 100644
+--- a/src/test/java/io/lettuce/core/ConnectionCommandIntegrationTests.java
++++ b/src/test/java/io/lettuce/core/ConnectionCommandIntegrationTests.java
+@@ -135,7 +135,7 @@ class ConnectionCommandIntegrationTests extends TestSupport {
+     void authInvalidPassword() {
+         RedisAsyncCommands<String, String> async = client.connect().async();
+         try {
+-            Futures.await(async.auth("invalid"));
++            TestFutures.await(async.auth("invalid"));
+             fail("Authenticated with invalid password");
+         } catch (RedisException e) {
+             assertThat(e.getMessage()).isEqualTo("ERR Client sent AUTH, but no password is set");
+@@ -150,7 +150,7 @@ class ConnectionCommandIntegrationTests extends TestSupport {
+     void selectInvalid() {
+         RedisAsyncCommands<String, String> async = client.connect().async();
+         try {
+-            Futures.await(async.select(1024));
++            TestFutures.await(async.select(1024));
+             fail("Selected invalid db index");
+         } catch (RedisException e) {
+             assertThat(e.getMessage()).startsWith("ERR");
+diff --git a/src/test/java/io/lettuce/core/RedisClientConnectIntegrationTests.java b/src/test/java/io/lettuce/core/RedisClientConnectIntegrationTests.java
+index 20db5be..202d216 100644
+--- a/src/test/java/io/lettuce/core/RedisClientConnectIntegrationTests.java
++++ b/src/test/java/io/lettuce/core/RedisClientConnectIntegrationTests.java
+@@ -35,7 +35,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
+ import io.lettuce.core.api.StatefulRedisConnection;
+ import io.lettuce.core.pubsub.StatefulRedisPubSubConnection;
+ import io.lettuce.core.sentinel.api.StatefulRedisSentinelConnection;
+-import io.lettuce.test.Futures;
++import io.lettuce.test.TestFutures;
+ import io.lettuce.test.LettuceExtension;
+ 
+ /**
+@@ -107,7 +107,7 @@ class RedisClientConnectIntegrationTests extends TestSupport {
+     void connectAsyncCodecOwnUri() {
+         RedisURI redisURI = redis(host, port).build();
+         ConnectionFuture<StatefulRedisConnection<String, String>> future = client.connectAsync(UTF8, redisURI);
+-        StatefulRedisConnection<String, String> connection = Futures.get(future.toCompletableFuture());
++        StatefulRedisConnection<String, String> connection = TestFutures.get(future.toCompletableFuture());
+         assertThat(connection.getTimeout()).isEqualTo(redisURI.getTimeout());
+         connection.close();
+     }
+@@ -134,7 +134,7 @@ class RedisClientConnectIntegrationTests extends TestSupport {
+             redisClient.shutdown(0, 0, SECONDS); // deadlock expected.
+             }).toCompletableFuture();
+ 
+-        assertThatThrownBy(() -> Futures.await(f)).isInstanceOf(TimeoutException.class);
++        assertThatThrownBy(() -> TestFutures.await(f)).isInstanceOf(TimeoutException.class);
+     }
+ 
+     @Test
+@@ -147,7 +147,7 @@ class RedisClientConnectIntegrationTests extends TestSupport {
+             return redisClient.shutdownAsync(0, 0, SECONDS);
+         }).toCompletableFuture();
+ 
+-        Futures.await(f);
++        TestFutures.await(f);
+     }
+ 
+     /*
+diff --git a/src/test/java/io/lettuce/core/RedisClientIntegrationTests.java b/src/test/java/io/lettuce/core/RedisClientIntegrationTests.java
+index 93a714c..d2bea38 100644
+--- a/src/test/java/io/lettuce/core/RedisClientIntegrationTests.java
++++ b/src/test/java/io/lettuce/core/RedisClientIntegrationTests.java
+@@ -28,7 +28,7 @@ import io.lettuce.core.api.StatefulRedisConnection;
+ import io.lettuce.core.resource.ClientResources;
+ import io.lettuce.core.resource.DefaultClientResources;
+ import io.lettuce.core.resource.DefaultEventLoopGroupProvider;
+-import io.lettuce.test.Futures;
++import io.lettuce.test.TestFutures;
+ import io.lettuce.test.Wait;
+ import io.lettuce.test.resource.FastShutdown;
+ import io.lettuce.test.resource.TestClientResources;
+@@ -119,7 +119,7 @@ class RedisClientIntegrationTests extends TestSupport {
+         // then
+         connectAndClose(redisClient2);
+ 
+-        Futures.await(clientResources.shutdown(0, 0, TimeUnit.MILLISECONDS));
++        TestFutures.await(clientResources.shutdown(0, 0, TimeUnit.MILLISECONDS));
+ 
+         assertThat(eventLoopGroups).isEmpty();
+         assertThat(executor.isShuttingDown()).isTrue();
+@@ -152,7 +152,7 @@ class RedisClientIntegrationTests extends TestSupport {
+         assertThat(clientResources.eventExecutorGroup().isShuttingDown()).isFalse();
+ 
+         // cleanup
+-        Futures.await(clientResources.shutdown(0, 0, TimeUnit.MILLISECONDS));
++        TestFutures.await(clientResources.shutdown(0, 0, TimeUnit.MILLISECONDS));
+         assertThat(clientResources.eventExecutorGroup().isShuttingDown()).isTrue();
+     }
+ 
+diff --git a/src/test/java/io/lettuce/core/SslIntegrationTests.java b/src/test/java/io/lettuce/core/SslIntegrationTests.java
+index 855f918..6e9f7dc 100644
+--- a/src/test/java/io/lettuce/core/SslIntegrationTests.java
++++ b/src/test/java/io/lettuce/core/SslIntegrationTests.java
+@@ -380,7 +380,7 @@ class SslIntegrationTests extends TestSupport {
+ 
+         Wait.untilTrue(() -> connection2.pubsubChannels().containsAll(Arrays.asList("c1", "c2"))).waitOrTimeout();
+ 
+-        Futures.await(connection.quit());
++        TestFutures.await(connection.quit());
+ 
+         List<String> future = connection2.pubsubChannels();
+         assertThat(future).doesNotContain("c1", "c2");
+@@ -390,7 +390,7 @@ class SslIntegrationTests extends TestSupport {
+ 
+         RedisFuture<Void> defectFuture = connection.subscribe("foo");
+ 
+-        assertThatThrownBy(() -> Futures.await(defectFuture)).hasCauseInstanceOf(DecoderException.class)
++        assertThatThrownBy(() -> TestFutures.await(defectFuture)).hasCauseInstanceOf(DecoderException.class)
+                 .hasRootCauseInstanceOf(GeneralSecurityException.class);
+ 
+         assertThat(defectFuture.toCompletableFuture()).isDone();
+diff --git a/src/test/java/io/lettuce/core/cluster/AdvancedClusterClientIntegrationTests.java b/src/test/java/io/lettuce/core/cluster/AdvancedClusterClientIntegrationTests.java
+index 4ec4742..eaa9299 100644
+--- a/src/test/java/io/lettuce/core/cluster/AdvancedClusterClientIntegrationTests.java
++++ b/src/test/java/io/lettuce/core/cluster/AdvancedClusterClientIntegrationTests.java
+@@ -41,7 +41,7 @@ import io.lettuce.core.cluster.api.sync.RedisAdvancedClusterCommands;
+ import io.lettuce.core.cluster.api.sync.RedisClusterCommands;
+ import io.lettuce.core.cluster.models.partitions.Partitions;
+ import io.lettuce.core.cluster.models.partitions.RedisClusterNode;
+-import io.lettuce.test.Futures;
++import io.lettuce.test.TestFutures;
+ import io.lettuce.test.KeysAndValues;
+ import io.lettuce.test.LettuceExtension;
+ import io.lettuce.test.ListStreamingAdapter;
+@@ -86,7 +86,7 @@ class AdvancedClusterClientIntegrationTests extends TestSupport {
+         for (RedisClusterNode redisClusterNode : clusterClient.getPartitions()) {
+             RedisClusterAsyncCommands<String, String> nodeConnection = async.getConnection(redisClusterNode.getNodeId());
+ 
+-            String myid = Futures.get(nodeConnection.clusterMyId());
++            String myid = TestFutures.get(nodeConnection.clusterMyId());
+             assertThat(myid).isEqualTo(redisClusterNode.getNodeId());
+         }
+     }
+@@ -228,7 +228,7 @@ class AdvancedClusterClientIntegrationTests extends TestSupport {
+         Long result = sync.unlink(key);
+ 
+         assertThat(result).isEqualTo(1);
+-        assertThat(Futures.get(async.get(key))).isNull();
++        assertThat(TestFutures.get(async.get(key))).isNull();
+     }
+ 
+     @Test
+@@ -495,7 +495,7 @@ class AdvancedClusterClientIntegrationTests extends TestSupport {
+ 
+         RedisAdvancedClusterAsyncCommands<String, String> async = connectionUnderTest.async();
+         // preheat the first connection
+-        Futures.await(async.get(key(0)));
++        TestFutures.await(async.get(key(0)));
+ 
+         int iterations = 1000;
+         async.setAutoFlushCommands(false);
+@@ -510,7 +510,7 @@ class AdvancedClusterClientIntegrationTests extends TestSupport {
+ 
+         async.flushCommands();
+ 
+-        boolean result = Futures.awaitAll(futures);
++        boolean result = TestFutures.awaitAll(futures);
+         assertThat(result).isTrue();
+ 
+         for (int i = 0; i < iterations; i++) {
+diff --git a/src/test/java/io/lettuce/core/cluster/AdvancedClusterReactiveIntegrationTests.java b/src/test/java/io/lettuce/core/cluster/AdvancedClusterReactiveIntegrationTests.java
+index e51061b..771b83f 100644
+--- a/src/test/java/io/lettuce/core/cluster/AdvancedClusterReactiveIntegrationTests.java
++++ b/src/test/java/io/lettuce/core/cluster/AdvancedClusterReactiveIntegrationTests.java
+@@ -240,17 +240,17 @@ class AdvancedClusterReactiveIntegrationTests extends TestSupport {
+ 
+         List<RedisFuture<?>> futures = new ArrayList<>();
+         RedisClusterAsyncCommands<String, String> async = commands.getStatefulConnection().async();
+-        Futures.await(async.flushall());
++        TestFutures.await(async.flushall());
+ 
+         for (int i = 0; i < 1000; i++) {
+             futures.add(async.set("key-" + i, "value-" + i));
+         }
+ 
+-        Futures.awaitAll(futures);
++        TestFutures.awaitAll(futures);
+ 
+         for (int i = 0; i < 1000; i++) {
+             CompletableFuture<Long> future = commands.keys("*").count().toFuture();
+-            Futures.await(future);
++            TestFutures.await(future);
+             assertThat(future).isCompletedWithValue(1000L);
+         }
+     }
+diff --git a/src/test/java/io/lettuce/core/cluster/AsyncConnectionProviderIntegrationTests.java b/src/test/java/io/lettuce/core/cluster/AsyncConnectionProviderIntegrationTests.java
+index 01880ba..62a7f58 100644
+--- a/src/test/java/io/lettuce/core/cluster/AsyncConnectionProviderIntegrationTests.java
++++ b/src/test/java/io/lettuce/core/cluster/AsyncConnectionProviderIntegrationTests.java
+@@ -45,7 +45,7 @@ import io.lettuce.core.api.StatefulRedisConnection;
+ import io.lettuce.core.cluster.ClusterNodeConnectionFactory.ConnectionKey;
+ import io.lettuce.core.codec.StringCodec;
+ import io.lettuce.core.internal.AsyncConnectionProvider;
+-import io.lettuce.test.Futures;
++import io.lettuce.test.TestFutures;
+ import io.lettuce.test.LettuceExtension;
+ import io.lettuce.test.settings.TestSettings;
+ import io.netty.channel.ConnectTimeoutException;
+@@ -101,10 +101,10 @@ class AsyncConnectionProviderIntegrationTests {
+ 
+         ConnectionKey connectionKey = new ConnectionKey(ClusterConnectionProvider.Intent.READ, TestSettings.host(),
+                 TestSettings.port());
+-        StatefulRedisConnection<String, String> connection = Futures
++        StatefulRedisConnection<String, String> connection = TestFutures
+                 .get(sut.getConnection(connectionKey).toCompletableFuture());
+ 
+-        assertThat(Futures.get(sut.getConnection(connectionKey).toCompletableFuture())).isSameAs(connection);
++        assertThat(TestFutures.get(sut.getConnection(connectionKey).toCompletableFuture())).isSameAs(connection);
+         sut.close();
+         serverSocket.accept();
+     }
+@@ -117,7 +117,7 @@ class AsyncConnectionProviderIntegrationTests {
+ 
+         assertThat(sut.getConnectionCount()).isEqualTo(0);
+ 
+-        Futures.await(sut.getConnection(connectionKey).toCompletableFuture());
++        TestFutures.await(sut.getConnection(connectionKey).toCompletableFuture());
+ 
+         assertThat(sut.getConnectionCount()).isEqualTo(1);
+         sut.close();
+@@ -147,10 +147,10 @@ class AsyncConnectionProviderIntegrationTests {
+                 TestSettings.port());
+ 
+         sut.getConnection(connectionKey);
+-        Futures.await(sut.close());
++        TestFutures.await(sut.close());
+ 
+         assertThat(sut.getConnectionCount()).isEqualTo(0);
+-        Futures.await(sut.close());
++        TestFutures.await(sut.close());
+ 
+         serverSocket.accept();
+     }
+@@ -169,12 +169,12 @@ class AsyncConnectionProviderIntegrationTests {
+ 
+         StopWatch stopWatch = new StopWatch();
+ 
+-        assertThatThrownBy(() -> Futures.await(sut.getConnection(connectionKey))).hasCauseInstanceOf(
++        assertThatThrownBy(() -> TestFutures.await(sut.getConnection(connectionKey))).hasCauseInstanceOf(
+                 ConnectTimeoutException.class);
+ 
+         stopWatch.start();
+ 
+-        assertThatThrownBy(() -> Futures.await(sut.getConnection(connectionKey))).hasCauseInstanceOf(
++        assertThatThrownBy(() -> TestFutures.await(sut.getConnection(connectionKey))).hasCauseInstanceOf(
+                 ConnectTimeoutException.class);
+ 
+         stopWatch.stop();
+@@ -254,7 +254,7 @@ class AsyncConnectionProviderIntegrationTests {
+                         .toCompletableFuture();
+ 
+                 connectInitiated.countDown();
+-                StatefulRedisConnection<String, String> connection = Futures.get(future);
++                StatefulRedisConnection<String, String> connection = TestFutures.get(future);
+                 createdConnection.complete(connection);
+             } catch (Exception e) {
+                 createdConnection.completeExceptionally(e);
+diff --git a/src/test/java/io/lettuce/core/cluster/ClusterCommandIntegrationTests.java b/src/test/java/io/lettuce/core/cluster/ClusterCommandIntegrationTests.java
+index 278d355..a98d8e4 100644
+--- a/src/test/java/io/lettuce/core/cluster/ClusterCommandIntegrationTests.java
++++ b/src/test/java/io/lettuce/core/cluster/ClusterCommandIntegrationTests.java
+@@ -39,7 +39,7 @@ import io.lettuce.core.cluster.api.sync.RedisClusterCommands;
+ import io.lettuce.core.cluster.models.slots.ClusterSlotRange;
+ import io.lettuce.core.cluster.models.slots.ClusterSlotsParser;
+ import io.lettuce.test.Delay;
+-import io.lettuce.test.Futures;
++import io.lettuce.test.TestFutures;
+ import io.lettuce.test.LettuceExtension;
+ import io.lettuce.test.Wait;
+ 
+@@ -76,7 +76,7 @@ class ClusterCommandIntegrationTests extends TestSupport {
+ 
+         RedisFuture<String> future = async.clusterBumpepoch();
+ 
+-        String result = Futures.get(future);
++        String result = TestFutures.get(future);
+ 
+         assertThat(result).matches("(BUMPED|STILL).*");
+     }
+@@ -119,7 +119,7 @@ class ClusterCommandIntegrationTests extends TestSupport {
+ 
+         sync.set("b", value);
+         RedisFuture<Long> replication = async.waitForReplication(1, 5);
+-        assertThat(Futures.get(replication)).isGreaterThan(0L);
++        assertThat(TestFutures.get(replication)).isGreaterThan(0L);
+     }
+ 
+     @Test
+@@ -134,13 +134,13 @@ class ClusterCommandIntegrationTests extends TestSupport {
+ 
+         StatefulRedisClusterConnection<String, String> clusterConnection = clusterClient.connect();
+ 
+-        Futures.await(clusterConnection.async().set("a", "myValue1"));
++        TestFutures.await(clusterConnection.async().set("a", "myValue1"));
+ 
+         clusterConnection.reset();
+ 
+         RedisFuture<String> setA = clusterConnection.async().set("a", "myValue1");
+ 
+-        assertThat(Futures.get(setA)).isEqualTo("OK");
++        assertThat(TestFutures.get(setA)).isEqualTo("OK");
+         assertThat(setA.getError()).isNull();
+ 
+         connection.close();
+@@ -248,7 +248,7 @@ class ClusterCommandIntegrationTests extends TestSupport {
+ 
+         async.set(key, value);
+ 
+-        String resultB = Futures.get(async.get(key));
++        String resultB = TestFutures.get(async.get(key));
+         assertThat(resultB).isEqualTo(value);
+         Delay.delay(Duration.ofMillis(500)); // give some time to replicate
+     }
+diff --git a/src/test/java/io/lettuce/core/cluster/ClusterNodeEndpointUnitTests.java b/src/test/java/io/lettuce/core/cluster/ClusterNodeEndpointUnitTests.java
+index 7760a4e..af054a6 100644
+--- a/src/test/java/io/lettuce/core/cluster/ClusterNodeEndpointUnitTests.java
++++ b/src/test/java/io/lettuce/core/cluster/ClusterNodeEndpointUnitTests.java
+@@ -40,7 +40,7 @@ import io.lettuce.core.protocol.Command;
+ import io.lettuce.core.protocol.CommandType;
+ import io.lettuce.core.protocol.RedisCommand;
+ import io.lettuce.core.resource.ClientResources;
+-import io.lettuce.test.Futures;
++import io.lettuce.test.TestFutures;
+ 
+ /**
+  * @author Mark Paluch
+@@ -111,7 +111,7 @@ class ClusterNodeEndpointUnitTests {
+ 
+         assertThat(command.isDone()).isTrue();
+ 
+-        assertThatThrownBy(() -> Futures.await(command)).isInstanceOf(RedisException.class);
++        assertThatThrownBy(() -> TestFutures.await(command)).isInstanceOf(RedisException.class);
+     }
+ 
+     @Test
+@@ -152,7 +152,7 @@ class ClusterNodeEndpointUnitTests {
+ 
+         sut.close();
+ 
+-        assertThatThrownBy(() -> Futures.await(command)).isInstanceOf(RedisException.class);
++        assertThatThrownBy(() -> TestFutures.await(command)).isInstanceOf(RedisException.class);
+     }
+ 
+     private void prepareNewEndpoint() {
+diff --git a/src/test/java/io/lettuce/core/cluster/ClusterSetup.java b/src/test/java/io/lettuce/core/cluster/ClusterSetup.java
+index c3613ea..445885b 100644
+--- a/src/test/java/io/lettuce/core/cluster/ClusterSetup.java
++++ b/src/test/java/io/lettuce/core/cluster/ClusterSetup.java
+@@ -23,7 +23,7 @@ import io.lettuce.core.cluster.api.async.RedisClusterAsyncCommands;
+ import io.lettuce.core.cluster.api.sync.RedisClusterCommands;
+ import io.lettuce.core.cluster.models.partitions.Partitions;
+ import io.lettuce.core.cluster.models.partitions.RedisClusterNode;
+-import io.lettuce.test.Futures;
++import io.lettuce.test.TestFutures;
+ import io.lettuce.test.Wait;
+ import io.lettuce.test.settings.TestSettings;
+ 
+@@ -110,7 +110,7 @@ class ClusterSetup {
+ 
+         Wait.untilTrue(clusterRule::isStable).waitOrTimeout();
+ 
+-        Futures.await(connection.getConnection(ClusterTestSettings.host, ClusterTestSettings.port6).clusterReplicate(
++        TestFutures.await(connection.getConnection(ClusterTestSettings.host, ClusterTestSettings.port6).clusterReplicate(
+                 node1.clusterMyId()));
+ 
+         clusterRule.getClusterClient().reloadPartitions();
+diff --git a/src/test/java/io/lettuce/core/cluster/NodeSelectionAsyncIntegrationTests.java b/src/test/java/io/lettuce/core/cluster/NodeSelectionAsyncIntegrationTests.java
+index e1dae91..25f728a 100644
+--- a/src/test/java/io/lettuce/core/cluster/NodeSelectionAsyncIntegrationTests.java
++++ b/src/test/java/io/lettuce/core/cluster/NodeSelectionAsyncIntegrationTests.java
+@@ -41,7 +41,7 @@ import io.lettuce.core.cluster.models.partitions.Partitions;
+ import io.lettuce.core.cluster.models.partitions.RedisClusterNode;
+ import io.lettuce.core.internal.LettuceSets;
+ import io.lettuce.test.Delay;
+-import io.lettuce.test.Futures;
++import io.lettuce.test.TestFutures;
+ import io.lettuce.test.LettuceExtension;
+ import io.lettuce.test.Wait;
+ 
+@@ -70,12 +70,12 @@ class NodeSelectionAsyncIntegrationTests extends TestSupport {
+         for (char c = 'a'; c < 'z'; c++) {
+             String key = new String(new char[] { c, c, c });
+             expectation.add(key);
+-            Futures.await(commands.set(key, value));
++            TestFutures.await(commands.set(key, value));
+         }
+ 
+         List<String> result = new Vector<>();
+ 
+-        Futures.await(commands.masters().commands().keys(result::add, "*"));
++        TestFutures.await(commands.masters().commands().keys(result::add, "*"));
+ 
+         assertThat(result).hasSize(expectation.size());
+ 
+@@ -92,7 +92,7 @@ class NodeSelectionAsyncIntegrationTests extends TestSupport {
+         for (char c = 'a'; c < 'z'; c++) {
+             String key = new String(new char[] { c, c, c });
+             expectation.add(key);
+-            Futures.await(commands.set(key, value));
++            TestFutures.await(commands.set(key, value));
+         }
+ 
+         Collector<List<String>, List<String>, List<String>> collector = Collector.of(ArrayList::new, List::addAll, (a, b) -> a,
+@@ -101,7 +101,7 @@ class NodeSelectionAsyncIntegrationTests extends TestSupport {
+         CompletableFuture<List<String>> future = commands.masters().commands().keys("*").thenCollect(collector)
+                 .toCompletableFuture();
+ 
+-        Futures.await(future);
++        TestFutures.await(future);
+         List<String> result = future.join();
+ 
+         assertThat(result).hasSize(expectation.size());
+@@ -118,7 +118,7 @@ class NodeSelectionAsyncIntegrationTests extends TestSupport {
+         CompletableFuture<String> transformed = commands.masters().commands().ping()
+                 .thenApply(it -> String.join(" ", it.toArray(new String[0]))).toCompletableFuture();
+ 
+-        Futures.await(transformed);
++        TestFutures.await(transformed);
+ 
+         assertThat(transformed.join()).isEqualTo("PONG PONG");
+     }
+@@ -185,7 +185,7 @@ class NodeSelectionAsyncIntegrationTests extends TestSupport {
+         AsyncExecutions<String> ping = onlyMe.commands().ping();
+         CompletionStage<String> completionStage = ping.get(onlyMe.node(0));
+ 
+-        assertThat(Futures.get(completionStage)).isEqualTo("PONG");
++        assertThat(TestFutures.get(completionStage)).isEqualTo("PONG");
+     }
+ 
+     @Test
+@@ -211,7 +211,7 @@ class NodeSelectionAsyncIntegrationTests extends TestSupport {
+         RedisAdvancedClusterAsyncCommands<String, String> async2 = connection2.async();
+ 
+         AsyncNodeSelection<String, String> masters = async2.masters();
+-        Futures.await(masters.commands().configSet("lua-time-limit", "10"));
++        TestFutures.await(masters.commands().configSet("lua-time-limit", "10"));
+ 
+         AsyncExecutions<Object> eval = masters.commands().eval("while true do end", STATUS, new String[0]);
+ 
+@@ -222,13 +222,13 @@ class NodeSelectionAsyncIntegrationTests extends TestSupport {
+         Delay.delay(Duration.ofMillis(200));
+ 
+         AsyncExecutions<String> kill = commands.masters().commands().scriptKill();
+-        Futures.await(kill);
++        TestFutures.await(kill);
+ 
+         for (CompletionStage<String> execution : kill) {
+-            assertThat(Futures.get(execution)).isEqualTo("OK");
++            assertThat(TestFutures.get(execution)).isEqualTo("OK");
+         }
+ 
+-        Futures.await(CompletableFuture.allOf(eval.futures()).exceptionally(throwable -> null));
++        TestFutures.await(CompletableFuture.allOf(eval.futures()).exceptionally(throwable -> null));
+         for (CompletableFuture<Object> future : eval.futures()) {
+             assertThat(future.isDone()).isTrue();
+         }
+@@ -244,7 +244,7 @@ class NodeSelectionAsyncIntegrationTests extends TestSupport {
+ 
+         assertThat(nodes.size()).isEqualTo(2);
+ 
+-        Futures.await(commands.set(key, value));
++        TestFutures.await(commands.set(key, value));
+ 
+         waitForReplication(key, ClusterTestSettings.port4);
+ 
+@@ -257,7 +257,7 @@ class NodeSelectionAsyncIntegrationTests extends TestSupport {
+             });
+         });
+ 
+-        Futures.await(CompletableFuture.allOf(keys.futures()).exceptionally(throwable -> null));
++        TestFutures.await(CompletableFuture.allOf(keys.futures()).exceptionally(throwable -> null));
+ 
+         assertThat(t.size()).isGreaterThan(0);
+     }
+@@ -270,7 +270,7 @@ class NodeSelectionAsyncIntegrationTests extends TestSupport {
+ 
+         assertThat(nodes.size()).isEqualTo(2);
+ 
+-        Futures.await(commands.set(key, value));
++        TestFutures.await(commands.set(key, value));
+         waitForReplication(key, ClusterTestSettings.port4);
+ 
+         List<Throwable> t = new ArrayList<>();
+@@ -284,7 +284,7 @@ class NodeSelectionAsyncIntegrationTests extends TestSupport {
+             lcs.thenAccept(strings::add);
+         });
+ 
+-        Futures.await(CompletableFuture.allOf(keys.futures()).exceptionally(throwable -> null));
++        TestFutures.await(CompletableFuture.allOf(keys.futures()).exceptionally(throwable -> null));
+         Wait.untilEquals(1, t::size).waitOrTimeout();
+ 
+         assertThat(t).hasSize(1);
+@@ -303,9 +303,9 @@ class NodeSelectionAsyncIntegrationTests extends TestSupport {
+         Wait.untilNotEquals(null, () -> {
+             for (CompletableFuture<String> future : selection.commands().get(key).futures()) {
+ 
+-                Futures.await(future);
++                TestFutures.await(future);
+ 
+-                String result = Futures.get((Future<String>) future);
++                String result = TestFutures.get((Future<String>) future);
+                 if (result != null) {
+                     return result;
+                 }
+diff --git a/src/test/java/io/lettuce/core/cluster/PipelinedRedisFutureUnitTests.java b/src/test/java/io/lettuce/core/cluster/PipelinedRedisFutureUnitTests.java
+index 5f08160..094bce9 100644
+--- a/src/test/java/io/lettuce/core/cluster/PipelinedRedisFutureUnitTests.java
++++ b/src/test/java/io/lettuce/core/cluster/PipelinedRedisFutureUnitTests.java
+@@ -21,7 +21,7 @@ import java.util.HashMap;
+ 
+ import org.junit.jupiter.api.Test;
+ 
+-import io.lettuce.test.Futures;
++import io.lettuce.test.TestFutures;
+ 
+ /**
+  * @author Mark Paluch
+@@ -38,7 +38,7 @@ class PipelinedRedisFutureUnitTests {
+         sut = new PipelinedRedisFuture<>(new HashMap<>(), o -> other);
+ 
+         sut.complete("");
+-        assertThat(Futures.get(sut.toCompletableFuture())).isEqualTo(other);
++        assertThat(TestFutures.get(sut.toCompletableFuture())).isEqualTo(other);
+         assertThat(sut.getError()).isNull();
+     }
+ 
+@@ -50,7 +50,7 @@ class PipelinedRedisFutureUnitTests {
+         sut = new PipelinedRedisFuture<>(new HashMap<>(), o -> other);
+ 
+         sut.completeExceptionally(new Exception());
+-        assertThat(Futures.get(sut.toCompletableFuture())).isEqualTo(other);
++        assertThat(TestFutures.get(sut.toCompletableFuture())).isEqualTo(other);
+         assertThat(sut.getError()).isNull();
+     }
+ }
+diff --git a/src/test/java/io/lettuce/core/cluster/RedisClusterClientIntegrationTests.java b/src/test/java/io/lettuce/core/cluster/RedisClusterClientIntegrationTests.java
+index f56faa0..09e5abb 100644
+--- a/src/test/java/io/lettuce/core/cluster/RedisClusterClientIntegrationTests.java
++++ b/src/test/java/io/lettuce/core/cluster/RedisClusterClientIntegrationTests.java
+@@ -51,7 +51,7 @@ import io.lettuce.core.codec.StringCodec;
+ import io.lettuce.core.protocol.AsyncCommand;
+ import io.lettuce.core.pubsub.StatefulRedisPubSubConnection;
+ import io.lettuce.test.Delay;
+-import io.lettuce.test.Futures;
++import io.lettuce.test.TestFutures;
+ import io.lettuce.test.LettuceExtension;
+ import io.lettuce.test.Wait;
+ import io.lettuce.test.resource.FastShutdown;
+@@ -249,7 +249,7 @@ class RedisClusterClientIntegrationTests extends TestSupport {
+ 
+         RedisFuture<String> resultMoved = redis1.async().set(ClusterTestSettings.KEY_A, value);
+ 
+-        assertThatThrownBy(() -> Futures.await(resultMoved)).hasMessageContaining("MOVED 15495");
++        assertThatThrownBy(() -> TestFutures.await(resultMoved)).hasMessageContaining("MOVED 15495");
+ 
+         clusterClient.reloadPartitions();
+         RedisAdvancedClusterCommands<String, String> connection = clusterClient.connect().sync();
+@@ -308,18 +308,18 @@ class RedisClusterClientIntegrationTests extends TestSupport {
+ 
+         assertThat(setB.toCompletableFuture()).isInstanceOf(AsyncCommand.class);
+ 
+-        Futures.await(setB);
++        TestFutures.await(setB);
+         assertThat(setB.getError()).isNull();
+-        assertThat(Futures.get(setB)).isEqualTo("OK");
++        assertThat(TestFutures.get(setB)).isEqualTo("OK");
+ 
+         // gets redirection to node 3
+         RedisFuture<String> setA = connection.set(ClusterTestSettings.KEY_A, value);
+ 
+         assertThat((CompletionStage) setA).isInstanceOf(AsyncCommand.class);
+ 
+-        Futures.await(setA);
++        TestFutures.await(setA);
+         assertThat(setA.getError()).isNull();
+-        assertThat(Futures.get(setA)).isEqualTo("OK");
++        assertThat(TestFutures.get(setA)).isEqualTo("OK");
+ 
+         connection.getStatefulConnection().close();
+     }
+@@ -379,7 +379,7 @@ class RedisClusterClientIntegrationTests extends TestSupport {
+         List<String> time = sync.time();
+         assertThat(time).hasSize(2);
+ 
+-        Futures.await(connection.async().quit());
++        TestFutures.await(connection.async().quit());
+ 
+         Wait.untilTrue(connection::isOpen).waitOrTimeout();
+ 
+@@ -418,7 +418,7 @@ class RedisClusterClientIntegrationTests extends TestSupport {
+         List<String> time = sync.time();
+         assertThat(time).hasSize(2);
+ 
+-        Futures.await(connection.async().quit());
++        TestFutures.await(connection.async().quit());
+ 
+         Wait.untilTrue(connection::isOpen).waitOrTimeout();
+ 
+@@ -496,7 +496,7 @@ class RedisClusterClientIntegrationTests extends TestSupport {
+ 
+         RedisClusterNode partition = connection.getPartitions().getPartition(0);
+ 
+-        StatefulRedisConnection<String, String> node = Futures.get(connection.getConnectionAsync(partition.getNodeId()));
++        StatefulRedisConnection<String, String> node = TestFutures.get(connection.getConnectionAsync(partition.getNodeId()));
+ 
+         assertThat(node.sync().ping()).isEqualTo("PONG");
+     }
+@@ -516,7 +516,7 @@ class RedisClusterClientIntegrationTests extends TestSupport {
+     void testStatefulConnection() {
+         RedisAdvancedClusterAsyncCommands<String, String> async = connection.async();
+ 
+-        assertThat(Futures.get(async.ping())).isEqualTo("PONG");
++        assertThat(TestFutures.get(async.ping())).isEqualTo("PONG");
+     }
+ 
+     @Test
+@@ -541,7 +541,7 @@ class RedisClusterClientIntegrationTests extends TestSupport {
+         // commands are dispatched to a different connection, therefore it works for us.
+         sync.set(ClusterTestSettings.KEY_B, value);
+ 
+-        Futures.await(connection.async().quit());
++        TestFutures.await(connection.async().quit());
+ 
+         assertThat(ReflectionTestUtils.getField(connection, "readOnly")).isEqualTo(Boolean.TRUE);
+ 
+diff --git a/src/test/java/io/lettuce/core/cluster/RedisClusterSetupTest.java b/src/test/java/io/lettuce/core/cluster/RedisClusterSetupTest.java
+index a9ff7bf..2b4ac66 100644
+--- a/src/test/java/io/lettuce/core/cluster/RedisClusterSetupTest.java
++++ b/src/test/java/io/lettuce/core/cluster/RedisClusterSetupTest.java
+@@ -43,7 +43,7 @@ import io.lettuce.core.cluster.models.partitions.ClusterPartitionParser;
+ import io.lettuce.core.cluster.models.partitions.Partitions;
+ import io.lettuce.core.cluster.models.partitions.RedisClusterNode;
+ import io.lettuce.test.ConnectionTestUtil;
+-import io.lettuce.test.Futures;
++import io.lettuce.test.TestFutures;
+ import io.lettuce.test.Wait;
+ import io.lettuce.test.resource.DefaultRedisClient;
+ import io.lettuce.test.resource.FastShutdown;
+@@ -292,7 +292,7 @@ public class RedisClusterSetupTest extends TestSupport {
+ 
+         set.await(5, TimeUnit.SECONDS);
+ 
+-        assertThatThrownBy(() -> Futures.await(set)).hasRootCauseInstanceOf(RedisException.class);
++        assertThatThrownBy(() -> TestFutures.await(set)).hasRootCauseInstanceOf(RedisException.class);
+             clusterConnection.getStatefulConnection().close();
+     }
+ 
+@@ -338,7 +338,7 @@ public class RedisClusterSetupTest extends TestSupport {
+         partitions.updateCache();
+         clusterClient.updatePartitionsInConnections();
+ 
+-        Wait.untilTrue(() -> Futures.areAllCompleted(futures)).waitOrTimeout();
++        Wait.untilTrue(() -> TestFutures.areAllCompleted(futures)).waitOrTimeout();
+ 
+         assertRoutedExecution(clusterConnection);
+ 
+@@ -478,7 +478,7 @@ public class RedisClusterSetupTest extends TestSupport {
+         RedisAdvancedClusterAsyncCommands<String, String> clusterConnection = clusterClient.connect().async();
+         clusterConnection.getStatefulConnection().setReadFrom(ReadFrom.REPLICA);
+ 
+-        Futures.await(clusterConnection.set(key, value));
++        TestFutures.await(clusterConnection.set(key, value));
+ 
+         try {
+             clusterConnection.get(key);
+@@ -517,9 +517,9 @@ public class RedisClusterSetupTest extends TestSupport {
+     }
+ 
+     private void assertExecuted(RedisFuture<String> set) {
+-        Futures.await(set);
++        TestFutures.await(set);
+         assertThat(set.getError()).isNull();
+-        assertThat(Futures.get(set)).isEqualTo("OK");
++        assertThat(TestFutures.get(set)).isEqualTo("OK");
+     }
+ 
+     private void suspendConnection(RedisClusterAsyncCommands<String, String> asyncCommands) {
+diff --git a/src/test/java/io/lettuce/core/cluster/commands/CustomClusterCommandIntegrationTests.java b/src/test/java/io/lettuce/core/cluster/commands/CustomClusterCommandIntegrationTests.java
+index 198a3d1..69ed6ab 100644
+--- a/src/test/java/io/lettuce/core/cluster/commands/CustomClusterCommandIntegrationTests.java
++++ b/src/test/java/io/lettuce/core/cluster/commands/CustomClusterCommandIntegrationTests.java
+@@ -34,7 +34,7 @@ import io.lettuce.core.codec.StringCodec;
+ import io.lettuce.core.commands.CustomCommandIntegrationTests;
+ import io.lettuce.core.output.StatusOutput;
+ import io.lettuce.core.protocol.*;
+-import io.lettuce.test.Futures;
++import io.lettuce.test.TestFutures;
+ import io.lettuce.test.LettuceExtension;
+ 
+ /**
+@@ -89,7 +89,7 @@ class CustomClusterCommandIntegrationTests extends TestSupport {
+         AsyncCommand<String, String, String> async = new AsyncCommand<>(command);
+         connection.dispatch(async);
+ 
+-        assertThat(Futures.get((RedisFuture) async)).isEqualTo("PONG");
++        assertThat(TestFutures.get((RedisFuture) async)).isEqualTo("PONG");
+     }
+ 
+     @Test
+@@ -107,8 +107,8 @@ class CustomClusterCommandIntegrationTests extends TestSupport {
+         AsyncCommand<String, String, String> async2 = new AsyncCommand<>(command2);
+         connection.dispatch(Arrays.asList(async1, async2));
+ 
+-        assertThat(Futures.get(async1.toCompletableFuture())).isEqualTo("PONG");
+-        assertThat(Futures.get(async2.toCompletableFuture())).isEqualTo("PONG");
++        assertThat(TestFutures.get(async1.toCompletableFuture())).isEqualTo("PONG");
++        assertThat(TestFutures.get(async2.toCompletableFuture())).isEqualTo("PONG");
+     }
+ 
+     @Test
+@@ -128,9 +128,9 @@ class CustomClusterCommandIntegrationTests extends TestSupport {
+         AsyncCommand<String, String, String> async3 = new AsyncCommand<>(command3);
+         connection.dispatch(Arrays.asList(async1, async2, async3));
+ 
+-        assertThat(Futures.get(async1.toCompletableFuture())).isEqualTo("OK");
+-        assertThat(Futures.get(async2.toCompletableFuture())).isEqualTo("value");
+-        assertThat(Futures.get(async3.toCompletableFuture())).isEqualTo("OK");
++        assertThat(TestFutures.get(async1.toCompletableFuture())).isEqualTo("OK");
++        assertThat(TestFutures.get(async2.toCompletableFuture())).isEqualTo("value");
++        assertThat(TestFutures.get(async3.toCompletableFuture())).isEqualTo("OK");
+     }
+ 
+     @Test
+diff --git a/src/test/java/io/lettuce/core/cluster/pubsub/RedisClusterPubSubConnectionIntegrationTests.java b/src/test/java/io/lettuce/core/cluster/pubsub/RedisClusterPubSubConnectionIntegrationTests.java
+index 9db537a..3191aee 100644
+--- a/src/test/java/io/lettuce/core/cluster/pubsub/RedisClusterPubSubConnectionIntegrationTests.java
++++ b/src/test/java/io/lettuce/core/cluster/pubsub/RedisClusterPubSubConnectionIntegrationTests.java
+@@ -42,7 +42,7 @@ import io.lettuce.core.cluster.pubsub.api.sync.NodeSelectionPubSubCommands;
+ import io.lettuce.core.cluster.pubsub.api.sync.PubSubNodeSelection;
+ import io.lettuce.core.pubsub.StatefulRedisPubSubConnection;
+ import io.lettuce.core.support.PubSubTestListener;
+-import io.lettuce.test.Futures;
++import io.lettuce.test.TestFutures;
+ import io.lettuce.test.LettuceExtension;
+ 
+ /**
+@@ -156,7 +156,7 @@ class RedisClusterPubSubConnectionIntegrationTests extends TestSupport {
+ 
+         RedisClusterNode partition = pubSubConnection.getPartitions().getPartition(0);
+ 
+-        StatefulRedisPubSubConnection<String, String> node = Futures.get(pubSubConnection.getConnectionAsync(partition
++        StatefulRedisPubSubConnection<String, String> node = TestFutures.get(pubSubConnection.getConnectionAsync(partition
+                 .getNodeId()));
+ 
+         assertThat(node.sync().ping()).isEqualTo("PONG");
+@@ -168,7 +168,7 @@ class RedisClusterPubSubConnectionIntegrationTests extends TestSupport {
+         RedisClusterNode partition = pubSubConnection.getPartitions().getPartition(0);
+ 
+         RedisURI uri = partition.getUri();
+-        StatefulRedisPubSubConnection<String, String> node = Futures.get(pubSubConnection.getConnectionAsync(uri.getHost(),
++        StatefulRedisPubSubConnection<String, String> node = TestFutures.get(pubSubConnection.getConnectionAsync(uri.getHost(),
+                 uri.getPort()));
+ 
+         assertThat(node.sync().ping()).isEqualTo("PONG");
+@@ -230,7 +230,7 @@ class RedisClusterPubSubConnectionIntegrationTests extends TestSupport {
+         PubSubAsyncNodeSelection<String, String> masters = pubSubConnection.async().masters();
+         NodeSelectionPubSubAsyncCommands<String, String> commands = masters.commands();
+ 
+-        Futures.await(commands.psubscribe("chann*"));
++        TestFutures.await(commands.psubscribe("chann*"));
+ 
+         pubSubConnection2.sync().publish("channel", "message");
+ 
+diff --git a/src/test/java/io/lettuce/core/commands/CustomCommandIntegrationTests.java b/src/test/java/io/lettuce/core/commands/CustomCommandIntegrationTests.java
+index 8d0b20a..919cc30 100644
+--- a/src/test/java/io/lettuce/core/commands/CustomCommandIntegrationTests.java
++++ b/src/test/java/io/lettuce/core/commands/CustomCommandIntegrationTests.java
+@@ -36,7 +36,7 @@ import io.lettuce.core.api.sync.RedisCommands;
+ import io.lettuce.core.codec.StringCodec;
+ import io.lettuce.core.output.StatusOutput;
+ import io.lettuce.core.protocol.*;
+-import io.lettuce.test.Futures;
++import io.lettuce.test.TestFutures;
+ import io.lettuce.test.LettuceExtension;
+ 
+ /**
+@@ -106,7 +106,7 @@ public class CustomCommandIntegrationTests extends TestSupport {
+         AsyncCommand<String, String, String> async = new AsyncCommand<>(command);
+         getStandaloneConnection().dispatch(async);
+ 
+-        assertThat(Futures.get(async.toCompletableFuture())).isEqualTo("PONG");
++        assertThat(TestFutures.get(async.toCompletableFuture())).isEqualTo("PONG");
+     }
+ 
+     @Test
+@@ -122,8 +122,8 @@ public class CustomCommandIntegrationTests extends TestSupport {
+         AsyncCommand<String, String, String> async2 = new AsyncCommand<>(command2);
+         getStandaloneConnection().dispatch(Arrays.asList(async1, async2));
+ 
+-        assertThat(Futures.get(async1.toCompletableFuture())).isEqualTo("PONG");
+-        assertThat(Futures.get(async2.toCompletableFuture())).isEqualTo("PONG");
++        assertThat(TestFutures.get(async1.toCompletableFuture())).isEqualTo("PONG");
++        assertThat(TestFutures.get(async2.toCompletableFuture())).isEqualTo("PONG");
+     }
+ 
+     @Test
+@@ -141,10 +141,10 @@ public class CustomCommandIntegrationTests extends TestSupport {
+         AsyncCommand<String, String, TransactionResult> async3 = new AsyncCommand<>(exec);
+         getStandaloneConnection().dispatch(Arrays.asList(async1, async2, async3));
+ 
+-        assertThat(Futures.get(async1.toCompletableFuture())).isEqualTo("OK");
+-        assertThat(Futures.get(async2.toCompletableFuture())).isEqualTo("OK");
++        assertThat(TestFutures.get(async1.toCompletableFuture())).isEqualTo("OK");
++        assertThat(TestFutures.get(async2.toCompletableFuture())).isEqualTo("OK");
+ 
+-        TransactionResult transactionResult = Futures.get(async3.toCompletableFuture());
++        TransactionResult transactionResult = TestFutures.get(async3.toCompletableFuture());
+         assertThat(transactionResult.wasDiscarded()).isFalse();
+         assertThat(transactionResult.<String> get(0)).isEqualTo("OK");
+     }
+diff --git a/src/test/java/io/lettuce/core/dynamic/RedisCommandsBatchingIntegrationTests.java b/src/test/java/io/lettuce/core/dynamic/RedisCommandsBatchingIntegrationTests.java
+index 2f2b2e5..15e8e2e 100644
+--- a/src/test/java/io/lettuce/core/dynamic/RedisCommandsBatchingIntegrationTests.java
++++ b/src/test/java/io/lettuce/core/dynamic/RedisCommandsBatchingIntegrationTests.java
+@@ -37,7 +37,7 @@ import io.lettuce.core.dynamic.batch.BatchException;
+ import io.lettuce.core.dynamic.batch.BatchExecutor;
+ import io.lettuce.core.dynamic.batch.BatchSize;
+ import io.lettuce.core.dynamic.batch.CommandBatching;
+-import io.lettuce.test.Futures;
++import io.lettuce.test.TestFutures;
+ import io.lettuce.test.LettuceExtension;
+ 
+ /**
+@@ -158,7 +158,7 @@ class RedisCommandsBatchingIntegrationTests extends TestSupport {
+         api.setAsync("k4", value);
+ 
+         assertThat(redis.get("k1")).isNull();
+-        assertThat(Futures.get(api.setAsync("k5", value))).isEqualTo("OK");
++        assertThat(TestFutures.get(api.setAsync("k5", value))).isEqualTo("OK");
+ 
+         assertThat(redis.get("k1")).isEqualTo(value);
+     }
+diff --git a/src/test/java/io/lettuce/core/masterreplica/MasterReplicaTest.java b/src/test/java/io/lettuce/core/masterreplica/MasterReplicaTest.java
+index bf8673b..0795fc3 100644
+--- a/src/test/java/io/lettuce/core/masterreplica/MasterReplicaTest.java
++++ b/src/test/java/io/lettuce/core/masterreplica/MasterReplicaTest.java
+@@ -39,7 +39,7 @@ import io.lettuce.core.codec.StringCodec;
+ import io.lettuce.core.models.role.RedisInstance;
+ import io.lettuce.core.models.role.RedisNodeDescription;
+ import io.lettuce.core.models.role.RoleParser;
+-import io.lettuce.test.Futures;
++import io.lettuce.test.TestFutures;
+ import io.lettuce.test.settings.TestSettings;
+ 
+ /**
+@@ -99,13 +99,13 @@ class MasterReplicaTest extends AbstractRedisClientTest {
+ 
+         if (connectionToNode1 != null) {
+             connectionToNode1.configSet("requirepass", "");
+-            Futures.await(connectionToNode1.configSet("masterauth", ""));
++            TestFutures.await(connectionToNode1.configSet("masterauth", ""));
+             connectionToNode1.getStatefulConnection().close();
+         }
+ 
+         if (connectionToNode2 != null) {
+             connectionToNode2.configSet("requirepass", "");
+-            Futures.await(connectionToNode2.configSet("masterauth", ""));
++            TestFutures.await(connectionToNode2.configSet("masterauth", ""));
+             connectionToNode2.getStatefulConnection().close();
+         }
+ 
+diff --git a/src/test/java/io/lettuce/core/masterslave/CustomCommandIntegrationTests.java b/src/test/java/io/lettuce/core/masterslave/CustomCommandIntegrationTests.java
+index dae1476..7589388 100644
+--- a/src/test/java/io/lettuce/core/masterslave/CustomCommandIntegrationTests.java
++++ b/src/test/java/io/lettuce/core/masterslave/CustomCommandIntegrationTests.java
+@@ -34,7 +34,7 @@ import io.lettuce.core.api.sync.RedisCommands;
+ import io.lettuce.core.codec.StringCodec;
+ import io.lettuce.core.output.StatusOutput;
+ import io.lettuce.core.protocol.*;
+-import io.lettuce.test.Futures;
++import io.lettuce.test.TestFutures;
+ import io.lettuce.test.LettuceExtension;
+ 
+ /**
+@@ -114,7 +114,7 @@ class CustomCommandIntegrationTests extends TestSupport {
+         AsyncCommand<String, String, String> async = new AsyncCommand<>(command);
+         getStandaloneConnection().dispatch(async);
+ 
+-        assertThat(Futures.get(async.toCompletableFuture())).isEqualTo("PONG");
++        assertThat(TestFutures.get(async.toCompletableFuture())).isEqualTo("PONG");
+     }
+ 
+     @Test
+@@ -134,9 +134,9 @@ class CustomCommandIntegrationTests extends TestSupport {
+         AsyncCommand<String, String, String> async3 = new AsyncCommand<>(command3);
+         getStandaloneConnection().dispatch(Arrays.asList(async1, async2, async3));
+ 
+-        assertThat(Futures.get(async1.toCompletableFuture())).isEqualTo("OK");
+-        assertThat(Futures.get(async2.toCompletableFuture())).isEqualTo("value");
+-        assertThat(Futures.get(async3.toCompletableFuture())).isEqualTo("OK");
++        assertThat(TestFutures.get(async1.toCompletableFuture())).isEqualTo("OK");
++        assertThat(TestFutures.get(async2.toCompletableFuture())).isEqualTo("value");
++        assertThat(TestFutures.get(async3.toCompletableFuture())).isEqualTo("OK");
+     }
+ 
+     @Test
+diff --git a/src/test/java/io/lettuce/core/masterslave/MasterSlaveTest.java b/src/test/java/io/lettuce/core/masterslave/MasterSlaveTest.java
+index 28a592c..1467b7c 100644
+--- a/src/test/java/io/lettuce/core/masterslave/MasterSlaveTest.java
++++ b/src/test/java/io/lettuce/core/masterslave/MasterSlaveTest.java
+@@ -39,7 +39,7 @@ import io.lettuce.core.codec.StringCodec;
+ import io.lettuce.core.models.role.RedisInstance;
+ import io.lettuce.core.models.role.RedisNodeDescription;
+ import io.lettuce.core.models.role.RoleParser;
+-import io.lettuce.test.Futures;
++import io.lettuce.test.TestFutures;
+ import io.lettuce.test.settings.TestSettings;
+ 
+ /**
+@@ -99,13 +99,13 @@ class MasterSlaveTest extends AbstractRedisClientTest {
+ 
+         if (connectionToNode1 != null) {
+             connectionToNode1.configSet("requirepass", "");
+-            Futures.await(connectionToNode1.configSet("masterauth", ""));
++            TestFutures.await(connectionToNode1.configSet("masterauth", ""));
+             connectionToNode1.getStatefulConnection().close();
+         }
+ 
+         if (connectionToNode2 != null) {
+             connectionToNode2.configSet("requirepass", "");
+-            Futures.await(connectionToNode2.configSet("masterauth", ""));
++            TestFutures.await(connectionToNode2.configSet("masterauth", ""));
+             connectionToNode2.getStatefulConnection().close();
+         }
+ 
+diff --git a/src/test/java/io/lettuce/core/protocol/AsyncCommandUnitTests.java b/src/test/java/io/lettuce/core/protocol/AsyncCommandUnitTests.java
+index cebf0a1..d9e330d 100644
+--- a/src/test/java/io/lettuce/core/protocol/AsyncCommandUnitTests.java
++++ b/src/test/java/io/lettuce/core/protocol/AsyncCommandUnitTests.java
+@@ -31,7 +31,7 @@ import io.lettuce.core.codec.RedisCodec;
+ import io.lettuce.core.codec.StringCodec;
+ import io.lettuce.core.output.CommandOutput;
+ import io.lettuce.core.output.StatusOutput;
+-import io.lettuce.test.Futures;
++import io.lettuce.test.TestFutures;
+ 
+ /**
+  * @author Mark Paluch
+@@ -126,7 +126,7 @@ public class AsyncCommandUnitTests {
+     void asyncGet() {
+         sut.getOutput().set(StandardCharsets.US_ASCII.encode("one"));
+         sut.complete();
+-        assertThat(Futures.get(sut.toCompletableFuture())).isEqualTo("one");
++        assertThat(TestFutures.get(sut.toCompletableFuture())).isEqualTo("one");
+         sut.getOutput().toString();
+     }
+ 
+diff --git a/src/test/java/io/lettuce/core/protocol/ConnectionFailureIntegrationTests.java b/src/test/java/io/lettuce/core/protocol/ConnectionFailureIntegrationTests.java
+index efea0f9..54f1cf7 100644
+--- a/src/test/java/io/lettuce/core/protocol/ConnectionFailureIntegrationTests.java
++++ b/src/test/java/io/lettuce/core/protocol/ConnectionFailureIntegrationTests.java
+@@ -125,7 +125,7 @@ class ConnectionFailureIntegrationTests extends TestSupport {
+ 
+             assertThat(connectionWatchdog.isListenOnChannelInactive()).isTrue();
+ 
+-            assertThatThrownBy(() -> Futures.await(connection.info())).hasRootCauseInstanceOf(RedisException.class)
++            assertThatThrownBy(() -> TestFutures.await(connection.info())).hasRootCauseInstanceOf(RedisException.class)
+                     .hasMessageContaining("Invalid first byte");
+ 
+             connection.getStatefulConnection().close();
+@@ -227,7 +227,7 @@ class ConnectionFailureIntegrationTests extends TestSupport {
+             assertThatThrownBy(set1::get).isInstanceOf(CancellationException.class).hasNoCause();
+             assertThatThrownBy(set2::get).isInstanceOf(CancellationException.class).hasNoCause();
+ 
+-            assertThatThrownBy(() -> Futures.await(connection.info())).isInstanceOf(RedisException.class)
++            assertThatThrownBy(() -> TestFutures.await(connection.info())).isInstanceOf(RedisException.class)
+                     .hasMessageContaining("Invalid first byte");
+ 
+             connection.getStatefulConnection().close();
+diff --git a/src/test/java/io/lettuce/core/pubsub/PubSubCommandTest.java b/src/test/java/io/lettuce/core/pubsub/PubSubCommandTest.java
+index 8865c22..2b85791 100644
+--- a/src/test/java/io/lettuce/core/pubsub/PubSubCommandTest.java
++++ b/src/test/java/io/lettuce/core/pubsub/PubSubCommandTest.java
+@@ -38,7 +38,7 @@ import io.lettuce.core.api.async.RedisAsyncCommands;
+ import io.lettuce.core.internal.LettuceFactories;
+ import io.lettuce.core.pubsub.api.async.RedisPubSubAsyncCommands;
+ import io.lettuce.test.Delay;
+-import io.lettuce.test.Futures;
++import io.lettuce.test.TestFutures;
+ import io.lettuce.test.Wait;
+ import io.lettuce.test.resource.FastShutdown;
+ import io.lettuce.test.resource.TestClientResources;
+@@ -201,7 +201,7 @@ class PubSubCommandTest extends AbstractRedisClientTest implements RedisPubSubLi
+     @Test
+     void psubscribe() throws Exception {
+         RedisFuture<Void> psubscribe = pubsub.psubscribe(pattern);
+-        assertThat(Futures.get(psubscribe)).isNull();
++        assertThat(TestFutures.get(psubscribe)).isNull();
+         assertThat(psubscribe.getError()).isNull();
+         assertThat(psubscribe.isCancelled()).isFalse();
+         assertThat(psubscribe.isDone()).isTrue();
+@@ -230,7 +230,7 @@ class PubSubCommandTest extends AbstractRedisClientTest implements RedisPubSubLi
+ 
+     @Test
+     void pubsubChannels() {
+-        Futures.await(pubsub.subscribe(channel));
++        TestFutures.await(pubsub.subscribe(channel));
+         List<String> result = redis.pubsubChannels();
+         assertThat(result).contains(channel);
+ 
+@@ -238,7 +238,7 @@ class PubSubCommandTest extends AbstractRedisClientTest implements RedisPubSubLi
+ 
+     @Test
+     void pubsubMultipleChannels() {
+-        Futures.await(pubsub.subscribe(channel, "channel1", "channel3"));
++        TestFutures.await(pubsub.subscribe(channel, "channel1", "channel3"));
+ 
+         List<String> result = redis.pubsubChannels();
+         assertThat(result).contains(channel, "channel1", "channel3");
+@@ -247,7 +247,7 @@ class PubSubCommandTest extends AbstractRedisClientTest implements RedisPubSubLi
+ 
+     @Test
+     void pubsubChannelsWithArg() {
+-        Futures.await(pubsub.subscribe(channel));
++        TestFutures.await(pubsub.subscribe(channel));
+         List<String> result = redis.pubsubChannels(pattern);
+         assertThat(result, hasItem(channel));
+     }
+@@ -255,7 +255,7 @@ class PubSubCommandTest extends AbstractRedisClientTest implements RedisPubSubLi
+     @Test
+     void pubsubNumsub() {
+ 
+-        Futures.await(pubsub.subscribe(channel));
++        TestFutures.await(pubsub.subscribe(channel));
+ 
+         Map<String, Long> result = redis.pubsubNumsub(channel);
+         assertThat(result.size()).isGreaterThan(0);
+@@ -265,14 +265,14 @@ class PubSubCommandTest extends AbstractRedisClientTest implements RedisPubSubLi
+     @Test
+     void pubsubNumpat() {
+ 
+-        Futures.await(pubsub.psubscribe(pattern));
++        TestFutures.await(pubsub.psubscribe(pattern));
+         Long result = redis.pubsubNumpat();
+         assertThat(result.longValue()).isGreaterThan(0); // Redis sometimes keeps old references
+     }
+ 
+     @Test
+     void punsubscribe() throws Exception {
+-        Futures.await(pubsub.punsubscribe(pattern));
++        TestFutures.await(pubsub.punsubscribe(pattern));
+         assertThat(patterns.take()).isEqualTo(pattern);
+         assertThat((long) counts.take()).isEqualTo(0);
+ 
+@@ -287,13 +287,13 @@ class PubSubCommandTest extends AbstractRedisClientTest implements RedisPubSubLi
+ 
+     @Test
+     void unsubscribe() throws Exception {
+-        Futures.await(pubsub.unsubscribe(channel));
++        TestFutures.await(pubsub.unsubscribe(channel));
+         assertThat(channels.take()).isEqualTo(channel);
+         assertThat((long) counts.take()).isEqualTo(0);
+ 
+         RedisFuture<Void> future = pubsub.unsubscribe();
+ 
+-        assertThat(Futures.get(future)).isNull();
++        assertThat(TestFutures.get(future)).isNull();
+         assertThat(future.getError()).isNull();
+ 
+         assertThat(channels).isEmpty();
+@@ -412,15 +412,15 @@ class PubSubCommandTest extends AbstractRedisClientTest implements RedisPubSubLi
+     @Test
+     void pingNotAllowedInSubscriptionState() {
+ 
+-        Futures.await(pubsub.subscribe(channel));
++        TestFutures.await(pubsub.subscribe(channel));
+ 
+-        assertThatThrownBy(() -> Futures.get(pubsub.ping())).isInstanceOf(RedisException.class).hasMessageContaining(
++        assertThatThrownBy(() -> TestFutures.get(pubsub.ping())).isInstanceOf(RedisException.class).hasMessageContaining(
+                 "not allowed");
+         pubsub.unsubscribe(channel);
+ 
+         Wait.untilTrue(() -> channels.size() == 2).waitOrTimeout();
+ 
+-        assertThat(Futures.get(pubsub.ping())).isEqualTo("PONG");
++        assertThat(TestFutures.get(pubsub.ping())).isEqualTo("PONG");
+     }
+ 
+     // RedisPubSubListener implementation
+diff --git a/src/test/java/io/lettuce/core/reliability/AtMostOnceTest.java b/src/test/java/io/lettuce/core/reliability/AtMostOnceTest.java
+index 63d578b..ab80cd2 100644
+--- a/src/test/java/io/lettuce/core/reliability/AtMostOnceTest.java
++++ b/src/test/java/io/lettuce/core/reliability/AtMostOnceTest.java
+@@ -41,7 +41,7 @@ import io.lettuce.core.protocol.CommandArgs;
+ import io.lettuce.core.protocol.CommandType;
+ import io.lettuce.test.ConnectionTestUtil;
+ import io.lettuce.test.Delay;
+-import io.lettuce.test.Futures;
++import io.lettuce.test.TestFutures;
+ import io.lettuce.test.Wait;
+ import io.netty.buffer.ByteBuf;
+ import io.netty.channel.Channel;
+@@ -297,7 +297,7 @@ class AtMostOnceTest extends AbstractRedisClientTest {
+ 
+             connection.flushCommands();
+ 
+-            Futures.await(incr);
++            TestFutures.await(incr);
+ 
+         } catch (Exception e) {
+             assertThat(e).hasRootCauseInstanceOf(RedisException.class).hasMessageContaining("Connection disconnected");
+diff --git a/src/test/java/io/lettuce/core/resource/DefaultClientResourcesUnitTests.java b/src/test/java/io/lettuce/core/resource/DefaultClientResourcesUnitTests.java
+index b8972f2..9dea71b 100644
+--- a/src/test/java/io/lettuce/core/resource/DefaultClientResourcesUnitTests.java
++++ b/src/test/java/io/lettuce/core/resource/DefaultClientResourcesUnitTests.java
+@@ -32,7 +32,7 @@ import io.lettuce.core.event.Event;
+ import io.lettuce.core.event.EventBus;
+ import io.lettuce.core.metrics.CommandLatencyCollector;
+ import io.lettuce.core.metrics.DefaultCommandLatencyCollectorOptions;
+-import io.lettuce.test.Futures;
++import io.lettuce.test.TestFutures;
+ import io.lettuce.test.resource.FastShutdown;
+ import io.netty.channel.nio.NioEventLoopGroup;
+ import io.netty.util.HashedWheelTimer;
+@@ -118,7 +118,7 @@ class DefaultClientResourcesUnitTests {
+         assertThat(sut.eventBus()).isSameAs(eventBusMock);
+         assertThat(sut.nettyCustomizer()).isSameAs(nettyCustomizer);
+ 
+-        assertThat(Futures.get(sut.shutdown())).isTrue();
++        assertThat(TestFutures.get(sut.shutdown())).isTrue();
+ 
+         verifyZeroInteractions(executorMock);
+         verifyZeroInteractions(groupProviderMock);
+@@ -149,7 +149,7 @@ class DefaultClientResourcesUnitTests {
+         assertThat(copy.timer()).isSameAs(timerMock2).isNotSameAs(timerMock);
+         assertThat(sut.eventBus()).isSameAs(eventBusMock);
+ 
+-        assertThat(Futures.get(sut.shutdown())).isTrue();
++        assertThat(TestFutures.get(sut.shutdown())).isTrue();
+ 
+         verifyZeroInteractions(executorMock);
+         verifyZeroInteractions(groupProviderMock);
+@@ -168,7 +168,7 @@ class DefaultClientResourcesUnitTests {
+         assertThat(eventLoopGroup.executorCount()).isEqualTo(3);
+         assertThat(sut.ioThreadPoolSize()).isEqualTo(3);
+ 
+-        assertThat(Futures.get(sut.shutdown(0, 0, TimeUnit.MILLISECONDS))).isTrue();
++        assertThat(TestFutures.get(sut.shutdown(0, 0, TimeUnit.MILLISECONDS))).isTrue();
+     }
+ 
+     @Test
+@@ -181,7 +181,7 @@ class DefaultClientResourcesUnitTests {
+ 
+         StepVerifier.create(eventBus.get()).then(() -> eventBus.publish(event)).expectNext(event).thenCancel().verify();
+ 
+-        assertThat(Futures.get(sut.shutdown(0, 0, TimeUnit.MILLISECONDS))).isTrue();
++        assertThat(TestFutures.get(sut.shutdown(0, 0, TimeUnit.MILLISECONDS))).isTrue();
+     }
+ 
+     @Test
+diff --git a/src/test/java/io/lettuce/core/resource/DefaultEventLoopGroupProviderUnitTests.java b/src/test/java/io/lettuce/core/resource/DefaultEventLoopGroupProviderUnitTests.java
+index 5ccc21e..bcb260b 100644
+--- a/src/test/java/io/lettuce/core/resource/DefaultEventLoopGroupProviderUnitTests.java
++++ b/src/test/java/io/lettuce/core/resource/DefaultEventLoopGroupProviderUnitTests.java
+@@ -21,7 +21,7 @@ import java.util.concurrent.TimeUnit;
+ 
+ import org.junit.jupiter.api.Test;
+ 
+-import io.lettuce.test.Futures;
++import io.lettuce.test.TestFutures;
+ import io.netty.channel.nio.NioEventLoopGroup;
+ import io.netty.util.concurrent.Future;
+ 
+@@ -37,10 +37,10 @@ class DefaultEventLoopGroupProviderUnitTests {
+         NioEventLoopGroup eventLoopGroup = sut.allocate(NioEventLoopGroup.class);
+ 
+         Future<Boolean> shutdown = sut.release(eventLoopGroup, 10, 10, TimeUnit.MILLISECONDS);
+-        Futures.await(shutdown);
++        TestFutures.await(shutdown);
+ 
+         Future<Boolean> shutdown2 = sut.release(eventLoopGroup, 10, 10, TimeUnit.MILLISECONDS);
+-        Futures.await(shutdown2);
++        TestFutures.await(shutdown2);
+     }
+ 
+     @Test
+@@ -48,7 +48,7 @@ class DefaultEventLoopGroupProviderUnitTests {
+ 
+         DefaultEventLoopGroupProvider sut = new DefaultEventLoopGroupProvider(1);
+ 
+-        Futures.await(sut.shutdown(10, 10, TimeUnit.MILLISECONDS));
++        TestFutures.await(sut.shutdown(10, 10, TimeUnit.MILLISECONDS));
+         assertThatThrownBy(() -> sut.allocate(NioEventLoopGroup.class)).isInstanceOf(IllegalStateException.class);
+     }
+ }
+diff --git a/src/test/java/io/lettuce/core/resource/FuturesUnitTests.java b/src/test/java/io/lettuce/core/resource/FuturesUnitTests.java
+deleted file mode 100644
+index 34745b1..0000000
+--- a/src/test/java/io/lettuce/core/resource/FuturesUnitTests.java
++++ /dev/null
+@@ -1,86 +0,0 @@
+-/*
+- * Copyright 2011-2019 the original author or authors.
+- *
+- * Licensed under the Apache License, Version 2.0 (the "License");
+- * you may not use this file except in compliance with the License.
+- * You may obtain a copy of the License at
+- *
+- *      http://www.apache.org/licenses/LICENSE-2.0
+- *
+- * Unless required by applicable law or agreed to in writing, software
+- * distributed under the License is distributed on an "AS IS" BASIS,
+- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+- * See the License for the specific language governing permissions and
+- * limitations under the License.
+- */
+-package io.lettuce.core.resource;
+-
+-import static org.assertj.core.api.Assertions.assertThat;
+-import static org.assertj.core.api.Assertions.assertThatThrownBy;
+-
+-import org.junit.jupiter.api.Test;
+-
+-import io.lettuce.test.Wait;
+-import io.netty.util.concurrent.DefaultPromise;
+-import io.netty.util.concurrent.GlobalEventExecutor;
+-import io.netty.util.concurrent.ImmediateEventExecutor;
+-import io.netty.util.concurrent.Promise;
+-
+-/**
+- * @author Mark Paluch
+- */
+-class FuturesUnitTests {
+-
+-    @Test
+-    void testPromise() {
+-        assertThatThrownBy(() -> new Futures.PromiseAggregator(null)).isInstanceOf(IllegalArgumentException.class);
+-    }
+-
+-    @Test
+-    void notArmed() {
+-
+-        Futures.PromiseAggregator<Boolean, Promise<Boolean>> sut = new Futures.PromiseAggregator<>(
+-                new DefaultPromise<>(ImmediateEventExecutor.INSTANCE));
+-        assertThatThrownBy(() -> sut.add(new DefaultPromise<>(ImmediateEventExecutor.INSTANCE))).isInstanceOf(
+-                IllegalStateException.class);
+-    }
+-
+-    @Test
+-    void expectAfterArmed() {
+-        Futures.PromiseAggregator<Boolean, Promise<Boolean>> sut = new Futures.PromiseAggregator<>(
+-                new DefaultPromise<>(ImmediateEventExecutor.INSTANCE));
+-        sut.arm();
+-
+-        assertThatThrownBy(() -> sut.expectMore(1)).isInstanceOf(IllegalStateException.class);
+-    }
+-
+-    @Test
+-    void armTwice() {
+-
+-        Futures.PromiseAggregator<Boolean, Promise<Boolean>> sut = new Futures.PromiseAggregator<>(
+-                new DefaultPromise<>(ImmediateEventExecutor.INSTANCE));
+-
+-        sut.arm();
+-        assertThatThrownBy(sut::arm).isInstanceOf(IllegalStateException.class);
+-    }
+-
+-    @Test
+-    void regularUse() {
+-
+-        DefaultPromise<Boolean> target = new DefaultPromise<>(GlobalEventExecutor.INSTANCE);
+-        Futures.PromiseAggregator<Boolean, Promise<Boolean>> sut = new Futures.PromiseAggregator<>(target);
+-
+-        sut.expectMore(1);
+-        sut.arm();
+-        DefaultPromise<Boolean> part = new DefaultPromise<>(GlobalEventExecutor.INSTANCE);
+-        sut.add(part);
+-
+-        assertThat(target.isDone()).isFalse();
+-
+-        part.setSuccess(true);
+-
+-        Wait.untilTrue(target::isDone).waitOrTimeout();
+-
+-        assertThat(target.isDone()).isTrue();
+-    }
+-}
+diff --git a/src/test/java/io/lettuce/core/resource/PromiseAdapterUnitTests.java b/src/test/java/io/lettuce/core/resource/PromiseAdapterUnitTests.java
+new file mode 100644
+index 0000000..205aa8a
+--- /dev/null
++++ b/src/test/java/io/lettuce/core/resource/PromiseAdapterUnitTests.java
+@@ -0,0 +1,66 @@
++/*
++ * Copyright 2011-2019 the original author or authors.
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package io.lettuce.core.resource;
++
++import static org.assertj.core.api.Assertions.assertThat;
++import static org.assertj.core.api.Assertions.assertThatThrownBy;
++
++import java.util.concurrent.CompletableFuture;
++
++import org.junit.jupiter.api.Test;
++
++import io.lettuce.test.Wait;
++import io.netty.util.concurrent.Promise;
++
++class PromiseAdapterUnitTests {
++
++    @Test
++    void rejectsNullCompletionStage() {
++        assertThatThrownBy(() -> PromiseAdapter.toPromise(null)).isInstanceOf(IllegalArgumentException.class);
++    }
++
++    @Test
++    void completesSuccessfully() {
++
++        CompletableFuture<String> stage = new CompletableFuture<>();
++        Promise<String> promise = PromiseAdapter.toPromise(stage);
++
++        assertThat(promise.isDone()).isFalse();
++
++        stage.complete("ok");
++
++        Wait.untilTrue(promise::isDone).waitOrTimeout();
++
++        assertThat(promise.isSuccess()).isTrue();
++        assertThat(promise.getNow()).isEqualTo("ok");
++    }
++
++    @Test
++    void propagatesFailure() {
++
++        CompletableFuture<String> stage = new CompletableFuture<>();
++        Promise<String> promise = PromiseAdapter.toPromise(stage);
++
++        RuntimeException ex = new RuntimeException("boom");
++        stage.completeExceptionally(ex);
++
++        Wait.untilTrue(promise::isDone).waitOrTimeout();
++
++        assertThat(promise.isSuccess()).isFalse();
++        assertThat(promise.cause()).isSameAs(ex);
++    }
++}
++
+diff --git a/src/test/java/io/lettuce/core/sentinel/SentinelConnectionIntegrationTests.java b/src/test/java/io/lettuce/core/sentinel/SentinelConnectionIntegrationTests.java
+index 7be51d4..4ccdcff 100644
+--- a/src/test/java/io/lettuce/core/sentinel/SentinelConnectionIntegrationTests.java
++++ b/src/test/java/io/lettuce/core/sentinel/SentinelConnectionIntegrationTests.java
+@@ -35,7 +35,7 @@ import io.lettuce.core.codec.ByteArrayCodec;
+ import io.lettuce.core.sentinel.api.StatefulRedisSentinelConnection;
+ import io.lettuce.core.sentinel.api.async.RedisSentinelAsyncCommands;
+ import io.lettuce.core.sentinel.api.sync.RedisSentinelCommands;
+-import io.lettuce.test.Futures;
++import io.lettuce.test.TestFutures;
+ import io.lettuce.test.LettuceExtension;
+ import io.lettuce.test.Wait;
+ import io.lettuce.test.settings.TestSettings;
+@@ -78,7 +78,7 @@ public class SentinelConnectionIntegrationTests extends TestSupport {
+ 
+         RedisFuture<List<Map<String, String>>> future = sentinelAsync.masters();
+ 
+-        assertThat(Futures.get(future)).isNotNull();
++        assertThat(TestFutures.get(future)).isNotNull();
+         assertThat(future.isDone()).isTrue();
+         assertThat(future.isCancelled()).isFalse();
+     }
+diff --git a/src/test/java/io/lettuce/core/support/AsyncConnectionPoolSupportIntegrationTests.java b/src/test/java/io/lettuce/core/support/AsyncConnectionPoolSupportIntegrationTests.java
+index a8f8497..e106617 100644
+--- a/src/test/java/io/lettuce/core/support/AsyncConnectionPoolSupportIntegrationTests.java
++++ b/src/test/java/io/lettuce/core/support/AsyncConnectionPoolSupportIntegrationTests.java
+@@ -35,7 +35,7 @@ import io.lettuce.core.api.reactive.RedisReactiveCommands;
+ import io.lettuce.core.api.sync.RedisCommands;
+ import io.lettuce.core.cluster.StatefulRedisClusterConnectionImpl;
+ import io.lettuce.core.codec.StringCodec;
+-import io.lettuce.test.Futures;
++import io.lettuce.test.TestFutures;
+ import io.lettuce.test.resource.FastShutdown;
+ import io.lettuce.test.resource.TestClientResources;
+ import io.netty.channel.group.ChannelGroup;
+@@ -73,8 +73,8 @@ class AsyncConnectionPoolSupportIntegrationTests extends TestSupport {
+         borrowAndClose(pool);
+         borrowAndCloseAsync(pool);
+ 
+-        Futures.await(pool.release(Futures.get(pool.acquire()).sync().getStatefulConnection()));
+-        Futures.await(pool.release(Futures.get(pool.acquire()).async().getStatefulConnection()));
++        TestFutures.await(pool.release(TestFutures.get(pool.acquire()).sync().getStatefulConnection()));
++        TestFutures.await(pool.release(TestFutures.get(pool.acquire()).async().getStatefulConnection()));
+ 
+         assertThat(channels).hasSize(1);
+ 
+@@ -95,9 +95,9 @@ class AsyncConnectionPoolSupportIntegrationTests extends TestSupport {
+         borrowAndReturn(pool);
+         borrowAndClose(pool);
+ 
+-        StatefulRedisConnection<String, String> c1 = Futures.get(pool.acquire());
+-        StatefulRedisConnection<String, String> c2 = Futures.get(pool.acquire());
+-        StatefulRedisConnection<String, String> c3 = Futures.get(pool.acquire());
++        StatefulRedisConnection<String, String> c1 = TestFutures.get(pool.acquire());
++        StatefulRedisConnection<String, String> c2 = TestFutures.get(pool.acquire());
++        StatefulRedisConnection<String, String> c3 = TestFutures.get(pool.acquire());
+ 
+         assertThat(channels).hasSize(3);
+ 
+@@ -118,7 +118,7 @@ class AsyncConnectionPoolSupportIntegrationTests extends TestSupport {
+ 
+         borrowAndReturn(pool);
+ 
+-        StatefulRedisConnection<String, String> connection = Futures.get(pool.acquire());
++        StatefulRedisConnection<String, String> connection = TestFutures.get(pool.acquire());
+         assertThat(Proxy.isProxyClass(connection.getClass())).isFalse();
+         pool.release(connection);
+ 
+@@ -131,7 +131,7 @@ class AsyncConnectionPoolSupportIntegrationTests extends TestSupport {
+         AsyncPool<StatefulRedisConnection<String, String>> pool = AsyncConnectionPoolSupport.createBoundedObjectPool(
+                 () -> client.connectAsync(StringCodec.ASCII, uri), BoundedPoolConfig.create());
+ 
+-        StatefulRedisConnection<String, String> connection = Futures.get(pool.acquire());
++        StatefulRedisConnection<String, String> connection = TestFutures.get(pool.acquire());
+         RedisCommands<String, String> sync = connection.sync();
+         sync.set(key, value);
+ 
+@@ -152,7 +152,7 @@ class AsyncConnectionPoolSupportIntegrationTests extends TestSupport {
+         AsyncPool<StatefulRedisConnection<String, String>> pool = AsyncConnectionPoolSupport.createBoundedObjectPool(
+                 () -> client.connectAsync(StringCodec.ASCII, uri), BoundedPoolConfig.create());
+ 
+-        StatefulRedisConnection<String, String> connection = Futures.get(pool.acquire());
++        StatefulRedisConnection<String, String> connection = TestFutures.get(pool.acquire());
+         RedisCommands<String, String> sync = connection.sync();
+ 
+         assertThat(connection).isInstanceOf(StatefulRedisConnection.class).isNotInstanceOf(
+@@ -176,7 +176,7 @@ class AsyncConnectionPoolSupportIntegrationTests extends TestSupport {
+         AsyncPool<StatefulRedisConnection<String, String>> pool = AsyncConnectionPoolSupport.createBoundedObjectPool(
+                 () -> client.connectAsync(StringCodec.ASCII, uri), BoundedPoolConfig.create(), true);
+ 
+-        StatefulRedisConnection<String, String> connection = Futures.get(pool.acquire());
++        StatefulRedisConnection<String, String> connection = TestFutures.get(pool.acquire());
+         RedisCommands<String, String> sync = connection.sync();
+         sync.ping();
+ 
+@@ -202,7 +202,7 @@ class AsyncConnectionPoolSupportIntegrationTests extends TestSupport {
+             return c.async().ping().whenComplete((s, throwable) -> pool.release(c));
+         });
+ 
+-        Futures.await(pingResponse);
++        TestFutures.await(pingResponse);
+         assertThat(pingResponse).isCompletedWithValue("PONG");
+ 
+         pool.close();
+@@ -211,17 +211,17 @@ class AsyncConnectionPoolSupportIntegrationTests extends TestSupport {
+     private void borrowAndReturn(AsyncPool<StatefulRedisConnection<String, String>> pool) {
+ 
+         for (int i = 0; i < 10; i++) {
+-            StatefulRedisConnection<String, String> connection = Futures.get(pool.acquire());
++            StatefulRedisConnection<String, String> connection = TestFutures.get(pool.acquire());
+             RedisCommands<String, String> sync = connection.sync();
+             sync.ping();
+-            Futures.await(pool.release(connection));
++            TestFutures.await(pool.release(connection));
+         }
+     }
+ 
+     private void borrowAndClose(AsyncPool<StatefulRedisConnection<String, String>> pool) {
+ 
+         for (int i = 0; i < 10; i++) {
+-            StatefulRedisConnection<String, String> connection = Futures.get(pool.acquire());
++            StatefulRedisConnection<String, String> connection = TestFutures.get(pool.acquire());
+             RedisCommands<String, String> sync = connection.sync();
+             sync.ping();
+             connection.close();
+@@ -231,10 +231,10 @@ class AsyncConnectionPoolSupportIntegrationTests extends TestSupport {
+     private void borrowAndCloseAsync(AsyncPool<StatefulRedisConnection<String, String>> pool) {
+ 
+         for (int i = 0; i < 10; i++) {
+-            StatefulRedisConnection<String, String> connection = Futures.get(pool.acquire());
++            StatefulRedisConnection<String, String> connection = TestFutures.get(pool.acquire());
+             RedisCommands<String, String> sync = connection.sync();
+             sync.ping();
+-            Futures.get(connection.closeAsync());
++            TestFutures.get(connection.closeAsync());
+         }
+     }
+ }
+diff --git a/src/test/java/io/lettuce/core/support/AsyncPoolWithValidationUnitTests.java b/src/test/java/io/lettuce/core/support/AsyncPoolWithValidationUnitTests.java
+index bb53305..cabc393 100644
+--- a/src/test/java/io/lettuce/core/support/AsyncPoolWithValidationUnitTests.java
++++ b/src/test/java/io/lettuce/core/support/AsyncPoolWithValidationUnitTests.java
+@@ -36,7 +36,7 @@ import org.mockito.junit.jupiter.MockitoSettings;
+ import org.mockito.quality.Strictness;
+ 
+ import io.lettuce.core.RedisException;
+-import io.lettuce.test.Futures;
++import io.lettuce.test.TestFutures;
+ 
+ /**
+  * @author Mark Paluch
+@@ -204,7 +204,7 @@ class AsyncPoolWithValidationUnitTests {
+ 
+         BoundedAsyncPool<String> pool = new BoundedAsyncPool<>(factory, BoundedPoolConfig.builder().testOnAcquire().build());
+ 
+-        pool.release(Futures.get(pool.acquire()));
++        pool.release(TestFutures.get(pool.acquire()));
+ 
+         assertThat(pool.getIdle()).isEqualTo(1);
+         assertThat(pool.getObjectCount()).isEqualTo(1);
+@@ -223,7 +223,7 @@ class AsyncPoolWithValidationUnitTests {
+ 
+         BoundedAsyncPool<String> pool = new BoundedAsyncPool<>(factory, BoundedPoolConfig.builder().testOnAcquire().build());
+ 
+-        pool.release(Futures.get(pool.acquire()));
++        pool.release(TestFutures.get(pool.acquire()));
+ 
+         assertThat(pool.getIdle()).isEqualTo(1);
+         assertThat(pool.getObjectCount()).isEqualTo(1);
+@@ -246,7 +246,7 @@ class AsyncPoolWithValidationUnitTests {
+ 
+         BoundedAsyncPool<String> pool = new BoundedAsyncPool<>(factory, BoundedPoolConfig.builder().testOnAcquire().build());
+ 
+-        pool.release(Futures.get(pool.acquire()));
++        pool.release(TestFutures.get(pool.acquire()));
+ 
+         assertThat(pool.getIdle()).isEqualTo(1);
+         assertThat(pool.getObjectCount()).isEqualTo(1);
+@@ -269,7 +269,7 @@ class AsyncPoolWithValidationUnitTests {
+ 
+         BoundedAsyncPool<String> pool = new BoundedAsyncPool<>(factory, BoundedPoolConfig.builder().testOnRelease().build());
+ 
+-        Futures.await(pool.release(Futures.get(pool.acquire())));
++        TestFutures.await(pool.release(TestFutures.get(pool.acquire())));
+ 
+         assertThat(pool.getIdle()).isEqualTo(1);
+         assertThat(pool.getObjectCount()).isEqualTo(1);
+@@ -288,7 +288,7 @@ class AsyncPoolWithValidationUnitTests {
+ 
+         BoundedAsyncPool<String> pool = new BoundedAsyncPool<>(factory, BoundedPoolConfig.builder().testOnRelease().build());
+ 
+-        CompletableFuture<Void> release = pool.release(Futures.get(pool.acquire()));
++        CompletableFuture<Void> release = pool.release(TestFutures.get(pool.acquire()));
+ 
+         assertThat(pool.getIdle()).isZero();
+         assertThat(pool.getObjectCount()).isZero();
+@@ -305,7 +305,7 @@ class AsyncPoolWithValidationUnitTests {
+ 
+         BoundedAsyncPool<String> pool = new BoundedAsyncPool<>(factory, BoundedPoolConfig.builder().testOnRelease().build());
+ 
+-        CompletableFuture<Void> release = pool.release(Futures.get(pool.acquire()));
++        CompletableFuture<Void> release = pool.release(TestFutures.get(pool.acquire()));
+ 
+         assertThat(pool.getIdle()).isZero();
+         assertThat(pool.getObjectCount()).isZero();
+@@ -342,7 +342,7 @@ class AsyncPoolWithValidationUnitTests {
+ 
+         assertThat(pool.getIdle()).isEqualTo(5);
+ 
+-        String object = Futures.get(pool.acquire());
++        String object = TestFutures.get(pool.acquire());
+         pool.release(object);
+ 
+         assertThat(pool.getIdle()).isEqualTo(5);
+diff --git a/src/test/java/io/lettuce/core/support/BoundedAsyncPoolUnitTests.java b/src/test/java/io/lettuce/core/support/BoundedAsyncPoolUnitTests.java
+index c37a64f..307a949 100644
+--- a/src/test/java/io/lettuce/core/support/BoundedAsyncPoolUnitTests.java
++++ b/src/test/java/io/lettuce/core/support/BoundedAsyncPoolUnitTests.java
+@@ -24,7 +24,7 @@ import java.util.concurrent.atomic.AtomicInteger;
+ 
+ import org.junit.jupiter.api.Test;
+ 
+-import io.lettuce.test.Futures;
++import io.lettuce.test.TestFutures;
+ 
+ /**
+  * @author Mark Paluch
+@@ -57,7 +57,7 @@ class BoundedAsyncPoolUnitTests {
+ 
+         BoundedAsyncPool<String> pool = new BoundedAsyncPool<>(STRING_OBJECT_FACTORY, BoundedPoolConfig.create());
+ 
+-        String object = Futures.get(pool.acquire());
++        String object = TestFutures.get(pool.acquire());
+ 
+         assertThat(pool.getIdle()).isEqualTo(0);
+         assertThat(object).isEqualTo("1");
+@@ -79,7 +79,7 @@ class BoundedAsyncPoolUnitTests {
+         BoundedAsyncPool<String> pool = new BoundedAsyncPool<>(STRING_OBJECT_FACTORY, BoundedPoolConfig.builder().minIdle(2)
+                 .build());
+ 
+-        Futures.await(pool.acquire());
++        TestFutures.await(pool.acquire());
+ 
+         assertThat(pool.getIdle()).isEqualTo(2);
+         assertThat(pool.getObjectCount()).isEqualTo(3);
+@@ -91,7 +91,7 @@ class BoundedAsyncPoolUnitTests {
+         BoundedAsyncPool<String> pool = new BoundedAsyncPool<>(STRING_OBJECT_FACTORY, BoundedPoolConfig.builder().minIdle(2)
+                 .maxTotal(2).build());
+ 
+-        Futures.await(pool.acquire());
++        TestFutures.await(pool.acquire());
+ 
+         assertThat(pool.getIdle()).isEqualTo(1);
+         assertThat(pool.getObjectCount()).isEqualTo(2);
+@@ -102,7 +102,7 @@ class BoundedAsyncPoolUnitTests {
+ 
+         BoundedAsyncPool<String> pool = new BoundedAsyncPool<>(STRING_OBJECT_FACTORY, BoundedPoolConfig.create());
+ 
+-        String object = Futures.get(pool.acquire());
++        String object = TestFutures.get(pool.acquire());
+         assertThat(pool.getObjectCount()).isEqualTo(1);
+         pool.release(object);
+ 
+@@ -114,9 +114,9 @@ class BoundedAsyncPoolUnitTests {
+ 
+         BoundedAsyncPool<String> pool = new BoundedAsyncPool<>(STRING_OBJECT_FACTORY, BoundedPoolConfig.create());
+ 
+-        pool.release(Futures.get(pool.acquire()));
++        pool.release(TestFutures.get(pool.acquire()));
+ 
+-        assertThat(Futures.get(pool.acquire())).isEqualTo("1");
++        assertThat(TestFutures.get(pool.acquire())).isEqualTo("1");
+         assertThat(pool.getIdle()).isEqualTo(0);
+     }
+ 
+@@ -128,7 +128,7 @@ class BoundedAsyncPoolUnitTests {
+ 
+         List<String> objects = new ArrayList<>();
+         for (int i = 0; i < 3; i++) {
+-            objects.add(Futures.get(pool.acquire()));
++            objects.add(TestFutures.get(pool.acquire()));
+         }
+ 
+         for (int i = 0; i < 2; i++) {
+@@ -150,10 +150,10 @@ class BoundedAsyncPoolUnitTests {
+         BoundedAsyncPool<String> pool = new BoundedAsyncPool<>(STRING_OBJECT_FACTORY, BoundedPoolConfig.builder().maxTotal(4)
+                 .build());
+ 
+-        String object1 = Futures.get(pool.acquire());
+-        String object2 = Futures.get(pool.acquire());
+-        String object3 = Futures.get(pool.acquire());
+-        String object4 = Futures.get(pool.acquire());
++        String object1 = TestFutures.get(pool.acquire());
++        String object2 = TestFutures.get(pool.acquire());
++        String object3 = TestFutures.get(pool.acquire());
++        String object4 = TestFutures.get(pool.acquire());
+ 
+         assertThat(pool.getIdle()).isZero();
+         assertThat(pool.getObjectCount()).isEqualTo(4);
+@@ -180,10 +180,10 @@ class BoundedAsyncPoolUnitTests {
+ 
+         for (int i = 0; i < 20; i++) {
+ 
+-            String object1 = Futures.get(pool.acquire());
+-            String object2 = Futures.get(pool.acquire());
+-            String object3 = Futures.get(pool.acquire());
+-            String object4 = Futures.get(pool.acquire());
++            String object1 = TestFutures.get(pool.acquire());
++            String object2 = TestFutures.get(pool.acquire());
++            String object3 = TestFutures.get(pool.acquire());
++            String object4 = TestFutures.get(pool.acquire());
+ 
+             assertThat(pool.acquire()).isCompletedExceptionally();
+ 
+diff --git a/src/test/java/io/lettuce/test/Futures.java b/src/test/java/io/lettuce/test/TestFutures.java
+similarity index 99%
+rename from src/test/java/io/lettuce/test/Futures.java
+rename to src/test/java/io/lettuce/test/TestFutures.java
+index 333067f..8ba1fe5 100644
+--- a/src/test/java/io/lettuce/test/Futures.java
++++ b/src/test/java/io/lettuce/test/TestFutures.java
+@@ -32,7 +32,7 @@ import io.lettuce.core.cluster.api.async.AsyncExecutions;
+  *
+  * @author Mark Paluch
+  */
+-public class Futures {
++public class TestFutures {
+ 
+     private static final Duration TIMEOUT = Duration.ofSeconds(5);
+ 

@@ -1,0 +1,5503 @@
+diff --git a/app.go b/app.go
+index 685d75fe1c..8c2d0ffcfe 100644
+--- a/app.go
++++ b/app.go
+@@ -15,7 +15,7 @@ import (
+ 	"github.com/urfave/cli/v2"
+ )
+ 
+-func setupApp(ctx context.Context, sv semver.Version) *cli.App {
++func setupApp(ctx context.Context, sv semver.Version) (context.Context, *cli.App) {
+ 	// try to read config (if it exists)
+ 	cfg := config.Load()
+ 
+@@ -46,22 +46,22 @@ func setupApp(ctx context.Context, sv semver.Version) *cli.App {
+ 	app.EnableBashCompletion = true
+ 	app.BashComplete = func(c *cli.Context) {
+ 		cli.DefaultAppComplete(c)
+-		action.Complete(ctx, c)
++		action.Complete(c)
+ 	}
+ 
+ 	app.Action = func(c *cli.Context) error {
+-		if err := action.Initialized(withGlobalFlags(ctx, c), c); err != nil {
++		if err := action.Initialized(c); err != nil {
+ 			return err
+ 		}
+ 
+ 		if strings.HasSuffix(os.Args[0], "native_host") || strings.HasSuffix(os.Args[0], "native_host.exe") {
+-			return action.JSONAPI(withGlobalFlags(ctx, c), c)
++			return action.JSONAPI(c)
+ 		}
+ 
+ 		if c.Args().Present() {
+-			return action.Show(withGlobalFlags(ctx, c), c)
++			return action.Show(c)
+ 		}
+-		return action.List(withGlobalFlags(ctx, c), c)
++		return action.List(c)
+ 	}
+ 
+ 	app.Flags = []cli.Flag{
+@@ -80,5 +80,5 @@ func setupApp(ctx context.Context, sv semver.Version) *cli.App {
+ 	}
+ 
+ 	app.Commands = getCommands(ctx, action, app)
+-	return app
++	return ctx, app
+ }
+diff --git a/app_test.go b/app_test.go
+index 60e3cfbd03..3cbed993a7 100644
+--- a/app_test.go
++++ b/app_test.go
+@@ -10,6 +10,6 @@ import (
+ 
+ func TestSetupApp(t *testing.T) {
+ 	ctx := context.Background()
+-	app := setupApp(ctx, semver.Version{})
++	_, app := setupApp(ctx, semver.Version{})
+ 	assert.NotNil(t, app)
+ }
+diff --git a/commands.go b/commands.go
+index ce506bdf09..cc48390d0d 100644
+--- a/commands.go
++++ b/commands.go
+@@ -2,183 +2,17 @@ package main
+ 
+ import (
+ 	"context"
++	"sort"
+ 
+ 	ap "github.com/gopasspw/gopass/pkg/action"
+ 	"github.com/gopasspw/gopass/pkg/action/binary"
+ 	"github.com/gopasspw/gopass/pkg/action/create"
+ 	"github.com/gopasspw/gopass/pkg/action/xc"
+-	"github.com/gopasspw/gopass/pkg/ctxutil"
+ 	"github.com/urfave/cli/v2"
+ )
+ 
+ func getCommands(ctx context.Context, action *ap.Action, app *cli.App) []*cli.Command {
+-	return []*cli.Command{
+-		{
+-			Name:  "audit",
+-			Usage: "Scan for weak passwords",
+-			Description: "" +
+-				"This command decrypts all secrets and checks for common flaws and (optionally) " +
+-				"against a list of previously leaked passwords.",
+-			Before: func(c *cli.Context) error { return action.Initialized(withGlobalFlags(ctx, c), c) },
+-			Action: func(c *cli.Context) error {
+-				return action.Audit(withGlobalFlags(ctx, c), c)
+-			},
+-			Flags: []cli.Flag{
+-				&cli.IntFlag{
+-					Name:    "jobs",
+-					Aliases: []string{"j"},
+-					Usage:   "The number of jobs to run concurrently when auditing",
+-					Value:   1,
+-				},
+-			},
+-			Subcommands: []*cli.Command{
+-				{
+-					Name:  "hibp",
+-					Usage: "Detect leaked passwords",
+-					Description: "" +
+-						"This command will decrypt all secrets and check the passwords against the public " +
+-						"havibeenpwned.com v2 API or dumps. " +
+-						"To use the dumps you need to download the dumps from https://haveibeenpwned.com/passwords first. Be sure to grab the one that says '(ordered by hash)'. " +
+-						"This is a very expensive operation, for advanced users. " +
+-						"Most users should probably use the API. " +
+-						"If you want to use the dumps you need to use 7z to extract the dump: 7z x pwned-passwords-ordered-2.0.txt.7z.",
+-					Before: func(c *cli.Context) error { return action.Initialized(withGlobalFlags(ctx, c), c) },
+-					Action: func(c *cli.Context) error {
+-						return action.HIBP(withGlobalFlags(ctx, c), c)
+-					},
+-					Flags: []cli.Flag{
+-						&cli.BoolFlag{
+-							Name:    "force",
+-							Aliases: []string{"f"},
+-							Usage:   "Force to move the secret and overwrite existing one",
+-						},
+-						&cli.BoolFlag{
+-							Name:    "api",
+-							Aliases: []string{"a"},
+-							Usage:   "Use HIBP API",
+-						},
+-						&cli.StringSliceFlag{
+-							Name:  "dumps",
+-							Usage: "One or more HIBP v1/v2 dumps",
+-						},
+-					},
+-				},
+-			},
+-		},
+-		{
+-			Name:  "binary",
+-			Usage: "Assist with Binary/Base64 content",
+-			Description: "" +
+-				"These commands directly convert binary files from/to base64 encoding.",
+-			Aliases: []string{"bin"},
+-			Subcommands: []*cli.Command{
+-				{
+-					Name:  "cat",
+-					Usage: "Print content of a secret to stdout, or insert from stdin",
+-					Description: "" +
+-						"This command is similar to the way cat works on the command line. " +
+-						"It can either be used to retrieve the decoded content of a secret " +
+-						"similar to 'cat file' or vice versa to encode the content from STDIN " +
+-						"to a secret.",
+-					Before: func(c *cli.Context) error { return action.Initialized(withGlobalFlags(ctx, c), c) },
+-					Action: func(c *cli.Context) error {
+-						return binary.Cat(withGlobalFlags(ctx, c), c, action.Store)
+-					},
+-					BashComplete: func(c *cli.Context) { action.Complete(ctx, c) },
+-				},
+-				{
+-					Name:  "sum",
+-					Usage: "Compute the SHA256 checksum",
+-					Description: "" +
+-						"This command decodes an Base64 encoded secret and computes the SHA256 checksum " +
+-						"over the decoded data. This is useful to verify the integrity of an " +
+-						"inserted secret.",
+-					Aliases: []string{"sha", "sha256"},
+-					Before:  func(c *cli.Context) error { return action.Initialized(withGlobalFlags(ctx, c), c) },
+-					Action: func(c *cli.Context) error {
+-						return binary.Sum(withGlobalFlags(ctx, c), c, action.Store)
+-					},
+-					BashComplete: func(c *cli.Context) { action.Complete(ctx, c) },
+-				},
+-				{
+-					Name:  "copy",
+-					Usage: "Copy files from or to the password store",
+-					Description: "" +
+-						"This command either reads a file from the filesystem and writes the " +
+-						"encoded and encrypted version in the store or it decrypts and decodes " +
+-						"a secret and writes the result to a file. Either source or destination " +
+-						"must be a file and the other one a secret. If you want the source to " +
+-						"be securely removed after copying, use 'gopass binary move'",
+-					Before:  func(c *cli.Context) error { return action.Initialized(withGlobalFlags(ctx, c), c) },
+-					Aliases: []string{"cp"},
+-					Action: func(c *cli.Context) error {
+-						return binary.Copy(withGlobalFlags(ctx, c), c, action.Store)
+-					},
+-					BashComplete: func(c *cli.Context) { action.Complete(ctx, c) },
+-					Flags: []cli.Flag{
+-						&cli.BoolFlag{
+-							Name:    "force",
+-							Aliases: []string{"f"},
+-							Usage:   "Force to move the secret and overwrite existing one",
+-						},
+-					},
+-				},
+-				{
+-					Name:  "move",
+-					Usage: "Move files from or to the password store",
+-					Description: "" +
+-						"This command either reads a file from the filesystem and writes the " +
+-						"encoded and encrypted version in the store or it decrypts and decodes " +
+-						"a secret and writes the result to a file. Either source or destination " +
+-						"must be a file and the other one a secret. The source will be wiped " +
+-						"from disk or from the store after it has been copied successfully " +
+-						"and validated. If you don't want the source to be removed use " +
+-						"'gopass binary copy'",
+-					Before:  func(c *cli.Context) error { return action.Initialized(withGlobalFlags(ctx, c), c) },
+-					Aliases: []string{"mv"},
+-					Action: func(c *cli.Context) error {
+-						return binary.Move(withGlobalFlags(ctx, c), c, action.Store)
+-					},
+-					BashComplete: func(c *cli.Context) { action.Complete(ctx, c) },
+-					Flags: []cli.Flag{
+-						&cli.BoolFlag{
+-							Name:    "force",
+-							Aliases: []string{"f"},
+-							Usage:   "Force to move the secret and overwrite existing one",
+-						},
+-					},
+-				},
+-			},
+-		},
+-		{
+-			Name:  "clone",
+-			Usage: "Clone a store from git",
+-			Description: "" +
+-				"This command clones an existing password store from a git remote to " +
+-				"a local password store. Can be either used to initialize a new root store " +
+-				"or to add a new mounted sub-store." +
+-				"" +
+-				"Needs at least one argument (git URL) to clone from. " +
+-				"Accepts a second argument (mount location) to clone and mount a sub-store, e.g. " +
+-				"'gopass clone git@example.com/store.git foo/bar'",
+-			Action: func(c *cli.Context) error {
+-				return action.Clone(withGlobalFlags(ctx, c), c)
+-			},
+-			Flags: []cli.Flag{
+-				&cli.StringFlag{
+-					Name:  "path",
+-					Usage: "Path to clone the repo to",
+-				},
+-				&cli.StringFlag{
+-					Name:  "crypto",
+-					Usage: "Select crypto backend (gpg, gpgcli, plain, xc)",
+-				},
+-				&cli.StringFlag{
+-					Name:  "sync",
+-					Usage: "Select sync backend (git, gitcli, noop)",
+-				},
+-			},
+-		},
++	cmds := []*cli.Command{
+ 		{
+ 			Name:  "completion",
+ 			Usage: "Bash and ZSH completion",
+@@ -208,288 +42,6 @@ func getCommands(ctx context.Context, action *ap.Action, app *cli.App) []*cli.Co
+ 				},
+ 			}},
+ 		},
+-		{
+-			Name:  "config",
+-			Usage: "Edit configuration",
+-			Description: "" +
+-				"This command allows for easy printing and editing of the configuration. " +
+-				"Without argument, the entire config is printed. " +
+-				"With a single argument, a single key can be printed. " +
+-				"With two arguments a setting specified by key can be set to value.",
+-			Action: func(c *cli.Context) error {
+-				return action.Config(withGlobalFlags(ctx, c), c)
+-			},
+-			BashComplete: action.ConfigComplete,
+-			Flags: []cli.Flag{
+-				&cli.StringFlag{
+-					Name:  "store",
+-					Usage: "Set value to substore config",
+-				},
+-			},
+-		},
+-		{
+-			Name:    "copy",
+-			Aliases: []string{"cp"},
+-			Usage:   "Copy secrets from one location to another",
+-			Description: "" +
+-				"This command copies an existing secret in the store to another location. " +
+-				"This also works across different sub-stores. If the source is a directory it will " +
+-				"automatically copy recursively. In that case, the source directory is re-created " +
+-				"at the destination if no trailing slash is found, otherwise the contents are " +
+-				"flattened (similar to rsync).",
+-			Before: func(c *cli.Context) error { return action.Initialized(withGlobalFlags(ctx, c), c) },
+-			Action: func(c *cli.Context) error {
+-				return action.Copy(withGlobalFlags(ctx, c), c)
+-			},
+-			BashComplete: func(c *cli.Context) { action.Complete(ctx, c) },
+-			Flags: []cli.Flag{
+-				&cli.BoolFlag{
+-					Name:    "force",
+-					Aliases: []string{"f"},
+-					Usage:   "Force to copy the secret and overwrite existing one",
+-				},
+-			},
+-		},
+-		{
+-			Name:    "create",
+-			Aliases: []string{"new"},
+-			Usage:   "Easy creation of new secrets",
+-			Description: "" +
+-				"This command starts a wizard to aid in creation of new secrets.",
+-			Before: func(c *cli.Context) error { return action.Initialized(withGlobalFlags(ctx, c), c) },
+-			Action: func(c *cli.Context) error {
+-				return create.Create(withGlobalFlags(ctx, c), c, action.Store)
+-			},
+-			Flags: []cli.Flag{
+-				&cli.StringFlag{
+-					Name:    "store",
+-					Aliases: []string{"s"},
+-					Usage:   "Which store to use",
+-				},
+-			},
+-		},
+-		{
+-			Name:  "delete",
+-			Usage: "Remove secrets",
+-			Description: "" +
+-				"This command removes secrets. It can work recursively on folders. " +
+-				"Recursing across stores is purposefully not supported.",
+-			Aliases: []string{"remove", "rm"},
+-			Before:  func(c *cli.Context) error { return action.Initialized(withGlobalFlags(ctx, c), c) },
+-			Action: func(c *cli.Context) error {
+-				return action.Delete(withGlobalFlags(ctx, c), c)
+-			},
+-			BashComplete: func(c *cli.Context) { action.Complete(ctx, c) },
+-			Flags: []cli.Flag{
+-				&cli.BoolFlag{
+-					Name:    "recursive",
+-					Aliases: []string{"r"},
+-					Usage:   "Recursive delete files and folders",
+-				},
+-				&cli.BoolFlag{
+-					Name:    "force",
+-					Aliases: []string{"f"},
+-					Usage:   "Force to delete the secret",
+-				},
+-			},
+-		},
+-		{
+-			Name:  "edit",
+-			Usage: "Edit new or existing secrets",
+-			Description: "" +
+-				"Use this command to insert a new secret or edit an existing one using " +
+-				"your $EDITOR. It will attempt to create a secure temporary directory " +
+-				"for storing your secret while the editor is accessing it. Please make " +
+-				"sure your editor doesn't leak sensitive data to other locations while " +
+-				"editing.",
+-			Before: func(c *cli.Context) error { return action.Initialized(withGlobalFlags(ctx, c), c) },
+-			Action: func(c *cli.Context) error {
+-				return action.Edit(withGlobalFlags(ctx, c), c)
+-			},
+-			Aliases:      []string{"set"},
+-			BashComplete: func(c *cli.Context) { action.Complete(ctx, c) },
+-			Flags: []cli.Flag{
+-				&cli.StringFlag{
+-					Name:    "editor",
+-					Aliases: []string{"e"},
+-					Usage:   "Use this editor binary",
+-				},
+-				&cli.BoolFlag{
+-					Name:    "create",
+-					Aliases: []string{"c"},
+-					Usage:   "Create a new secret if none found",
+-				},
+-			},
+-		},
+-		{
+-			Name:  "find",
+-			Usage: "Search for secrets",
+-			Description: "" +
+-				"This command will first attempt a simple pattern match on the name of the " +
+-				"secret. If that yields no results, it will trigger a fuzzy search. " +
+-				"If there is an exact match it will be shown directly; if there are " +
+-				"multiple matches, a selection will be shown.",
+-			Before: func(c *cli.Context) error { return action.Initialized(withGlobalFlags(ctx, c), c) },
+-			Action: func(c *cli.Context) error {
+-				return action.Find(withGlobalFlags(ctxutil.WithFuzzySearch(ctx, false), c), c)
+-			},
+-			Aliases:      []string{"search"},
+-			BashComplete: func(c *cli.Context) { action.Complete(ctx, c) },
+-			Flags: []cli.Flag{
+-				&cli.BoolFlag{
+-					Name:    "clip",
+-					Aliases: []string{"c"},
+-					Usage:   "Copy the password into the clipboard",
+-				},
+-				&cli.BoolFlag{
+-					Name:    "force",
+-					Aliases: []string{"f"},
+-					Usage:   "In the case of an exact match, display the password even if safecontent is enabled",
+-				},
+-			},
+-		},
+-		{
+-			Name:  "fsck",
+-			Usage: "Check store integrity",
+-			Description: "" +
+-				"Check the integrity of the given sub-store or all stores if none are specified. " +
+-				"Will automatically fix all issues found.",
+-			Before: func(c *cli.Context) error { return action.Initialized(withGlobalFlags(ctx, c), c) },
+-			Action: func(c *cli.Context) error {
+-				return action.Fsck(withGlobalFlags(ctx, c), c)
+-			},
+-			BashComplete: action.MountsComplete,
+-			Flags: []cli.Flag{
+-				&cli.BoolFlag{
+-					Name:  "decrypt",
+-					Usage: "Decrypt during fsck",
+-				},
+-			},
+-		},
+-		{
+-			Name:  "generate",
+-			Usage: "Generate a new password",
+-			Description: "" +
+-				"Generate a new password of the specified length, optionally with no symbols. " +
+-				"Alternatively, a xkcd style password can be generated (https://xkcd.com/936/). " +
+-				"Optionally put it on the clipboard and clear clipboard after 45 seconds. " +
+-				"Prompt before overwriting existing password unless forced. " +
+-				"It will replace only the first line of an existing file with a new password.",
+-			Before: func(c *cli.Context) error { return action.Initialized(withGlobalFlags(ctx, c), c) },
+-			Action: func(c *cli.Context) error {
+-				return action.Generate(withGlobalFlags(ctx, c), c)
+-			},
+-			BashComplete: func(c *cli.Context) { action.CompleteGenerate(ctx, c) },
+-			Flags: []cli.Flag{
+-				&cli.BoolFlag{
+-					Name:    "clip",
+-					Aliases: []string{"c"},
+-					Usage:   "Copy the generated password to the clipboard",
+-					Value:   true,
+-				},
+-				&cli.BoolFlag{
+-					Name:    "print",
+-					Aliases: []string{"p"},
+-					Usage:   "Print the generated password to the terminal",
+-				},
+-				&cli.BoolFlag{
+-					Name:    "force",
+-					Aliases: []string{"f"},
+-					Usage:   "Force to overwrite existing password",
+-				},
+-				&cli.BoolFlag{
+-					Name:    "edit",
+-					Aliases: []string{"e"},
+-					Usage:   "Open secret for editing after generating a password",
+-				},
+-				&cli.BoolFlag{
+-					Name:    "symbols",
+-					Aliases: []string{"s"},
+-					Usage:   "Use symbols in the password",
+-				},
+-				&cli.BoolFlag{
+-					Name:  "strict",
+-					Usage: "Require strict character class rules",
+-				},
+-				&cli.BoolFlag{
+-					Name:    "xkcd",
+-					Aliases: []string{"x"},
+-					Usage:   "Use multiple random english words combined to a password. By default, space is used as separator and all words are lowercase",
+-				},
+-				&cli.StringFlag{
+-					Name:    "xkcdsep",
+-					Aliases: []string{"xs"},
+-					Usage:   "Word separator for generated xkcd style password. If no separator is specified, the words are combined without spaces/separator and the first character of words is capitalised. This flag implies -xkcd",
+-					Value:   "",
+-				},
+-				&cli.StringFlag{
+-					Name:    "xkcdlang",
+-					Aliases: []string{"xl"},
+-					Usage:   "Language to generate password from, currently de (german) and en (english, default) are supported",
+-					Value:   "en",
+-				},
+-			},
+-		},
+-		{
+-			Name:  "git-credential",
+-			Usage: `Use "!gopass git-credential $@" as git's credential.helper`,
+-			Description: "" +
+-				"This command allows you to cache your git-credentials with gopass." +
+-				"Activate by using `git config --global credential.helper \"!gopass git-credential $@\"`",
+-			Subcommands: []*cli.Command{
+-				{
+-					Name:   "get",
+-					Hidden: true,
+-					Action: func(c *cli.Context) error {
+-						return action.GitCredentialGet(withGlobalFlags(ctx, c), c)
+-					},
+-					Before: func(c *cli.Context) error {
+-						return action.GitCredentialBefore(ctxutil.WithInteractive(withGlobalFlags(ctx, c), false), c)
+-					},
+-				},
+-				{
+-					Name:   "store",
+-					Hidden: true,
+-					Action: func(c *cli.Context) error {
+-						return action.GitCredentialStore(withGlobalFlags(ctx, c), c)
+-					},
+-					Before: func(c *cli.Context) error {
+-						return action.GitCredentialBefore(ctxutil.WithInteractive(withGlobalFlags(ctx, c), false), c)
+-					},
+-				},
+-				{
+-					Name:   "erase",
+-					Hidden: true,
+-					Action: func(c *cli.Context) error {
+-						return action.GitCredentialErase(withGlobalFlags(ctx, c), c)
+-					},
+-					Before: func(c *cli.Context) error {
+-						return action.GitCredentialBefore(ctxutil.WithInteractive(withGlobalFlags(ctx, c), false), c)
+-					},
+-				},
+-				{
+-					Name:        "configure",
+-					Description: "This command configures gopass as git's credential.helper",
+-					Action: func(c *cli.Context) error {
+-						return action.GitCredentialConfigure(withGlobalFlags(ctx, c), c)
+-					},
+-					Flags: []cli.Flag{
+-						&cli.BoolFlag{
+-							Name:  "global",
+-							Usage: "Install for current user",
+-						},
+-						&cli.BoolFlag{
+-							Name:  "local",
+-							Usage: "Install for current repository only",
+-						},
+-						&cli.BoolFlag{
+-							Name:  "system",
+-							Usage: "Install for all users, requires superuser rights",
+-						},
+-					},
+-				},
+-			},
+-		},
+ 		{
+ 			Name:        "jsonapi",
+ 			Usage:       "Run and configure gopass as jsonapi e.g. for browser plugins",
+@@ -500,18 +52,14 @@ func getCommands(ctx context.Context, action *ap.Action, app *cli.App) []*cli.Co
+ 					Name:        "listen",
+ 					Usage:       "Listen and respond to messages via stdin/stdout",
+ 					Description: "Gopass is started in listen mode from browser plugins using a wrapper specified in native messaging host manifests",
+-					Action: func(c *cli.Context) error {
+-						return action.JSONAPI(withGlobalFlags(ctx, c), c)
+-					},
+-					Before: func(c *cli.Context) error { return action.Initialized(withGlobalFlags(ctx, c), c) },
++					Action:      action.JSONAPI,
++					Before:      action.Initialized,
+ 				},
+ 				{
+ 					Name:        "configure",
+ 					Usage:       "Setup gopass native messaging manifest for selected browser",
+ 					Description: "To access gopass from browser plugins, a native app manifest must be installed at the correct location",
+-					Action: func(c *cli.Context) error {
+-						return action.SetupNativeMessaging(withGlobalFlags(ctx, c), c)
+-					},
++					Action:      action.SetupNativeMessaging,
+ 					Flags: []cli.Flag{
+ 						&cli.StringFlag{
+ 							Name:  "browser",
+@@ -553,11 +101,9 @@ func getCommands(ctx context.Context, action *ap.Action, app *cli.App) []*cli.Co
+ 			Description: "" +
+ 				"Tries to parse an OTP URL (otpauth://). URL can be TOTP or HOTP. " +
+ 				"The URL can be provided on its own line or on a key value line with a key named 'totp'.",
+-			Before: func(c *cli.Context) error { return action.Initialized(withGlobalFlags(ctx, c), c) },
+-			Action: func(c *cli.Context) error {
+-				return action.OTP(withGlobalFlags(ctx, c), c)
+-			},
+-			BashComplete: func(c *cli.Context) { action.Complete(ctx, c) },
++			Before:       action.Initialized,
++			Action:       action.OTP,
++			BashComplete: action.Complete,
+ 			Flags: []cli.Flag{
+ 				&cli.BoolFlag{
+ 					Name:    "clip",
+@@ -576,725 +122,11 @@ func getCommands(ctx context.Context, action *ap.Action, app *cli.App) []*cli.Co
+ 				},
+ 			},
+ 		},
+-		{
+-			Name:  "git",
+-			Usage: "Run a git command inside a password store (init, remote, push, pull)",
+-			Description: "" +
+-				"If the password store is a git repository, execute a git command " +
+-				"specified by git-command-args.",
+-			Subcommands: []*cli.Command{
+-				{
+-					Name:        "init",
+-					Usage:       "Init git repo",
+-					Description: "Create and initialize a new git repo in the store",
+-					Before:      func(c *cli.Context) error { return action.Initialized(withGlobalFlags(ctx, c), c) },
+-					Action: func(c *cli.Context) error {
+-						return action.GitInit(withGlobalFlags(ctx, c), c)
+-					},
+-					Flags: []cli.Flag{
+-						&cli.StringFlag{
+-							Name:  "store",
+-							Usage: "Store to operate on",
+-						},
+-						&cli.StringFlag{
+-							Name:  "sign-key",
+-							Usage: "GPG Key to sign commits",
+-						},
+-						&cli.StringFlag{
+-							Name:  "rcs",
+-							Usage: "Select sync backend (git, gitcli, noop)",
+-						},
+-					},
+-				},
+-				{
+-					Name:        "remote",
+-					Usage:       "Manage git remotes",
+-					Description: "These subcommands can be used to manage git remotes",
+-					Before:      func(c *cli.Context) error { return action.Initialized(withGlobalFlags(ctx, c), c) },
+-					Subcommands: []*cli.Command{
+-						{
+-							Name:        "add",
+-							Usage:       "Add git remote",
+-							Description: "Add a new git remote",
+-							Before:      func(c *cli.Context) error { return action.Initialized(withGlobalFlags(ctx, c), c) },
+-							Action: func(c *cli.Context) error {
+-								return action.GitAddRemote(withGlobalFlags(ctx, c), c)
+-							},
+-							Flags: []cli.Flag{
+-								&cli.StringFlag{
+-									Name:  "store",
+-									Usage: "Store to operate on",
+-								},
+-							},
+-						},
+-						{
+-							Name:        "remove",
+-							Usage:       "Remove git remote",
+-							Description: "Remove a git remote",
+-							Before:      func(c *cli.Context) error { return action.Initialized(withGlobalFlags(ctx, c), c) },
+-							Action: func(c *cli.Context) error {
+-								return action.GitRemoveRemote(withGlobalFlags(ctx, c), c)
+-							},
+-							Flags: []cli.Flag{
+-								&cli.StringFlag{
+-									Name:  "store",
+-									Usage: "Store to operate on",
+-								},
+-							},
+-						},
+-					},
+-				},
+-				{
+-					Name:        "push",
+-					Usage:       "Push to remote",
+-					Description: "Push to a git remote",
+-					Before:      func(c *cli.Context) error { return action.Initialized(withGlobalFlags(ctx, c), c) },
+-					Action: func(c *cli.Context) error {
+-						return action.GitPush(withGlobalFlags(ctx, c), c)
+-					},
+-					Flags: []cli.Flag{
+-						&cli.StringFlag{
+-							Name:  "store",
+-							Usage: "Store to operate on",
+-						},
+-					},
+-				},
+-				{
+-					Name:        "pull",
+-					Usage:       "Pull from remote",
+-					Description: "Pull from a git remote",
+-					Before:      func(c *cli.Context) error { return action.Initialized(withGlobalFlags(ctx, c), c) },
+-					Action: func(c *cli.Context) error {
+-						return action.GitPull(withGlobalFlags(ctx, c), c)
+-					},
+-					Flags: []cli.Flag{
+-						&cli.StringFlag{
+-							Name:  "store",
+-							Usage: "Store to operate on",
+-						},
+-					},
+-				},
+-				{
+-					Name:        "status",
+-					Usage:       "RCS status",
+-					Description: "Show the RCS status",
+-					Before:      func(c *cli.Context) error { return action.Initialized(withGlobalFlags(ctx, c), c) },
+-					Action: func(c *cli.Context) error {
+-						return action.GitStatus(withGlobalFlags(ctx, c), c)
+-					},
+-					Flags: []cli.Flag{
+-						&cli.StringFlag{
+-							Name:  "store",
+-							Usage: "Store to operate on",
+-						},
+-					},
+-				},
+-			},
+-		},
+-		{
+-			Name:  "grep",
+-			Usage: "Search for secrets files containing search-string when decrypted.",
+-			Description: "" +
+-				"This command decrypts all secrets and performs a pattern matching on the " +
+-				"content.",
+-			Before: func(c *cli.Context) error { return action.Initialized(withGlobalFlags(ctx, c), c) },
+-			Action: func(c *cli.Context) error {
+-				return action.Grep(withGlobalFlags(ctx, c), c)
+-			},
+-		},
+-		{
+-			Name:    "history",
+-			Usage:   "Show password history",
+-			Aliases: []string{"hist"},
+-			Description: "" +
+-				"Display the change history for a secret",
+-			Before: func(c *cli.Context) error { return action.Initialized(withGlobalFlags(ctx, c), c) },
+-			Action: func(c *cli.Context) error {
+-				return action.History(withGlobalFlags(ctx, c), c)
+-			},
+-			BashComplete: func(c *cli.Context) { action.Complete(ctx, c) },
+-			Flags: []cli.Flag{
+-				&cli.BoolFlag{
+-					Name:    "password",
+-					Aliases: []string{"p"},
+-					Usage:   "Include passwords in output",
+-				},
+-			},
+-		},
+-		{
+-			Name:  "init",
+-			Usage: "Initialize new password store.",
+-			Description: "" +
+-				"Initialize new password storage and use gpg-id for encryption.",
+-			Action: func(c *cli.Context) error {
+-				return action.Init(withGlobalFlags(ctx, c), c)
+-			},
+-			Flags: []cli.Flag{
+-				&cli.StringFlag{
+-					Name:    "path",
+-					Aliases: []string{"p"},
+-					Usage:   "Set the sub-store path to operate on",
+-				},
+-				&cli.StringFlag{
+-					Name:    "store",
+-					Aliases: []string{"s"},
+-					Usage:   "Set the name of the sub-store",
+-				},
+-				&cli.StringFlag{
+-					Name:  "crypto",
+-					Usage: "Select crypto backend (gpg, gpgcli, plain, xc)",
+-				},
+-				&cli.StringFlag{
+-					Name:  "rcs",
+-					Usage: "Select sync backend (git, gitcli, noop)",
+-				},
+-				&cli.BoolFlag{
+-					Name:   "nogit",
+-					Usage:  "(DEPRECATED): Select noop RCS backend. Use '--rcs noop' instead",
+-					Hidden: true,
+-				},
+-			},
+-		},
+-		{
+-			Name:  "insert",
+-			Usage: "Insert a new secret",
+-			Description: "" +
+-				"Insert a new secret. Optionally, echo the secret back to the console during entry. " +
+-				"Or, optionally, the entry may be multiline. " +
+-				"Prompt before overwriting existing secret unless forced.",
+-			Before: func(c *cli.Context) error { return action.Initialized(withGlobalFlags(ctx, c), c) },
+-			Action: func(c *cli.Context) error {
+-				return action.Insert(withGlobalFlags(ctx, c), c)
+-			},
+-			BashComplete: func(c *cli.Context) { action.Complete(ctx, c) },
+-			Flags: []cli.Flag{
+-				&cli.BoolFlag{
+-					Name:    "echo",
+-					Aliases: []string{"e"},
+-					Usage:   "Display secret while typing",
+-				},
+-				&cli.BoolFlag{
+-					Name:    "multiline",
+-					Aliases: []string{"m"},
+-					Usage:   "Insert using $EDITOR",
+-				},
+-				&cli.BoolFlag{
+-					Name:    "force",
+-					Aliases: []string{"f"},
+-					Usage:   "Overwrite any existing secret and do not prompt to confirm recipients",
+-				},
+-				&cli.BoolFlag{
+-					Name:    "append",
+-					Aliases: []string{"a"},
+-					Usage:   "Append to any existing data",
+-				},
+-			},
+-		},
+-		{
+-			Name:  "list",
+-			Usage: "List existing secrets",
+-			Description: "" +
+-				"This command will list all existing secrets. Provide a folder prefix to list " +
+-				"only certain subfolders of the store.",
+-			Aliases: []string{"ls"},
+-			Before:  func(c *cli.Context) error { return action.Initialized(withGlobalFlags(ctx, c), c) },
+-			Action: func(c *cli.Context) error {
+-				return action.List(withGlobalFlags(ctx, c), c)
+-			},
+-			BashComplete: func(c *cli.Context) { action.Complete(ctx, c) },
+-			Flags: []cli.Flag{
+-				&cli.IntFlag{
+-					Name:    "limit",
+-					Aliases: []string{"l"},
+-					Usage:   "Max tree depth",
+-				},
+-				&cli.BoolFlag{
+-					Name:    "flat",
+-					Aliases: []string{"f"},
+-					Usage:   "Print flat list",
+-				},
+-				&cli.BoolFlag{
+-					Name:    "folders",
+-					Aliases: []string{"fo"},
+-					Usage:   "Print flat list of folders",
+-				},
+-				&cli.BoolFlag{
+-					Name:    "strip-prefix",
+-					Aliases: []string{"s"},
+-					Usage:   "Strip prefix from filtered entries",
+-				},
+-			},
+-		},
+-		{
+-			Name:    "move",
+-			Aliases: []string{"mv"},
+-			Usage:   "Move secrets from one location to another",
+-			Description: "" +
+-				"This command moves a secret from one path to another. This also works " +
+-				"across different sub-stores. If the source is a directory, the source directory " +
+-				"is re-created at the destination if no trailing slash is found, otherwise the " +
+-				"contents are flattened (similar to rsync).",
+-			Before: func(c *cli.Context) error { return action.Initialized(withGlobalFlags(ctx, c), c) },
+-			Action: func(c *cli.Context) error {
+-				return action.Move(withGlobalFlags(ctx, c), c)
+-			},
+-			BashComplete: func(c *cli.Context) { action.Complete(ctx, c) },
+-			Flags: []cli.Flag{
+-				&cli.BoolFlag{
+-					Name:    "force",
+-					Aliases: []string{"f"},
+-					Usage:   "Force to move the secret and overwrite existing one",
+-				},
+-			},
+-		},
+-		{
+-			Name:  "mounts",
+-			Usage: "Edit mounted stores",
+-			Description: "" +
+-				"This command displays all mounted password stores. It offers several " +
+-				"subcommands to create or remove mounts.",
+-			Before: func(c *cli.Context) error { return action.Initialized(withGlobalFlags(ctx, c), c) },
+-			Action: func(c *cli.Context) error {
+-				return action.MountsPrint(withGlobalFlags(ctx, c), c)
+-			},
+-			Subcommands: []*cli.Command{
+-				{
+-					Name:    "add",
+-					Aliases: []string{"mount"},
+-					Usage:   "Mount a password store",
+-					Description: "" +
+-						"This command allows for mounting an existing or new password store " +
+-						"at any path in an existing root store.",
+-					Before: func(c *cli.Context) error { return action.Initialized(withGlobalFlags(ctx, c), c) },
+-					Action: func(c *cli.Context) error {
+-						return action.MountAdd(withGlobalFlags(ctx, c), c)
+-					},
+-					Flags: []cli.Flag{
+-						&cli.StringFlag{
+-							Name:    "init",
+-							Aliases: []string{"i"},
+-							Usage:   "Init the store with the given recipient key",
+-						},
+-					},
+-				},
+-				{
+-					Name:    "remove",
+-					Aliases: []string{"rm", "unmount", "umount"},
+-					Usage:   "Umount an mounted password store",
+-					Description: "" +
+-						"This command allows to unmount an mounted password store. This will " +
+-						"only updated the configuration and not delete the password store.",
+-					Before: func(c *cli.Context) error { return action.Initialized(withGlobalFlags(ctx, c), c) },
+-					Action: func(c *cli.Context) error {
+-						return action.MountRemove(withGlobalFlags(ctx, c), c)
+-					},
+-					BashComplete: action.MountsComplete,
+-				},
+-			},
+-		},
+-		{
+-			Name:  "recipients",
+-			Usage: "Edit recipient permissions",
+-			Description: "" +
+-				"This command displays all existing recipients for all mounted stores. " +
+-				"The subcommands allow adding or removing recipients.",
+-			Before: func(c *cli.Context) error { return action.Initialized(withGlobalFlags(ctx, c), c) },
+-			Action: func(c *cli.Context) error {
+-				return action.RecipientsPrint(withGlobalFlags(ctx, c), c)
+-			},
+-			Subcommands: []*cli.Command{
+-				{
+-					Name:    "add",
+-					Aliases: []string{"authorize"},
+-					Usage:   "Add any number of Recipients to any store",
+-					Description: "" +
+-						"This command adds any number of recipients to any existing store. " +
+-						"If none are given it will display a list of usable public keys. " +
+-						"After adding the recipient to the list it will re-encrypt the whole " +
+-						"affected store to make sure the recipient has access to all existing " +
+-						"secrets.",
+-					Before: func(c *cli.Context) error { return action.Initialized(withGlobalFlags(ctx, c), c) },
+-					Action: func(c *cli.Context) error {
+-						return action.RecipientsAdd(withGlobalFlags(ctx, c), c)
+-					},
+-					Flags: []cli.Flag{
+-						&cli.StringFlag{
+-							Name:  "store",
+-							Usage: "Store to operate on",
+-						},
+-						&cli.BoolFlag{
+-							Name:  "force",
+-							Usage: "Force adding non-existing keys",
+-						},
+-					},
+-				},
+-				{
+-					Name:    "remove",
+-					Aliases: []string{"rm", "deauthorize"},
+-					Usage:   "Remove any number of Recipients from any store",
+-					Description: "" +
+-						"This command removes any number of recipients from any existing store. " +
+-						"If no recipients are provided, it will show a list of existing recipients " +
+-						"to choose from. It will refuse to remove the current user's key from the " +
+-						"store to avoid losing access. After removing the keys it will re-encrypt " +
+-						"all existing secrets. Please note that the removed recipients will still " +
+-						"be able to decrypt old revisions of the password store and any local " +
+-						"copies they might have. The only way to reliably remove a recipient is to " +
+-						"rotate all existing secrets.",
+-					Before: func(c *cli.Context) error { return action.Initialized(withGlobalFlags(ctx, c), c) },
+-					Action: func(c *cli.Context) error {
+-						return action.RecipientsRemove(withGlobalFlags(ctx, c), c)
+-					},
+-					BashComplete: func(c *cli.Context) {
+-						action.RecipientsComplete(ctx, c)
+-					},
+-					Flags: []cli.Flag{
+-						&cli.StringFlag{
+-							Name:  "store",
+-							Usage: "Store to operate on",
+-						},
+-						&cli.BoolFlag{
+-							Name:  "force",
+-							Usage: "Force adding non-existing keys",
+-						},
+-					},
+-				},
+-				{
+-					Name:  "update",
+-					Usage: "Recompute the saved recipient list checksums",
+-					Description: "" +
+-						"This command will recompute the saved recipient checksum" +
+-						"and save them to the config.",
+-					Before: func(c *cli.Context) error { return action.Initialized(withGlobalFlags(ctx, c), c) },
+-					Action: func(c *cli.Context) error {
+-						return action.RecipientsUpdate(withGlobalFlags(ctx, c), c)
+-					},
+-				},
+-			},
+-		},
+-		{
+-			Name:  "setup",
+-			Usage: "Initialize a new password store",
+-			Description: "" +
+-				"This command is automatically invoked if gopass is started without any " +
+-				"existing password store. This command exists so users can be provided with " +
+-				"simple one-command setup instructions.",
+-			Hidden: true,
+-			Action: func(c *cli.Context) error {
+-				return action.InitOnboarding(withGlobalFlags(ctx, c), c)
+-			},
+-			Flags: []cli.Flag{
+-				&cli.StringFlag{
+-					Name:  "remote",
+-					Usage: "URL to a git remote, will attempt to join this team",
+-				},
+-				&cli.StringFlag{
+-					Name:  "alias",
+-					Usage: "Local mount point for the given remote",
+-				},
+-				&cli.BoolFlag{
+-					Name:  "create",
+-					Usage: "Create a new team (default: false, i.e. join an existing team)",
+-				},
+-				&cli.StringFlag{
+-					Name:  "name",
+-					Usage: "Firstname and Lastname for unattended GPG key generation",
+-				},
+-				&cli.StringFlag{
+-					Name:  "email",
+-					Usage: "EMail for unattended GPG key generation",
+-				},
+-				&cli.StringFlag{
+-					Name:  "crypto",
+-					Usage: "Select crypto backend (gpg, gpgcli, plain, xc)",
+-				},
+-				&cli.StringFlag{
+-					Name:  "rcs",
+-					Usage: "Select sync backend (git, gitcli, noop)",
+-				},
+-			},
+-		},
+-		{
+-			Name:  "show",
+-			Usage: "Display a secret",
+-			Description: "" +
+-				"Show an existing secret and optionally put its first line on the clipboard. " +
+-				"If put on the clipboard, it will be cleared after 45 seconds.",
+-			Before: func(c *cli.Context) error { return action.Initialized(withGlobalFlags(ctx, c), c) },
+-			Action: func(c *cli.Context) error {
+-				return action.Show(withGlobalFlags(ctx, c), c)
+-			},
+-			BashComplete: func(c *cli.Context) { action.Complete(ctx, c) },
+-			Flags: []cli.Flag{
+-				&cli.BoolFlag{
+-					Name:    "clip",
+-					Aliases: []string{"c"},
+-					Usage:   "Copy the first line of the secret into the clipboard",
+-				},
+-				&cli.BoolFlag{
+-					Name:  "alsoclip, C",
+-					Usage: "Copy the first line of the secret and show everything",
+-				},
+-				&cli.BoolFlag{
+-					Name:  "qr",
+-					Usage: "Print the first line of the secret as QR Code",
+-				},
+-				&cli.BoolFlag{
+-					Name:    "force",
+-					Aliases: []string{"f"},
+-					Usage:   "Display the password even if safecontent is enabled",
+-				},
+-				&cli.BoolFlag{
+-					Name:    "password",
+-					Aliases: []string{"o"},
+-					Usage:   "Display only the password",
+-				},
+-				&cli.BoolFlag{
+-					Name:    "sync",
+-					Aliases: []string{"s"},
+-					Usage:   "Sync before attempting to display the secret",
+-				},
+-				&cli.StringFlag{
+-					Name:  "revision",
+-					Usage: "Show a past revision",
+-				},
+-			},
+-		},
+-		{
+-			Name:  "sync",
+-			Usage: "Sync all local stores with their remotes",
+-			Description: "" +
+-				"Sync all local stores with their git remotes, if any, and check " +
+-				"any possibly affected gpg keys.",
+-			Before: func(c *cli.Context) error { return action.Initialized(withGlobalFlags(ctx, c), c) },
+-			Action: func(c *cli.Context) error {
+-				return action.Sync(withGlobalFlags(ctx, c), c)
+-
+-			},
+-			Flags: []cli.Flag{
+-				&cli.StringFlag{
+-					Name:    "store",
+-					Aliases: []string{"s"},
+-					Usage:   "Select the store to sync",
+-				},
+-			},
+-		},
+-		{
+-			Name:  "templates",
+-			Usage: "Edit templates",
+-			Description: "" +
+-				"List existing templates in the password store and allow for editing " +
+-				"and creating them.",
+-			Before: func(c *cli.Context) error { return action.Initialized(withGlobalFlags(ctx, c), c) },
+-			Action: func(c *cli.Context) error {
+-				return action.TemplatesPrint(withGlobalFlags(ctx, c), c)
+-			},
+-			Subcommands: []*cli.Command{
+-				{
+-					Name:        "show",
+-					Usage:       "Show a secret template.",
+-					Description: "Display an existing template",
+-					Aliases:     []string{"cat"},
+-					Before:      func(c *cli.Context) error { return action.Initialized(withGlobalFlags(ctx, c), c) },
+-					Action: func(c *cli.Context) error {
+-						return action.TemplatePrint(withGlobalFlags(ctx, c), c)
+-					},
+-					BashComplete: func(c *cli.Context) { action.TemplatesComplete(ctx, c) },
+-				},
+-				{
+-					Name:        "edit",
+-					Usage:       "Edit secret templates.",
+-					Description: "Edit an existing or new template",
+-					Aliases:     []string{"create", "new"},
+-					Before:      func(c *cli.Context) error { return action.Initialized(withGlobalFlags(ctx, c), c) },
+-					Action: func(c *cli.Context) error {
+-						return action.TemplateEdit(withGlobalFlags(ctx, c), c)
+-					},
+-					BashComplete: func(c *cli.Context) { action.TemplatesComplete(ctx, c) },
+-				},
+-				{
+-					Name:        "remove",
+-					Aliases:     []string{"rm"},
+-					Usage:       "Remove secret templates.",
+-					Description: "Remove an existing template",
+-					Before:      func(c *cli.Context) error { return action.Initialized(withGlobalFlags(ctx, c), c) },
+-					Action: func(c *cli.Context) error {
+-						return action.TemplateRemove(withGlobalFlags(ctx, c), c)
+-					},
+-					BashComplete: func(c *cli.Context) { action.TemplatesComplete(ctx, c) },
+-				},
+-			},
+-		},
+-		{
+-			Name:        "unclip",
+-			Usage:       "Internal command to clear clipboard",
+-			Description: "Clear the clipboard if the content matches the checksum.",
+-			Action: func(c *cli.Context) error {
+-				return action.Unclip(withGlobalFlags(ctx, c), c)
+-			},
+-			Hidden: true,
+-			Flags: []cli.Flag{
+-				&cli.IntFlag{
+-					Name:  "timeout",
+-					Usage: "Time to wait",
+-				},
+-				&cli.BoolFlag{
+-					Name:  "force",
+-					Usage: "Clear clipboard even if checksum mismatches",
+-				},
+-			},
+-		},
+-		{
+-			Name:  "update",
+-			Usage: "Check for updates",
+-			Description: "" +
+-				"This command checks for gopass updates at GitHub and automatically " +
+-				"downloads and installs any missing update.",
+-			Action: func(c *cli.Context) error {
+-				return action.Update(withGlobalFlags(ctx, c), c)
+-			},
+-			Flags: []cli.Flag{
+-				&cli.BoolFlag{
+-					Name:  "pre",
+-					Usage: "Update to prereleases",
+-				},
+-			},
+-		},
+-		{
+-			Name:  "version",
+-			Usage: "Display version",
+-			Description: "" +
+-				"This command displays version and build time information " +
+-				"along with version information of important external commands. " +
+-				"Please provide the output when reporting issues.",
+-			Action: func(c *cli.Context) error {
+-				return action.Version(withGlobalFlags(ctx, c), c)
+-			},
+-		},
+-		{
+-			Name:  "xc",
+-			Usage: "Experimental Crypto",
+-			Description: "" +
+-				"These subcommands are used to control and test the experimental crypto" +
+-				"implementation.",
+-			Subcommands: []*cli.Command{
+-				{
+-					Name: "list-private-keys",
+-					Action: func(c *cli.Context) error {
+-						return xc.ListPrivateKeys(withGlobalFlags(ctx, c), c)
+-					},
+-				},
+-				{
+-					Name: "list-public-keys",
+-					Action: func(c *cli.Context) error {
+-						return xc.ListPublicKeys(withGlobalFlags(ctx, c), c)
+-					},
+-				},
+-				{
+-					Name: "generate",
+-					Action: func(c *cli.Context) error {
+-						return xc.GenerateKeypair(withGlobalFlags(ctx, c), c)
+-					},
+-				},
+-				{
+-					Name: "export",
+-					Action: func(c *cli.Context) error {
+-						return xc.ExportPublicKey(withGlobalFlags(ctx, c), c)
+-					},
+-					Flags: []cli.Flag{
+-						&cli.StringFlag{
+-							Name: "id",
+-						},
+-						&cli.StringFlag{
+-							Name: "file",
+-						},
+-					},
+-				},
+-				{
+-					Name: "import",
+-					Action: func(c *cli.Context) error {
+-						return xc.ImportPublicKey(withGlobalFlags(ctx, c), c)
+-					},
+-					Flags: []cli.Flag{
+-						&cli.StringFlag{
+-							Name: "id",
+-						},
+-						&cli.StringFlag{
+-							Name: "file",
+-						},
+-					},
+-				},
+-				{
+-					Name: "export-private-key",
+-					Action: func(c *cli.Context) error {
+-						return xc.ExportPrivateKey(withGlobalFlags(ctx, c), c)
+-					},
+-					Flags: []cli.Flag{
+-						&cli.StringFlag{
+-							Name: "id",
+-						},
+-						&cli.StringFlag{
+-							Name: "file",
+-						},
+-					},
+-				},
+-				{
+-					Name: "import-private-key",
+-					Action: func(c *cli.Context) error {
+-						return xc.ImportPrivateKey(withGlobalFlags(ctx, c), c)
+-					},
+-					Flags: []cli.Flag{
+-						&cli.StringFlag{
+-							Name: "id",
+-						},
+-						&cli.StringFlag{
+-							Name: "file",
+-						},
+-					},
+-				},
+-				{
+-					Name: "remove",
+-					Action: func(c *cli.Context) error {
+-						return xc.RemoveKey(withGlobalFlags(ctx, c), c)
+-					},
+-					Flags: []cli.Flag{
+-						&cli.StringFlag{
+-							Name: "id",
+-						},
+-					},
+-				},
+-				{
+-					Name: "encrypt",
+-					Action: func(c *cli.Context) error {
+-						return xc.EncryptFile(withGlobalFlags(ctx, c), c)
+-					},
+-					Flags: []cli.Flag{
+-						&cli.StringFlag{
+-							Name: "file",
+-						},
+-						&cli.StringSliceFlag{
+-							Name: "recipients",
+-						},
+-						&cli.BoolFlag{
+-							Name: "stream",
+-						},
+-					},
+-				},
+-				{
+-					Name: "decrypt",
+-					Action: func(c *cli.Context) error {
+-						return xc.DecryptFile(withGlobalFlags(ctx, c), c)
+-					},
+-					Flags: []cli.Flag{
+-						&cli.StringFlag{
+-							Name: "file",
+-						},
+-						&cli.BoolFlag{
+-							Name: "stream",
+-						},
+-					},
+-				},
+-			},
+-		},
+ 	}
++	cmds = append(cmds, action.GetCommands()...)
++	cmds = append(cmds, xc.GetCommands()...)
++	cmds = append(cmds, create.GetCommands(action, action.Store)...)
++	cmds = append(cmds, binary.GetCommands(action, action.Store)...)
++	sort.Slice(cmds, func(i, j int) bool { return cmds[i].Name < cmds[j].Name })
++	return cmds
+ }
+diff --git a/commands_test.go b/commands_test.go
+index 1bcb38af5f..5279dc09b4 100644
+--- a/commands_test.go
++++ b/commands_test.go
+@@ -87,6 +87,7 @@ func TestGetCommands(t *testing.T) {
+ 	app := cli.NewApp()
+ 	fs := flag.NewFlagSet("default", flag.ContinueOnError)
+ 	c := cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+ 	commands := getCommands(ctx, act, app)
+ 	assert.Equal(t, 32, len(commands))
+diff --git a/main.go b/main.go
+index 36944173a4..3472822726 100644
+--- a/main.go
++++ b/main.go
+@@ -13,7 +13,6 @@ import (
+ 	_ "github.com/gopasspw/gopass/pkg/backend/crypto"
+ 	_ "github.com/gopasspw/gopass/pkg/backend/rcs"
+ 	_ "github.com/gopasspw/gopass/pkg/backend/storage"
+-	"github.com/gopasspw/gopass/pkg/ctxutil"
+ 	"github.com/gopasspw/gopass/pkg/protect"
+ 
+ 	"github.com/blang/semver"
+@@ -63,8 +62,8 @@ func main() {
+ 	sv := getVersion()
+ 	cli.VersionPrinter = makeVersionPrinter(os.Stdout, sv)
+ 
+-	app := setupApp(ctx, sv)
+-	if err := app.Run(os.Args); err != nil {
++	ctx, app := setupApp(ctx, sv)
++	if err := app.RunContext(ctx, os.Args); err != nil {
+ 		log.Fatal(err)
+ 	}
+ }
+@@ -109,13 +108,6 @@ func (e errorWriter) Write(p []byte) (int, error) {
+ 	return e.out.Write([]byte("\n" + color.RedString("Error: %s", p)))
+ }
+ 
+-func withGlobalFlags(ctx context.Context, c *cli.Context) context.Context {
+-	if c.Bool("yes") {
+-		ctx = ctxutil.WithAlwaysYes(ctx, true)
+-	}
+-	return ctx
+-}
+-
+ func getVersion() semver.Version {
+ 	sv, err := semver.Parse(version)
+ 	if err == nil {
+diff --git a/main_test.go b/main_test.go
+index 124a21c783..e6837d609a 100644
+--- a/main_test.go
++++ b/main_test.go
+@@ -2,34 +2,14 @@ package main
+ 
+ import (
+ 	"bytes"
+-	"context"
+-	"flag"
+ 	"fmt"
+ 	"runtime"
+ 	"testing"
+ 
+ 	"github.com/blang/semver"
+-	"github.com/gopasspw/gopass/pkg/ctxutil"
+ 	"github.com/stretchr/testify/assert"
+-	"github.com/urfave/cli/v2"
+ )
+ 
+-func TestGlobalFlags(t *testing.T) {
+-	ctx := context.Background()
+-	app := cli.NewApp()
+-
+-	fs := flag.NewFlagSet("default", flag.ContinueOnError)
+-	sf := cli.BoolFlag{
+-		Name:  "yes",
+-		Usage: "yes",
+-	}
+-	assert.NoError(t, sf.Apply(fs))
+-	assert.NoError(t, fs.Parse([]string{"--yes"}))
+-	c := cli.NewContext(app, fs, nil)
+-
+-	assert.Equal(t, true, ctxutil.IsAlwaysYes(withGlobalFlags(ctx, c)))
+-}
+-
+ func TestVersionPrinter(t *testing.T) {
+ 	buf := &bytes.Buffer{}
+ 	vp := makeVersionPrinter(buf, semver.Version{Major: 1})
+diff --git a/pkg/action/action_test.go b/pkg/action/action_test.go
+index 119b28997a..aa213ac48d 100644
+--- a/pkg/action/action_test.go
++++ b/pkg/action/action_test.go
+@@ -2,6 +2,7 @@ package action
+ 
+ import (
+ 	"context"
++	"flag"
+ 	"io/ioutil"
+ 	"os"
+ 	"path/filepath"
+@@ -15,6 +16,7 @@ import (
+ 	"github.com/blang/semver"
+ 	"github.com/stretchr/testify/assert"
+ 	"github.com/stretchr/testify/require"
++	"github.com/urfave/cli/v2"
+ )
+ 
+ func newMock(ctx context.Context, u *gptest.Unit) (*Action, error) {
+@@ -28,7 +30,10 @@ func newMock(ctx context.Context, u *gptest.Unit) (*Action, error) {
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	if err := act.Initialized(ctx, nil); err != nil {
++	fs := flag.NewFlagSet("default", flag.ContinueOnError)
++	c := cli.NewContext(cli.NewApp(), fs, nil)
++	c.Context = ctx
++	if err := act.Initialized(c); err != nil {
+ 		return nil, err
+ 	}
+ 	return act, nil
+diff --git a/pkg/action/audit.go b/pkg/action/audit.go
+index 47c834e555..9bc0afb94c 100644
+--- a/pkg/action/audit.go
++++ b/pkg/action/audit.go
+@@ -1,17 +1,18 @@
+ package action
+ 
+ import (
+-	"context"
+-
+ 	"github.com/gopasspw/gopass/pkg/audit"
++	"github.com/gopasspw/gopass/pkg/ctxutil"
+ 	"github.com/gopasspw/gopass/pkg/out"
+ 
+ 	"github.com/urfave/cli/v2"
+ )
+ 
+ // Audit validates passwords against common flaws
+-func (s *Action) Audit(ctx context.Context, c *cli.Context) error {
++func (s *Action) Audit(c *cli.Context) error {
+ 	filter := c.Args().First()
++
++	ctx := ctxutil.WithGlobalFlags(c)
+ 	ctx = s.Store.WithConfig(ctx, filter)
+ 
+ 	out.Print(ctx, "Auditing passwords for common flaws ...")
+diff --git a/pkg/action/audit_test.go b/pkg/action/audit_test.go
+index 560e4531c0..10e6b320ee 100644
+--- a/pkg/action/audit_test.go
++++ b/pkg/action/audit_test.go
+@@ -43,13 +43,15 @@ func TestAudit(t *testing.T) {
+ 		stdout = os.Stdout
+ 	}()
+ 
+-	assert.Error(t, act.Audit(ctx, c))
++	c.Context = ctx
++	assert.Error(t, act.Audit(c))
+ 	buf.Reset()
+ 
+ 	// test with filter
+ 	fs = flag.NewFlagSet("default", flag.ContinueOnError)
+ 	assert.NoError(t, fs.Parse([]string{"foo"}))
+ 	c = cli.NewContext(app, fs, nil)
+-	assert.Error(t, act.Audit(ctx, c))
++	c.Context = ctx
++	assert.Error(t, act.Audit(c))
+ 	buf.Reset()
+ }
+diff --git a/pkg/action/binary/binary_test.go b/pkg/action/binary/binary_test.go
+index a6c426f849..cb8b233e5b 100644
+--- a/pkg/action/binary/binary_test.go
++++ b/pkg/action/binary/binary_test.go
+@@ -34,6 +34,7 @@ func TestBinary(t *testing.T) {
+ 	app := cli.NewApp()
+ 	fs := flag.NewFlagSet("default", flag.ContinueOnError)
+ 	c := cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+ 	buf := &bytes.Buffer{}
+ 	out.Stdout = buf
+@@ -45,10 +46,10 @@ func TestBinary(t *testing.T) {
+ 	assert.NoError(t, ioutil.WriteFile(infile, []byte("0xDEADBEEF"), 0644))
+ 	assert.NoError(t, binaryCopy(ctx, c, infile, "bar", true, store))
+ 
+-	assert.Error(t, Cat(ctx, c, store))
+-	assert.Error(t, Copy(ctx, c, store))
+-	assert.Error(t, Move(ctx, c, store))
+-	assert.Error(t, Sum(ctx, c, store))
++	assert.Error(t, Cat(c, store))
++	assert.Error(t, Copy(c, store))
++	assert.Error(t, Move(c, store))
++	assert.Error(t, Sum(c, store))
+ }
+ 
+ func TestBinaryCat(t *testing.T) {
+@@ -67,6 +68,7 @@ func TestBinaryCat(t *testing.T) {
+ 	app := cli.NewApp()
+ 	fs := flag.NewFlagSet("default", flag.ContinueOnError)
+ 	c := cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+ 	buf := &bytes.Buffer{}
+ 	out.Stdout = buf
+@@ -82,7 +84,7 @@ func TestBinaryCat(t *testing.T) {
+ 	fs = flag.NewFlagSet("default", flag.ContinueOnError)
+ 	assert.NoError(t, fs.Parse([]string{"bar"}))
+ 	c = cli.NewContext(app, fs, nil)
+-	assert.NoError(t, Cat(ctx, c, store))
++	assert.NoError(t, Cat(c, store))
+ }
+ 
+ func TestBinaryCopy(t *testing.T) {
+@@ -101,6 +103,7 @@ func TestBinaryCopy(t *testing.T) {
+ 	app := cli.NewApp()
+ 	fs := flag.NewFlagSet("default", flag.ContinueOnError)
+ 	c := cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+ 	buf := &bytes.Buffer{}
+ 	out.Stdout = buf
+@@ -118,25 +121,33 @@ func TestBinaryCopy(t *testing.T) {
+ 	fs = flag.NewFlagSet("default", flag.ContinueOnError)
+ 	assert.NoError(t, fs.Parse([]string{"bar", outfile}))
+ 	c = cli.NewContext(app, fs, nil)
+-	assert.NoError(t, Copy(ctx, c, store))
++	c.Context = ctx
++
++	assert.NoError(t, Copy(c, store))
+ 
+ 	// binary copy tempdir/bar tempdir/bar
+ 	fs = flag.NewFlagSet("default", flag.ContinueOnError)
+ 	assert.NoError(t, fs.Parse([]string{outfile, outfile}))
+ 	c = cli.NewContext(app, fs, nil)
+-	assert.Error(t, Copy(ctx, c, store))
++	c.Context = ctx
++
++	assert.Error(t, Copy(c, store))
+ 
+ 	// binary copy bar bar
+ 	fs = flag.NewFlagSet("default", flag.ContinueOnError)
+ 	assert.NoError(t, fs.Parse([]string{"bar", "bar"}))
+ 	c = cli.NewContext(app, fs, nil)
+-	assert.Error(t, Copy(ctx, c, store))
++	c.Context = ctx
++
++	assert.Error(t, Copy(c, store))
+ 
+ 	// binary move tempdir/bar bar2
+ 	fs = flag.NewFlagSet("default", flag.ContinueOnError)
+ 	assert.NoError(t, fs.Parse([]string{outfile, "bar2"}))
+ 	c = cli.NewContext(app, fs, nil)
+-	assert.NoError(t, Move(ctx, c, store))
++	c.Context = ctx
++
++	assert.NoError(t, Move(c, store))
+ }
+ 
+ func TestBinarySum(t *testing.T) {
+@@ -155,6 +166,7 @@ func TestBinarySum(t *testing.T) {
+ 	app := cli.NewApp()
+ 	fs := flag.NewFlagSet("default", flag.ContinueOnError)
+ 	c := cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+ 	buf := &bytes.Buffer{}
+ 	out.Stdout = buf
+@@ -170,5 +182,7 @@ func TestBinarySum(t *testing.T) {
+ 	fs = flag.NewFlagSet("default", flag.ContinueOnError)
+ 	assert.NoError(t, fs.Parse([]string{"bar"}))
+ 	c = cli.NewContext(app, fs, nil)
+-	assert.NoError(t, Sum(ctx, c, store))
++	c.Context = ctx
++
++	assert.NoError(t, Sum(c, store))
+ }
+diff --git a/pkg/action/binary/cat.go b/pkg/action/binary/cat.go
+index 1a035ffa98..b7b5bb3fcb 100644
+--- a/pkg/action/binary/cat.go
++++ b/pkg/action/binary/cat.go
+@@ -2,13 +2,13 @@ package binary
+ 
+ import (
+ 	"bytes"
+-	"context"
+ 	"encoding/base64"
+ 	"io"
+ 	"os"
+ 	"strings"
+ 
+ 	"github.com/gopasspw/gopass/pkg/action"
++	"github.com/gopasspw/gopass/pkg/ctxutil"
+ 	"github.com/gopasspw/gopass/pkg/out"
+ 	"github.com/gopasspw/gopass/pkg/store/secret"
+ 	"github.com/gopasspw/gopass/pkg/store/sub"
+@@ -17,7 +17,8 @@ import (
+ )
+ 
+ // Cat prints to or reads from STDIN/STDOUT
+-func Cat(ctx context.Context, c *cli.Context, store storer) error {
++func Cat(c *cli.Context, store storer) error {
++	ctx := ctxutil.WithGlobalFlags(c)
+ 	name := c.Args().First()
+ 	if name == "" {
+ 		return action.ExitError(ctx, action.ExitNoName, nil, "Usage: %s binary cat <NAME>", c.App.Name)
+diff --git a/pkg/action/binary/commands.go b/pkg/action/binary/commands.go
+new file mode 100644
+index 0000000000..0fca803576
+--- /dev/null
++++ b/pkg/action/binary/commands.go
+@@ -0,0 +1,101 @@
++package binary
++
++import (
++	"github.com/urfave/cli/v2"
++)
++
++type initializer interface {
++	Initialized(*cli.Context) error
++	Complete(*cli.Context)
++}
++
++// GetCommands returns the CLI commands exported for the create commands
++func GetCommands(i initializer, store storer) []*cli.Command {
++	return []*cli.Command{
++		{
++			Name:  "binary",
++			Usage: "Assist with Binary/Base64 content",
++			Description: "" +
++				"These commands directly convert binary files from/to base64 encoding.",
++			Aliases: []string{"bin"},
++			Subcommands: []*cli.Command{
++				{
++					Name:  "cat",
++					Usage: "Print content of a secret to stdout, or insert from stdin",
++					Description: "" +
++						"This command is similar to the way cat works on the command line. " +
++						"It can either be used to retrieve the decoded content of a secret " +
++						"similar to 'cat file' or vice versa to encode the content from STDIN " +
++						"to a secret.",
++					Before: i.Initialized,
++					Action: func(c *cli.Context) error {
++						return Cat(c, store)
++					},
++					BashComplete: i.Complete,
++				},
++				{
++					Name:  "sum",
++					Usage: "Compute the SHA256 checksum",
++					Description: "" +
++						"This command decodes an Base64 encoded secret and computes the SHA256 checksum " +
++						"over the decoded data. This is useful to verify the integrity of an " +
++						"inserted secret.",
++					Aliases: []string{"sha", "sha256"},
++					Before:  i.Initialized,
++					Action: func(c *cli.Context) error {
++						return Sum(c, store)
++					},
++					BashComplete: i.Complete,
++				},
++				{
++					Name:  "copy",
++					Usage: "Copy files from or to the password store",
++					Description: "" +
++						"This command either reads a file from the filesystem and writes the " +
++						"encoded and encrypted version in the store or it decrypts and decodes " +
++						"a secret and writes the result to a file. Either source or destination " +
++						"must be a file and the other one a secret. If you want the source to " +
++						"be securely removed after copying, use 'gopass binary move'",
++					Before:  i.Initialized,
++					Aliases: []string{"cp"},
++					Action: func(c *cli.Context) error {
++						return Copy(c, store)
++					},
++					BashComplete: i.Complete,
++					Flags: []cli.Flag{
++						&cli.BoolFlag{
++							Name:    "force",
++							Aliases: []string{"f"},
++							Usage:   "Force to move the secret and overwrite existing one",
++						},
++					},
++				},
++				{
++					Name:  "move",
++					Usage: "Move files from or to the password store",
++					Description: "" +
++						"This command either reads a file from the filesystem and writes the " +
++						"encoded and encrypted version in the store or it decrypts and decodes " +
++						"a secret and writes the result to a file. Either source or destination " +
++						"must be a file and the other one a secret. The source will be wiped " +
++						"from disk or from the store after it has been copied successfully " +
++						"and validated. If you don't want the source to be removed use " +
++						"'gopass binary copy'",
++					Before:  i.Initialized,
++					Aliases: []string{"mv"},
++					Action: func(c *cli.Context) error {
++						return Move(c, store)
++					},
++					BashComplete: i.Complete,
++					Flags: []cli.Flag{
++						&cli.BoolFlag{
++							Name:    "force",
++							Aliases: []string{"f"},
++							Usage:   "Force to move the secret and overwrite existing one",
++						},
++					},
++				},
++			},
++		},
++	}
++}
+diff --git a/pkg/action/binary/copy.go b/pkg/action/binary/copy.go
+index bfd7566e85..96d4c63e14 100644
+--- a/pkg/action/binary/copy.go
++++ b/pkg/action/binary/copy.go
+@@ -9,6 +9,7 @@ import (
+ 	"strings"
+ 
+ 	"github.com/gopasspw/gopass/pkg/action"
++	"github.com/gopasspw/gopass/pkg/ctxutil"
+ 	"github.com/gopasspw/gopass/pkg/fsutil"
+ 	"github.com/gopasspw/gopass/pkg/store/secret"
+ 	"github.com/gopasspw/gopass/pkg/store/sub"
+@@ -19,7 +20,8 @@ import (
+ 
+ // Copy copies either from the filesystem to the store or from the store
+ // to the filesystem
+-func Copy(ctx context.Context, c *cli.Context, store storer) error {
++func Copy(c *cli.Context, store storer) error {
++	ctx := ctxutil.WithGlobalFlags(c)
+ 	from := c.Args().Get(0)
+ 	to := c.Args().Get(1)
+ 
+@@ -33,7 +35,8 @@ func Copy(ctx context.Context, c *cli.Context, store storer) error {
+ // Move works like Copy but will remove (shred/wipe) the source
+ // after a successful copy. Mostly useful for securely moving secrets into
+ // the store if they are no longer needed / wanted on disk afterwards
+-func Move(ctx context.Context, c *cli.Context, store storer) error {
++func Move(c *cli.Context, store storer) error {
++	ctx := ctxutil.WithGlobalFlags(c)
+ 	from := c.Args().Get(0)
+ 	to := c.Args().Get(1)
+ 
+diff --git a/pkg/action/binary/sum.go b/pkg/action/binary/sum.go
+index 81918149fd..7dd6503497 100644
+--- a/pkg/action/binary/sum.go
++++ b/pkg/action/binary/sum.go
+@@ -1,18 +1,19 @@
+ package binary
+ 
+ import (
+-	"context"
+ 	"crypto/sha256"
+ 	"strings"
+ 
+ 	"github.com/gopasspw/gopass/pkg/action"
++	"github.com/gopasspw/gopass/pkg/ctxutil"
+ 	"github.com/gopasspw/gopass/pkg/out"
+ 
+ 	"github.com/urfave/cli/v2"
+ )
+ 
+ // Sum decodes binary content and computes the SHA256 checksum
+-func Sum(ctx context.Context, c *cli.Context, store storer) error {
++func Sum(c *cli.Context, store storer) error {
++	ctx := ctxutil.WithGlobalFlags(c)
+ 	name := c.Args().First()
+ 	if name == "" {
+ 		return action.ExitError(ctx, action.ExitUsage, nil, "Usage: %s sha256 name", c.App.Name)
+diff --git a/pkg/action/clone.go b/pkg/action/clone.go
+index ade66854b8..c26c45137f 100644
+--- a/pkg/action/clone.go
++++ b/pkg/action/clone.go
+@@ -18,7 +18,8 @@ import (
+ )
+ 
+ // Clone will fetch and mount a new password store from a git repo
+-func (s *Action) Clone(ctx context.Context, c *cli.Context) error {
++func (s *Action) Clone(c *cli.Context) error {
++	ctx := ctxutil.WithGlobalFlags(c)
+ 	if c.IsSet("crypto") {
+ 		ctx = backend.WithCryptoBackendString(ctx, c.String("crypto"))
+ 	}
+diff --git a/pkg/action/clone_test.go b/pkg/action/clone_test.go
+index 7a12375fbf..9117f38cec 100644
+--- a/pkg/action/clone_test.go
++++ b/pkg/action/clone_test.go
+@@ -51,6 +51,7 @@ func TestClone(t *testing.T) {
+ 	app := cli.NewApp()
+ 	fs := flag.NewFlagSet("default", flag.ContinueOnError)
+ 	c := cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+ 	buf := &bytes.Buffer{}
+ 	out.Stdout = buf
+@@ -61,7 +62,7 @@ func TestClone(t *testing.T) {
+ 	}()
+ 
+ 	// no args
+-	assert.Error(t, act.Clone(ctx, c))
++	assert.Error(t, act.Clone(c))
+ 
+ 	// clone to initialized store
+ 	assert.Error(t, act.clone(ctx, "/tmp/non-existing-repo.git", "", filepath.Join(u.Dir, "store")))
+@@ -77,22 +78,27 @@ func TestCloneBackendIsStoredForMount(t *testing.T) {
+ 
+ 	ctx := context.Background()
+ 
++	app := cli.NewApp()
++	fs := flag.NewFlagSet("default", flag.ContinueOnError)
++	c := cli.NewContext(app, fs, nil)
++	c.Context = ctx
++
+ 	cfg := config.Load()
+ 	cfg.Root.Path = backend.FromPath(u.StoreDir(""))
+ 
+ 	act, err := newAction(ctx, cfg, semver.Version{})
+ 	require.NoError(t, err)
+ 	require.NotNil(t, act)
+-	require.NoError(t, act.Initialized(ctx, nil))
++	require.NoError(t, act.Initialized(c))
+ 
+ 	repo := aGitRepo(ctx, u, t, "my-project")
+ 
+-	app := cli.NewApp()
+-	fs := flag.NewFlagSet("default", flag.ContinueOnError)
++	fs = flag.NewFlagSet("default", flag.ContinueOnError)
+ 	assert.NoError(t, fs.Parse([]string{repo, "the-project"}))
+-	c := cli.NewContext(app, fs, nil)
++	c = cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+-	assert.NoError(t, act.Clone(ctx, c))
++	assert.NoError(t, act.Clone(c))
+ 
+ 	require.NotNil(t, act.cfg.Mounts["the-project"])
+ 	require.Equal(t, act.cfg.Mounts["the-project"].Path.RCS, backend.GitCLI)
+diff --git a/pkg/action/commands.go b/pkg/action/commands.go
+new file mode 100644
+index 0000000000..424f543ede
+--- /dev/null
++++ b/pkg/action/commands.go
+@@ -0,0 +1,856 @@
++package action
++
++import (
++	"github.com/urfave/cli/v2"
++)
++
++// GetCommands returns the cli commands exported by this module
++func (s *Action) GetCommands() []*cli.Command {
++	return []*cli.Command{
++		{
++			Name:  "audit",
++			Usage: "Scan for weak passwords",
++			Description: "" +
++				"This command decrypts all secrets and checks for common flaws and (optionally) " +
++				"against a list of previously leaked passwords.",
++			Before: s.Initialized,
++			Action: s.Audit,
++			Flags: []cli.Flag{
++				&cli.IntFlag{
++					Name:    "jobs",
++					Aliases: []string{"j"},
++					Usage:   "The number of jobs to run concurrently when auditing",
++					Value:   1,
++				},
++			},
++			Subcommands: []*cli.Command{
++				{
++					Name:  "hibp",
++					Usage: "Detect leaked passwords",
++					Description: "" +
++						"This command will decrypt all secrets and check the passwords against the public " +
++						"havibeenpwned.com v2 API or dumps. " +
++						"To use the dumps you need to download the dumps from https://haveibeenpwned.com/passwords first. Be sure to grab the one that says '(ordered by hash)'. " +
++						"This is a very expensive operation, for advanced users. " +
++						"Most users should probably use the API. " +
++						"If you want to use the dumps you need to use 7z to extract the dump: 7z x pwned-passwords-ordered-2.0.txt.7z.",
++					Before: s.Initialized,
++					Action: s.HIBP,
++					Flags: []cli.Flag{
++						&cli.BoolFlag{
++							Name:    "force",
++							Aliases: []string{"f"},
++							Usage:   "Force to move the secret and overwrite existing one",
++						},
++						&cli.BoolFlag{
++							Name:    "api",
++							Aliases: []string{"a"},
++							Usage:   "Use HIBP API",
++						},
++						&cli.StringSliceFlag{
++							Name:  "dumps",
++							Usage: "One or more HIBP v1/v2 dumps",
++						},
++					},
++				},
++			},
++		},
++		{
++			Name:  "clone",
++			Usage: "Clone a store from git",
++			Description: "" +
++				"This command clones an existing password store from a git remote to " +
++				"a local password store. Can be either used to initialize a new root store " +
++				"or to add a new mounted sub-store." +
++				"" +
++				"Needs at least one argument (git URL) to clone from. " +
++				"Accepts a second argument (mount location) to clone and mount a sub-store, e.g. " +
++				"'gopass clone git@example.com/store.git foo/bar'",
++			Action: s.Clone,
++			Flags: []cli.Flag{
++				&cli.StringFlag{
++					Name:  "path",
++					Usage: "Path to clone the repo to",
++				},
++				&cli.StringFlag{
++					Name:  "crypto",
++					Usage: "Select crypto backend (gpg, gpgcli, plain, xc)",
++				},
++				&cli.StringFlag{
++					Name:  "sync",
++					Usage: "Select sync backend (git, gitcli, noop)",
++				},
++			},
++		},
++		{
++			Name:  "config",
++			Usage: "Edit configuration",
++			Description: "" +
++				"This command allows for easy printing and editing of the configuration. " +
++				"Without argument, the entire config is printed. " +
++				"With a single argument, a single key can be printed. " +
++				"With two arguments a setting specified by key can be set to value.",
++			Action:       s.Config,
++			BashComplete: s.ConfigComplete,
++			Flags: []cli.Flag{
++				&cli.StringFlag{
++					Name:  "store",
++					Usage: "Set value to substore config",
++				},
++			},
++		},
++		{
++			Name:    "copy",
++			Aliases: []string{"cp"},
++			Usage:   "Copy secrets from one location to another",
++			Description: "" +
++				"This command copies an existing secret in the store to another location. " +
++				"This also works across different sub-stores. If the source is a directory it will " +
++				"automatically copy recursively. In that case, the source directory is re-created " +
++				"at the destination if no trailing slash is found, otherwise the contents are " +
++				"flattened (similar to rsync).",
++			Before:       s.Initialized,
++			Action:       s.Copy,
++			BashComplete: s.Complete,
++			Flags: []cli.Flag{
++				&cli.BoolFlag{
++					Name:    "force",
++					Aliases: []string{"f"},
++					Usage:   "Force to copy the secret and overwrite existing one",
++				},
++			},
++		},
++		{
++			Name:  "delete",
++			Usage: "Remove secrets",
++			Description: "" +
++				"This command removes secrets. It can work recursively on folders. " +
++				"Recursing across stores is purposefully not supported.",
++			Aliases:      []string{"remove", "rm"},
++			Before:       s.Initialized,
++			Action:       s.Delete,
++			BashComplete: s.Complete,
++			Flags: []cli.Flag{
++				&cli.BoolFlag{
++					Name:    "recursive",
++					Aliases: []string{"r"},
++					Usage:   "Recursive delete files and folders",
++				},
++				&cli.BoolFlag{
++					Name:    "force",
++					Aliases: []string{"f"},
++					Usage:   "Force to delete the secret",
++				},
++			},
++		},
++		{
++			Name:  "edit",
++			Usage: "Edit new or existing secrets",
++			Description: "" +
++				"Use this command to insert a new secret or edit an existing one using " +
++				"your $EDITOR. It will attempt to create a secure temporary directory " +
++				"for storing your secret while the editor is accessing it. Please make " +
++				"sure your editor doesn't leak sensitive data to other locations while " +
++				"editing.",
++			Before:       s.Initialized,
++			Action:       s.Edit,
++			Aliases:      []string{"set"},
++			BashComplete: s.Complete,
++			Flags: []cli.Flag{
++				&cli.StringFlag{
++					Name:    "editor",
++					Aliases: []string{"e"},
++					Usage:   "Use this editor binary",
++				},
++				&cli.BoolFlag{
++					Name:    "create",
++					Aliases: []string{"c"},
++					Usage:   "Create a new secret if none found",
++				},
++			},
++		},
++		{
++			Name:  "find",
++			Usage: "Search for secrets",
++			Description: "" +
++				"This command will first attempt a simple pattern match on the name of the " +
++				"secret. If that yields no results, it will trigger a fuzzy search. " +
++				"If there is an exact match it will be shown directly; if there are " +
++				"multiple matches, a selection will be shown.",
++			Before:       s.Initialized,
++			Action:       s.FindNoFuzzy,
++			Aliases:      []string{"search"},
++			BashComplete: s.Complete,
++			Flags: []cli.Flag{
++				&cli.BoolFlag{
++					Name:    "clip",
++					Aliases: []string{"c"},
++					Usage:   "Copy the password into the clipboard",
++				},
++				&cli.BoolFlag{
++					Name:    "force",
++					Aliases: []string{"f"},
++					Usage:   "In the case of an exact match, display the password even if safecontent is enabled",
++				},
++			},
++		},
++		{
++			Name:  "fsck",
++			Usage: "Check store integrity",
++			Description: "" +
++				"Check the integrity of the given sub-store or all stores if none are specified. " +
++				"Will automatically fix all issues found.",
++			Before:       s.Initialized,
++			Action:       s.Fsck,
++			BashComplete: s.MountsComplete,
++			Flags: []cli.Flag{
++				&cli.BoolFlag{
++					Name:  "decrypt",
++					Usage: "Decrypt during fsck",
++				},
++			},
++		},
++		{
++			Name:  "generate",
++			Usage: "Generate a new password",
++			Description: "" +
++				"Generate a new password of the specified length, optionally with no symbols. " +
++				"Alternatively, a xkcd style password can be generated (https://xkcd.com/936/). " +
++				"Optionally put it on the clipboard and clear clipboard after 45 seconds. " +
++				"Prompt before overwriting existing password unless forced. " +
++				"It will replace only the first line of an existing file with a new password.",
++			Before:       s.Initialized,
++			Action:       s.Generate,
++			BashComplete: s.CompleteGenerate,
++			Flags: []cli.Flag{
++				&cli.BoolFlag{
++					Name:    "clip",
++					Aliases: []string{"c"},
++					Usage:   "Copy the generated password to the clipboard",
++					Value:   true,
++				},
++				&cli.BoolFlag{
++					Name:    "print",
++					Aliases: []string{"p"},
++					Usage:   "Print the generated password to the terminal",
++				},
++				&cli.BoolFlag{
++					Name:    "force",
++					Aliases: []string{"f"},
++					Usage:   "Force to overwrite existing password",
++				},
++				&cli.BoolFlag{
++					Name:    "edit",
++					Aliases: []string{"e"},
++					Usage:   "Open secret for editing after generating a password",
++				},
++				&cli.BoolFlag{
++					Name:    "symbols",
++					Aliases: []string{"s"},
++					Usage:   "Use symbols in the password",
++				},
++				&cli.BoolFlag{
++					Name:  "strict",
++					Usage: "Require strict character class rules",
++				},
++				&cli.BoolFlag{
++					Name:    "xkcd",
++					Aliases: []string{"x"},
++					Usage:   "Use multiple random english words combined to a password. By default, space is used as separator and all words are lowercase",
++				},
++				&cli.StringFlag{
++					Name:    "xkcdsep",
++					Aliases: []string{"xs"},
++					Usage:   "Word separator for generated xkcd style password. If no separator is specified, the words are combined without spaces/separator and the first character of words is capitalised. This flag implies -xkcd",
++					Value:   "",
++				},
++				&cli.StringFlag{
++					Name:    "xkcdlang",
++					Aliases: []string{"xl"},
++					Usage:   "Language to generate password from, currently de (german) and en (english, default) are supported",
++					Value:   "en",
++				},
++			},
++		},
++		{
++			Name:  "git",
++			Usage: "Run a git command inside a password store (init, remote, push, pull)",
++			Description: "" +
++				"If the password store is a git repository, execute a git command " +
++				"specified by git-command-args.",
++			Subcommands: []*cli.Command{
++				{
++					Name:        "init",
++					Usage:       "Init git repo",
++					Description: "Create and initialize a new git repo in the store",
++					Before:      s.Initialized,
++					Action:      s.GitInit,
++					Flags: []cli.Flag{
++						&cli.StringFlag{
++							Name:  "store",
++							Usage: "Store to operate on",
++						},
++						&cli.StringFlag{
++							Name:  "sign-key",
++							Usage: "GPG Key to sign commits",
++						},
++						&cli.StringFlag{
++							Name:  "rcs",
++							Usage: "Select sync backend (git, gitcli, noop)",
++						},
++					},
++				},
++				{
++					Name:        "remote",
++					Usage:       "Manage git remotes",
++					Description: "These subcommands can be used to manage git remotes",
++					Before:      s.Initialized,
++					Subcommands: []*cli.Command{
++						{
++							Name:        "add",
++							Usage:       "Add git remote",
++							Description: "Add a new git remote",
++							Before:      s.Initialized,
++							Action:      s.GitAddRemote,
++							Flags: []cli.Flag{
++								&cli.StringFlag{
++									Name:  "store",
++									Usage: "Store to operate on",
++								},
++							},
++						},
++						{
++							Name:        "remove",
++							Usage:       "Remove git remote",
++							Description: "Remove a git remote",
++							Before:      s.Initialized,
++							Action:      s.GitRemoveRemote,
++							Flags: []cli.Flag{
++								&cli.StringFlag{
++									Name:  "store",
++									Usage: "Store to operate on",
++								},
++							},
++						},
++					},
++				},
++				{
++					Name:        "push",
++					Usage:       "Push to remote",
++					Description: "Push to a git remote",
++					Before:      s.Initialized,
++					Action:      s.GitPush,
++					Flags: []cli.Flag{
++						&cli.StringFlag{
++							Name:  "store",
++							Usage: "Store to operate on",
++						},
++					},
++				},
++				{
++					Name:        "pull",
++					Usage:       "Pull from remote",
++					Description: "Pull from a git remote",
++					Before:      s.Initialized,
++					Action:      s.GitPull,
++					Flags: []cli.Flag{
++						&cli.StringFlag{
++							Name:  "store",
++							Usage: "Store to operate on",
++						},
++					},
++				},
++				{
++					Name:        "status",
++					Usage:       "RCS status",
++					Description: "Show the RCS status",
++					Before:      s.Initialized,
++					Action:      s.GitStatus,
++					Flags: []cli.Flag{
++						&cli.StringFlag{
++							Name:  "store",
++							Usage: "Store to operate on",
++						},
++					},
++				},
++			},
++		},
++		{
++			Name:  "git-credential",
++			Usage: `Use "!gopass git-credential $@" as git's credential.helper`,
++			Description: "" +
++				"This command allows you to cache your git-credentials with gopass." +
++				"Activate by using `git config --global credential.helper \"!gopass git-credential $@\"`",
++			Subcommands: []*cli.Command{
++				{
++					Name:   "get",
++					Hidden: true,
++					Action: s.GitCredentialGet,
++					Before: s.GitCredentialBefore,
++				},
++				{
++					Name:   "store",
++					Hidden: true,
++					Action: s.GitCredentialStore,
++					Before: s.GitCredentialBefore,
++				},
++				{
++					Name:   "erase",
++					Hidden: true,
++					Action: s.GitCredentialErase,
++					Before: s.GitCredentialBefore,
++				},
++				{
++					Name:        "configure",
++					Description: "This command configures gopass as git's credential.helper",
++					Action:      s.GitCredentialConfigure,
++					Flags: []cli.Flag{
++						&cli.BoolFlag{
++							Name:  "global",
++							Usage: "Install for current user",
++						},
++						&cli.BoolFlag{
++							Name:  "local",
++							Usage: "Install for current repository only",
++						},
++						&cli.BoolFlag{
++							Name:  "system",
++							Usage: "Install for all users, requires superuser rights",
++						},
++					},
++				},
++			},
++		},
++		{
++			Name:  "grep",
++			Usage: "Search for secrets files containing search-string when decrypted.",
++			Description: "" +
++				"This command decrypts all secrets and performs a pattern matching on the " +
++				"content.",
++			Before: s.Initialized,
++			Action: s.Grep,
++		},
++		{
++			Name:    "history",
++			Usage:   "Show password history",
++			Aliases: []string{"hist"},
++			Description: "" +
++				"Display the change history for a secret",
++			Before:       s.Initialized,
++			Action:       s.History,
++			BashComplete: s.Complete,
++			Flags: []cli.Flag{
++				&cli.BoolFlag{
++					Name:    "password",
++					Aliases: []string{"p"},
++					Usage:   "Include passwords in output",
++				},
++			},
++		},
++		{
++			Name:  "init",
++			Usage: "Initialize new password store.",
++			Description: "" +
++				"Initialize new password storage and use gpg-id for encryption.",
++			Action: s.Init,
++			Flags: []cli.Flag{
++				&cli.StringFlag{
++					Name:    "path",
++					Aliases: []string{"p"},
++					Usage:   "Set the sub-store path to operate on",
++				},
++				&cli.StringFlag{
++					Name:    "store",
++					Aliases: []string{"s"},
++					Usage:   "Set the name of the sub-store",
++				},
++				&cli.StringFlag{
++					Name:  "crypto",
++					Usage: "Select crypto backend (gpg, gpgcli, plain, xc)",
++				},
++				&cli.StringFlag{
++					Name:  "rcs",
++					Usage: "Select sync backend (git, gitcli, noop)",
++				},
++				&cli.BoolFlag{
++					Name:   "nogit",
++					Usage:  "(DEPRECATED): Select noop RCS backend. Use '--rcs noop' instead",
++					Hidden: true,
++				},
++			},
++		},
++		{
++			Name:  "insert",
++			Usage: "Insert a new secret",
++			Description: "" +
++				"Insert a new secret. Optionally, echo the secret back to the console during entry. " +
++				"Or, optionally, the entry may be multiline. " +
++				"Prompt before overwriting existing secret unless forced.",
++			Before:       s.Initialized,
++			Action:       s.Insert,
++			BashComplete: s.Complete,
++			Flags: []cli.Flag{
++				&cli.BoolFlag{
++					Name:    "echo",
++					Aliases: []string{"e"},
++					Usage:   "Display secret while typing",
++				},
++				&cli.BoolFlag{
++					Name:    "multiline",
++					Aliases: []string{"m"},
++					Usage:   "Insert using $EDITOR",
++				},
++				&cli.BoolFlag{
++					Name:    "force",
++					Aliases: []string{"f"},
++					Usage:   "Overwrite any existing secret and do not prompt to confirm recipients",
++				},
++				&cli.BoolFlag{
++					Name:    "append",
++					Aliases: []string{"a"},
++					Usage:   "Append to any existing data",
++				},
++			},
++		},
++		{
++			Name:  "list",
++			Usage: "List existing secrets",
++			Description: "" +
++				"This command will list all existing secrets. Provide a folder prefix to list " +
++				"only certain subfolders of the store.",
++			Aliases:      []string{"ls"},
++			Before:       s.Initialized,
++			Action:       s.List,
++			BashComplete: s.Complete,
++			Flags: []cli.Flag{
++				&cli.IntFlag{
++					Name:    "limit",
++					Aliases: []string{"l"},
++					Usage:   "Max tree depth",
++				},
++				&cli.BoolFlag{
++					Name:    "flat",
++					Aliases: []string{"f"},
++					Usage:   "Print flat list",
++				},
++				&cli.BoolFlag{
++					Name:    "folders",
++					Aliases: []string{"fo"},
++					Usage:   "Print flat list of folders",
++				},
++				&cli.BoolFlag{
++					Name:    "strip-prefix",
++					Aliases: []string{"s"},
++					Usage:   "Strip prefix from filtered entries",
++				},
++			},
++		},
++		{
++			Name:    "move",
++			Aliases: []string{"mv"},
++			Usage:   "Move secrets from one location to another",
++			Description: "" +
++				"This command moves a secret from one path to another. This also works " +
++				"across different sub-stores. If the source is a directory, the source directory " +
++				"is re-created at the destination if no trailing slash is found, otherwise the " +
++				"contents are flattened (similar to rsync).",
++			Before:       s.Initialized,
++			Action:       s.Move,
++			BashComplete: s.Complete,
++			Flags: []cli.Flag{
++				&cli.BoolFlag{
++					Name:    "force",
++					Aliases: []string{"f"},
++					Usage:   "Force to move the secret and overwrite existing one",
++				},
++			},
++		},
++		{
++			Name:  "mounts",
++			Usage: "Edit mounted stores",
++			Description: "" +
++				"This command displays all mounted password stores. It offers several " +
++				"subcommands to create or remove mounts.",
++			Before: s.Initialized,
++			Action: s.MountsPrint,
++			Subcommands: []*cli.Command{
++				{
++					Name:    "add",
++					Aliases: []string{"mount"},
++					Usage:   "Mount a password store",
++					Description: "" +
++						"This command allows for mounting an existing or new password store " +
++						"at any path in an existing root store.",
++					Before: s.Initialized,
++					Action: s.MountAdd,
++					Flags: []cli.Flag{
++						&cli.StringFlag{
++							Name:    "init",
++							Aliases: []string{"i"},
++							Usage:   "Init the store with the given recipient key",
++						},
++					},
++				},
++				{
++					Name:    "remove",
++					Aliases: []string{"rm", "unmount", "umount"},
++					Usage:   "Umount an mounted password store",
++					Description: "" +
++						"This command allows to unmount an mounted password store. This will " +
++						"only updated the configuration and not delete the password store.",
++					Before:       s.Initialized,
++					Action:       s.MountRemove,
++					BashComplete: s.MountsComplete,
++				},
++			},
++		},
++		{
++			Name:  "recipients",
++			Usage: "Edit recipient permissions",
++			Description: "" +
++				"This command displays all existing recipients for all mounted stores. " +
++				"The subcommands allow adding or removing recipients.",
++			Before: s.Initialized,
++			Action: s.RecipientsPrint,
++			Subcommands: []*cli.Command{
++				{
++					Name:    "add",
++					Aliases: []string{"authorize"},
++					Usage:   "Add any number of Recipients to any store",
++					Description: "" +
++						"This command adds any number of recipients to any existing store. " +
++						"If none are given it will display a list of usable public keys. " +
++						"After adding the recipient to the list it will re-encrypt the whole " +
++						"affected store to make sure the recipient has access to all existing " +
++						"secrets.",
++					Before: s.Initialized,
++					Action: s.RecipientsAdd,
++					Flags: []cli.Flag{
++						&cli.StringFlag{
++							Name:  "store",
++							Usage: "Store to operate on",
++						},
++						&cli.BoolFlag{
++							Name:  "force",
++							Usage: "Force adding non-existing keys",
++						},
++					},
++				},
++				{
++					Name:    "remove",
++					Aliases: []string{"rm", "deauthorize"},
++					Usage:   "Remove any number of Recipients from any store",
++					Description: "" +
++						"This command removes any number of recipients from any existing store. " +
++						"If no recipients are provided, it will show a list of existing recipients " +
++						"to choose from. It will refuse to remove the current user's key from the " +
++						"store to avoid losing access. After removing the keys it will re-encrypt " +
++						"all existing secrets. Please note that the removed recipients will still " +
++						"be able to decrypt old revisions of the password store and any local " +
++						"copies they might have. The only way to reliably remove a recipient is to " +
++						"rotate all existing secrets.",
++					Before:       s.Initialized,
++					Action:       s.RecipientsRemove,
++					BashComplete: s.RecipientsComplete,
++					Flags: []cli.Flag{
++						&cli.StringFlag{
++							Name:  "store",
++							Usage: "Store to operate on",
++						},
++						&cli.BoolFlag{
++							Name:  "force",
++							Usage: "Force adding non-existing keys",
++						},
++					},
++				},
++				{
++					Name:  "update",
++					Usage: "Recompute the saved recipient list checksums",
++					Description: "" +
++						"This command will recompute the saved recipient checksum" +
++						"and save them to the config.",
++					Before: s.Initialized,
++					Action: s.RecipientsUpdate,
++				},
++			},
++		},
++		{
++			Name:  "setup",
++			Usage: "Initialize a new password store",
++			Description: "" +
++				"This command is automatically invoked if gopass is started without any " +
++				"existing password store. This command exists so users can be provided with " +
++				"simple one-command setup instructions.",
++			Hidden: true,
++			Action: s.InitOnboarding,
++			Flags: []cli.Flag{
++				&cli.StringFlag{
++					Name:  "remote",
++					Usage: "URL to a git remote, will attempt to join this team",
++				},
++				&cli.StringFlag{
++					Name:  "alias",
++					Usage: "Local mount point for the given remote",
++				},
++				&cli.BoolFlag{
++					Name:  "create",
++					Usage: "Create a new team (default: false, i.e. join an existing team)",
++				},
++				&cli.StringFlag{
++					Name:  "name",
++					Usage: "Firstname and Lastname for unattended GPG key generation",
++				},
++				&cli.StringFlag{
++					Name:  "email",
++					Usage: "EMail for unattended GPG key generation",
++				},
++				&cli.StringFlag{
++					Name:  "crypto",
++					Usage: "Select crypto backend (gpg, gpgcli, plain, xc)",
++				},
++				&cli.StringFlag{
++					Name:  "rcs",
++					Usage: "Select sync backend (git, gitcli, noop)",
++				},
++			},
++		},
++		{
++			Name:  "show",
++			Usage: "Display a secret",
++			Description: "" +
++				"Show an existing secret and optionally put its first line on the clipboard. " +
++				"If put on the clipboard, it will be cleared after 45 seconds.",
++			Before:       s.Initialized,
++			Action:       s.Show,
++			BashComplete: s.Complete,
++			Flags: []cli.Flag{
++				&cli.BoolFlag{
++					Name:    "clip",
++					Aliases: []string{"c"},
++					Usage:   "Copy the first line of the secret into the clipboard",
++				},
++				&cli.BoolFlag{
++					Name:  "alsoclip, C",
++					Usage: "Copy the first line of the secret and show everything",
++				},
++				&cli.BoolFlag{
++					Name:  "qr",
++					Usage: "Print the first line of the secret as QR Code",
++				},
++				&cli.BoolFlag{
++					Name:    "force",
++					Aliases: []string{"f"},
++					Usage:   "Display the password even if safecontent is enabled",
++				},
++				&cli.BoolFlag{
++					Name:    "password",
++					Aliases: []string{"o"},
++					Usage:   "Display only the password",
++				},
++				&cli.BoolFlag{
++					Name:    "sync",
++					Aliases: []string{"s"},
++					Usage:   "Sync before attempting to display the secret",
++				},
++				&cli.StringFlag{
++					Name:  "revision",
++					Usage: "Show a past revision",
++				},
++			},
++		},
++		{
++			Name:  "sync",
++			Usage: "Sync all local stores with their remotes",
++			Description: "" +
++				"Sync all local stores with their git remotes, if any, and check " +
++				"any possibly affected gpg keys.",
++			Before: s.Initialized,
++			Action: s.Sync,
++			Flags: []cli.Flag{
++				&cli.StringFlag{
++					Name:    "store",
++					Aliases: []string{"s"},
++					Usage:   "Select the store to sync",
++				},
++			},
++		},
++		{
++			Name:  "templates",
++			Usage: "Edit templates",
++			Description: "" +
++				"List existing templates in the password store and allow for editing " +
++				"and creating them.",
++			Before: s.Initialized,
++			Action: s.TemplatesPrint,
++			Subcommands: []*cli.Command{
++				{
++					Name:         "show",
++					Usage:        "Show a secret template.",
++					Description:  "Display an existing template",
++					Aliases:      []string{"cat"},
++					Before:       s.Initialized,
++					Action:       s.TemplatePrint,
++					BashComplete: s.TemplatesComplete,
++				},
++				{
++					Name:         "edit",
++					Usage:        "Edit secret templates.",
++					Description:  "Edit an existing or new template",
++					Aliases:      []string{"create", "new"},
++					Before:       s.Initialized,
++					Action:       s.TemplateEdit,
++					BashComplete: s.TemplatesComplete,
++				},
++				{
++					Name:         "remove",
++					Aliases:      []string{"rm"},
++					Usage:        "Remove secret templates.",
++					Description:  "Remove an existing template",
++					Before:       s.Initialized,
++					Action:       s.TemplateRemove,
++					BashComplete: s.TemplatesComplete,
++				},
++			},
++		},
++		{
++			Name:        "unclip",
++			Usage:       "Internal command to clear clipboard",
++			Description: "Clear the clipboard if the content matches the checksum.",
++			Action:      s.Unclip,
++			Hidden:      true,
++			Flags: []cli.Flag{
++				&cli.IntFlag{
++					Name:  "timeout",
++					Usage: "Time to wait",
++				},
++				&cli.BoolFlag{
++					Name:  "force",
++					Usage: "Clear clipboard even if checksum mismatches",
++				},
++			},
++		},
++		{
++			Name:  "update",
++			Usage: "Check for updates",
++			Description: "" +
++				"This command checks for gopass updates at GitHub and automatically " +
++				"downloads and installs any missing update.",
++			Action: s.Update,
++			Flags: []cli.Flag{
++				&cli.BoolFlag{
++					Name:  "pre",
++					Usage: "Update to prereleases",
++				},
++			},
++		},
++		{
++			Name:  "version",
++			Usage: "Display version",
++			Description: "" +
++				"This command displays version and build time information " +
++				"along with version information of important external commands. " +
++				"Please provide the output when reporting issues.",
++			Action: s.Version,
++		},
++	}
++}
+diff --git a/pkg/action/completion.go b/pkg/action/completion.go
+index f9d6031d70..61c17f1624 100644
+--- a/pkg/action/completion.go
++++ b/pkg/action/completion.go
+@@ -1,13 +1,13 @@
+ package action
+ 
+ import (
+-	"context"
+ 	"fmt"
+ 	"regexp"
+ 	"runtime"
+ 	"strings"
+ 
+ 	zshcomp "github.com/gopasspw/gopass/pkg/completion/zsh"
++	"github.com/gopasspw/gopass/pkg/ctxutil"
+ 	"github.com/gopasspw/gopass/pkg/out"
+ 	"github.com/urfave/cli/v2"
+ )
+@@ -25,7 +25,8 @@ func bashEscape(s string) string {
+ }
+ 
+ // Complete prints a list of all password names to os.Stdout
+-func (s *Action) Complete(ctx context.Context, c *cli.Context) {
++func (s *Action) Complete(c *cli.Context) {
++	ctx := ctxutil.WithGlobalFlags(c)
+ 	_, err := s.Store.Initialized(ctx) // important to make sure the structs are not nil
+ 	if err != nil {
+ 		out.Error(ctx, "Store not initialized: %s", err)
+diff --git a/pkg/action/completion_test.go b/pkg/action/completion_test.go
+index 96c0e56bc3..ebfcc41d74 100644
+--- a/pkg/action/completion_test.go
++++ b/pkg/action/completion_test.go
+@@ -3,6 +3,7 @@ package action
+ import (
+ 	"bytes"
+ 	"context"
++	"flag"
+ 	"os"
+ 	"testing"
+ 
+@@ -46,7 +47,11 @@ func TestComplete(t *testing.T) {
+ 		},
+ 	}
+ 
+-	act.Complete(ctx, nil)
++	fs := flag.NewFlagSet("default", flag.ContinueOnError)
++	c := cli.NewContext(app, fs, nil)
++	c.Context = ctx
++
++	act.Complete(c)
+ 	assert.Equal(t, "foo\n", buf.String())
+ 	buf.Reset()
+ 
+diff --git a/pkg/action/config.go b/pkg/action/config.go
+index 4fb7753a80..e52180d97f 100644
+--- a/pkg/action/config.go
++++ b/pkg/action/config.go
+@@ -5,6 +5,7 @@ import (
+ 	"fmt"
+ 	"sort"
+ 
++	"github.com/gopasspw/gopass/pkg/ctxutil"
+ 	"github.com/gopasspw/gopass/pkg/out"
+ 
+ 	"github.com/pkg/errors"
+@@ -12,7 +13,8 @@ import (
+ )
+ 
+ // Config handles changes to the gopass configuration
+-func (s *Action) Config(ctx context.Context, c *cli.Context) error {
++func (s *Action) Config(c *cli.Context) error {
++	ctx := ctxutil.WithGlobalFlags(c)
+ 	if c.Args().Len() < 1 {
+ 		s.printConfigValues(ctx, "")
+ 		return nil
+diff --git a/pkg/action/config_test.go b/pkg/action/config_test.go
+index ff94fc41a5..7784ed9c6d 100644
+--- a/pkg/action/config_test.go
++++ b/pkg/action/config_test.go
+@@ -29,6 +29,7 @@ func TestConfig(t *testing.T) {
+ 
+ 	app := cli.NewApp()
+ 	c := cli.NewContext(app, flag.NewFlagSet("default", flag.ContinueOnError), nil)
++	c.Context = ctx
+ 
+ 	buf := &bytes.Buffer{}
+ 	out.Stdout = buf
+@@ -39,7 +40,7 @@ func TestConfig(t *testing.T) {
+ 	}()
+ 
+ 	// action.Config
+-	assert.NoError(t, act.Config(ctx, c))
++	assert.NoError(t, act.Config(c))
+ 	want := `root store config:
+   askformore: false
+   autoclip: true
+@@ -123,7 +124,8 @@ mount 'foo' config:
+ 	fs := flag.NewFlagSet("default", flag.ContinueOnError)
+ 	assert.NoError(t, fs.Parse([]string{"autoimport"}))
+ 	c = cli.NewContext(app, fs, nil)
+-	assert.NoError(t, act.Config(ctx, c))
++	c.Context = ctx
++	assert.NoError(t, act.Config(c))
+ 	assert.Equal(t, "autoimport: true", strings.TrimSpace(buf.String()))
+ 	buf.Reset()
+ 
+@@ -131,7 +133,8 @@ mount 'foo' config:
+ 	fs = flag.NewFlagSet("default", flag.ContinueOnError)
+ 	assert.NoError(t, fs.Parse([]string{"autoimport", "false"}))
+ 	c = cli.NewContext(app, fs, nil)
+-	assert.NoError(t, act.Config(ctx, c))
++	c.Context = ctx
++	assert.NoError(t, act.Config(c))
+ 	assert.Equal(t, "autoimport: false", strings.TrimSpace(buf.String()))
+ 	buf.Reset()
+ 
+@@ -161,6 +164,7 @@ usesymbols
+ 	fs = flag.NewFlagSet("default", flag.ContinueOnError)
+ 	assert.NoError(t, fs.Parse([]string{"autoimport", "false", "42"}))
+ 	c = cli.NewContext(app, fs, nil)
+-	assert.Error(t, act.Config(ctx, c))
++	c.Context = ctx
++	assert.Error(t, act.Config(c))
+ 	buf.Reset()
+ }
+diff --git a/pkg/action/copy.go b/pkg/action/copy.go
+index 0085453776..3511938a0c 100644
+--- a/pkg/action/copy.go
++++ b/pkg/action/copy.go
+@@ -4,13 +4,15 @@ import (
+ 	"context"
+ 	"fmt"
+ 
++	"github.com/gopasspw/gopass/pkg/ctxutil"
+ 	"github.com/gopasspw/gopass/pkg/termio"
+ 
+ 	"github.com/urfave/cli/v2"
+ )
+ 
+ // Copy the contents of a file to another one
+-func (s *Action) Copy(ctx context.Context, c *cli.Context) error {
++func (s *Action) Copy(c *cli.Context) error {
++	ctx := ctxutil.WithGlobalFlags(c)
+ 	force := c.Bool("force")
+ 
+ 	if c.Args().Len() != 2 {
+diff --git a/pkg/action/copy_test.go b/pkg/action/copy_test.go
+index 47ddf0799a..acfa92d215 100644
+--- a/pkg/action/copy_test.go
++++ b/pkg/action/copy_test.go
+@@ -40,15 +40,17 @@ func TestCopy(t *testing.T) {
+ 	fs := flag.NewFlagSet("default", flag.ContinueOnError)
+ 	assert.NoError(t, fs.Parse([]string{"foo", "bar"}))
+ 	c := cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+-	assert.NoError(t, act.Copy(ctx, c))
++	assert.NoError(t, act.Copy(c))
+ 	buf.Reset()
+ 
+ 	// copy foo bar (again, should fail)
+ 	{
+ 		ctx := ctxutil.WithAlwaysYes(ctx, false)
+ 		ctx = ctxutil.WithInteractive(ctx, false)
+-		assert.Error(t, act.Copy(ctx, c))
++		c.Context = ctx
++		assert.Error(t, act.Copy(c))
+ 		buf.Reset()
+ 	}
+ 
+@@ -56,15 +58,17 @@ func TestCopy(t *testing.T) {
+ 	fs = flag.NewFlagSet("default", flag.ContinueOnError)
+ 	assert.NoError(t, fs.Parse([]string{"not-found", "still-not-there"}))
+ 	c = cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+-	assert.Error(t, act.Copy(ctx, c))
++	assert.Error(t, act.Copy(c))
+ 	buf.Reset()
+ 
+ 	// copy
+ 	fs = flag.NewFlagSet("default", flag.ContinueOnError)
+ 	c = cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+-	assert.Error(t, act.Copy(ctx, c))
++	assert.Error(t, act.Copy(c))
+ 	buf.Reset()
+ 
+ 	// insert bam/baz
+@@ -75,8 +79,9 @@ func TestCopy(t *testing.T) {
+ 	fs = flag.NewFlagSet("default", flag.ContinueOnError)
+ 	assert.NoError(t, fs.Parse([]string{"bam", "zab"}))
+ 	c = cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+-	assert.NoError(t, act.Copy(ctx, c))
++	assert.NoError(t, act.Copy(c))
+ 	buf.Reset()
+ 
+ 	assert.NoError(t, act.show(ctx, c, "zab/bam/zab", false))
+diff --git a/pkg/action/create/commands.go b/pkg/action/create/commands.go
+new file mode 100644
+index 0000000000..22fc575315
+--- /dev/null
++++ b/pkg/action/create/commands.go
+@@ -0,0 +1,33 @@
++package create
++
++import (
++	"github.com/urfave/cli/v2"
++)
++
++type initializer interface {
++	Initialized(*cli.Context) error
++}
++
++// GetCommands returns the CLI commands exported for the create commands
++func GetCommands(i initializer, store storer) []*cli.Command {
++	return []*cli.Command{
++		{
++			Name:    "create",
++			Aliases: []string{"new"},
++			Usage:   "Easy creation of new secrets",
++			Description: "" +
++				"This command starts a wizard to aid in creation of new secrets.",
++			Before: i.Initialized,
++			Action: func(c *cli.Context) error {
++				return Create(c, store)
++			},
++			Flags: []cli.Flag{
++				&cli.StringFlag{
++					Name:    "store",
++					Aliases: []string{"s"},
++					Usage:   "Which store to use",
++				},
++			},
++		},
++	}
++}
+diff --git a/pkg/action/create/create.go b/pkg/action/create/create.go
+index 33d222f8c4..5f59cafee1 100644
+--- a/pkg/action/create/create.go
++++ b/pkg/action/create/create.go
+@@ -12,6 +12,7 @@ import (
+ 	"github.com/fatih/color"
+ 	"github.com/gopasspw/gopass/pkg/action"
+ 	"github.com/gopasspw/gopass/pkg/clipboard"
++	"github.com/gopasspw/gopass/pkg/ctxutil"
+ 	"github.com/gopasspw/gopass/pkg/cui"
+ 	"github.com/gopasspw/gopass/pkg/fsutil"
+ 	"github.com/gopasspw/gopass/pkg/out"
+@@ -46,7 +47,8 @@ func fmtfn(d int, n string, t string) string {
+ }
+ 
+ // Create displays the password creation wizard
+-func Create(ctx context.Context, c *cli.Context, store storer) error {
++func Create(c *cli.Context, store storer) error {
++	ctx := ctxutil.WithGlobalFlags(c)
+ 	s := creator{store: store}
+ 	acts := make(cui.Actions, 0, 5)
+ 	acts = append(acts, cui.Action{Name: "Website Login", Fn: s.createWebsite})
+diff --git a/pkg/action/create/create_test.go b/pkg/action/create/create_test.go
+index b73fbcb474..1dadda827b 100644
+--- a/pkg/action/create/create_test.go
++++ b/pkg/action/create/create_test.go
+@@ -49,8 +49,9 @@ func TestCreate(t *testing.T) {
+ 	// create
+ 	fs := flag.NewFlagSet("default", flag.ContinueOnError)
+ 	c := cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+-	assert.Error(t, Create(ctx, c, store))
++	assert.Error(t, Create(c, store))
+ 	buf.Reset()
+ }
+ 
+diff --git a/pkg/action/delete.go b/pkg/action/delete.go
+index a66ef159a2..8d63d193b3 100644
+--- a/pkg/action/delete.go
++++ b/pkg/action/delete.go
+@@ -4,6 +4,7 @@ import (
+ 	"context"
+ 	"fmt"
+ 
++	"github.com/gopasspw/gopass/pkg/ctxutil"
+ 	"github.com/gopasspw/gopass/pkg/store/sub"
+ 	"github.com/gopasspw/gopass/pkg/termio"
+ 
+@@ -11,7 +12,8 @@ import (
+ )
+ 
+ // Delete a secret file with its content
+-func (s *Action) Delete(ctx context.Context, c *cli.Context) error {
++func (s *Action) Delete(c *cli.Context) error {
++	ctx := ctxutil.WithGlobalFlags(c)
+ 	force := c.Bool("force")
+ 	recursive := c.Bool("recursive")
+ 
+diff --git a/pkg/action/delete_test.go b/pkg/action/delete_test.go
+index 7f0efae6a7..7488542a29 100644
+--- a/pkg/action/delete_test.go
++++ b/pkg/action/delete_test.go
+@@ -39,6 +39,7 @@ func TestDelete(t *testing.T) {
+ 
+ 	// delete
+ 	c := cli.NewContext(app, flag.NewFlagSet("default", flag.ContinueOnError), nil)
++	c.Context = ctx
+ 
+ 	actName := "action.test"
+ 
+@@ -46,7 +47,7 @@ func TestDelete(t *testing.T) {
+ 		actName = "action.test.exe"
+ 	}
+ 
+-	if err := act.Delete(ctx, c); err == nil || err.Error() != fmt.Sprintf("Usage: %s rm name", actName) {
++	if err := act.Delete(c); err == nil || err.Error() != fmt.Sprintf("Usage: %s rm name", actName) {
+ 		t.Errorf("Should fail")
+ 	}
+ 	buf.Reset()
+@@ -55,8 +56,9 @@ func TestDelete(t *testing.T) {
+ 	fs := flag.NewFlagSet("default", flag.ContinueOnError)
+ 	assert.NoError(t, fs.Parse([]string{"foo"}))
+ 	c = cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+-	assert.NoError(t, act.Delete(ctx, c))
++	assert.NoError(t, act.Delete(c))
+ 	buf.Reset()
+ 
+ 	// delete foo bar
+@@ -64,8 +66,9 @@ func TestDelete(t *testing.T) {
+ 	fs = flag.NewFlagSet("default", flag.ContinueOnError)
+ 	assert.NoError(t, fs.Parse([]string{"foo", "bar"}))
+ 	c = cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+-	assert.NoError(t, act.Delete(ctx, c))
++	assert.NoError(t, act.Delete(c))
+ 	buf.Reset()
+ 
+ 	// delete -r foo
+@@ -78,8 +81,8 @@ func TestDelete(t *testing.T) {
+ 	assert.NoError(t, sf.Apply(fs))
+ 	assert.NoError(t, fs.Parse([]string{"--recursive=true", "foo"}))
+ 	c = cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+-	assert.NoError(t, act.Delete(ctx, c))
++	assert.NoError(t, act.Delete(c))
+ 	buf.Reset()
+-
+ }
+diff --git a/pkg/action/edit.go b/pkg/action/edit.go
+index dadc38345a..f3351495ef 100644
+--- a/pkg/action/edit.go
++++ b/pkg/action/edit.go
+@@ -17,7 +17,8 @@ import (
+ )
+ 
+ // Edit the content of a password file
+-func (s *Action) Edit(ctx context.Context, c *cli.Context) error {
++func (s *Action) Edit(c *cli.Context) error {
++	ctx := ctxutil.WithGlobalFlags(c)
+ 	name := c.Args().First()
+ 	if name == "" {
+ 		return ExitError(ctx, ExitUsage, nil, "Usage: %s edit secret", s.Name)
+diff --git a/pkg/action/edit_test.go b/pkg/action/edit_test.go
+index 7bac50a0cb..4055a8d45f 100644
+--- a/pkg/action/edit_test.go
++++ b/pkg/action/edit_test.go
+@@ -37,14 +37,17 @@ func TestEdit(t *testing.T) {
+ 
+ 	// edit
+ 	c := cli.NewContext(app, flag.NewFlagSet("default", flag.ContinueOnError), nil)
+-	assert.Error(t, act.Edit(ctx, c))
++	c.Context = ctx
++
++	assert.Error(t, act.Edit(c))
+ 	buf.Reset()
+ 
+ 	// edit foo
+ 	fs := flag.NewFlagSet("default", flag.ContinueOnError)
+ 	assert.NoError(t, fs.Parse([]string{"foo"}))
+ 	c = cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+-	assert.Error(t, act.Edit(ctx, c))
++	assert.Error(t, act.Edit(c))
+ 	buf.Reset()
+ }
+diff --git a/pkg/action/find.go b/pkg/action/find.go
+index a0e0b0d5b6..366b85dc76 100644
+--- a/pkg/action/find.go
++++ b/pkg/action/find.go
+@@ -14,8 +14,15 @@ import (
+ 	"github.com/urfave/cli/v2"
+ )
+ 
++// FindNoFuzzy runs find without fuzzy search
++func (s *Action) FindNoFuzzy(c *cli.Context) error {
++	c.Context = ctxutil.WithFuzzySearch(c.Context, false)
++	return s.Find(c)
++}
++
+ // Find a string in the secret file's name
+-func (s *Action) Find(ctx context.Context, c *cli.Context) error {
++func (s *Action) Find(c *cli.Context) error {
++	ctx := ctxutil.WithGlobalFlags(c)
+ 	if c.IsSet("clip") {
+ 		ctx = WithClip(ctx, c.Bool("clip"))
+ 	}
+@@ -95,7 +102,7 @@ func (s *Action) findSelection(ctx context.Context, c *cli.Context, choices []st
+ 		return cb(WithClip(ctx, false), c, choices[sel], false)
+ 	case "sync":
+ 		// run sync and re-run show/find workflow
+-		if err := s.Sync(ctx, c); err != nil {
++		if err := s.Sync(c); err != nil {
+ 			return err
+ 		}
+ 		return cb(ctx, c, needle, true)
+diff --git a/pkg/action/find_test.go b/pkg/action/find_test.go
+index cda9b99094..e279edfe33 100644
+--- a/pkg/action/find_test.go
++++ b/pkg/action/find_test.go
+@@ -50,7 +50,8 @@ func TestFind(t *testing.T) {
+ 
+ 	// find
+ 	c := cli.NewContext(app, flag.NewFlagSet("default", flag.ContinueOnError), nil)
+-	if err := act.Find(ctx, c); err == nil || err.Error() != fmt.Sprintf("Usage: %s find <NEEDLE>", actName) {
++	c.Context = ctx
++	if err := act.Find(c); err == nil || err.Error() != fmt.Sprintf("Usage: %s find <NEEDLE>", actName) {
+ 		t.Errorf("Should fail: %s", err)
+ 	}
+ 
+@@ -58,14 +59,17 @@ func TestFind(t *testing.T) {
+ 	fs := flag.NewFlagSet("default", flag.ContinueOnError)
+ 	assert.NoError(t, fs.Parse([]string{"fo"}))
+ 	c = cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+-	assert.NoError(t, act.Find(ctx, c))
++	assert.NoError(t, act.Find(c))
+ 	assert.Equal(t, "Found exact match in 'foo'\nsecret", strings.TrimSpace(buf.String()))
+ 	buf.Reset()
+ 
+ 	// testing the safecontent case
+ 	ctx = ctxutil.WithShowSafeContent(ctx, true)
+-	assert.NoError(t, act.Find(ctx, c))
++	c.Context = ctx
++	assert.NoError(t, act.Find(c))
++
+ 	out := strings.TrimSpace(buf.String())
+ 	assert.Contains(t, out, "Found exact match in 'foo'")
+ 	assert.Contains(t, out, "with -f")
+@@ -80,8 +84,9 @@ func TestFind(t *testing.T) {
+ 	assert.NoError(t, bf.Apply(fs))
+ 	assert.NoError(t, fs.Parse([]string{"-clip", "fo"}))
+ 	c = cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+-	assert.NoError(t, act.Find(ctx, c))
++	assert.NoError(t, act.Find(c))
+ 	out = strings.TrimSpace(buf.String())
+ 	assert.Contains(t, out, "Found exact match in 'foo'")
+ 	buf.Reset()
+@@ -95,8 +100,9 @@ func TestFind(t *testing.T) {
+ 	assert.NoError(t, bf.Apply(fs))
+ 	assert.NoError(t, fs.Parse([]string{"-force", "fo"}))
+ 	c = cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+-	assert.NoError(t, act.Find(ctx, c))
++	assert.NoError(t, act.Find(c))
+ 	out = strings.TrimSpace(buf.String())
+ 	assert.Contains(t, out, "Found exact match in 'foo'\nsecret")
+ 	buf.Reset()
+@@ -108,8 +114,9 @@ func TestFind(t *testing.T) {
+ 	fs = flag.NewFlagSet("default", flag.ContinueOnError)
+ 	assert.NoError(t, fs.Parse([]string{"yo"}))
+ 	c = cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+-	assert.Error(t, act.Find(ctx, c))
++	assert.Error(t, act.Find(c))
+ 	buf.Reset()
+ 
+ 	// add some secrets
+@@ -121,8 +128,9 @@ func TestFind(t *testing.T) {
+ 	fs = flag.NewFlagSet("default", flag.ContinueOnError)
+ 	assert.NoError(t, fs.Parse([]string{"bar"}))
+ 	c = cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+-	assert.NoError(t, act.Find(ctx, c))
++	assert.NoError(t, act.Find(c))
+ 	assert.Equal(t, "bar/baz\nbar/zab", strings.TrimSpace(buf.String()))
+ 	buf.Reset()
+ }
+diff --git a/pkg/action/fsck.go b/pkg/action/fsck.go
+index 38e86c8495..6ef32384fe 100644
+--- a/pkg/action/fsck.go
++++ b/pkg/action/fsck.go
+@@ -1,7 +1,6 @@
+ package action
+ 
+ import (
+-	"context"
+ 	"fmt"
+ 	"io/ioutil"
+ 	"os"
+@@ -17,7 +16,8 @@ import (
+ )
+ 
+ // Fsck checks the store integrity
+-func (s *Action) Fsck(ctx context.Context, c *cli.Context) error {
++func (s *Action) Fsck(c *cli.Context) error {
++	ctx := ctxutil.WithGlobalFlags(c)
+ 	if c.IsSet("decrypt") {
+ 		ctx = sub.WithFsckDecrypt(ctx, c.Bool("decrypt"))
+ 	}
+diff --git a/pkg/action/fsck_test.go b/pkg/action/fsck_test.go
+index 66854d7a61..43b1eb2a4a 100644
+--- a/pkg/action/fsck_test.go
++++ b/pkg/action/fsck_test.go
+@@ -43,20 +43,21 @@ func TestFsck(t *testing.T) {
+ 
+ 	// fsck
+ 	c := cli.NewContext(app, flag.NewFlagSet("default", flag.ContinueOnError), nil)
+-	assert.NoError(t, act.Fsck(ctx, c))
++	c.Context = ctx
++	assert.NoError(t, act.Fsck(c))
+ 	out := strings.TrimSpace(buf.String())
+ 	assert.Contains(t, out, "Checking store integrity ...")
+ 	assert.Contains(t, out, "[] Extra recipients on foo: [0xFEEDBEEF]")
+ 	assert.Contains(t, out, "[] Pushed changes to git remote")
+-
+ 	buf.Reset()
+ 
+ 	// fsck fo
+ 	fs := flag.NewFlagSet("default", flag.ContinueOnError)
+ 	assert.NoError(t, fs.Parse([]string{"fo"}))
+ 	c = cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+-	assert.NoError(t, act.Fsck(ctx, c))
++	assert.NoError(t, act.Fsck(c))
+ 	out = strings.TrimSpace(buf.String())
+ 	assert.Contains(t, out, "Checking store integrity ...")
+ 	assert.Contains(t, out, "[] Extra recipients on foo: [0xFEEDBEEF]")
+diff --git a/pkg/action/generate.go b/pkg/action/generate.go
+index 817bdc738a..d87a83251e 100644
+--- a/pkg/action/generate.go
++++ b/pkg/action/generate.go
+@@ -33,7 +33,8 @@ var (
+ )
+ 
+ // Generate and save a password
+-func (s *Action) Generate(ctx context.Context, c *cli.Context) error {
++func (s *Action) Generate(c *cli.Context) error {
++	ctx := ctxutil.WithGlobalFlags(c)
+ 	force := c.Bool("force")
+ 	edit := c.Bool("edit")
+ 
+@@ -75,7 +76,8 @@ func (s *Action) Generate(ctx context.Context, c *cli.Context) error {
+ 
+ 	// if requested launch editor to add more data to the generated secret
+ 	if (edit || ctxutil.IsAskForMore(ctx)) && termio.AskForConfirmation(ctx, fmt.Sprintf("Do you want to add more data for %s?", name)) {
+-		if err := s.Edit(ctx, c); err != nil {
++		c.Context = ctx
++		if err := s.Edit(c); err != nil {
+ 			return ExitError(ctx, ExitUnknown, err, "failed to edit '%s': %s", name, err)
+ 		}
+ 	}
+@@ -270,7 +272,8 @@ func setMetadata(sec store.Secret, kvps map[string]string) {
+ }
+ 
+ // CompleteGenerate implements the completion heuristic for the generate command
+-func (s *Action) CompleteGenerate(ctx context.Context, c *cli.Context) {
++func (s *Action) CompleteGenerate(c *cli.Context) {
++	ctx := ctxutil.WithGlobalFlags(c)
+ 	if c.Args().Len() < 1 {
+ 		return
+ 	}
+diff --git a/pkg/action/generate_test.go b/pkg/action/generate_test.go
+index dc4da0f741..f8cbc5732b 100644
+--- a/pkg/action/generate_test.go
++++ b/pkg/action/generate_test.go
+@@ -43,21 +43,23 @@ func TestGenerate(t *testing.T) {
+ 	// generate
+ 	fs := flag.NewFlagSet("default", flag.ContinueOnError)
+ 	c := cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+-	assert.Error(t, act.Generate(ctx, c))
++	assert.Error(t, act.Generate(c))
+ 	buf.Reset()
+ 
+ 	// generate foobar
+ 	fs = flag.NewFlagSet("default", flag.ContinueOnError)
+ 	assert.NoError(t, fs.Parse([]string{"foobar"}))
+ 	c = cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+-	assert.NoError(t, act.Generate(ctx, c))
++	assert.NoError(t, act.Generate(c))
+ 	buf.Reset()
+ 
+ 	// generate foobar
+ 	// should succeed because of always yes
+-	assert.NoError(t, act.Generate(ctx, c))
++	assert.NoError(t, act.Generate(c))
+ 	buf.Reset()
+ 
+ 	// generate --force foobar
+@@ -69,8 +71,9 @@ func TestGenerate(t *testing.T) {
+ 	assert.NoError(t, bf.Apply(fs))
+ 	assert.NoError(t, fs.Parse([]string{"--force=true", "foobar"}))
+ 	c = cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+-	assert.NoError(t, act.Generate(ctx, c))
++	assert.NoError(t, act.Generate(c))
+ 	buf.Reset()
+ 
+ 	// generate --force foobar 32
+@@ -82,8 +85,9 @@ func TestGenerate(t *testing.T) {
+ 	assert.NoError(t, bf.Apply(fs))
+ 	assert.NoError(t, fs.Parse([]string{"--force=true", "foobar", "32"}))
+ 	c = cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+-	assert.NoError(t, act.Generate(ctx, c))
++	assert.NoError(t, act.Generate(c))
+ 	buf.Reset()
+ 
+ 	// generate --force --symbols foobar 32
+@@ -105,8 +109,9 @@ func TestGenerate(t *testing.T) {
+ 	assert.NoError(t, bf.Apply(fs))
+ 	assert.NoError(t, fs.Parse([]string{"--force=true", "--print=true", "--symbols", "foobar", "32"}))
+ 	c = cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+-	assert.NoError(t, act.Generate(ctx, c))
++	assert.NoError(t, act.Generate(c))
+ 	passIsAlphaNum(t, buf.String(), false)
+ 	buf.Reset()
+ 
+@@ -129,8 +134,9 @@ func TestGenerate(t *testing.T) {
+ 	assert.NoError(t, bf.Apply(fs))
+ 	assert.NoError(t, fs.Parse([]string{"--force=true", "--print=true", "--symbols=true", "foobar", "32"}))
+ 	c = cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+-	assert.NoError(t, act.Generate(ctx, c))
++	assert.NoError(t, act.Generate(c))
+ 	passIsAlphaNum(t, buf.String(), false)
+ 	buf.Reset()
+ 
+@@ -153,8 +159,9 @@ func TestGenerate(t *testing.T) {
+ 	assert.NoError(t, bf.Apply(fs))
+ 	assert.NoError(t, fs.Parse([]string{"--force=true", "--print=true", "--symbols=false", "foobar", "32"}))
+ 	c = cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+-	assert.NoError(t, act.Generate(ctx, c))
++	assert.NoError(t, act.Generate(c))
+ 	passIsAlphaNum(t, buf.String(), true)
+ 	buf.Reset()
+ 
+@@ -178,8 +185,9 @@ func TestGenerate(t *testing.T) {
+ 	assert.NoError(t, sf.Apply(fs))
+ 	assert.NoError(t, fs.Parse([]string{"--force=true", "--xkcd=true", "foobar", "32"}))
+ 	c = cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+-	assert.NoError(t, act.Generate(ctx, c))
++	assert.NoError(t, act.Generate(c))
+ 	buf.Reset()
+ 
+ 	// generate --force --xkcd foobar baz 32
+@@ -202,8 +210,9 @@ func TestGenerate(t *testing.T) {
+ 	assert.NoError(t, sf.Apply(fs))
+ 	assert.NoError(t, fs.Parse([]string{"--force=true", "--xkcd=true", "foobar", "baz", "32"}))
+ 	c = cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+-	assert.NoError(t, act.Generate(ctx, c))
++	assert.NoError(t, act.Generate(c))
+ 	buf.Reset()
+ 
+ 	// generate --force --xkcd foobar baz
+@@ -226,8 +235,9 @@ func TestGenerate(t *testing.T) {
+ 	assert.NoError(t, sf.Apply(fs))
+ 	assert.NoError(t, fs.Parse([]string{"--force=true", "--xkcd=true", "foobar", "baz"}))
+ 	c = cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+-	assert.NoError(t, act.Generate(ctx, c))
++	assert.NoError(t, act.Generate(c))
+ 	buf.Reset()
+ 
+ 	// generate --force --xkcd --print foobar baz
+@@ -255,8 +265,9 @@ func TestGenerate(t *testing.T) {
+ 	assert.NoError(t, sf.Apply(fs))
+ 	assert.NoError(t, fs.Parse([]string{"--force=true", "--print=true", "--xkcd=true", "foobar", "baz"}))
+ 	c = cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+-	assert.NoError(t, act.Generate(ctx, c))
++	assert.NoError(t, act.Generate(c))
+ 	buf.Reset()
+ }
+ 
+diff --git a/pkg/action/git-credential.go b/pkg/action/git-credential.go
+index e974bde515..361dd7abad 100644
+--- a/pkg/action/git-credential.go
++++ b/pkg/action/git-credential.go
+@@ -2,7 +2,6 @@ package action
+ 
+ import (
+ 	"bufio"
+-	"context"
+ 	"fmt"
+ 	"io"
+ 	"log"
+@@ -107,9 +106,10 @@ func parseGitCredentials(r io.Reader) (*gitCredentials, error) {
+ }
+ 
+ // GitCredentialBefore is executed before another git-credential command
+-func (s *Action) GitCredentialBefore(ctx context.Context, c *cli.Context) error {
+-	err := s.Initialized(ctx, c)
+-	if err != nil {
++func (s *Action) GitCredentialBefore(c *cli.Context) error {
++	ctx := ctxutil.WithGlobalFlags(c)
++	ctx = ctxutil.WithInteractive(ctx, false)
++	if err := s.Initialized(c); err != nil {
+ 		return err
+ 	}
+ 	if !ctxutil.IsStdin(ctx) {
+@@ -119,7 +119,8 @@ func (s *Action) GitCredentialBefore(ctx context.Context, c *cli.Context) error
+ }
+ 
+ // GitCredentialGet returns a credential to git
+-func (s *Action) GitCredentialGet(ctx context.Context, c *cli.Context) error {
++func (s *Action) GitCredentialGet(c *cli.Context) error {
++	ctx := ctxutil.WithGlobalFlags(c)
+ 	ctx = sub.WithAutoSync(ctx, false)
+ 	cred, err := parseGitCredentials(termio.Stdin)
+ 	if err != nil {
+@@ -167,7 +168,8 @@ func (s *Action) GitCredentialGet(ctx context.Context, c *cli.Context) error {
+ }
+ 
+ // GitCredentialStore stores a credential got from git
+-func (s *Action) GitCredentialStore(ctx context.Context, c *cli.Context) error {
++func (s *Action) GitCredentialStore(c *cli.Context) error {
++	ctx := ctxutil.WithGlobalFlags(c)
+ 	cred, err := parseGitCredentials(termio.Stdin)
+ 	if err != nil {
+ 		return ExitError(ctx, ExitUnsupported, err, "Error: %v while parsing git-credential", err)
+@@ -195,7 +197,8 @@ func (s *Action) GitCredentialStore(ctx context.Context, c *cli.Context) error {
+ }
+ 
+ // GitCredentialErase removes a credential got from git
+-func (s *Action) GitCredentialErase(ctx context.Context, c *cli.Context) error {
++func (s *Action) GitCredentialErase(c *cli.Context) error {
++	ctx := ctxutil.WithGlobalFlags(c)
+ 	cred, err := parseGitCredentials(termio.Stdin)
+ 	if err != nil {
+ 		return ExitError(ctx, ExitUnsupported, err, "Error: %v while parsing git-credential", err)
+@@ -209,7 +212,8 @@ func (s *Action) GitCredentialErase(ctx context.Context, c *cli.Context) error {
+ }
+ 
+ // GitCredentialConfigure configures gopass as git's credential.helper
+-func (s *Action) GitCredentialConfigure(ctx context.Context, c *cli.Context) error {
++func (s *Action) GitCredentialConfigure(c *cli.Context) error {
++	ctx := ctxutil.WithGlobalFlags(c)
+ 	flags := 0
+ 	flag := "--global"
+ 	if c.Bool("local") {
+diff --git a/pkg/action/git-credential_test.go b/pkg/action/git-credential_test.go
+index b0f2460439..8fe5d8d98a 100644
+--- a/pkg/action/git-credential_test.go
++++ b/pkg/action/git-credential_test.go
+@@ -103,35 +103,37 @@ func TestGitCredentialHelper(t *testing.T) {
+ 
+ 	fs := flag.NewFlagSet("default", flag.ContinueOnError)
+ 	c := cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+ 	// before without stdin
+-	assert.Error(t, act.GitCredentialBefore(ctx, c))
++	assert.Error(t, act.GitCredentialBefore(c))
+ 
+ 	// before with stdin
+ 	ctx = ctxutil.WithStdin(ctx, true)
+-	assert.NoError(t, act.GitCredentialBefore(ctx, c))
++	c.Context = ctx
++	assert.NoError(t, act.GitCredentialBefore(c))
+ 
+ 	s := "protocol=https\n" +
+ 		"host=example.com\n" +
+ 		"username=bob\n"
+ 
+ 	termio.Stdin = strings.NewReader(s)
+-	assert.NoError(t, act.GitCredentialGet(ctx, c))
++	assert.NoError(t, act.GitCredentialGet(c))
+ 	assert.Equal(t, "", stdout.String())
+ 
+ 	termio.Stdin = strings.NewReader(s + "password=secr3=t\n")
+-	assert.NoError(t, act.GitCredentialStore(ctx, c))
++	assert.NoError(t, act.GitCredentialStore(c))
+ 	stdout.Reset()
+ 
+ 	termio.Stdin = strings.NewReader(s)
+-	assert.NoError(t, act.GitCredentialGet(ctx, c))
++	assert.NoError(t, act.GitCredentialGet(c))
+ 	read, err := parseGitCredentials(stdout)
+ 	assert.NoError(t, err)
+ 	assert.Equal(t, "secr3=t", read.Password)
+ 	stdout.Reset()
+ 
+ 	termio.Stdin = strings.NewReader("host=example.com\n")
+-	assert.NoError(t, act.GitCredentialGet(ctx, c))
++	assert.NoError(t, act.GitCredentialGet(c))
+ 	read, err = parseGitCredentials(stdout)
+ 	assert.NoError(t, err)
+ 	assert.Equal(t, "secr3=t", read.Password)
+@@ -139,17 +141,17 @@ func TestGitCredentialHelper(t *testing.T) {
+ 	stdout.Reset()
+ 
+ 	termio.Stdin = strings.NewReader(s)
+-	assert.NoError(t, act.GitCredentialErase(ctx, c))
++	assert.NoError(t, act.GitCredentialErase(c))
+ 	assert.Equal(t, "", stdout.String())
+ 
+ 	termio.Stdin = strings.NewReader(s)
+-	assert.NoError(t, act.GitCredentialGet(ctx, c))
++	assert.NoError(t, act.GitCredentialGet(c))
+ 	assert.Equal(t, "", stdout.String())
+ 
+ 	termio.Stdin = strings.NewReader("a")
+-	assert.Error(t, act.GitCredentialGet(ctx, c))
++	assert.Error(t, act.GitCredentialGet(c))
+ 	termio.Stdin = strings.NewReader("a")
+-	assert.Error(t, act.GitCredentialStore(ctx, c))
++	assert.Error(t, act.GitCredentialStore(c))
+ 	termio.Stdin = strings.NewReader("a")
+-	assert.Error(t, act.GitCredentialErase(ctx, c))
++	assert.Error(t, act.GitCredentialErase(c))
+ }
+diff --git a/pkg/action/git.go b/pkg/action/git.go
+index d1bf79849b..652c2756f0 100644
+--- a/pkg/action/git.go
++++ b/pkg/action/git.go
+@@ -5,6 +5,7 @@ import (
+ 	"os"
+ 
+ 	"github.com/gopasspw/gopass/pkg/backend"
++	"github.com/gopasspw/gopass/pkg/ctxutil"
+ 	"github.com/gopasspw/gopass/pkg/cui"
+ 	"github.com/gopasspw/gopass/pkg/out"
+ 	"github.com/gopasspw/gopass/pkg/termio"
+@@ -15,7 +16,8 @@ import (
+ )
+ 
+ // GitInit initializes a git repo including basic configuration
+-func (s *Action) GitInit(ctx context.Context, c *cli.Context) error {
++func (s *Action) GitInit(c *cli.Context) error {
++	ctx := ctxutil.WithGlobalFlags(c)
+ 	store := c.String("store")
+ 	un := c.String("username")
+ 	ue := c.String("useremail")
+@@ -76,7 +78,8 @@ func (s *Action) getUserData(ctx context.Context, store, un, ue string) (string,
+ }
+ 
+ // GitAddRemote adds a new git remote
+-func (s *Action) GitAddRemote(ctx context.Context, c *cli.Context) error {
++func (s *Action) GitAddRemote(c *cli.Context) error {
++	ctx := ctxutil.WithGlobalFlags(c)
+ 	store := c.String("store")
+ 	remote := c.Args().Get(0)
+ 	url := c.Args().Get(1)
+@@ -89,7 +92,8 @@ func (s *Action) GitAddRemote(ctx context.Context, c *cli.Context) error {
+ }
+ 
+ // GitRemoveRemote removes a git remote
+-func (s *Action) GitRemoveRemote(ctx context.Context, c *cli.Context) error {
++func (s *Action) GitRemoveRemote(c *cli.Context) error {
++	ctx := ctxutil.WithGlobalFlags(c)
+ 	store := c.String("store")
+ 	remote := c.Args().Get(0)
+ 
+@@ -101,7 +105,8 @@ func (s *Action) GitRemoveRemote(ctx context.Context, c *cli.Context) error {
+ }
+ 
+ // GitPull pulls from a git remote
+-func (s *Action) GitPull(ctx context.Context, c *cli.Context) error {
++func (s *Action) GitPull(c *cli.Context) error {
++	ctx := ctxutil.WithGlobalFlags(c)
+ 	store := c.String("store")
+ 	origin := c.Args().Get(0)
+ 	branch := c.Args().Get(1)
+@@ -116,7 +121,8 @@ func (s *Action) GitPull(ctx context.Context, c *cli.Context) error {
+ }
+ 
+ // GitPush pushes to a git remote
+-func (s *Action) GitPush(ctx context.Context, c *cli.Context) error {
++func (s *Action) GitPush(c *cli.Context) error {
++	ctx := ctxutil.WithGlobalFlags(c)
+ 	store := c.String("store")
+ 	origin := c.Args().Get(0)
+ 	branch := c.Args().Get(1)
+@@ -128,7 +134,8 @@ func (s *Action) GitPush(ctx context.Context, c *cli.Context) error {
+ }
+ 
+ // GitStatus prints the rcs status
+-func (s *Action) GitStatus(ctx context.Context, c *cli.Context) error {
++func (s *Action) GitStatus(c *cli.Context) error {
++	ctx := ctxutil.WithGlobalFlags(c)
+ 	store := c.String("store")
+ 
+ 	return s.Store.GitStatus(ctx, store)
+diff --git a/pkg/action/git_test.go b/pkg/action/git_test.go
+index c82d3ba392..fefe57452e 100644
+--- a/pkg/action/git_test.go
++++ b/pkg/action/git_test.go
+@@ -52,8 +52,9 @@ func TestGit(t *testing.T) {
+ 	assert.NoError(t, ue.Apply(fs))
+ 	assert.NoError(t, fs.Parse([]string{"--username", "foobar", "--useremail", "foo.bar@example.org"}))
+ 	c := cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+-	assert.NoError(t, act.GitInit(ctx, c))
++	assert.NoError(t, act.GitInit(c))
+ 	buf.Reset()
+ 
+ 	// getUserData
+@@ -62,18 +63,18 @@ func TestGit(t *testing.T) {
+ 	assert.Equal(t, "", email)
+ 
+ 	// GitAddRemote
+-	assert.Error(t, act.GitAddRemote(ctx, c))
++	assert.Error(t, act.GitAddRemote(c))
+ 	buf.Reset()
+ 
+ 	// GitRemoveRemote
+-	assert.Error(t, act.GitRemoveRemote(ctx, c))
++	assert.Error(t, act.GitRemoveRemote(c))
+ 	buf.Reset()
+ 
+ 	// GitPull
+-	assert.NoError(t, act.GitPull(ctx, c))
++	assert.NoError(t, act.GitPull(c))
+ 	buf.Reset()
+ 
+ 	// GitPush
+-	assert.Error(t, act.GitPush(ctx, c))
++	assert.Error(t, act.GitPush(c))
+ 	buf.Reset()
+ }
+diff --git a/pkg/action/grep.go b/pkg/action/grep.go
+index 6b2643bdd0..fced2e6d92 100644
+--- a/pkg/action/grep.go
++++ b/pkg/action/grep.go
+@@ -1,9 +1,9 @@
+ package action
+ 
+ import (
+-	"context"
+ 	"strings"
+ 
++	"github.com/gopasspw/gopass/pkg/ctxutil"
+ 	"github.com/gopasspw/gopass/pkg/out"
+ 
+ 	"github.com/fatih/color"
+@@ -11,7 +11,8 @@ import (
+ )
+ 
+ // Grep searches a string inside the content of all files
+-func (s *Action) Grep(ctx context.Context, c *cli.Context) error {
++func (s *Action) Grep(c *cli.Context) error {
++	ctx := ctxutil.WithGlobalFlags(c)
+ 	if !c.Args().Present() {
+ 		return ExitError(ctx, ExitUsage, nil, "Usage: %s grep arg", s.Name)
+ 	}
+diff --git a/pkg/action/grep_test.go b/pkg/action/grep_test.go
+index 162fa641cc..b501cd0326 100644
+--- a/pkg/action/grep_test.go
++++ b/pkg/action/grep_test.go
+@@ -37,12 +37,13 @@ func TestGrep(t *testing.T) {
+ 	fs := flag.NewFlagSet("default", flag.ContinueOnError)
+ 	assert.NoError(t, fs.Parse([]string{"foo"}))
+ 	c := cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+-	assert.Error(t, act.Grep(ctx, c))
++	assert.Error(t, act.Grep(c))
+ 	buf.Reset()
+ 
+ 	// add some secret
+ 	assert.NoError(t, act.Store.Set(ctx, "foo", secret.New("foobar", "foobar")))
+-	assert.Error(t, act.Grep(ctx, c))
++	assert.Error(t, act.Grep(c))
+ 	buf.Reset()
+ }
+diff --git a/pkg/action/hibp.go b/pkg/action/hibp.go
+index d11e3e57a7..7f82fa4299 100644
+--- a/pkg/action/hibp.go
++++ b/pkg/action/hibp.go
+@@ -7,6 +7,7 @@ import (
+ 	"io/ioutil"
+ 	"sort"
+ 
++	"github.com/gopasspw/gopass/pkg/ctxutil"
+ 	hibpapi "github.com/gopasspw/gopass/pkg/hibp/api"
+ 	hibpdump "github.com/gopasspw/gopass/pkg/hibp/dump"
+ 	"github.com/gopasspw/gopass/pkg/notify"
+@@ -19,7 +20,8 @@ import (
+ )
+ 
+ // HIBP compares all entries from the store against the provided SHA1 sum dumps
+-func (s *Action) HIBP(ctx context.Context, c *cli.Context) error {
++func (s *Action) HIBP(c *cli.Context) error {
++	ctx := ctxutil.WithGlobalFlags(c)
+ 	force := c.Bool("force")
+ 	api := c.Bool("api")
+ 
+diff --git a/pkg/action/hibp_test.go b/pkg/action/hibp_test.go
+index cd68fffb9d..6c526bfd43 100644
+--- a/pkg/action/hibp_test.go
++++ b/pkg/action/hibp_test.go
+@@ -55,9 +55,10 @@ func TestHIBPDump(t *testing.T) {
+ 	app := cli.NewApp()
+ 	fs := flag.NewFlagSet("default", flag.ContinueOnError)
+ 	c := cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+ 	// no hibp dump, no env var
+-	assert.Error(t, act.HIBP(ctx, c))
++	assert.Error(t, act.HIBP(c))
+ 	buf.Reset()
+ 
+ 	// setup file and env
+@@ -70,9 +71,10 @@ func TestHIBPDump(t *testing.T) {
+ 	assert.NoError(t, bf.Apply(fs))
+ 	assert.NoError(t, fs.Parse([]string{"--dumps=" + fn}))
+ 	c = cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+ 	assert.NoError(t, ioutil.WriteFile(fn, []byte(testHibpSample), 0644))
+-	assert.NoError(t, act.HIBP(ctx, c))
++	assert.NoError(t, act.HIBP(c))
+ 	buf.Reset()
+ 
+ 	// gzip
+@@ -84,9 +86,12 @@ func TestHIBPDump(t *testing.T) {
+ 	}
+ 	assert.NoError(t, bf.Apply(fs))
+ 	assert.NoError(t, fs.Parse([]string{"--dumps=" + fn}))
++
+ 	c = cli.NewContext(app, fs, nil)
++	c.Context = ctx
++
+ 	assert.NoError(t, testWriteGZ(fn, []byte(testHibpSample)))
+-	assert.NoError(t, act.HIBP(ctx, c))
++	assert.NoError(t, act.HIBP(c))
+ 	buf.Reset()
+ }
+ 
+@@ -134,6 +139,7 @@ func TestHIBPAPI(t *testing.T) {
+ 	assert.NoError(t, bf.Apply(fs))
+ 	assert.NoError(t, fs.Parse([]string{"--api=true"}))
+ 	c := cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+ 	reqCnt := 0
+ 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+@@ -156,11 +162,11 @@ func TestHIBPAPI(t *testing.T) {
+ 	hibpapi.URL = ts.URL
+ 
+ 	// test with one entry
+-	assert.NoError(t, act.HIBP(ctx, c))
++	assert.NoError(t, act.HIBP(c))
+ 	buf.Reset()
+ 
+ 	// add another one
+ 	assert.NoError(t, act.insertStdin(ctx, "baz", []byte("foobar"), false))
+-	assert.Error(t, act.HIBP(ctx, c))
++	assert.Error(t, act.HIBP(c))
+ 	buf.Reset()
+ }
+diff --git a/pkg/action/history.go b/pkg/action/history.go
+index 0861ea11b0..4972e623aa 100644
+--- a/pkg/action/history.go
++++ b/pkg/action/history.go
+@@ -1,16 +1,17 @@
+ package action
+ 
+ import (
+-	"context"
+ 	"time"
+ 
++	"github.com/gopasspw/gopass/pkg/ctxutil"
+ 	"github.com/gopasspw/gopass/pkg/out"
+ 
+ 	"github.com/urfave/cli/v2"
+ )
+ 
+ // History displays the history of a given secret
+-func (s *Action) History(ctx context.Context, c *cli.Context) error {
++func (s *Action) History(c *cli.Context) error {
++	ctx := ctxutil.WithGlobalFlags(c)
+ 	name := c.Args().Get(0)
+ 	showPassword := c.Bool("password")
+ 
+diff --git a/pkg/action/history_test.go b/pkg/action/history_test.go
+index 59f883c08d..c7664efd59 100644
+--- a/pkg/action/history_test.go
++++ b/pkg/action/history_test.go
+@@ -29,12 +29,17 @@ func TestHistory(t *testing.T) {
+ 	ctx = backend.WithCryptoBackend(ctx, backend.Plain)
+ 	ctx = backend.WithStorageBackend(ctx, backend.FS)
+ 
++	app := cli.NewApp()
++	fs := flag.NewFlagSet("default", flag.ContinueOnError)
++	c := cli.NewContext(app, fs, nil)
++	c.Context = ctx
++
+ 	cfg := config.New()
+ 	cfg.Root.Path = backend.FromPath(u.StoreDir(""))
+ 	act, err := newAction(ctx, cfg, semver.Version{})
+ 	require.NoError(t, err)
+ 	require.NotNil(t, act)
+-	require.NoError(t, act.Initialized(ctx, nil))
++	require.NoError(t, act.Initialized(c))
+ 
+ 	buf := &bytes.Buffer{}
+ 	out.Stdout = buf
+@@ -42,26 +47,26 @@ func TestHistory(t *testing.T) {
+ 		out.Stdout = os.Stdout
+ 	}()
+ 
+-	app := cli.NewApp()
+-
+ 	// init git
+ 	require.NoError(t, act.rcsInit(ctx, "", "foo bar", "foo.bar@example.org"))
+ 	buf.Reset()
+ 
+ 	// insert bar
+-	fs := flag.NewFlagSet("default", flag.ContinueOnError)
++	fs = flag.NewFlagSet("default", flag.ContinueOnError)
+ 	assert.NoError(t, fs.Parse([]string{"bar"}))
+-	c := cli.NewContext(app, fs, nil)
++	c = cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+-	assert.NoError(t, act.Insert(ctx, c))
++	assert.NoError(t, act.Insert(c))
+ 	buf.Reset()
+ 
+ 	// history bar
+ 	fs = flag.NewFlagSet("default", flag.ContinueOnError)
+ 	assert.NoError(t, fs.Parse([]string{"bar"}))
+ 	c = cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+-	assert.NoError(t, act.History(ctx, c))
++	assert.NoError(t, act.History(c))
+ 	buf.Reset()
+ 
+ 	// history --password bar
+@@ -73,7 +78,8 @@ func TestHistory(t *testing.T) {
+ 	assert.NoError(t, sf.Apply(fs))
+ 	assert.NoError(t, fs.Parse([]string{"--password=true", "bar"}))
+ 	c = cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+-	assert.NoError(t, act.History(ctx, c))
++	assert.NoError(t, act.History(c))
+ 	buf.Reset()
+ }
+diff --git a/pkg/action/init.go b/pkg/action/init.go
+index 3f4ba1a00a..020e9b8492 100644
+--- a/pkg/action/init.go
++++ b/pkg/action/init.go
+@@ -21,7 +21,8 @@ import (
+ 
+ // Initialized returns an error if the store is not properly
+ // prepared.
+-func (s *Action) Initialized(ctx context.Context, c *cli.Context) error {
++func (s *Action) Initialized(c *cli.Context) error {
++	ctx := ctxutil.WithGlobalFlags(c)
+ 	inited, err := s.Store.Initialized(ctx)
+ 	if err != nil {
+ 		return ExitError(ctx, ExitUnknown, err, "Failed to initialize store: %s", err)
+@@ -36,7 +37,8 @@ func (s *Action) Initialized(ctx context.Context, c *cli.Context) error {
+ 		return ExitError(ctx, ExitNotInitialized, nil, "password-store is not initialized. Try '%s init'", s.Name)
+ 	}
+ 	if ok, err := termio.AskForBool(ctx, "It seems you are new to gopass. Do you want to run the onboarding wizard?", true); err == nil && ok {
+-		if err := s.InitOnboarding(ctx, c); err != nil {
++		c.Context = ctx
++		if err := s.InitOnboarding(c); err != nil {
+ 			return ExitError(ctx, ExitUnknown, err, "failed to run onboarding wizard: %s", err)
+ 		}
+ 		return nil
+@@ -45,7 +47,8 @@ func (s *Action) Initialized(ctx context.Context, c *cli.Context) error {
+ }
+ 
+ // Init a new password store with a first gpg id
+-func (s *Action) Init(ctx context.Context, c *cli.Context) error {
++func (s *Action) Init(c *cli.Context) error {
++	ctx := ctxutil.WithGlobalFlags(c)
+ 	path := c.String("path")
+ 	alias := c.String("store")
+ 
+@@ -168,7 +171,8 @@ func (s *Action) getCryptoFor(ctx context.Context, name string) backend.Crypto {
+ }
+ 
+ // InitOnboarding will invoke the onboarding / setup wizard
+-func (s *Action) InitOnboarding(ctx context.Context, c *cli.Context) error {
++func (s *Action) InitOnboarding(c *cli.Context) error {
++	ctx := ctxutil.WithGlobalFlags(c)
+ 	remote := c.String("remote")
+ 	team := c.String("alias")
+ 	create := c.Bool("create")
+diff --git a/pkg/action/init_test.go b/pkg/action/init_test.go
+index 452d65e32f..e7f97eb265 100644
+--- a/pkg/action/init_test.go
++++ b/pkg/action/init_test.go
+@@ -41,10 +41,11 @@ func TestInit(t *testing.T) {
+ 	fs := flag.NewFlagSet("default", flag.ContinueOnError)
+ 	assert.NoError(t, fs.Parse([]string{"foo.bar@example.org"}))
+ 	c := cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+-	assert.NoError(t, act.Initialized(ctx, c))
+-	assert.Error(t, act.Init(ctx, c))
+-	assert.Error(t, act.InitOnboarding(ctx, c))
++	assert.NoError(t, act.Initialized(c))
++	assert.Error(t, act.Init(c))
++	assert.Error(t, act.InitOnboarding(c))
+ 	crypto := act.Store.Crypto(ctx, "")
+ 	assert.Equal(t, true, act.initHasUseablePrivateKeys(ctx, crypto, ""))
+ 	assert.Error(t, act.initCreatePrivateKey(ctx, crypto, "", "foo bar", "foo.bar@example.org"))
+@@ -52,7 +53,7 @@ func TestInit(t *testing.T) {
+ 
+ 	// un-initialize the store
+ 	assert.NoError(t, os.Remove(filepath.Join(u.StoreDir(""), ".gpg-id")))
+-	assert.Error(t, act.Initialized(ctx, c))
++	assert.Error(t, act.Initialized(c))
+ 	buf.Reset()
+ }
+ 
+diff --git a/pkg/action/insert.go b/pkg/action/insert.go
+index 8b119dc0af..a5cb894e33 100644
+--- a/pkg/action/insert.go
++++ b/pkg/action/insert.go
+@@ -20,7 +20,8 @@ import (
+ )
+ 
+ // Insert a string as content to a secret file
+-func (s *Action) Insert(ctx context.Context, c *cli.Context) error {
++func (s *Action) Insert(c *cli.Context) error {
++	ctx := ctxutil.WithGlobalFlags(c)
+ 	echo := c.Bool("echo")
+ 	multiline := c.Bool("multiline")
+ 	force := c.Bool("force")
+diff --git a/pkg/action/insert_test.go b/pkg/action/insert_test.go
+index 46c03661b2..38309f0ee3 100644
+--- a/pkg/action/insert_test.go
++++ b/pkg/action/insert_test.go
+@@ -41,15 +41,17 @@ func TestInsert(t *testing.T) {
+ 	fs := flag.NewFlagSet("default", flag.ContinueOnError)
+ 	assert.NoError(t, fs.Parse([]string{"bar"}))
+ 	c := cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+-	assert.NoError(t, act.Insert(ctx, c))
++	assert.NoError(t, act.Insert(c))
+ 
+ 	// insert bar baz
+ 	fs = flag.NewFlagSet("default", flag.ContinueOnError)
+ 	assert.NoError(t, fs.Parse([]string{"bar", "baz"}))
+ 	c = cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+-	assert.NoError(t, act.Insert(ctx, c))
++	assert.NoError(t, act.Insert(c))
+ 
+ 	// insert baz via stdin
+ 	assert.NoError(t, act.insertStdin(ctx, "baz", []byte("foobar"), false))
+@@ -71,6 +73,7 @@ func TestInsert(t *testing.T) {
+ 	assert.NoError(t, bf.Apply(fs))
+ 	assert.NoError(t, fs.Parse([]string{"--multiline=true", "bar", "baz"}))
+ 	c = cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+-	assert.NoError(t, act.Insert(ctx, c))
++	assert.NoError(t, act.Insert(c))
+ }
+diff --git a/pkg/action/jsonapi.go b/pkg/action/jsonapi.go
+index 9a858a06eb..ca29fdaf45 100644
+--- a/pkg/action/jsonapi.go
++++ b/pkg/action/jsonapi.go
+@@ -6,6 +6,7 @@ import (
+ 	"runtime"
+ 	"strings"
+ 
++	"github.com/gopasspw/gopass/pkg/ctxutil"
+ 	"github.com/gopasspw/gopass/pkg/jsonapi"
+ 	"github.com/gopasspw/gopass/pkg/jsonapi/manifest"
+ 	"github.com/gopasspw/gopass/pkg/termio"
+@@ -16,7 +17,8 @@ import (
+ )
+ 
+ // JSONAPI reads a json message on stdin and responds on stdout
+-func (s *Action) JSONAPI(ctx context.Context, c *cli.Context) error {
++func (s *Action) JSONAPI(c *cli.Context) error {
++	ctx := ctxutil.WithGlobalFlags(c)
+ 	api := jsonapi.API{Store: s.Store, Reader: stdin, Writer: stdout, Version: s.version}
+ 	if err := api.ReadAndRespond(ctx); err != nil {
+ 		return api.RespondError(err)
+diff --git a/pkg/action/jsonapi_others.go b/pkg/action/jsonapi_others.go
+index 302e2c1e3f..de1cb9d3de 100644
+--- a/pkg/action/jsonapi_others.go
++++ b/pkg/action/jsonapi_others.go
+@@ -3,12 +3,12 @@
+ package action
+ 
+ import (
+-	"context"
+ 	"io/ioutil"
+ 	"os"
+ 	"path/filepath"
+ 
+ 	"github.com/gopasspw/gopass/pkg/config"
++	"github.com/gopasspw/gopass/pkg/ctxutil"
+ 	"github.com/gopasspw/gopass/pkg/jsonapi/manifest"
+ 	"github.com/gopasspw/gopass/pkg/out"
+ 	"github.com/gopasspw/gopass/pkg/termio"
+@@ -18,7 +18,8 @@ import (
+ )
+ 
+ // SetupNativeMessaging sets up manifest for gopass as native messaging host
+-func (s *Action) SetupNativeMessaging(ctx context.Context, c *cli.Context) error {
++func (s *Action) SetupNativeMessaging(c *cli.Context) error {
++	ctx := ctxutil.WithGlobalFlags(c)
+ 	browser, err := s.getBrowser(ctx, c)
+ 	if err != nil {
+ 		return ExitError(ctx, ExitIO, err, "failed to get browser: %s", err)
+diff --git a/pkg/action/jsonapi_test.go b/pkg/action/jsonapi_test.go
+index 3359a69fe8..d5b6b129a5 100644
+--- a/pkg/action/jsonapi_test.go
++++ b/pkg/action/jsonapi_test.go
+@@ -21,6 +21,7 @@ func TestJSONAPI(t *testing.T) {
+ 	defer u.Remove()
+ 
+ 	ctx, cancel := context.WithCancel(context.Background())
++	defer cancel()
+ 	ctx = ctxutil.WithAlwaysYes(ctx, true)
+ 	act, err := newMock(ctx, u)
+ 	require.NoError(t, err)
+@@ -29,6 +30,7 @@ func TestJSONAPI(t *testing.T) {
+ 	app := cli.NewApp()
+ 	fs := flag.NewFlagSet("default", flag.ContinueOnError)
+ 	c := cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+ 	buf := &bytes.Buffer{}
+ 	out.Stdout = buf
+@@ -36,6 +38,5 @@ func TestJSONAPI(t *testing.T) {
+ 		out.Stdout = os.Stdout
+ 	}()
+ 
+-	assert.NoError(t, act.JSONAPI(ctx, c))
+-	cancel()
++	assert.NoError(t, act.JSONAPI(c))
+ }
+diff --git a/pkg/action/jsonapi_windows.go b/pkg/action/jsonapi_windows.go
+index 23e8d4a77a..f36ba8a793 100644
+--- a/pkg/action/jsonapi_windows.go
++++ b/pkg/action/jsonapi_windows.go
+@@ -3,12 +3,12 @@
+ package action
+ 
+ import (
+-	"context"
+ 	"io"
+ 	"io/ioutil"
+ 	"os"
+ 	"path/filepath"
+ 
++	"github.com/gopasspw/gopass/pkg/ctxutil"
+ 	"github.com/gopasspw/gopass/pkg/jsonapi/manifest"
+ 	"github.com/gopasspw/gopass/pkg/out"
+ 	"github.com/gopasspw/gopass/pkg/termio"
+@@ -19,7 +19,8 @@ import (
+ )
+ 
+ // SetupNativeMessaging sets up manifest for gopass as native messaging host
+-func (s *Action) SetupNativeMessaging(ctx context.Context, c *cli.Context) error {
++func (s *Action) SetupNativeMessaging(c *cli.Context) error {
++	ctx := ctxutil.WithGlobalFlags(c)
+ 	browser, err := s.getBrowser(ctx, c)
+ 	if err != nil {
+ 		return ExitError(ctx, ExitIO, err, "failed to get browser: %s", err)
+diff --git a/pkg/action/list.go b/pkg/action/list.go
+index feaba50ed9..16c4357c6f 100644
+--- a/pkg/action/list.go
++++ b/pkg/action/list.go
+@@ -21,7 +21,8 @@ import (
+ 
+ // List all secrets as a tree. If the filter argument is non-empty
+ // display only those that have this prefix
+-func (s *Action) List(ctx context.Context, c *cli.Context) error {
++func (s *Action) List(c *cli.Context) error {
++	ctx := ctxutil.WithGlobalFlags(c)
+ 	filter := c.Args().First()
+ 	flat := c.Bool("flat")
+ 	stripPrefix := c.Bool("strip-prefix")
+diff --git a/pkg/action/list_test.go b/pkg/action/list_test.go
+index 45e34672f8..20e2b663a4 100644
+--- a/pkg/action/list_test.go
++++ b/pkg/action/list_test.go
+@@ -39,8 +39,9 @@ func TestList(t *testing.T) {
+ 	app := cli.NewApp()
+ 	fs := flag.NewFlagSet("default", flag.ContinueOnError)
+ 	c := cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+-	assert.NoError(t, act.List(ctx, c))
++	assert.NoError(t, act.List(c))
+ 	want := `gopass
+ └── foo
+ 
+@@ -55,8 +56,9 @@ func TestList(t *testing.T) {
+ 	fs = flag.NewFlagSet("default", flag.ContinueOnError)
+ 	assert.NoError(t, fs.Parse([]string{"foo"}))
+ 	c = cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+-	assert.NoError(t, act.List(ctx, c))
++	assert.NoError(t, act.List(c))
+ 	want = `foo
+ └── bar
+ 
+@@ -73,8 +75,9 @@ func TestList(t *testing.T) {
+ 	assert.NoError(t, bf.Apply(fs))
+ 	assert.NoError(t, fs.Parse([]string{"--flat=true", "foo"}))
+ 	c = cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+-	assert.NoError(t, act.List(ctx, c))
++	assert.NoError(t, act.List(c))
+ 	want = `foo/bar
+ `
+ 	assert.Equal(t, want, buf.String())
+@@ -95,8 +98,9 @@ func TestList(t *testing.T) {
+ 	assert.NoError(t, bf.Apply(fs))
+ 	assert.NoError(t, fs.Parse([]string{"--folders=true"}))
+ 	c = cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+-	assert.NoError(t, act.List(ctx, c))
++	assert.NoError(t, act.List(c))
+ 	want = `foo
+ foo/zen
+ foo2
+@@ -108,7 +112,9 @@ foo2
+ 	fs = flag.NewFlagSet("default", flag.ContinueOnError)
+ 	assert.NoError(t, fs.Parse([]string{"not-present"}))
+ 	c = cli.NewContext(app, fs, nil)
+-	assert.Error(t, act.List(ctx, c))
++	c.Context = ctx
++
++	assert.Error(t, act.List(c))
+ 	buf.Reset()
+ }
+ 
+diff --git a/pkg/action/mount.go b/pkg/action/mount.go
+index 9e4f11a71a..b056c1a34b 100644
+--- a/pkg/action/mount.go
++++ b/pkg/action/mount.go
+@@ -1,11 +1,11 @@
+ package action
+ 
+ import (
+-	"context"
+ 	"fmt"
+ 	"sort"
+ 
+ 	"github.com/gopasspw/gopass/pkg/config"
++	"github.com/gopasspw/gopass/pkg/ctxutil"
+ 	"github.com/gopasspw/gopass/pkg/out"
+ 	"github.com/gopasspw/gopass/pkg/store"
+ 	"github.com/gopasspw/gopass/pkg/store/root"
+@@ -17,7 +17,8 @@ import (
+ )
+ 
+ // MountRemove removes an existing mount
+-func (s *Action) MountRemove(ctx context.Context, c *cli.Context) error {
++func (s *Action) MountRemove(c *cli.Context) error {
++	ctx := ctxutil.WithGlobalFlags(c)
+ 	if c.Args().Len() != 1 {
+ 		return ExitError(ctx, ExitUsage, nil, "Usage: %s mount remove [alias]", s.Name)
+ 	}
+@@ -35,7 +36,8 @@ func (s *Action) MountRemove(ctx context.Context, c *cli.Context) error {
+ }
+ 
+ // MountsPrint prints all existing mounts
+-func (s *Action) MountsPrint(ctx context.Context, c *cli.Context) error {
++func (s *Action) MountsPrint(c *cli.Context) error {
++	ctx := ctxutil.WithGlobalFlags(c)
+ 	if len(s.Store.Mounts()) < 1 {
+ 		out.Cyan(ctx, "No mounts")
+ 		return nil
+@@ -65,7 +67,8 @@ func (s *Action) MountsComplete(*cli.Context) {
+ }
+ 
+ // MountAdd adds a new mount
+-func (s *Action) MountAdd(ctx context.Context, c *cli.Context) error {
++func (s *Action) MountAdd(c *cli.Context) error {
++	ctx := ctxutil.WithGlobalFlags(c)
+ 	alias := c.Args().Get(0)
+ 	localPath := c.Args().Get(1)
+ 	if alias == "" {
+diff --git a/pkg/action/mount_test.go b/pkg/action/mount_test.go
+index 12d2fffae8..d72adff584 100644
+--- a/pkg/action/mount_test.go
++++ b/pkg/action/mount_test.go
+@@ -40,8 +40,9 @@ func TestMounts(t *testing.T) {
+ 	// print mounts
+ 	fs := flag.NewFlagSet("default", flag.ContinueOnError)
+ 	c := cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+-	assert.NoError(t, act.MountsPrint(ctx, c))
++	assert.NoError(t, act.MountsPrint(c))
+ 	buf.Reset()
+ 
+ 	// complete mounts
+@@ -54,24 +55,27 @@ func TestMounts(t *testing.T) {
+ 	// remove no non-existing mount
+ 	fs = flag.NewFlagSet("default", flag.ContinueOnError)
+ 	c = cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+-	assert.Error(t, act.MountRemove(ctx, c))
++	assert.Error(t, act.MountRemove(c))
+ 	buf.Reset()
+ 
+ 	// remove non-existing mount
+ 	fs = flag.NewFlagSet("default", flag.ContinueOnError)
+ 	assert.NoError(t, fs.Parse([]string{"foo"}))
+ 	c = cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+-	assert.NoError(t, act.MountRemove(ctx, c))
++	assert.NoError(t, act.MountRemove(c))
+ 	buf.Reset()
+ 
+ 	// add non-existing mount
+ 	fs = flag.NewFlagSet("default", flag.ContinueOnError)
+ 	assert.NoError(t, fs.Parse([]string{"foo", filepath.Join(u.Dir, "mount1")}))
+ 	c = cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+-	assert.Error(t, act.MountAdd(ctx, c))
++	assert.Error(t, act.MountAdd(c))
+ 	buf.Reset()
+ 
+ 	// add some mounts
+@@ -83,7 +87,8 @@ func TestMounts(t *testing.T) {
+ 	// print mounts
+ 	fs = flag.NewFlagSet("default", flag.ContinueOnError)
+ 	c = cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+-	assert.NoError(t, act.MountsPrint(ctx, c))
++	assert.NoError(t, act.MountsPrint(c))
+ 	buf.Reset()
+ }
+diff --git a/pkg/action/move.go b/pkg/action/move.go
+index e3065eabf8..0f99498ac5 100644
+--- a/pkg/action/move.go
++++ b/pkg/action/move.go
+@@ -1,16 +1,17 @@
+ package action
+ 
+ import (
+-	"context"
+ 	"fmt"
+ 
++	"github.com/gopasspw/gopass/pkg/ctxutil"
+ 	"github.com/gopasspw/gopass/pkg/termio"
+ 
+ 	"github.com/urfave/cli/v2"
+ )
+ 
+ // Move the content from one secret to another
+-func (s *Action) Move(ctx context.Context, c *cli.Context) error {
++func (s *Action) Move(c *cli.Context) error {
++	ctx := ctxutil.WithGlobalFlags(c)
+ 	force := c.Bool("force")
+ 
+ 	if c.Args().Len() != 2 {
+diff --git a/pkg/action/move_test.go b/pkg/action/move_test.go
+index 8092a36653..c4393a4560 100644
+--- a/pkg/action/move_test.go
++++ b/pkg/action/move_test.go
+@@ -31,6 +31,7 @@ func TestMove(t *testing.T) {
+ 	fs := flag.NewFlagSet("default", flag.ContinueOnError)
+ 	assert.NoError(t, fs.Parse([]string{"foo", "bar"}))
+ 	c := cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+ 	buf := &bytes.Buffer{}
+ 	out.Stdout = buf
+@@ -38,6 +39,6 @@ func TestMove(t *testing.T) {
+ 		out.Stdout = os.Stdout
+ 	}()
+ 
+-	assert.NoError(t, act.Move(ctx, c))
++	assert.NoError(t, act.Move(c))
+ 	buf.Reset()
+ }
+diff --git a/pkg/action/otp.go b/pkg/action/otp.go
+index ffe42f3cf7..5cb1cb752b 100644
+--- a/pkg/action/otp.go
++++ b/pkg/action/otp.go
+@@ -23,7 +23,8 @@ const (
+ )
+ 
+ // OTP implements OTP token handling for TOTP and HOTP
+-func (s *Action) OTP(ctx context.Context, c *cli.Context) error {
++func (s *Action) OTP(c *cli.Context) error {
++	ctx := ctxutil.WithGlobalFlags(c)
+ 	name := c.Args().First()
+ 	if name == "" {
+ 		return ExitError(ctx, ExitUsage, nil, "Usage: %s otp <NAME>", s.Name)
+diff --git a/pkg/action/otp_test.go b/pkg/action/otp_test.go
+index b7dbfdb1b2..adf0c48c3f 100644
+--- a/pkg/action/otp_test.go
++++ b/pkg/action/otp_test.go
+@@ -41,18 +41,20 @@ func TestOTP(t *testing.T) {
+ 	fs := flag.NewFlagSet("default", flag.ContinueOnError)
+ 	assert.NoError(t, fs.Parse([]string{"foo"}))
+ 	c := cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+-	assert.Error(t, act.OTP(ctx, c))
++	assert.Error(t, act.OTP(c))
+ 	buf.Reset()
+ 
+ 	// create and display valid OTP
+ 	fs = flag.NewFlagSet("default", flag.ContinueOnError)
+ 	assert.NoError(t, fs.Parse([]string{"bar"}))
+ 	c = cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+ 	assert.NoError(t, act.Store.Set(ctx, "bar", secret.New("foo", twofactor.GenerateGoogleTOTP().URL("foo"))))
+ 
+-	assert.NoError(t, act.OTP(ctx, c))
++	assert.NoError(t, act.OTP(c))
+ 	buf.Reset()
+ 
+ 	// copy to clipboard
+@@ -69,8 +71,9 @@ func TestOTP(t *testing.T) {
+ 	fn := filepath.Join(u.Dir, "qr.png")
+ 	assert.NoError(t, fs.Parse([]string{"--qr=" + fn, "bar"}))
+ 	c = cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+-	assert.NoError(t, act.OTP(ctx, c))
++	assert.NoError(t, act.OTP(c))
+ 	assert.FileExists(t, fn)
+ 	buf.Reset()
+ }
+diff --git a/pkg/action/recipients.go b/pkg/action/recipients.go
+index 57abffc889..eaa5570ec8 100644
+--- a/pkg/action/recipients.go
++++ b/pkg/action/recipients.go
+@@ -35,7 +35,8 @@ credentials.
+ )
+ 
+ // RecipientsPrint prints all recipients per store
+-func (s *Action) RecipientsPrint(ctx context.Context, c *cli.Context) error {
++func (s *Action) RecipientsPrint(c *cli.Context) error {
++	ctx := ctxutil.WithGlobalFlags(c)
+ 	out.Cyan(ctx, "Hint: run 'gopass sync' to import any missing public keys")
+ 
+ 	tree, err := s.Store.RecipientsTree(ctx, true)
+@@ -49,7 +50,8 @@ func (s *Action) RecipientsPrint(ctx context.Context, c *cli.Context) error {
+ 
+ // RecipientsComplete will print a list of recipients for bash
+ // completion
+-func (s *Action) RecipientsComplete(ctx context.Context, c *cli.Context) {
++func (s *Action) RecipientsComplete(c *cli.Context) {
++	ctx := ctxutil.WithGlobalFlags(c)
+ 	tree, err := s.Store.RecipientsTree(out.WithHidden(ctx, true), false)
+ 	if err != nil {
+ 		fmt.Fprintln(stdout, err)
+@@ -62,7 +64,8 @@ func (s *Action) RecipientsComplete(ctx context.Context, c *cli.Context) {
+ }
+ 
+ // RecipientsAdd adds new recipients
+-func (s *Action) RecipientsAdd(ctx context.Context, c *cli.Context) error {
++func (s *Action) RecipientsAdd(c *cli.Context) error {
++	ctx := ctxutil.WithGlobalFlags(c)
+ 	store := c.String("store")
+ 	force := c.Bool("force")
+ 	added := 0
+@@ -125,7 +128,8 @@ func (s *Action) RecipientsAdd(ctx context.Context, c *cli.Context) error {
+ }
+ 
+ // RecipientsRemove removes recipients
+-func (s *Action) RecipientsRemove(ctx context.Context, c *cli.Context) error {
++func (s *Action) RecipientsRemove(c *cli.Context) error {
++	ctx := ctxutil.WithGlobalFlags(c)
+ 	store := c.String("store")
+ 	force := c.Bool("force")
+ 	removed := 0
+@@ -194,7 +198,8 @@ func (s *Action) RecipientsRemove(ctx context.Context, c *cli.Context) error {
+ }
+ 
+ // RecipientsUpdate will recompute and update any changed recipients list checksums
+-func (s *Action) RecipientsUpdate(ctx context.Context, c *cli.Context) error {
++func (s *Action) RecipientsUpdate(c *cli.Context) error {
++	ctx := ctxutil.WithGlobalFlags(c)
+ 	changed := 0
+ 
+ 	mps := s.Store.MountPoints()
+diff --git a/pkg/action/recipients_test.go b/pkg/action/recipients_test.go
+index 54376d5141..9bbae9d220 100644
+--- a/pkg/action/recipients_test.go
++++ b/pkg/action/recipients_test.go
+@@ -31,6 +31,7 @@ func TestRecipients(t *testing.T) {
+ 	app := cli.NewApp()
+ 	fs := flag.NewFlagSet("default", flag.ContinueOnError)
+ 	c := cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+ 	buf := &bytes.Buffer{}
+ 	out.Stdout = buf
+@@ -44,7 +45,7 @@ func TestRecipients(t *testing.T) {
+ 	}()
+ 
+ 	// RecipientsPrint
+-	assert.NoError(t, act.RecipientsPrint(ctx, c))
++	assert.NoError(t, act.RecipientsPrint(c))
+ 	want := `Hint: run 'gopass sync' to import any missing public keys
+ gopass
+ └── 0xDEADBEEF
+@@ -54,36 +55,40 @@ gopass
+ 	buf.Reset()
+ 
+ 	// RecipientsComplete
+-	act.RecipientsComplete(ctx, c)
++	act.RecipientsComplete(c)
+ 	want = "0xDEADBEEF\n"
+ 	assert.Equal(t, want, buf.String())
+ 	buf.Reset()
+ 
+ 	// RecipientsAdd
+-	assert.Error(t, act.RecipientsAdd(ctx, c))
++	assert.Error(t, act.RecipientsAdd(c))
+ 	buf.Reset()
+ 
+ 	// RecipientsRemove
+-	assert.Error(t, act.RecipientsRemove(ctx, c))
++	assert.Error(t, act.RecipientsRemove(c))
+ 	buf.Reset()
+ 
+ 	// RecipientsAdd 0xFEEDBEEF
+ 	fs = flag.NewFlagSet("default", flag.ContinueOnError)
+ 	assert.NoError(t, fs.Parse([]string{"0xFEEDBEEF"}))
+ 	c = cli.NewContext(app, fs, nil)
+-	assert.NoError(t, act.RecipientsAdd(ctx, c))
++	c.Context = ctx
++
++	assert.NoError(t, act.RecipientsAdd(c))
+ 	buf.Reset()
+ 
+ 	// RecipientsAdd 0xBEEFFEED
+ 	fs = flag.NewFlagSet("default", flag.ContinueOnError)
+ 	assert.NoError(t, fs.Parse([]string{"0xBEEFFEED"}))
+ 	c = cli.NewContext(app, fs, nil)
+-	assert.Error(t, act.RecipientsAdd(ctx, c))
++	c.Context = ctx
++	assert.Error(t, act.RecipientsAdd(c))
+ 	buf.Reset()
+ 
+ 	// RecipientsRemove 0xDEADBEEF
+ 	fs = flag.NewFlagSet("default", flag.ContinueOnError)
+ 	assert.NoError(t, fs.Parse([]string{"0xDEADBEEF"}))
+ 	c = cli.NewContext(app, fs, nil)
+-	assert.NoError(t, act.RecipientsRemove(ctx, c))
++	c.Context = ctx
++	assert.NoError(t, act.RecipientsRemove(c))
+ }
+diff --git a/pkg/action/show.go b/pkg/action/show.go
+index 070646ec57..fb67e5f0cf 100644
+--- a/pkg/action/show.go
++++ b/pkg/action/show.go
+@@ -23,7 +23,8 @@ const (
+ )
+ 
+ // Show the content of a secret file
+-func (s *Action) Show(ctx context.Context, c *cli.Context) error {
++func (s *Action) Show(c *cli.Context) error {
++	ctx := ctxutil.WithGlobalFlags(c)
+ 	name := c.Args().First()
+ 
+ 	ctx = s.Store.WithConfig(ctx, name)
+@@ -56,7 +57,7 @@ func (s *Action) show(ctx context.Context, c *cli.Context, name string, recurse
+ 	}
+ 
+ 	if s.Store.IsDir(ctx, name) && !s.Store.Exists(ctx, name) {
+-		return s.List(ctx, c)
++		return s.List(c)
+ 	}
+ 	if s.Store.IsDir(ctx, name) && ctxutil.IsTerminal(ctx) {
+ 		out.Cyan(ctx, "Warning: %s is a secret and a folder. Use 'gopass show %s' to display the secret and 'gopass list %s' to show the content of the folder", name, name, name)
+@@ -162,7 +163,7 @@ func (s *Action) showHandleError(ctx context.Context, c *cli.Context, name strin
+ 		_ = notify.Notify(ctx, "gopass - warning", fmt.Sprintf("Entry '%s' not found. Starting search...", name))
+ 	}
+ 	out.Yellow(ctx, "Entry '%s' not found. Starting search...", name)
+-	if err := s.Find(ctx, c); err != nil {
++	if err := s.Find(c); err != nil {
+ 		if IsClip(ctx) {
+ 			_ = notify.Notify(ctx, "gopass - error", fmt.Sprintf("%s", err))
+ 		}
+diff --git a/pkg/action/show_test.go b/pkg/action/show_test.go
+index a5901a13bd..781b811e31 100644
+--- a/pkg/action/show_test.go
++++ b/pkg/action/show_test.go
+@@ -45,8 +45,9 @@ func TestShow(t *testing.T) {
+ 	fs := flag.NewFlagSet("default", flag.ContinueOnError)
+ 	assert.NoError(t, fs.Parse([]string{"foo"}))
+ 	c := cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+-	assert.NoError(t, act.Show(ctx, c))
++	assert.NoError(t, act.Show(c))
+ 	assert.Equal(t, "secret", buf.String())
+ 	buf.Reset()
+ 
+@@ -59,8 +60,9 @@ func TestShow(t *testing.T) {
+ 	assert.NoError(t, bf.Apply(fs))
+ 	assert.NoError(t, fs.Parse([]string{"--sync", "foo"}))
+ 	c = cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+-	assert.NoError(t, act.Show(ctx, c))
++	assert.NoError(t, act.Show(c))
+ 	assert.Equal(t, "secret", buf.String())
+ 	buf.Reset()
+ 
+@@ -71,8 +73,9 @@ func TestShow(t *testing.T) {
+ 	fs = flag.NewFlagSet("default", flag.ContinueOnError)
+ 	assert.NoError(t, fs.Parse([]string{"bar"}))
+ 	c = cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+-	assert.NoError(t, act.Show(ctx, c))
++	assert.NoError(t, act.Show(c))
+ 	assert.Equal(t, "bar\n└── baz\n\n", buf.String())
+ 	buf.Reset()
+ 
+@@ -81,8 +84,9 @@ func TestShow(t *testing.T) {
+ 	fs = flag.NewFlagSet("default", flag.ContinueOnError)
+ 	assert.NoError(t, fs.Parse([]string{"bar/baz"}))
+ 	c = cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+-	assert.NoError(t, act.Show(ctx, c))
++	assert.NoError(t, act.Show(c))
+ 	assert.Equal(t, "---\nbar: zab", buf.String())
+ 	buf.Reset()
+ 
+@@ -90,8 +94,9 @@ func TestShow(t *testing.T) {
+ 	fs = flag.NewFlagSet("default", flag.ContinueOnError)
+ 	assert.NoError(t, fs.Parse([]string{"foo"}))
+ 	c = cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+-	assert.NoError(t, act.Show(ctx, c))
++	assert.NoError(t, act.Show(c))
+ 	assert.Contains(t, buf.String(), "no safe content to display, you can force display with -f.")
+ 	buf.Reset()
+ 
+@@ -104,8 +109,9 @@ func TestShow(t *testing.T) {
+ 	assert.NoError(t, bf.Apply(fs))
+ 	assert.NoError(t, fs.Parse([]string{"--force", "foo"}))
+ 	c = cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+-	assert.NoError(t, act.Show(ctx, c))
++	assert.NoError(t, act.Show(c))
+ 	assert.Equal(t, "secret", buf.String())
+ 	buf.Reset()
+ 
+@@ -119,8 +125,9 @@ func TestShow(t *testing.T) {
+ 	assert.NoError(t, bf.Apply(fs))
+ 	assert.NoError(t, fs.Parse([]string{"--clip", "bar/baz"}))
+ 	c = cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+-	assert.NoError(t, act.Show(ctx, c))
++	assert.NoError(t, act.Show(c))
+ 	assert.NotContains(t, buf.String(), "123")
+ 	buf.Reset()
+ }
+@@ -150,6 +157,7 @@ func TestShowHandleRevision(t *testing.T) {
+ 	// show foo
+ 	fs := flag.NewFlagSet("default", flag.ContinueOnError)
+ 	c := cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+ 	assert.NoError(t, act.showHandleRevision(ctx, c, "foo", "baz"))
+ 	buf.Reset()
+@@ -180,6 +188,7 @@ func TestShowHandleError(t *testing.T) {
+ 	// show foo
+ 	fs := flag.NewFlagSet("default", flag.ContinueOnError)
+ 	c := cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+ 	assert.Error(t, act.showHandleError(ctx, c, "foo", false, fmt.Errorf("test")))
+ 	buf.Reset()
+diff --git a/pkg/action/sync.go b/pkg/action/sync.go
+index 179b5e38dc..7a84521b5d 100644
+--- a/pkg/action/sync.go
++++ b/pkg/action/sync.go
+@@ -5,6 +5,7 @@ import (
+ 	"fmt"
+ 
+ 	"github.com/gopasspw/gopass/pkg/backend/rcs/noop"
++	"github.com/gopasspw/gopass/pkg/ctxutil"
+ 	"github.com/gopasspw/gopass/pkg/notify"
+ 	"github.com/gopasspw/gopass/pkg/out"
+ 	"github.com/gopasspw/gopass/pkg/store"
+@@ -15,7 +16,8 @@ import (
+ )
+ 
+ // Sync all stores with their remotes
+-func (s *Action) Sync(ctx context.Context, c *cli.Context) error {
++func (s *Action) Sync(c *cli.Context) error {
++	ctx := ctxutil.WithGlobalFlags(c)
+ 	store := c.String("store")
+ 	return s.sync(ctx, c, store)
+ }
+diff --git a/pkg/action/sync_test.go b/pkg/action/sync_test.go
+index 9106941d5d..7cf995b890 100644
+--- a/pkg/action/sync_test.go
++++ b/pkg/action/sync_test.go
+@@ -37,8 +37,9 @@ func TestSync(t *testing.T) {
+ 	// default
+ 	fs := flag.NewFlagSet("default", flag.ContinueOnError)
+ 	c := cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+-	assert.NoError(t, act.Sync(ctx, c))
++	assert.NoError(t, act.Sync(c))
+ 	buf.Reset()
+ 
+ 	// sync --store=root
+@@ -50,7 +51,8 @@ func TestSync(t *testing.T) {
+ 	assert.NoError(t, sf.Apply(fs))
+ 	assert.NoError(t, fs.Parse([]string{"--store=root"}))
+ 	c = cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+-	assert.NoError(t, act.Sync(ctx, c))
++	assert.NoError(t, act.Sync(c))
+ 	buf.Reset()
+ }
+diff --git a/pkg/action/templates.go b/pkg/action/templates.go
+index 196f18ed35..0aa7961e23 100644
+--- a/pkg/action/templates.go
++++ b/pkg/action/templates.go
+@@ -6,6 +6,7 @@ import (
+ 	"fmt"
+ 	"strings"
+ 
++	"github.com/gopasspw/gopass/pkg/ctxutil"
+ 	"github.com/gopasspw/gopass/pkg/editor"
+ 	"github.com/gopasspw/gopass/pkg/out"
+ 	"github.com/gopasspw/gopass/pkg/tpl"
+@@ -35,7 +36,8 @@ const (
+ )
+ 
+ // TemplatesPrint will pretty-print a tree of templates
+-func (s *Action) TemplatesPrint(ctx context.Context, c *cli.Context) error {
++func (s *Action) TemplatesPrint(c *cli.Context) error {
++	ctx := ctxutil.WithGlobalFlags(c)
+ 	tree, err := s.Store.TemplateTree(ctx)
+ 	if err != nil {
+ 		return ExitError(ctx, ExitList, err, "failed to list templates: %s", err)
+@@ -45,7 +47,8 @@ func (s *Action) TemplatesPrint(ctx context.Context, c *cli.Context) error {
+ }
+ 
+ // TemplatePrint will lookup and print a single template
+-func (s *Action) TemplatePrint(ctx context.Context, c *cli.Context) error {
++func (s *Action) TemplatePrint(c *cli.Context) error {
++	ctx := ctxutil.WithGlobalFlags(c)
+ 	name := c.Args().First()
+ 
+ 	content, err := s.Store.GetTemplate(ctx, name)
+@@ -59,7 +62,8 @@ func (s *Action) TemplatePrint(ctx context.Context, c *cli.Context) error {
+ 
+ // TemplateEdit will load and existing or new template into an
+ // editor
+-func (s *Action) TemplateEdit(ctx context.Context, c *cli.Context) error {
++func (s *Action) TemplateEdit(c *cli.Context) error {
++	ctx := ctxutil.WithGlobalFlags(c)
+ 	name := c.Args().First()
+ 
+ 	var content []byte
+@@ -88,7 +92,8 @@ func (s *Action) TemplateEdit(ctx context.Context, c *cli.Context) error {
+ }
+ 
+ // TemplateRemove will remove a single template
+-func (s *Action) TemplateRemove(ctx context.Context, c *cli.Context) error {
++func (s *Action) TemplateRemove(c *cli.Context) error {
++	ctx := ctxutil.WithGlobalFlags(c)
+ 	name := c.Args().First()
+ 	if name == "" {
+ 		return ExitError(ctx, ExitUsage, nil, "usage: %s templates remove [name]", s.Name)
+@@ -102,7 +107,8 @@ func (s *Action) TemplateRemove(ctx context.Context, c *cli.Context) error {
+ }
+ 
+ // TemplatesComplete prints a list of all templates for bash completion
+-func (s *Action) TemplatesComplete(ctx context.Context, c *cli.Context) {
++func (s *Action) TemplatesComplete(c *cli.Context) {
++	ctx := ctxutil.WithGlobalFlags(c)
+ 	tree, err := s.Store.TemplateTree(ctx)
+ 	if err != nil {
+ 		fmt.Fprintln(stdout, err)
+diff --git a/pkg/action/templates_test.go b/pkg/action/templates_test.go
+index 295d85e571..5377d653a0 100644
+--- a/pkg/action/templates_test.go
++++ b/pkg/action/templates_test.go
+@@ -47,14 +47,15 @@ func TestTemplates(t *testing.T) {
+ 	fs := flag.NewFlagSet("default", flag.ContinueOnError)
+ 	assert.NoError(t, fs.Parse([]string{"foo"}))
+ 	c := cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+-	assert.NoError(t, act.TemplatesPrint(ctx, c))
++	assert.NoError(t, act.TemplatesPrint(c))
+ 	assert.Equal(t, "gopass\n\n", buf.String())
+ 	buf.Reset()
+ 
+ 	// add template
+ 	assert.NoError(t, act.Store.SetTemplate(ctx, "foo", []byte("foobar")))
+-	assert.NoError(t, act.TemplatesPrint(ctx, c))
++	assert.NoError(t, act.TemplatesPrint(c))
+ 	want := `Pushed changes to git remote
+ gopass
+ └── foo
+@@ -64,20 +65,20 @@ gopass
+ 	buf.Reset()
+ 
+ 	// complete templates
+-	act.TemplatesComplete(ctx, c)
++	act.TemplatesComplete(c)
+ 	assert.Equal(t, "foo\n", buf.String())
+ 	buf.Reset()
+ 
+ 	// print template
+-	assert.NoError(t, act.TemplatePrint(ctx, c))
++	assert.NoError(t, act.TemplatePrint(c))
+ 	assert.Equal(t, "foobar\n", buf.String())
+ 	buf.Reset()
+ 
+ 	// edit template
+-	assert.Error(t, act.TemplateEdit(ctx, c))
++	assert.Error(t, act.TemplateEdit(c))
+ 	buf.Reset()
+ 
+ 	// remove template
+-	assert.NoError(t, act.TemplateRemove(ctx, c))
++	assert.NoError(t, act.TemplateRemove(c))
+ 	buf.Reset()
+ }
+diff --git a/pkg/action/unclip.go b/pkg/action/unclip.go
+index 44e3d33a3c..4f6dc70d38 100644
+--- a/pkg/action/unclip.go
++++ b/pkg/action/unclip.go
+@@ -1,17 +1,18 @@
+ package action
+ 
+ import (
+-	"context"
+ 	"os"
+ 	"time"
+ 
+ 	"github.com/gopasspw/gopass/pkg/clipboard"
++	"github.com/gopasspw/gopass/pkg/ctxutil"
+ 
+ 	"github.com/urfave/cli/v2"
+ )
+ 
+ // Unclip tries to erase the content of the clipboard
+-func (s *Action) Unclip(ctx context.Context, c *cli.Context) error {
++func (s *Action) Unclip(c *cli.Context) error {
++	ctx := ctxutil.WithGlobalFlags(c)
+ 	force := c.Bool("force")
+ 	timeout := c.Int("timeout")
+ 	checksum := os.Getenv("GOPASS_UNCLIP_CHECKSUM")
+diff --git a/pkg/action/unclip_test.go b/pkg/action/unclip_test.go
+index 3c547c9700..c65ba536ac 100644
+--- a/pkg/action/unclip_test.go
++++ b/pkg/action/unclip_test.go
+@@ -45,6 +45,7 @@ func TestUnclip(t *testing.T) {
+ 	assert.NoError(t, sf.Apply(fs))
+ 	assert.NoError(t, fs.Parse([]string{"--timeout=0"}))
+ 	c := cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+-	assert.Error(t, act.Unclip(ctx, c))
++	assert.Error(t, act.Unclip(c))
+ }
+diff --git a/pkg/action/update.go b/pkg/action/update.go
+index 66299fc0e0..b7045cfc18 100644
+--- a/pkg/action/update.go
++++ b/pkg/action/update.go
+@@ -1,8 +1,7 @@
+ package action
+ 
+ import (
+-	"context"
+-
++	"github.com/gopasspw/gopass/pkg/ctxutil"
+ 	"github.com/gopasspw/gopass/pkg/out"
+ 	"github.com/gopasspw/gopass/pkg/updater"
+ 
+@@ -10,7 +9,8 @@ import (
+ )
+ 
+ // Update will start the interactive update assistant
+-func (s *Action) Update(ctx context.Context, c *cli.Context) error {
++func (s *Action) Update(c *cli.Context) error {
++	ctx := ctxutil.WithGlobalFlags(c)
+ 	pre := c.Bool("pre")
+ 
+ 	if s.version.String() == "0.0.0+HEAD" {
+diff --git a/pkg/action/update_test.go b/pkg/action/update_test.go
+index fe99db2212..ae122ef57f 100644
+--- a/pkg/action/update_test.go
++++ b/pkg/action/update_test.go
+@@ -61,6 +61,7 @@ func TestUpdate(t *testing.T) {
+ 	app := cli.NewApp()
+ 	fs := flag.NewFlagSet("default", flag.ContinueOnError)
+ 	c := cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+ 	// github release download mock
+ 	ghdl := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+@@ -106,6 +107,6 @@ func TestUpdate(t *testing.T) {
+ 		stdout = os.Stdout
+ 	}()
+ 
+-	assert.NoError(t, act.Update(ctx, c))
++	assert.NoError(t, act.Update(c))
+ 	buf.Reset()
+ }
+diff --git a/pkg/action/version.go b/pkg/action/version.go
+index 44fa9a8936..b26e05ec11 100644
+--- a/pkg/action/version.go
++++ b/pkg/action/version.go
+@@ -9,6 +9,7 @@ import (
+ 
+ 	"github.com/blang/semver"
+ 	"github.com/gopasspw/gopass/pkg/backend"
++	"github.com/gopasspw/gopass/pkg/ctxutil"
+ 	"github.com/gopasspw/gopass/pkg/out"
+ 	"github.com/gopasspw/gopass/pkg/protect"
+ 	"github.com/gopasspw/gopass/pkg/updater"
+@@ -18,11 +19,12 @@ import (
+ )
+ 
+ // Version prints the gopass version
+-func (s *Action) Version(ctx context.Context, c *cli.Context) error {
++func (s *Action) Version(c *cli.Context) error {
++	ctx := ctxutil.WithGlobalFlags(c)
+ 	version := make(chan string, 1)
+ 	go s.checkVersion(ctx, version)
+ 
+-	_ = s.Initialized(ctx, c)
++	_ = s.Initialized(c)
+ 
+ 	cli.VersionPrinter(c)
+ 
+diff --git a/pkg/action/version_test.go b/pkg/action/version_test.go
+index 9c831fc54e..c9a89e5952 100644
+--- a/pkg/action/version_test.go
++++ b/pkg/action/version_test.go
+@@ -32,6 +32,7 @@ func TestVersion(t *testing.T) {
+ 	app := cli.NewApp()
+ 	fs := flag.NewFlagSet("default", flag.ContinueOnError)
+ 	c := cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+ 	buf := &bytes.Buffer{}
+ 	out.Stdout = buf
+@@ -45,5 +46,5 @@ func TestVersion(t *testing.T) {
+ 		out.Print(ctx, "gopass version 0.0.0-test")
+ 	}
+ 
+-	assert.NoError(t, act.Version(ctx, c))
++	assert.NoError(t, act.Version(c))
+ }
+diff --git a/pkg/action/xc/commands.go b/pkg/action/xc/commands.go
+new file mode 100644
+index 0000000000..43c0ca4f9f
+--- /dev/null
++++ b/pkg/action/xc/commands.go
+@@ -0,0 +1,118 @@
++// +build xc
++
++package xc
++
++import (
++	"github.com/urfave/cli/v2"
++)
++
++// GetCommands returns the CLI commands exported for the XC crypto backend
++func GetCommands() []*cli.Command {
++	return []*cli.Command{
++		{
++			Name:  "xc",
++			Usage: "Experimental Crypto",
++			Description: "" +
++				"These subcommands are used to control and test the experimental crypto" +
++				"implementation.",
++			Subcommands: []*cli.Command{
++				{
++					Name:   "list-private-keys",
++					Action: ListPrivateKeys,
++				},
++				{
++					Name:   "list-public-keys",
++					Action: ListPublicKeys,
++				},
++				{
++					Name:   "generate",
++					Action: GenerateKeypair,
++				},
++				{
++					Name:   "export",
++					Action: ExportPublicKey,
++					Flags: []cli.Flag{
++						&cli.StringFlag{
++							Name: "id",
++						},
++						&cli.StringFlag{
++							Name: "file",
++						},
++					},
++				},
++				{
++					Name:   "import",
++					Action: ImportPublicKey,
++					Flags: []cli.Flag{
++						&cli.StringFlag{
++							Name: "id",
++						},
++						&cli.StringFlag{
++							Name: "file",
++						},
++					},
++				},
++				{
++					Name:   "export-private-key",
++					Action: ExportPrivateKey,
++					Flags: []cli.Flag{
++						&cli.StringFlag{
++							Name: "id",
++						},
++						&cli.StringFlag{
++							Name: "file",
++						},
++					},
++				},
++				{
++					Name:   "import-private-key",
++					Action: ImportPrivateKey,
++					Flags: []cli.Flag{
++						&cli.StringFlag{
++							Name: "id",
++						},
++						&cli.StringFlag{
++							Name: "file",
++						},
++					},
++				},
++				{
++					Name:   "remove",
++					Action: RemoveKey,
++					Flags: []cli.Flag{
++						&cli.StringFlag{
++							Name: "id",
++						},
++					},
++				},
++				{
++					Name:   "encrypt",
++					Action: EncryptFile,
++					Flags: []cli.Flag{
++						&cli.StringFlag{
++							Name: "file",
++						},
++						&cli.StringSliceFlag{
++							Name: "recipients",
++						},
++						&cli.BoolFlag{
++							Name: "stream",
++						},
++					},
++				},
++				{
++					Name:   "decrypt",
++					Action: DecryptFile,
++					Flags: []cli.Flag{
++						&cli.StringFlag{
++							Name: "file",
++						},
++						&cli.BoolFlag{
++							Name: "stream",
++						},
++					},
++				},
++			},
++		},
++	}
++}
+diff --git a/pkg/action/xc/no_xc.go b/pkg/action/xc/no_xc.go
+index bb4864f853..966d014da9 100644
+--- a/pkg/action/xc/no_xc.go
++++ b/pkg/action/xc/no_xc.go
+@@ -3,67 +3,8 @@
+ package xc
+ 
+ import (
+-	"context"
+-
+ 	"github.com/urfave/cli/v2"
+ )
+ 
+-// ListPrivateKeys list the XC private keys
+-func ListPrivateKeys(ctx context.Context, c *cli.Context) error {
+-	return nil
+-}
+-
+-// ListPublicKeys lists the XC public keys
+-func ListPublicKeys(ctx context.Context, c *cli.Context) error {
+-	return nil
+-}
+-
+-// GenerateKeypair generates a new XC keypair
+-func GenerateKeypair(ctx context.Context, c *cli.Context) error {
+-	return nil
+-}
+-
+-// ExportPublicKey exports an XC key
+-func ExportPublicKey(ctx context.Context, c *cli.Context) error {
+-	return nil
+-}
+-
+-// ImportPublicKey imports an XC key
+-func ImportPublicKey(ctx context.Context, c *cli.Context) error {
+-	return nil
+-}
+-
+-// RemoveKey removes a key from the keyring
+-func RemoveKey(ctx context.Context, c *cli.Context) error {
+-	return nil
+-}
+-
+-// ExportPrivateKey exports an XC key
+-func ExportPrivateKey(ctx context.Context, c *cli.Context) error {
+-	return nil
+-}
+-
+-// ImportPrivateKey imports an XC key
+-func ImportPrivateKey(ctx context.Context, c *cli.Context) error {
+-	return nil
+-}
+-
+-// EncryptFile encrypts a single file
+-func EncryptFile(ctx context.Context, c *cli.Context) error {
+-	return nil
+-}
+-
+-// DecryptFile decrypts a single file
+-func DecryptFile(ctx context.Context, c *cli.Context) error {
+-	return nil
+-}
+-
+-// EncryptFileStream encrypts a single file
+-func EncryptFileStream(ctx context.Context, c *cli.Context) error {
+-	return nil
+-}
+-
+-// DecryptFileStream decrypts a single file
+-func DecryptFileStream(ctx context.Context, c *cli.Context) error {
+-	return nil
+-}
++// GetCommands returns the cli commands provided by this module
++func GetCommands() []*cli.Command { return nil }
+diff --git a/pkg/action/xc/xc.go b/pkg/action/xc/xc.go
+index d86e0735a1..abf72df97e 100644
+--- a/pkg/action/xc/xc.go
++++ b/pkg/action/xc/xc.go
+@@ -3,7 +3,6 @@
+ package xc
+ 
+ import (
+-	"context"
+ 	"io/ioutil"
+ 	"os"
+ 	"strings"
+@@ -11,6 +10,7 @@ import (
+ 	"github.com/gopasspw/gopass/pkg/action"
+ 	"github.com/gopasspw/gopass/pkg/backend/crypto/xc"
+ 	"github.com/gopasspw/gopass/pkg/config"
++	"github.com/gopasspw/gopass/pkg/ctxutil"
+ 	"github.com/gopasspw/gopass/pkg/fsutil"
+ 	"github.com/gopasspw/gopass/pkg/out"
+ 	"github.com/gopasspw/gopass/pkg/termio"
+@@ -34,7 +34,8 @@ func initCrypto() error {
+ }
+ 
+ // ListPrivateKeys list the XC private keys
+-func ListPrivateKeys(ctx context.Context, c *cli.Context) error {
++func ListPrivateKeys(c *cli.Context) error {
++	ctx := ctxutil.WithGlobalFlags(c)
+ 	if err := initCrypto(); err != nil {
+ 		return action.ExitError(ctx, action.ExitUnknown, err, "failed to init XC")
+ 	}
+@@ -53,7 +54,8 @@ func ListPrivateKeys(ctx context.Context, c *cli.Context) error {
+ }
+ 
+ // ListPublicKeys lists the XC public keys
+-func ListPublicKeys(ctx context.Context, c *cli.Context) error {
++func ListPublicKeys(c *cli.Context) error {
++	ctx := ctxutil.WithGlobalFlags(c)
+ 	if err := initCrypto(); err != nil {
+ 		return action.ExitError(ctx, action.ExitUnknown, err, "failed to init XC")
+ 	}
+@@ -72,7 +74,8 @@ func ListPublicKeys(ctx context.Context, c *cli.Context) error {
+ }
+ 
+ // GenerateKeypair generates a new XC keypair
+-func GenerateKeypair(ctx context.Context, c *cli.Context) error {
++func GenerateKeypair(c *cli.Context) error {
++	ctx := ctxutil.WithGlobalFlags(c)
+ 	if err := initCrypto(); err != nil {
+ 		return action.ExitError(ctx, action.ExitUnknown, err, "failed to init XC")
+ 	}
+@@ -110,7 +113,8 @@ func GenerateKeypair(ctx context.Context, c *cli.Context) error {
+ }
+ 
+ // ExportPublicKey exports an XC key
+-func ExportPublicKey(ctx context.Context, c *cli.Context) error {
++func ExportPublicKey(c *cli.Context) error {
++	ctx := ctxutil.WithGlobalFlags(c)
+ 	if err := initCrypto(); err != nil {
+ 		return action.ExitError(ctx, action.ExitUnknown, err, "failed to init XC")
+ 	}
+@@ -141,7 +145,8 @@ func ExportPublicKey(ctx context.Context, c *cli.Context) error {
+ }
+ 
+ // ImportPublicKey imports an XC key
+-func ImportPublicKey(ctx context.Context, c *cli.Context) error {
++func ImportPublicKey(c *cli.Context) error {
++	ctx := ctxutil.WithGlobalFlags(c)
+ 	if err := initCrypto(); err != nil {
+ 		return action.ExitError(ctx, action.ExitUnknown, err, "failed to init XC")
+ 	}
+@@ -164,7 +169,8 @@ func ImportPublicKey(ctx context.Context, c *cli.Context) error {
+ }
+ 
+ // RemoveKey removes a key from the keyring
+-func RemoveKey(ctx context.Context, c *cli.Context) error {
++func RemoveKey(c *cli.Context) error {
++	ctx := ctxutil.WithGlobalFlags(c)
+ 	if err := initCrypto(); err != nil {
+ 		return action.ExitError(ctx, action.ExitUnknown, err, "failed to init XC")
+ 	}
+@@ -179,7 +185,8 @@ func RemoveKey(ctx context.Context, c *cli.Context) error {
+ }
+ 
+ // ExportPrivateKey exports an XC key
+-func ExportPrivateKey(ctx context.Context, c *cli.Context) error {
++func ExportPrivateKey(c *cli.Context) error {
++	ctx := ctxutil.WithGlobalFlags(c)
+ 	if err := initCrypto(); err != nil {
+ 		return action.ExitError(ctx, action.ExitUnknown, err, "failed to init XC")
+ 	}
+@@ -210,7 +217,8 @@ func ExportPrivateKey(ctx context.Context, c *cli.Context) error {
+ }
+ 
+ // ImportPrivateKey imports an XC key
+-func ImportPrivateKey(ctx context.Context, c *cli.Context) error {
++func ImportPrivateKey(c *cli.Context) error {
++	ctx := ctxutil.WithGlobalFlags(c)
+ 	if err := initCrypto(); err != nil {
+ 		return action.ExitError(ctx, action.ExitUnknown, err, "failed to init XC")
+ 	}
+@@ -233,13 +241,14 @@ func ImportPrivateKey(ctx context.Context, c *cli.Context) error {
+ }
+ 
+ // EncryptFile encrypts a single file
+-func EncryptFile(ctx context.Context, c *cli.Context) error {
++func EncryptFile(c *cli.Context) error {
++	ctx := ctxutil.WithGlobalFlags(c)
+ 	if err := initCrypto(); err != nil {
+ 		return action.ExitError(ctx, action.ExitUnknown, err, "failed to init XC")
+ 	}
+ 
+ 	if c.Bool("stream") {
+-		return EncryptFileStream(ctx, c)
++		return EncryptFileStream(c)
+ 	}
+ 
+ 	inFile := c.String("file")
+@@ -272,13 +281,14 @@ func EncryptFile(ctx context.Context, c *cli.Context) error {
+ }
+ 
+ // DecryptFile decrypts a single file
+-func DecryptFile(ctx context.Context, c *cli.Context) error {
++func DecryptFile(c *cli.Context) error {
++	ctx := ctxutil.WithGlobalFlags(c)
+ 	if err := initCrypto(); err != nil {
+ 		return action.ExitError(ctx, action.ExitUnknown, err, "failed to init XC")
+ 	}
+ 
+ 	if c.Bool("stream") {
+-		return DecryptFileStream(ctx, c)
++		return DecryptFileStream(c)
+ 	}
+ 
+ 	inFile := c.String("file")
+@@ -314,7 +324,8 @@ func DecryptFile(ctx context.Context, c *cli.Context) error {
+ }
+ 
+ // EncryptFileStream encrypts a single file
+-func EncryptFileStream(ctx context.Context, c *cli.Context) error {
++func EncryptFileStream(c *cli.Context) error {
++	ctx := ctxutil.WithGlobalFlags(c)
+ 	if err := initCrypto(); err != nil {
+ 		return action.ExitError(ctx, action.ExitUnknown, err, "failed to init XC")
+ 	}
+@@ -355,7 +366,8 @@ func EncryptFileStream(ctx context.Context, c *cli.Context) error {
+ }
+ 
+ // DecryptFileStream decrypts a single file
+-func DecryptFileStream(ctx context.Context, c *cli.Context) error {
++func DecryptFileStream(c *cli.Context) error {
++	ctx := ctxutil.WithGlobalFlags(c)
+ 	if err := initCrypto(); err != nil {
+ 		return action.ExitError(ctx, action.ExitUnknown, err, "failed to init XC")
+ 	}
+diff --git a/pkg/action/xc/xc_test.go b/pkg/action/xc/xc_test.go
+index 7a522313a2..1664027679 100644
+--- a/pkg/action/xc/xc_test.go
++++ b/pkg/action/xc/xc_test.go
+@@ -32,7 +32,8 @@ func TestListPrivateKeys(t *testing.T) {
+ 	app := cli.NewApp()
+ 	fs := flag.NewFlagSet("default", flag.ContinueOnError)
+ 	c := cli.NewContext(app, fs, nil)
+-	assert.NoError(t, ListPrivateKeys(ctx, c))
++	c.Context = ctx
++	assert.NoError(t, ListPrivateKeys(c))
+ }
+ 
+ func TestListPublicKeys(t *testing.T) {
+@@ -48,7 +49,8 @@ func TestListPublicKeys(t *testing.T) {
+ 	app := cli.NewApp()
+ 	fs := flag.NewFlagSet("default", flag.ContinueOnError)
+ 	c := cli.NewContext(app, fs, nil)
+-	assert.NoError(t, ListPublicKeys(ctx, c))
++	c.Context = ctx
++	assert.NoError(t, ListPublicKeys(c))
+ }
+ 
+ func TestGenerateKeypair(t *testing.T) {
+@@ -80,19 +82,23 @@ func TestGenerateKeypair(t *testing.T) {
+ 	assert.NoError(t, pf.Apply(fs))
+ 
+ 	c := cli.NewContext(app, fs, nil)
+-	assert.Error(t, GenerateKeypair(ctx, c))
++	c.Context = ctx
++	assert.Error(t, GenerateKeypair(c))
+ 
+ 	assert.NoError(t, fs.Parse([]string{"--name=foo"}))
+ 	c = cli.NewContext(app, fs, nil)
+-	assert.Error(t, GenerateKeypair(ctx, c))
++	c.Context = ctx
++	assert.Error(t, GenerateKeypair(c))
+ 
+ 	assert.NoError(t, fs.Parse([]string{"--name=foo", "--email=bar"}))
+ 	c = cli.NewContext(app, fs, nil)
+-	assert.Error(t, GenerateKeypair(ctx, c))
++	c.Context = ctx
++	assert.Error(t, GenerateKeypair(c))
+ 
+ 	assert.NoError(t, fs.Parse([]string{"--name=foo", "--email=bar", "--passphrase=foobar"}))
+ 	c = cli.NewContext(app, fs, nil)
+-	assert.NoError(t, GenerateKeypair(ctx, c))
++	c.Context = ctx
++	assert.NoError(t, GenerateKeypair(c))
+ }
+ 
+ func TestExportPublicKey(t *testing.T) {
+@@ -113,6 +119,7 @@ func TestExportPublicKey(t *testing.T) {
+ 	assert.NoError(t, ff.Apply(fs))
+ 	assert.NoError(t, fs.Parse([]string{"--id=foo", "--file=/tmp/foo.pub"}))
+ 	c := cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+ 	buf := &bytes.Buffer{}
+ 	out.Stdout = buf
+@@ -120,7 +127,7 @@ func TestExportPublicKey(t *testing.T) {
+ 		out.Stdout = os.Stdout
+ 	}()
+ 
+-	assert.Error(t, ExportPublicKey(ctx, c))
++	assert.Error(t, ExportPublicKey(c))
+ }
+ 
+ func TestImportPublicKey(t *testing.T) {
+@@ -136,6 +143,7 @@ func TestImportPublicKey(t *testing.T) {
+ 	assert.NoError(t, ff.Apply(fs))
+ 	assert.NoError(t, fs.Parse([]string{"--file=/tmp/foo.pub"}))
+ 	c := cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+ 	buf := &bytes.Buffer{}
+ 	out.Stdout = buf
+@@ -143,7 +151,7 @@ func TestImportPublicKey(t *testing.T) {
+ 		out.Stdout = os.Stdout
+ 	}()
+ 
+-	assert.Error(t, ImportPublicKey(ctx, c))
++	assert.Error(t, ImportPublicKey(c))
+ }
+ 
+ func TestExportPrivateKey(t *testing.T) {
+@@ -164,6 +172,7 @@ func TestExportPrivateKey(t *testing.T) {
+ 	assert.NoError(t, ff.Apply(fs))
+ 	assert.NoError(t, fs.Parse([]string{"--id=foo", "--file=/tmp/foo.pub"}))
+ 	c := cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+ 	buf := &bytes.Buffer{}
+ 	out.Stdout = buf
+@@ -171,7 +180,7 @@ func TestExportPrivateKey(t *testing.T) {
+ 		out.Stdout = os.Stdout
+ 	}()
+ 
+-	assert.Error(t, ExportPrivateKey(ctx, c))
++	assert.Error(t, ExportPrivateKey(c))
+ }
+ 
+ func TestImportPrivateKey(t *testing.T) {
+@@ -187,6 +196,7 @@ func TestImportPrivateKey(t *testing.T) {
+ 	assert.NoError(t, ff.Apply(fs))
+ 	assert.NoError(t, fs.Parse([]string{"--file=/tmp/foo.pub"}))
+ 	c := cli.NewContext(app, fs, nil)
++	c.Context = ctx
+ 
+ 	buf := &bytes.Buffer{}
+ 	out.Stdout = buf
+@@ -194,7 +204,7 @@ func TestImportPrivateKey(t *testing.T) {
+ 		out.Stdout = os.Stdout
+ 	}()
+ 
+-	assert.Error(t, ImportPrivateKey(ctx, c))
++	assert.Error(t, ImportPrivateKey(c))
+ }
+ 
+ func TestEncryptDecryptFile(t *testing.T) {
+@@ -231,13 +241,16 @@ func TestEncryptDecryptFile(t *testing.T) {
+ 	assert.NoError(t, ff.Apply(fs))
+ 	assert.NoError(t, fs.Parse([]string{"--file=" + plain}))
+ 	c := cli.NewContext(app, fs, nil)
+-	assert.NoError(t, EncryptFile(ctx, c))
++	c.Context = ctx
+ 
++	assert.NoError(t, EncryptFile(c))
+ 	assert.NoError(t, os.Remove(plain))
+ 
+ 	assert.NoError(t, fs.Parse([]string{"--file=" + plain + ".xc"}))
++
+ 	c = cli.NewContext(app, fs, nil)
+-	assert.NoError(t, DecryptFile(ctx, c))
++	c.Context = ctx
++	assert.NoError(t, DecryptFile(c))
+ 
+ 	content, err := ioutil.ReadFile(plain)
+ 	assert.NoError(t, err)
+@@ -277,14 +290,18 @@ func TestEncryptDecryptStream(t *testing.T) {
+ 	}
+ 	assert.NoError(t, ff.Apply(fs))
+ 	assert.NoError(t, fs.Parse([]string{"--file=" + plain}))
++
+ 	c := cli.NewContext(app, fs, nil)
+-	assert.NoError(t, EncryptFileStream(ctx, c))
++	c.Context = ctx
+ 
++	assert.NoError(t, EncryptFileStream(c))
+ 	assert.NoError(t, os.Remove(plain))
+ 
+ 	assert.NoError(t, fs.Parse([]string{"--file=" + plain + ".xc"}))
+ 	c = cli.NewContext(app, fs, nil)
+-	assert.NoError(t, DecryptFileStream(ctx, c))
++	c.Context = ctx
++
++	assert.NoError(t, DecryptFileStream(c))
+ 
+ 	content, err := ioutil.ReadFile(plain)
+ 	assert.NoError(t, err)
+diff --git a/pkg/ctxutil/ctxutil.go b/pkg/ctxutil/ctxutil.go
+index 3d102f099a..1b578cc4f4 100644
+--- a/pkg/ctxutil/ctxutil.go
++++ b/pkg/ctxutil/ctxutil.go
+@@ -1,6 +1,10 @@
+ package ctxutil
+ 
+-import "context"
++import (
++	"context"
++
++	"github.com/urfave/cli/v2"
++)
+ 
+ type contextKey int
+ 
+@@ -33,6 +37,15 @@ const (
+ 	ctxKeyForce
+ )
+ 
++// WithGlobalFlags parses any global flags from the cli context and returns
++// a regular context
++func WithGlobalFlags(c *cli.Context) context.Context {
++	if c.Bool("yes") {
++		return WithAlwaysYes(c.Context, true)
++	}
++	return c.Context
++}
++
+ // ProgressCallback is a callback for updateing progress
+ type ProgressCallback func()
+ 
+diff --git a/pkg/ctxutil/ctxutil_test.go b/pkg/ctxutil/ctxutil_test.go
+index 9bdfc73f25..0994a7e84f 100644
+--- a/pkg/ctxutil/ctxutil_test.go
++++ b/pkg/ctxutil/ctxutil_test.go
+@@ -2,9 +2,11 @@ package ctxutil
+ 
+ import (
+ 	"context"
++	"flag"
+ 	"testing"
+ 
+ 	"github.com/stretchr/testify/assert"
++	"github.com/urfave/cli/v2"
+ )
+ 
+ func TestDebug(t *testing.T) {
+@@ -248,3 +250,20 @@ func TestComposite(t *testing.T) {
+ 	assert.Equal(t, true, IsAutoClip(ctx))
+ 	assert.Equal(t, true, HasAutoClip(ctx))
+ }
++
++func TestGlobalFlags(t *testing.T) {
++	ctx := context.Background()
++	app := cli.NewApp()
++
++	fs := flag.NewFlagSet("default", flag.ContinueOnError)
++	sf := cli.BoolFlag{
++		Name:  "yes",
++		Usage: "yes",
++	}
++	assert.NoError(t, sf.Apply(fs))
++	assert.NoError(t, fs.Parse([]string{"--yes"}))
++	c := cli.NewContext(app, fs, nil)
++	c.Context = ctx
++
++	assert.Equal(t, true, IsAlwaysYes(WithGlobalFlags(c)))
++}
