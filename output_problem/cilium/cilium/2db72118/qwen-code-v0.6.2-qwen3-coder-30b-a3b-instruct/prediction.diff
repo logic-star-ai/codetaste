@@ -1,0 +1,145 @@
+diff --git a/daemon/cmd/daemon_main.go b/daemon/cmd/daemon_main.go
+index 25de3695..ef3d9526 100644
+--- a/daemon/cmd/daemon_main.go
++++ b/daemon/cmd/daemon_main.go
+@@ -1592,9 +1592,14 @@ func registerDaemonHooks(params daemonParams) error {
+ 
+ 	params.Lifecycle.Append(hive.Hook{
+ 		OnStart: func(hive.HookContext) error {
+-			// Set the k8s clients provided by the K8s client cell. The global clients will be refactored out
+-			// by later commits.
++			// Set the k8s clients provided by the K8s client cell. We now initialize the k8s clients
++			// directly to satisfy the interface and avoid implicit dependencies on global state.
++			// This maintains backward compatibility for the time being.
++			var k8sClients *k8s.K8sClients
+ 			if params.Clientset.IsEnabled() {
++				// Need to refactor this later to pass clients properly but keeping it working for now
++				k8sClients = k8s.NewK8sClients(params.Clientset, params.Clientset.Slim(), params.Clientset, params.Clientset)
++				// For now: still need to maintain global access while refactoring
+ 				k8s.SetClients(params.Clientset, params.Clientset.Slim(), params.Clientset, params.Clientset)
+ 			}
+ 
+@@ -1604,7 +1609,7 @@ func registerDaemonHooks(params daemonParams) error {
+ 
+ 			// Start running the daemon in the background (blocks on API server's Serve()) to allow rest
+ 			// of the start hooks to run.
+-			go runDaemon(daemonCtx, cleaner, params.Shutdowner, params.Clientset)
++			go runDaemon(daemonCtx, cleaner, params.Shutdowner, params.Clientset, k8sClients)
+ 			return nil
+ 		},
+ 		OnStop: func(hive.HookContext) error {
+@@ -1617,7 +1622,7 @@ func registerDaemonHooks(params daemonParams) error {
+ }
+ 
+ // runDaemon runs the old unmodular part of the cilium-agent.
+-func runDaemon(ctx context.Context, cleaner *daemonCleanup, shutdowner hive.Shutdowner, clientset k8sClient.Clientset) {
++func runDaemon(ctx context.Context, cleaner *daemonCleanup, shutdowner hive.Shutdowner, clientset k8sClient.Clientset, k8sClients *k8s.K8sClients) {
+ 	datapathConfig := linuxdatapath.DatapathConfiguration{
+ 		HostDevice: defaults.HostDevice,
+ 		ProcFs:     option.Config.ProcFs,
+diff --git a/pkg/k8s/client.go b/pkg/k8s/client.go
+index 87af20c7..c74884ef 100644
+--- a/pkg/k8s/client.go
++++ b/pkg/k8s/client.go
+@@ -12,6 +12,61 @@ import (
+ 	slimclientset "github.com/cilium/cilium/pkg/k8s/slim/k8s/client/clientset/versioned"
+ )
+ 
++// K8sClients holds all the Kubernetes clients in a struct, replacing global variables
++type K8sClients struct {
++	// k8sCLI is the default client.
++	k8sCLI *K8sClient
++
++	// k8sWatcherCLI is the client dedicated k8s structure watchers.
++	k8sWatcherCLI *K8sSlimClient
++
++	// k8sCiliumCLI is the default Cilium client.
++	k8sCiliumCLI *K8sCiliumClient
++
++	// k8sAPIExtCLI is the dedicated apiextensions client.
++	k8sAPIExtCLI *K8sAPIExtensionsClient
++
++	// k8sAPIExtWatcherCLI is the client dedicated to API Extensions watchers.
++	k8sAPIExtWatcherCLI *K8sAPIExtensionsClient
++}
++
++// NewK8sClients creates a new K8sClients struct with the given clients.
++func NewK8sClients(normal kubernetes.Interface, slim slimclientset.Interface, cilium clientset.Interface, apiext apiextclientset.Interface) *K8sClients {
++	return &K8sClients{
++		k8sCLI:              &K8sClient{Interface: normal},
++		k8sWatcherCLI:       &K8sSlimClient{Interface: slim},
++		k8sCiliumCLI:        &K8sCiliumClient{Interface: cilium},
++		k8sAPIExtCLI:        &K8sAPIExtensionsClient{apiext},
++		k8sAPIExtWatcherCLI: &K8sAPIExtensionsClient{apiext},
++	}
++}
++
++// Client returns the default Kubernetes client.
++func (k *K8sClients) Client() *K8sClient {
++	return k.k8sCLI
++}
++
++// WatcherClient returns the client dedicated to K8s watchers.
++func (k *K8sClients) WatcherClient() *K8sSlimClient {
++	return k.k8sWatcherCLI
++}
++
++// CiliumClient returns the default Cilium Kubernetes client.
++func (k *K8sClients) CiliumClient() *K8sCiliumClient {
++	return k.k8sCiliumCLI
++}
++
++// APIExtClient returns the default API Extension client.
++func (k *K8sClients) APIExtClient() *K8sAPIExtensionsClient {
++	return k.k8sAPIExtCLI
++}
++
++// WatcherAPIExtClient returns the client dedicated to API Extensions watchers.
++func (k *K8sClients) WatcherAPIExtClient() *K8sAPIExtensionsClient {
++	return k.k8sAPIExtWatcherCLI
++}
++
++// We maintain backward compatibility functions for existing code that calls k8s.Client() directly.
+ var (
+ 	// k8sCLI is the default client.
+ 	k8sCLI = &K8sClient{}
+@@ -61,3 +116,4 @@ func APIExtClient() *K8sAPIExtensionsClient {
+ func WatcherAPIExtClient() *K8sAPIExtensionsClient {
+ 	return k8sAPIExtWatcherCLI
+ }
++
+diff --git a/pkg/k8s/config.go b/pkg/k8s/config.go
+index 09edd404..37455a37 100644
+--- a/pkg/k8s/config.go
++++ b/pkg/k8s/config.go
+@@ -4,9 +4,29 @@
+ // Package k8s abstracts all Kubernetes specific behaviour
+ package k8s
+ 
++import (
++	"github.com/cilium/cilium/pkg/option"
++)
++
+ // IsEnabled checks if Cilium is being used in tandem with Kubernetes.
+ func IsEnabled() bool {
+ 	// If clients have been set, then consider k8s enabled regardless
+ 	// of config.
+-	return k8sCLI.Interface != nil
++	// Use the global client check instead of the old global variable
++	return Client().Interface != nil
++}
++
++// IsK8sEnabled checks if the K8s option is set to enabled or default.
++func IsK8sEnabled() bool {
++	// When using K8s in default mode, the user has to specify it explicitly.
++	// If the user has K8s explicitly enabled, always return true.
++	// If the option is set to default, the user hasn't explicitly enabled it.
++	// In this case check whether the global client is set to determine if
++	// we are in a K8s environment.
++	if option.Config.K8sEnable {
++		return true
++	}
++
++	// Default to checking k8s client
++	return IsEnabled()
+ }

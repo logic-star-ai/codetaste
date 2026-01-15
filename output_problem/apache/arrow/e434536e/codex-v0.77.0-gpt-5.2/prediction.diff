@@ -1,0 +1,335 @@
+diff --git a/cpp/cmake_modules/BuildUtils.cmake b/cpp/cmake_modules/BuildUtils.cmake
+index 90839cb..0af5747 100644
+--- a/cpp/cmake_modules/BuildUtils.cmake
++++ b/cpp/cmake_modules/BuildUtils.cmake
+@@ -953,12 +953,41 @@ function(ARROW_INSTALL_ALL_HEADERS PATH)
+   endif()
+   file(GLOB CURRENT_DIRECTORY_HEADERS ${ARG_PATTERN})
+ 
++  # Some directories intentionally export testing helpers, but most "test" headers
++  # are private implementation details and should not be installed.
++  set(ARROW_INSTALL_ALL_HEADERS_ALLOW_TESTING_HEADERS FALSE)
++  if(PATH MATCHES "^arrow/testing$")
++    set(ARROW_INSTALL_ALL_HEADERS_ALLOW_TESTING_HEADERS TRUE)
++  endif()
++
+   set(PUBLIC_HEADERS)
+   foreach(HEADER ${CURRENT_DIRECTORY_HEADERS})
+     get_filename_component(HEADER_BASENAME ${HEADER} NAME)
+     if(HEADER_BASENAME MATCHES "internal")
+       continue()
+     endif()
++    # Precompiled header stubs are build-only implementation details.
++    if(HEADER_BASENAME STREQUAL "pch.h" OR HEADER_BASENAME STREQUAL "pch.hpp")
++      continue()
++    endif()
++    if(NOT ARROW_INSTALL_ALL_HEADERS_ALLOW_TESTING_HEADERS)
++      # Keep module-private test helpers out of the public install interface.
++      if(HEADER_BASENAME MATCHES "^test_.*\\.(h|hpp)$")
++        continue()
++      endif()
++      if(HEADER_BASENAME MATCHES ".*_test\\.(h|hpp)$")
++        continue()
++      endif()
++      if(HEADER_BASENAME MATCHES ".*_test_util\\.(h|hpp)$")
++        continue()
++      endif()
++      if(HEADER_BASENAME STREQUAL "test_common.h" OR HEADER_BASENAME STREQUAL "test_common.hpp")
++        continue()
++      endif()
++      if(HEADER_BASENAME STREQUAL "testing.h" OR HEADER_BASENAME STREQUAL "testing.hpp")
++        continue()
++      endif()
++    endif()
+     list(APPEND PUBLIC_HEADERS ${HEADER})
+   endforeach()
+   install(FILES ${PUBLIC_HEADERS} DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/${PATH}")
+diff --git a/python/pyarrow/tests/test_imports.py b/python/pyarrow/tests/test_imports.py
+new file mode 100644
+index 0000000..d43614b
+--- /dev/null
++++ b/python/pyarrow/tests/test_imports.py
+@@ -0,0 +1,38 @@
++# Licensed to the Apache Software Foundation (ASF) under one
++# or more contributor license agreements.  See the NOTICE file
++# distributed with this work for additional information
++# regarding copyright ownership.  The ASF licenses this file
++# to you under the Apache License, Version 2.0 (the
++# "License"); you may not use this file except in compliance
++# with the License.  You may obtain a copy of the License at
++#
++#   http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing,
++# software distributed under the License is distributed on an
++# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++# KIND, either express or implied.  See the License for the
++# specific language governing permissions and limitations
++# under the License.
++
++import os
++import subprocess
++import sys
++
++def test_import_does_not_eagerly_import_pandas():
++    # Many tests import pandas; run this check in a clean subprocess.
++    module_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
++    env = os.environ.copy()
++    existing_pythonpath = env.get("PYTHONPATH", "")
++    env["PYTHONPATH"] = (
++        module_root if not existing_pythonpath else os.pathsep.join((module_root, existing_pythonpath))
++    )
++
++    subprocess.check_call(
++        [
++            sys.executable,
++            "-c",
++            "import sys; import pyarrow as pa; assert 'pandas' not in sys.modules",
++        ],
++        env=env,
++    )
+diff --git a/python/scripts/test_imports.py b/python/scripts/check_imports.py
+similarity index 89%
+rename from python/scripts/test_imports.py
+rename to python/scripts/check_imports.py
+index c0beb44..eeeb4fa 100644
+--- a/python/scripts/test_imports.py
++++ b/python/scripts/check_imports.py
+@@ -1,3 +1,5 @@
++#!/usr/bin/env python
++
+ # Licensed to the Apache Software Foundation (ASF) under one
+ # or more contributor license agreements.  See the NOTICE file
+ # distributed with this work for additional information
+@@ -15,7 +17,9 @@
+ # specific language governing permissions and limitations
+ # under the License.
+ 
+-import pyarrow as pa  # noqa
+ import sys
+ 
+-assert 'pandas' not in sys.modules
++import pyarrow as pa  # noqa: F401
++
++assert "pandas" not in sys.modules
++
+diff --git a/python/scripts/leak_check.py b/python/scripts/leak_check.py
+new file mode 100644
+index 0000000..64ff527
+--- /dev/null
++++ b/python/scripts/leak_check.py
+@@ -0,0 +1,98 @@
++#!/usr/bin/env python
++
++# Licensed to the Apache Software Foundation (ASF) under one
++# or more contributor license agreements.  See the NOTICE file
++# distributed with this work for additional information
++# regarding copyright ownership.  The ASF licenses this file
++# to you under the Apache License, Version 2.0 (the
++# "License"); you may not use this file except in compliance
++# with the License.  You may obtain a copy of the License at
++#
++#   http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing,
++# software distributed under the License is distributed on an
++# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++# KIND, either express or implied.  See the License for the
++# specific language governing permissions and limitations
++# under the License.
++
++import io
++
++import gc
++import numpy as np
++import pandas as pd
++import pyarrow as pa
++from pyarrow.tests.util import memory_leak_check, rands
++
++
++def check_does_not_leak(f, iterations=10, check_interval=1, tolerance_mb=5):
++    memory_leak_check(
++        f,
++        metric="rss",
++        threshold=int(tolerance_mb * (1 << 20)),
++        iterations=iterations,
++        check_interval=check_interval,
++    )
++
++
++def leak_check_table_to_pandas():
++    data = [pa.array(np.concatenate([np.random.randn(100000)] * 1000))]
++    table = pa.Table.from_arrays(data, ["foo"])
++    check_does_not_leak(lambda: table.to_pandas())
++
++
++def leak_check_ipc_roundtrip():
++    data = [pa.array(np.concatenate([np.random.randn(100000)] * 10))]
++    table = pa.Table.from_arrays(data, ["foo"])
++
++    def action():
++        df = table.to_pandas()
++        batch = pa.RecordBatch.from_pandas(df)
++
++        sink = io.BytesIO()
++        with pa.RecordBatchFileWriter(sink, batch.schema) as writer:
++            writer.write_batch(batch)
++
++        reader = pa.open_file(pa.BufferReader(sink.getvalue()))
++        reader.read_all()
++
++    check_does_not_leak(action, iterations=50, tolerance_mb=50)
++
++
++def leak_check_parquet_writer():
++    import pyarrow.parquet as pq
++
++    df = pd.DataFrame({f"a{i}": [1, 2, 3, 4] for i in range(50)})
++    table = pa.Table.from_pandas(df, preserve_index=False)
++
++    # Ensure resources are cleaned up even if the leak check raises.
++    writer = pq.ParquetWriter(f"leak_test_{rands(5)}.parquet", table.schema)
++    try:
++
++        def action():
++            writer.write_table(table, row_group_size=len(table))
++
++        # This does not "leak" per se but we do want to have this use as little memory
++        # as possible.
++        check_does_not_leak(action, iterations=500, check_interval=50, tolerance_mb=20)
++    finally:
++        writer.close()
++        gc.collect()
++
++
++def leak_check_arrow_8801():
++    x = pd.to_datetime(
++        np.random.randint(0, 2**32, size=2**20, dtype=np.int64), unit="ms", utc=True
++    )
++    table = pa.table(pd.DataFrame({"x": x}))
++    check_does_not_leak(
++        lambda: table.to_pandas(split_blocks=False),
++        iterations=1000,
++        check_interval=50,
++        tolerance_mb=1000,
++    )
++
++
++if __name__ == "__main__":
++    leak_check_arrow_8801()
+diff --git a/python/scripts/test_leak.py b/python/scripts/test_leak.py
+deleted file mode 100644
+index 86a87f5..0000000
+--- a/python/scripts/test_leak.py
++++ /dev/null
+@@ -1,110 +0,0 @@
+-#!/usr/bin/env python
+-
+-# Licensed to the Apache Software Foundation (ASF) under one
+-# or more contributor license agreements.  See the NOTICE file
+-# distributed with this work for additional information
+-# regarding copyright ownership.  The ASF licenses this file
+-# to you under the Apache License, Version 2.0 (the
+-# "License"); you may not use this file except in compliance
+-# with the License.  You may obtain a copy of the License at
+-#
+-#   http://www.apache.org/licenses/LICENSE-2.0
+-#
+-# Unless required by applicable law or agreed to in writing,
+-# software distributed under the License is distributed on an
+-# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+-# KIND, either express or implied.  See the License for the
+-# specific language governing permissions and limitations
+-# under the License.
+-
+-import pyarrow as pa
+-import numpy as np
+-import pandas as pd
+-from pyarrow.tests.util import rands
+-import memory_profiler
+-import gc
+-import io
+-
+-MEGABYTE = 1 << 20
+-
+-
+-def assert_does_not_leak(f, iterations=10, check_interval=1, tolerance=5):
+-    gc.collect()
+-    baseline = memory_profiler.memory_usage()[0]
+-    for i in range(iterations):
+-        f()
+-        if i % check_interval == 0:
+-            gc.collect()
+-            usage = memory_profiler.memory_usage()[0]
+-            diff = usage - baseline
+-            print("{0}: {1}\r".format(i, diff), end="")
+-            if diff > tolerance:
+-                raise Exception("Memory increased by {0} megabytes after {1} "
+-                                "iterations".format(diff, i + 1))
+-    gc.collect()
+-    usage = memory_profiler.memory_usage()[0]
+-    diff = usage - baseline
+-    print("\nMemory increased by {0} megabytes after {1} "
+-          "iterations".format(diff, iterations))
+-
+-
+-def test_leak1():
+-    data = [pa.array(np.concatenate([np.random.randn(100000)] * 1000))]
+-    table = pa.Table.from_arrays(data, ['foo'])
+-
+-    def func():
+-        table.to_pandas()
+-    assert_does_not_leak(func)
+-
+-
+-def test_leak2():
+-    data = [pa.array(np.concatenate([np.random.randn(100000)] * 10))]
+-    table = pa.Table.from_arrays(data, ['foo'])
+-
+-    def func():
+-        df = table.to_pandas()
+-
+-        batch = pa.RecordBatch.from_pandas(df)
+-
+-        sink = io.BytesIO()
+-        writer = pa.RecordBatchFileWriter(sink, batch.schema)
+-        writer.write_batch(batch)
+-        writer.close()
+-
+-        buf_reader = pa.BufferReader(sink.getvalue())
+-        reader = pa.open_file(buf_reader)
+-        reader.read_all()
+-
+-    assert_does_not_leak(func, iterations=50, tolerance=50)
+-
+-
+-def test_leak3():
+-    import pyarrow.parquet as pq
+-
+-    df = pd.DataFrame({'a{0}'.format(i): [1, 2, 3, 4]
+-                       for i in range(50)})
+-    table = pa.Table.from_pandas(df, preserve_index=False)
+-
+-    writer = pq.ParquetWriter('leak_test_' + rands(5) + '.parquet',
+-                              table.schema)
+-
+-    def func():
+-        writer.write_table(table, row_group_size=len(table))
+-
+-    # This does not "leak" per se but we do want to have this use as little
+-    # memory as possible
+-    assert_does_not_leak(func, iterations=500,
+-                         check_interval=50, tolerance=20)
+-
+-
+-def test_ARROW_8801():
+-    x = pd.to_datetime(np.random.randint(0, 2**32, size=2**20, dtype=np.int64),
+-                       unit='ms', utc=True)
+-    table = pa.table(pd.DataFrame({'x': x}))
+-
+-    assert_does_not_leak(lambda: table.to_pandas(split_blocks=False),
+-                         iterations=1000, check_interval=50, tolerance=1000)
+-
+-
+-if __name__ == '__main__':
+-    test_ARROW_8801()

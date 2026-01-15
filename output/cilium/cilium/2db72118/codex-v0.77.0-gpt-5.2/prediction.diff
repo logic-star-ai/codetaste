@@ -1,0 +1,2764 @@
+diff --git a/cilium/cmd/preflight_identity_crd_migrate.go b/cilium/cmd/preflight_identity_crd_migrate.go
+index 831eccae..f2b2989a 100644
+--- a/cilium/cmd/preflight_identity_crd_migrate.go
++++ b/cilium/cmd/preflight_identity_crd_migrate.go
+@@ -11,7 +11,9 @@ import (
+ 
+ 	"github.com/sirupsen/logrus"
+ 	"github.com/spf13/cobra"
++	core_v1 "k8s.io/api/core/v1"
+ 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
++	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+ 
+ 	"github.com/cilium/cilium/pkg/allocator"
+ 	"github.com/cilium/cilium/pkg/hive"
+@@ -21,6 +23,7 @@ import (
+ 	"github.com/cilium/cilium/pkg/idpool"
+ 	"github.com/cilium/cilium/pkg/k8s"
+ 	ciliumClient "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/client"
++	cilium_v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
+ 	k8sClient "github.com/cilium/cilium/pkg/k8s/client"
+ 	"github.com/cilium/cilium/pkg/k8s/identitybackend"
+ 	"github.com/cilium/cilium/pkg/kvstore"
+@@ -202,8 +205,15 @@ func migrateIdentities(ctx hive.HookContext, clientset k8sClient.Clientset, shut
+ }
+ 
+ type NodeGetter struct {
+-	*k8s.K8sClient
+-	*k8s.K8sCiliumClient
++	clientset k8sClient.Clientset
++}
++
++func (n NodeGetter) GetK8sNode(ctx context.Context, nodeName string) (*core_v1.Node, error) {
++	return n.clientset.CoreV1().Nodes().Get(ctx, nodeName, v1.GetOptions{})
++}
++
++func (n NodeGetter) GetCiliumNode(ctx context.Context, nodeName string) (*cilium_v2.CiliumNode, error) {
++	return n.clientset.CiliumV2().CiliumNodes().Get(ctx, nodeName, v1.GetOptions{})
+ }
+ 
+ // initK8s connects to k8s with a allocator.Backend and an initialized
+@@ -211,16 +221,12 @@ type NodeGetter struct {
+ func initK8s(ctx context.Context, clientset k8sClient.Clientset) (crdBackend allocator.Backend, crdAllocator *allocator.Allocator) {
+ 	log.Info("Setting up kubernetes client")
+ 
+-	k8s.SetClients(clientset, clientset.Slim(), clientset, clientset)
+-	if err := k8s.WaitForNodeInformation(ctx, &NodeGetter{
+-		K8sClient:       k8s.Client(),
+-		K8sCiliumClient: k8s.CiliumClient(),
+-	}); err != nil {
++	if err := k8s.WaitForNodeInformation(ctx, NodeGetter{clientset: clientset}); err != nil {
+ 		log.WithError(err).Fatal("Unable to connect to get node spec from apiserver")
+ 	}
+ 
+ 	// Update CRDs to ensure ciliumIdentity is present
+-	ciliumClient.RegisterCRDs()
++	ciliumClient.RegisterCRDs(clientset)
+ 
+ 	// Create a CRD Backend
+ 	crdBackend, err := identitybackend.NewCRDBackend(identitybackend.CRDBackendConfiguration{
+diff --git a/clustermesh-apiserver/main.go b/clustermesh-apiserver/main.go
+index bbbad50c..4c123713 100644
+--- a/clustermesh-apiserver/main.go
++++ b/clustermesh-apiserver/main.go
+@@ -117,7 +117,6 @@ func registerHooks(lc hive.Lifecycle, clientset k8sClient.Clientset) error {
+ 		return errors.New("Kubernetes client not configured, cannot continue.")
+ 	}
+ 
+-	k8s.SetClients(clientset, clientset.Slim(), clientset, clientset)
+ 	lc.Append(hive.Hook{
+ 		OnStart: func(ctx hive.HookContext) error {
+ 			startServer(ctx, clientset)
+@@ -555,7 +554,9 @@ func startServer(startCtx hive.HookContext, clientset k8sClient.Clientset) {
+ 	}).Info("Starting clustermesh-apiserver...")
+ 
+ 	if mockFile == "" {
+-		synced.SyncCRDs(startCtx, synced.AllCRDResourceNames(), &synced.Resources{}, &synced.APIGroups{})
++		if err := synced.SyncCRDs(startCtx, clientset, synced.AllCRDResourceNames(), &synced.Resources{}, &synced.APIGroups{}); err != nil {
++			log.WithError(err).Fatal("Unable to sync CRDs")
++		}
+ 	}
+ 
+ 	mgr := NewVMManager(clientset)
+diff --git a/daemon/cmd/daemon.go b/daemon/cmd/daemon.go
+index fa276682..1e7e5149 100644
+--- a/daemon/cmd/daemon.go
++++ b/daemon/cmd/daemon.go
+@@ -496,9 +496,9 @@ func NewDaemon(ctx context.Context, cleaner *daemonCleanup,
+ 		metrics.Identity.WithLabelValues(identity.WellKnownIdentityType).Add(float64(num))
+ 	}
+ 
+-	nd := nodediscovery.NewNodeDiscovery(nodeMngr, mtuConfig, netConf)
++	nd := nodediscovery.NewNodeDiscovery(nodeMngr, mtuConfig, netConf, clientset)
+ 
+-	devMngr, err := linuxdatapath.NewDeviceManager()
++	devMngr, err := linuxdatapath.NewDeviceManager(clientset)
+ 	if err != nil {
+ 		return nil, nil, err
+ 	}
+@@ -514,7 +514,7 @@ func NewDaemon(ctx context.Context, cleaner *daemonCleanup,
+ 		datapath:          dp,
+ 		deviceManager:     devMngr,
+ 		nodeDiscovery:     nd,
+-		endpointCreations: newEndpointCreationManager(),
++		endpointCreations: newEndpointCreationManager(clientset),
+ 		apiLimiterSet:     apiLimiterSet,
+ 		controllers:       controller.NewManager(),
+ 	}
+@@ -641,7 +641,7 @@ func NewDaemon(ctx context.Context, cleaner *daemonCleanup,
+ 
+ 	d.redirectPolicyManager = redirectpolicy.NewRedirectPolicyManager(d.svc)
+ 	if option.Config.BGPAnnounceLBIP || option.Config.BGPAnnouncePodCIDR {
+-		d.bgpSpeaker, err = speaker.New(ctx, speaker.Opts{
++		d.bgpSpeaker, err = speaker.New(ctx, clientset, speaker.Opts{
+ 			LoadBalancerIP: option.Config.BGPAnnounceLBIP,
+ 			PodCIDR:        option.Config.BGPAnnouncePodCIDR,
+ 		})
+@@ -671,6 +671,7 @@ func NewDaemon(ctx context.Context, cleaner *daemonCleanup,
+ 		option.Config,
+ 		d.ipcache,
+ 		d.cgroupManager,
++		clientset,
+ 	)
+ 	nd.RegisterK8sGetters(d.k8sWatcher)
+ 	d.ipcache.RegisterK8sSyncedChecker(&d)
+@@ -862,7 +863,7 @@ func NewDaemon(ctx context.Context, cleaner *daemonCleanup,
+ 
+ 	bootstrapStats.fqdn.End(true)
+ 
+-	if k8s.IsEnabled() {
++	if d.clientset.IsEnabled() {
+ 		bootstrapStats.k8sInit.Start()
+ 		// Errors are handled inside WaitForCRDsToRegister. It will fatal on a
+ 		// context deadline or if the context has been cancelled, the context's
+@@ -878,7 +879,7 @@ func NewDaemon(ctx context.Context, cleaner *daemonCleanup,
+ 		// from performing Gets directly into kube-apiserver to get the most up
+ 		// to date version of the k8s node. This allows for better scalability
+ 		// in large clusters.
+-		d.k8sWatcher.NodesInit(k8s.Client())
++		d.k8sWatcher.NodesInit()
+ 
+ 		if option.Config.IPAM == ipamOption.IPAMClusterPool || option.Config.IPAM == ipamOption.IPAMClusterPoolV2 {
+ 			// Create the CiliumNode custom resource. This call will block until
+@@ -1033,7 +1034,7 @@ func NewDaemon(ctx context.Context, cleaner *daemonCleanup,
+ 	// Some of the k8s watchers rely on option flags set above (specifically
+ 	// EnableBPFMasquerade), so we should only start them once the flag values
+ 	// are set.
+-	if k8s.IsEnabled() {
++	if d.clientset.IsEnabled() {
+ 		bootstrapStats.k8sInit.Start()
+ 
+ 		// Initialize d.k8sCachesSynced before any k8s watchers are alive, as they may
+@@ -1074,7 +1075,7 @@ func NewDaemon(ctx context.Context, cleaner *daemonCleanup,
+ 	d.configureIPAM()
+ 
+ 	if option.Config.JoinCluster {
+-		if k8s.IsEnabled() {
++		if d.clientset.IsEnabled() {
+ 			log.WithError(err).Errorf("cannot join a Cilium cluster (--%s) when configured as a Kubernetes node", option.JoinClusterName)
+ 			return nil, nil, fmt.Errorf("cannot join a Cilium cluster (--%s) when configured as a Kubernetes node", option.JoinClusterName)
+ 		}
+@@ -1131,7 +1132,7 @@ func NewDaemon(ctx context.Context, cleaner *daemonCleanup,
+ 
+ 	// Annotation of the k8s node must happen after discovery of the
+ 	// PodCIDR range and allocation of the health IPs.
+-	if k8s.IsEnabled() && option.Config.AnnotateK8sNode {
++	if d.clientset.IsEnabled() && option.Config.AnnotateK8sNode {
+ 		bootstrapStats.k8sInit.Start()
+ 		log.WithFields(logrus.Fields{
+ 			logfields.V4Prefix:       node.GetIPv4AllocRange(),
+@@ -1144,7 +1145,7 @@ func NewDaemon(ctx context.Context, cleaner *daemonCleanup,
+ 			logfields.V6CiliumHostIP: node.GetIPv6Router(),
+ 		}).Info("Annotating k8s node")
+ 
+-		err := k8s.Client().AnnotateNode(nodeTypes.GetName(),
++		err := k8s.AnnotateNode(d.clientset, nodeTypes.GetName(),
+ 			encryptKeyID,
+ 			node.GetIPv4AllocRange(), node.GetIPv6AllocRange(),
+ 			node.GetEndpointHealthIPv4(), node.GetEndpointHealthIPv6(),
+@@ -1177,7 +1178,7 @@ func NewDaemon(ctx context.Context, cleaner *daemonCleanup,
+ 		// Ignore the channel returned by this function, as we want the global
+ 		// identity allocator to run asynchronously.
+ 		realIdentityAllocator := d.identityAllocator
+-		realIdentityAllocator.InitIdentityAllocator(k8s.CiliumClient(), nil)
++		realIdentityAllocator.InitIdentityAllocator(d.clientset, nil)
+ 
+ 		d.bootstrapClusterMesh(nodeMngr)
+ 	}
+@@ -1279,8 +1280,8 @@ func NewDaemon(ctx context.Context, cleaner *daemonCleanup,
+ 
+ // WithDefaultEndpointManager creates the default endpoint manager with a
+ // functional endpoint synchronizer.
+-func WithDefaultEndpointManager(ctx context.Context, checker endpointmanager.EndpointCheckerFunc) *endpointmanager.EndpointManager {
+-	mgr := WithCustomEndpointManager(&watchers.EndpointSynchronizer{})
++func WithDefaultEndpointManager(ctx context.Context, checker endpointmanager.EndpointCheckerFunc, clientset k8sClient.Clientset) *endpointmanager.EndpointManager {
++	mgr := WithCustomEndpointManager(watchers.NewEndpointSynchronizer(clientset))
+ 	if option.Config.EndpointGCInterval > 0 {
+ 		mgr = mgr.WithPeriodicEndpointGC(ctx, checker, option.Config.EndpointGCInterval)
+ 	}
+@@ -1473,7 +1474,7 @@ func (d *Daemon) GetNodeSuffix() string {
+ // K8sCacheIsSynced returns true if the agent has fully synced its k8s cache
+ // with the API server
+ func (d *Daemon) K8sCacheIsSynced() bool {
+-	if !k8s.IsEnabled() {
++	if !d.clientset.IsEnabled() {
+ 		return true
+ 	}
+ 	select {
+diff --git a/daemon/cmd/daemon_main.go b/daemon/cmd/daemon_main.go
+index 25de3695..3d3d7791 100644
+--- a/daemon/cmd/daemon_main.go
++++ b/daemon/cmd/daemon_main.go
+@@ -1088,7 +1088,7 @@ func restoreExecPermissions(searchDir string, patterns ...string) error {
+ 	return err
+ }
+ 
+-func initEnv() {
++func initEnv(clientset k8sClient.Clientset) {
+ 	var debugDatapath bool
+ 
+ 	option.Config.SetMapElementSizes(
+@@ -1169,7 +1169,7 @@ func initEnv() {
+ 
+ 	// This check is here instead of in DaemonConfig.Populate (invoked at the
+ 	// start of this function as option.Config.Populate) to avoid an import loop.
+-	if option.Config.IdentityAllocationMode == option.IdentityAllocationModeCRD && !k8s.IsEnabled() &&
++	if option.Config.IdentityAllocationMode == option.IdentityAllocationModeCRD && !clientset.IsEnabled() &&
+ 		option.Config.DatapathMode != datapathOption.DatapathModeLBOnly {
+ 		log.Fatal("CRD Identity allocation mode requires k8s to be configured.")
+ 	}
+@@ -1521,7 +1521,7 @@ func (d *Daemon) initKVStore() {
+ 	// looking at services from k8s and retrieve the service IP from that.
+ 	// This makes cilium to not depend on kube dns to interact with etcd
+ 	_, isETCDOperator := kvstore.IsEtcdOperator(option.Config.KVStore, option.Config.KVStoreOpt, option.Config.K8sNamespace)
+-	if k8s.IsEnabled() && isETCDOperator {
++	if d.clientset.IsEnabled() && isETCDOperator {
+ 		// Wait services and endpoints cache are synced with k8s before setting
+ 		// up etcd so we can perform the name resolution for etcd-operator
+ 		// to the service IP as well perform the service -> backend IPs for
+@@ -1594,12 +1594,9 @@ func registerDaemonHooks(params daemonParams) error {
+ 		OnStart: func(hive.HookContext) error {
+ 			// Set the k8s clients provided by the K8s client cell. The global clients will be refactored out
+ 			// by later commits.
+-			if params.Clientset.IsEnabled() {
+-				k8s.SetClients(params.Clientset, params.Clientset.Slim(), params.Clientset, params.Clientset)
+-			}
+ 
+ 			bootstrapStats.earlyInit.Start()
+-			initEnv()
++			initEnv(params.Clientset)
+ 			bootstrapStats.earlyInit.End(true)
+ 
+ 			// Start running the daemon in the background (blocks on API server's Serve()) to allow rest
+@@ -1661,7 +1658,7 @@ func runDaemon(ctx context.Context, cleaner *daemonCleanup, shutdowner hive.Shut
+ 	}
+ 
+ 	d, restoredEndpoints, err := NewDaemon(ctx, cleaner,
+-		WithDefaultEndpointManager(ctx, endpoint.CheckHealth),
++		WithDefaultEndpointManager(ctx, endpoint.CheckHealth, clientset),
+ 		linuxdatapath.NewDatapath(datapathConfig, iptablesManager, wgAgent),
+ 		clientset)
+ 	if err != nil {
+@@ -1683,7 +1680,7 @@ func runDaemon(ctx context.Context, cleaner *daemonCleanup, shutdowner hive.Shut
+ 	bootstrapStats.enableConntrack.End(true)
+ 
+ 	bootstrapStats.k8sInit.Start()
+-	if k8s.IsEnabled() {
++	if d.clientset.IsEnabled() {
+ 		// Wait only for certain caches, but not all!
+ 		// (Check Daemon.InitK8sSubsystem() for more info)
+ 		<-d.k8sCachesSynced
+@@ -1762,7 +1759,7 @@ func runDaemon(ctx context.Context, cleaner *daemonCleanup, shutdowner hive.Shut
+ 	// logic runs before any endpoint creates.
+ 	if option.Config.IPAM == ipamOption.IPAMENI {
+ 		migrated, failed := linuxrouting.NewMigrator(
+-			&eni.InterfaceDB{},
++			eni.NewInterfaceDB(clientset),
+ 		).MigrateENIDatapath(option.Config.EgressMultiHomeIPRuleCompat)
+ 		switch {
+ 		case failed == -1:
+@@ -1876,7 +1873,7 @@ func (d *Daemon) instantiateBGPControlPlane(ctx context.Context) error {
+ 	// goBGP is currently the only supported RouterManager, if more are
+ 	// implemented replace this hard-coding with a construction switch.
+ 	rm := gobgp.NewBGPRouterManager()
+-	ctrl, err := bgpv1.NewController(d.ctx, rm)
++	ctrl, err := bgpv1.NewController(d.ctx, d.clientset, rm)
+ 	if err != nil {
+ 		return fmt.Errorf("failed to instantiate BGP Control Plane: %v", err)
+ 	}
+diff --git a/daemon/cmd/endpoint.go b/daemon/cmd/endpoint.go
+index 512d3cd2..45588f12 100644
+--- a/daemon/cmd/endpoint.go
++++ b/daemon/cmd/endpoint.go
+@@ -27,6 +27,7 @@ import (
+ 	"github.com/cilium/cilium/pkg/fqdn/restore"
+ 	"github.com/cilium/cilium/pkg/k8s"
+ 	k8sConst "github.com/cilium/cilium/pkg/k8s/apis/cilium.io"
++	k8sClient "github.com/cilium/cilium/pkg/k8s/client"
+ 	slim_corev1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/core/v1"
+ 	"github.com/cilium/cilium/pkg/labels"
+ 	"github.com/cilium/cilium/pkg/labelsfilter"
+@@ -220,13 +221,15 @@ type endpointCreationRequest struct {
+ }
+ 
+ type endpointCreationManager struct {
+-	mutex    lock.Mutex
+-	requests map[string]*endpointCreationRequest
++	mutex     lock.Mutex
++	requests  map[string]*endpointCreationRequest
++	clientset k8sClient.Clientset
+ }
+ 
+-func newEndpointCreationManager() *endpointCreationManager {
++func newEndpointCreationManager(clientset k8sClient.Clientset) *endpointCreationManager {
+ 	return &endpointCreationManager{
+-		requests: map[string]*endpointCreationRequest{},
++		requests:  map[string]*endpointCreationRequest{},
++		clientset: clientset,
+ 	}
+ }
+ 
+@@ -235,7 +238,7 @@ func (m *endpointCreationManager) NewCreateRequest(ep *endpoint.Endpoint, cancel
+ 	// The endpoint create logic already ensures that IPs and containerID
+ 	// are unique and thus tracking is not required outside of the
+ 	// Kubernetes context
+-	if !ep.K8sNamespaceAndPodNameIsSet() || !k8s.IsEnabled() {
++	if !ep.K8sNamespaceAndPodNameIsSet() || !m.clientset.IsEnabled() {
+ 		return
+ 	}
+ 
+@@ -258,7 +261,7 @@ func (m *endpointCreationManager) NewCreateRequest(ep *endpoint.Endpoint, cancel
+ }
+ 
+ func (m *endpointCreationManager) EndCreateRequest(ep *endpoint.Endpoint) bool {
+-	if !ep.K8sNamespaceAndPodNameIsSet() || !k8s.IsEnabled() {
++	if !ep.K8sNamespaceAndPodNameIsSet() || !m.clientset.IsEnabled() {
+ 		return false
+ 	}
+ 
+@@ -384,7 +387,7 @@ func (d *Daemon) createEndpoint(ctx context.Context, owner regeneration.Owner, e
+ 	d.endpointCreations.NewCreateRequest(ep, cancel)
+ 	defer d.endpointCreations.EndCreateRequest(ep)
+ 
+-	if ep.K8sNamespaceAndPodNameIsSet() && k8s.IsEnabled() {
++	if ep.K8sNamespaceAndPodNameIsSet() && d.clientset.IsEnabled() {
+ 		pod, cp, identityLabels, info, annotations, err := d.fetchK8sLabelsAndAnnotations(ep.K8sNamespace, ep.K8sPodName)
+ 		if err != nil {
+ 			ep.Logger("api").WithError(err).Warning("Unable to fetch kubernetes labels")
+@@ -428,7 +431,7 @@ func (d *Daemon) createEndpoint(ctx context.Context, owner regeneration.Owner, e
+ 	// static pod's labels. In this case, start a controller to attempt to
+ 	// resolve the labels.
+ 	k8sLabelsConfigured := true
+-	if ep.K8sNamespaceAndPodNameIsSet() && k8s.IsEnabled() {
++	if ep.K8sNamespaceAndPodNameIsSet() && d.clientset.IsEnabled() {
+ 		// If there are labels, but no pod namespace, then it's
+ 		// likely that there are no k8s labels at all. Resolve.
+ 		if _, k8sLabelsConfigured = addLabels[k8sConst.PodNamespaceLabel]; !k8sLabelsConfigured {
+@@ -446,7 +449,7 @@ func (d *Daemon) createEndpoint(ctx context.Context, owner regeneration.Owner, e
+ 	// the endpoint manager because the endpoint manager create the endpoint
+ 	// queue of the endpoint. If we execute this function before the endpoint
+ 	// manager creates the endpoint queue the operation will fail.
+-	if ep.K8sNamespaceAndPodNameIsSet() && k8s.IsEnabled() && k8sLabelsConfigured {
++	if ep.K8sNamespaceAndPodNameIsSet() && d.clientset.IsEnabled() && k8sLabelsConfigured {
+ 		ep.UpdateVisibilityPolicy(func(ns, podName string) (proxyVisibility string, err error) {
+ 			p, err := d.k8sWatcher.GetCachedPod(ns, podName)
+ 			if err != nil {
+diff --git a/daemon/cmd/health.go b/daemon/cmd/health.go
+index e38a674e..516aecaa 100644
+--- a/daemon/cmd/health.go
++++ b/daemon/cmd/health.go
+@@ -13,7 +13,6 @@ import (
+ 	"github.com/cilium/cilium/pkg/controller"
+ 	"github.com/cilium/cilium/pkg/endpoint"
+ 	"github.com/cilium/cilium/pkg/health/defaults"
+-	"github.com/cilium/cilium/pkg/k8s"
+ 	"github.com/cilium/cilium/pkg/logging/logfields"
+ 	"github.com/cilium/cilium/pkg/node"
+ 	"github.com/cilium/cilium/pkg/option"
+@@ -36,7 +35,7 @@ func (d *Daemon) initHealth(cleaner *daemonCleanup) {
+ 
+ 	// Launch the cilium-health-responder as an endpoint, managed by cilium.
+ 	log.Info("Launching Cilium health endpoint")
+-	if k8s.IsEnabled() {
++	if d.clientset.IsEnabled() {
+ 		// When Cilium starts up in k8s mode, it is guaranteed to be
+ 		// running inside a new PID namespace which means that existing
+ 		// PIDfiles are referring to PIDs that may be reused. Clean up.
+diff --git a/daemon/cmd/ipam.go b/daemon/cmd/ipam.go
+index a160e7fc..23d68fb4 100644
+--- a/daemon/cmd/ipam.go
++++ b/daemon/cmd/ipam.go
+@@ -550,7 +550,7 @@ func (d *Daemon) startIPAM() {
+ 	bootstrapStats.ipam.Start()
+ 	log.Info("Initializing node addressing")
+ 	// Set up ipam conf after init() because we might be running d.conf.KVStoreIPv4Registration
+-	d.ipam = ipam.NewIPAM(d.datapath.LocalNodeAddressing(), option.Config, d.nodeDiscovery, d.k8sWatcher, &d.mtuConfig)
++	d.ipam = ipam.NewIPAM(d.datapath.LocalNodeAddressing(), option.Config, d.nodeDiscovery, d.k8sWatcher, &d.mtuConfig, d.clientset)
+ 	bootstrapStats.ipam.End(true)
+ }
+ 
+diff --git a/daemon/cmd/policy.go b/daemon/cmd/policy.go
+index c464c264..59260cdd 100644
+--- a/daemon/cmd/policy.go
++++ b/daemon/cmd/policy.go
+@@ -26,7 +26,6 @@ import (
+ 	"github.com/cilium/cilium/pkg/eventqueue"
+ 	"github.com/cilium/cilium/pkg/identity"
+ 	"github.com/cilium/cilium/pkg/identity/cache"
+-	"github.com/cilium/cilium/pkg/k8s"
+ 	"github.com/cilium/cilium/pkg/labels"
+ 	"github.com/cilium/cilium/pkg/logging/logfields"
+ 	bpfIPCache "github.com/cilium/cilium/pkg/maps/ipcache"
+@@ -57,7 +56,7 @@ func (d *Daemon) initPolicy(epMgr *endpointmanager.EndpointManager) error {
+ 
+ 	d.policy = policy.NewPolicyRepository(d.identityAllocator,
+ 		d.identityAllocator.GetIdentityCache(),
+-		certificatemanager.NewManager(option.Config.CertDirectory, k8s.Client()))
++		certificatemanager.NewManager(option.Config.CertDirectory, d.clientset))
+ 	d.policy.SetEnvoyRulesFunc(envoy.GetEnvoyHTTPRules)
+ 	d.policyUpdater, err = policy.NewUpdater(d.policy, epMgr)
+ 	if err != nil {
+diff --git a/daemon/cmd/state.go b/daemon/cmd/state.go
+index caac17f0..3b0d198c 100644
+--- a/daemon/cmd/state.go
++++ b/daemon/cmd/state.go
+@@ -18,7 +18,6 @@ import (
+ 	"github.com/cilium/cilium/pkg/controller"
+ 	"github.com/cilium/cilium/pkg/endpoint"
+ 	"github.com/cilium/cilium/pkg/ipam"
+-	"github.com/cilium/cilium/pkg/k8s"
+ 	"github.com/cilium/cilium/pkg/k8s/watchers/resources"
+ 	"github.com/cilium/cilium/pkg/labels"
+ 	"github.com/cilium/cilium/pkg/logging/logfields"
+@@ -65,7 +64,7 @@ func (d *Daemon) validateEndpoint(ep *endpoint.Endpoint) (valid bool, err error)
+ 		return false, nil
+ 	}
+ 
+-	if ep.K8sPodName != "" && ep.K8sNamespace != "" && k8s.IsEnabled() {
++	if ep.K8sPodName != "" && ep.K8sNamespace != "" && d.clientset.IsEnabled() {
+ 		d.k8sWatcher.WaitForCacheSync(resources.K8sAPIGroupPodV1Core)
+ 		pod, err := d.k8sWatcher.GetCachedPod(ep.K8sNamespace, ep.K8sPodName)
+ 		if err != nil && k8serrors.IsNotFound(err) {
+@@ -175,7 +174,7 @@ func (d *Daemon) restoreOldEndpoints(state *endpointRestoreState, clean bool) er
+ 
+ 	for _, ep := range state.possible {
+ 		scopedLog := log.WithField(logfields.EndpointID, ep.ID)
+-		if k8s.IsEnabled() {
++		if d.clientset.IsEnabled() {
+ 			scopedLog = scopedLog.WithField("k8sPodName", ep.GetK8sNamespaceAndPodName())
+ 		}
+ 
+@@ -397,7 +396,7 @@ func (d *Daemon) initRestore(restoredEndpoints *endpointRestoreState) chan struc
+ 		}()
+ 
+ 		go func() {
+-			if k8s.IsEnabled() {
++			if d.clientset.IsEnabled() {
+ 				// Also wait for all cluster mesh to be synchronized with the
+ 				// datapath before proceeding.
+ 				if d.clustermesh != nil {
+diff --git a/daemon/cmd/status.go b/daemon/cmd/status.go
+index 0748da36..a7889019 100644
+--- a/daemon/cmd/status.go
++++ b/daemon/cmd/status.go
+@@ -21,7 +21,6 @@ import (
+ 	"github.com/cilium/cilium/pkg/datapath"
+ 	datapathOption "github.com/cilium/cilium/pkg/datapath/option"
+ 	"github.com/cilium/cilium/pkg/identity"
+-	"github.com/cilium/cilium/pkg/k8s"
+ 	k8smetrics "github.com/cilium/cilium/pkg/k8s/metrics"
+ 	"github.com/cilium/cilium/pkg/kvstore"
+ 	"github.com/cilium/cilium/pkg/lock"
+@@ -90,13 +89,13 @@ func (k *k8sVersion) update(version *versionapi.Info) string {
+ var k8sVersionCache k8sVersion
+ 
+ func (d *Daemon) getK8sStatus() *models.K8sStatus {
+-	if !k8s.IsEnabled() {
++	if !d.clientset.IsEnabled() {
+ 		return &models.K8sStatus{State: models.StatusStateDisabled}
+ 	}
+ 
+ 	version, valid := k8sVersionCache.cachedVersion()
+ 	if !valid {
+-		k8sVersion, err := k8s.Client().Discovery().ServerVersion()
++		k8sVersion, err := d.clientset.Discovery().ServerVersion()
+ 		if err != nil {
+ 			return &models.K8sStatus{State: models.StatusStateFailure, Msg: err.Error()}
+ 		}
+@@ -681,7 +680,7 @@ func (d *Daemon) getStatus(brief bool) models.StatusResponse {
+ 			State: d.statusResponse.ContainerRuntime.State,
+ 			Msg:   fmt.Sprintf("%s    %s", ciliumVer, msg),
+ 		}
+-	case k8s.IsEnabled() && d.statusResponse.Kubernetes != nil && d.statusResponse.Kubernetes.State != models.StatusStateOk:
++	case d.clientset.IsEnabled() && d.statusResponse.Kubernetes != nil && d.statusResponse.Kubernetes.State != models.StatusStateOk:
+ 		msg := "Kubernetes service is not ready"
+ 		sr.Cilium = &models.Status{
+ 			State: d.statusResponse.Kubernetes.State,
+@@ -1012,7 +1011,7 @@ func (d *Daemon) startStatusCollector(cleaner *daemonCleanup) {
+ 		{
+ 			Name: "kube-proxy-replacement",
+ 			Probe: func(ctx context.Context) (interface{}, error) {
+-				if k8s.IsEnabled() || option.Config.DatapathMode == datapathOption.DatapathModeLBOnly {
++				if d.clientset.IsEnabled() || option.Config.DatapathMode == datapathOption.DatapathModeLBOnly {
+ 					return d.getKubeProxyReplacementStatus(), nil
+ 				} else {
+ 					return nil, nil
+diff --git a/daemon/cmd/status_test.go b/daemon/cmd/status_test.go
+index 8f815052..bda3378c 100644
+--- a/daemon/cmd/status_test.go
++++ b/daemon/cmd/status_test.go
+@@ -69,7 +69,7 @@ func (g *GetNodesSuite) Test_getNodesHandle(c *C) {
+ 		{
+ 			name: "create a client ID and store it locally",
+ 			setupArgs: func() args {
+-				nodeDiscovery := nodediscovery.NewNodeDiscovery(nm, mtu.NewConfiguration(0, false, false, false, 0, nil), &cnitypes.NetConf{})
++				nodeDiscovery := nodediscovery.NewNodeDiscovery(nm, mtu.NewConfiguration(0, false, false, false, 0, nil), &cnitypes.NetConf{}, nil)
+ 				return args{
+ 					params: GetClusterNodesParams{
+ 						ClientID: &zero,
+@@ -100,7 +100,7 @@ func (g *GetNodesSuite) Test_getNodesHandle(c *C) {
+ 		{
+ 			name: "retrieve nodes diff from a client that was already present",
+ 			setupArgs: func() args {
+-				nodeDiscovery := nodediscovery.NewNodeDiscovery(nm, mtu.NewConfiguration(0, false, false, false, 0, nil), &cnitypes.NetConf{})
++				nodeDiscovery := nodediscovery.NewNodeDiscovery(nm, mtu.NewConfiguration(0, false, false, false, 0, nil), &cnitypes.NetConf{}, nil)
+ 				return args{
+ 					params: GetClusterNodesParams{
+ 						ClientID: &clientIDs[0],
+@@ -153,7 +153,7 @@ func (g *GetNodesSuite) Test_getNodesHandle(c *C) {
+ 		{
+ 			name: "retrieve nodes from an expired client, it should be ok because the clean up only happens when on insertion",
+ 			setupArgs: func() args {
+-				nodeDiscovery := nodediscovery.NewNodeDiscovery(nm, mtu.NewConfiguration(0, false, false, false, 0, nil), &cnitypes.NetConf{})
++				nodeDiscovery := nodediscovery.NewNodeDiscovery(nm, mtu.NewConfiguration(0, false, false, false, 0, nil), &cnitypes.NetConf{}, nil)
+ 				return args{
+ 					params: GetClusterNodesParams{
+ 						ClientID: &clientIDs[0],
+@@ -207,7 +207,7 @@ func (g *GetNodesSuite) Test_getNodesHandle(c *C) {
+ 		{
+ 			name: "retrieve nodes for a new client, the expired client should be deleted",
+ 			setupArgs: func() args {
+-				nodeDiscovery := nodediscovery.NewNodeDiscovery(nm, mtu.NewConfiguration(0, false, false, false, 0, nil), &cnitypes.NetConf{})
++				nodeDiscovery := nodediscovery.NewNodeDiscovery(nm, mtu.NewConfiguration(0, false, false, false, 0, nil), &cnitypes.NetConf{}, nil)
+ 				return args{
+ 					params: GetClusterNodesParams{
+ 						ClientID: &zero,
+@@ -256,7 +256,7 @@ func (g *GetNodesSuite) Test_getNodesHandle(c *C) {
+ 		{
+ 			name: "retrieve nodes for a new client, however the randomizer allocated an existing clientID, so we should return a empty clientID",
+ 			setupArgs: func() args {
+-				nodeDiscovery := nodediscovery.NewNodeDiscovery(nm, mtu.NewConfiguration(0, false, false, false, 0, nil), &cnitypes.NetConf{})
++				nodeDiscovery := nodediscovery.NewNodeDiscovery(nm, mtu.NewConfiguration(0, false, false, false, 0, nil), &cnitypes.NetConf{}, nil)
+ 				return args{
+ 					params: GetClusterNodesParams{
+ 						ClientID: &zero,
+@@ -305,7 +305,7 @@ func (g *GetNodesSuite) Test_getNodesHandle(c *C) {
+ 		{
+ 			name: "retrieve nodes for a client that does not want to have diffs, leave all other stored clients alone",
+ 			setupArgs: func() args {
+-				nodeDiscovery := nodediscovery.NewNodeDiscovery(nm, mtu.NewConfiguration(0, false, false, false, 0, nil), &cnitypes.NetConf{})
++				nodeDiscovery := nodediscovery.NewNodeDiscovery(nm, mtu.NewConfiguration(0, false, false, false, 0, nil), &cnitypes.NetConf{}, nil)
+ 				return args{
+ 					params: GetClusterNodesParams{},
+ 					daemon: &Daemon{
+@@ -414,7 +414,7 @@ func (g *GetNodesSuite) Test_cleanupClients(c *C) {
+ 		h := &getNodes{
+ 			clients: args.clients,
+ 			d: &Daemon{
+-				nodeDiscovery: nodediscovery.NewNodeDiscovery(nm, mtu.NewConfiguration(0, false, false, false, 0, nil), &cnitypes.NetConf{}),
++				nodeDiscovery: nodediscovery.NewNodeDiscovery(nm, mtu.NewConfiguration(0, false, false, false, 0, nil), &cnitypes.NetConf{}, nil),
+ 			},
+ 		}
+ 		h.cleanupClients()
+diff --git a/operator/cmd/ccnp_event.go b/operator/cmd/ccnp_event.go
+index 12a13840..bec44fdd 100644
+--- a/operator/cmd/ccnp_event.go
++++ b/operator/cmd/ccnp_event.go
+@@ -45,7 +45,7 @@ func enableCCNPWatcher(clientset k8sClient.Clientset) error {
+ 	ccnpStore := cache.NewStore(cache.DeletionHandlingMetaNamespaceKeyFunc)
+ 
+ 	if enableCNPStatusUpdates {
+-		ccnpStatusMgr = k8s.NewCCNPStatusEventHandler(ccnpStore, operatorOption.Config.CNPStatusUpdateInterval)
++		ccnpStatusMgr = k8s.NewCCNPStatusEventHandler(clientset, ccnpStore, operatorOption.Config.CNPStatusUpdateInterval)
+ 		ccnpSharedStore, err := store.JoinSharedStore(store.Configuration{
+ 			Prefix: k8s.CCNPStatusesPath,
+ 			KeyCreator: func() store.Key {
+@@ -76,7 +76,7 @@ func enableCCNPWatcher(clientset k8sClient.Clientset) error {
+ 					// See https://github.com/cilium/cilium/blob/27fee207f5422c95479422162e9ea0d2f2b6c770/pkg/policy/api/ingress.go#L112-L134
+ 					cnpCpy := cnp.DeepCopy()
+ 
+-					groups.AddDerivativeCCNPIfNeeded(cnpCpy.CiliumNetworkPolicy)
++					groups.AddDerivativeCCNPIfNeeded(clientset, cnpCpy.CiliumNetworkPolicy)
+ 					if enableCNPStatusUpdates {
+ 						ccnpStatusMgr.StartStatusHandler(cnpCpy)
+ 					}
+@@ -96,7 +96,7 @@ func enableCCNPWatcher(clientset k8sClient.Clientset) error {
+ 						newCNPCpy := newCNP.DeepCopy()
+ 						oldCNPCpy := oldCNP.DeepCopy()
+ 
+-						groups.UpdateDerivativeCCNPIfNeeded(newCNPCpy.CiliumNetworkPolicy, oldCNPCpy.CiliumNetworkPolicy)
++						groups.UpdateDerivativeCCNPIfNeeded(clientset, newCNPCpy.CiliumNetworkPolicy, oldCNPCpy.CiliumNetworkPolicy)
+ 					}
+ 				}
+ 			},
+@@ -122,7 +122,7 @@ func enableCCNPWatcher(clientset k8sClient.Clientset) error {
+ 	controller.NewManager().UpdateController("ccnp-to-groups",
+ 		controller.ControllerParams{
+ 			DoFunc: func(ctx context.Context) error {
+-				groups.UpdateCNPInformation()
++				groups.UpdateCNPInformation(clientset)
+ 				return nil
+ 			},
+ 			RunInterval: 5 * time.Minute,
+diff --git a/operator/cmd/cnp_event.go b/operator/cmd/cnp_event.go
+index 493dc1f9..e7be4e84 100644
+--- a/operator/cmd/cnp_event.go
++++ b/operator/cmd/cnp_event.go
+@@ -50,7 +50,7 @@ func enableCNPWatcher(clientset k8sClient.Clientset) error {
+ 	cnpStore := cache.NewStore(cache.DeletionHandlingMetaNamespaceKeyFunc)
+ 
+ 	if enableCNPStatusUpdates {
+-		cnpStatusMgr = k8s.NewCNPStatusEventHandler(cnpStore, cnpStatusUpdateInterval)
++		cnpStatusMgr = k8s.NewCNPStatusEventHandler(clientset, cnpStore, cnpStatusUpdateInterval)
+ 		cnpSharedStore, err := store.JoinSharedStore(store.Configuration{
+ 			Prefix: k8s.CNPStatusesPath,
+ 			KeyCreator: func() store.Key {
+@@ -81,7 +81,7 @@ func enableCNPWatcher(clientset k8sClient.Clientset) error {
+ 					// See https://github.com/cilium/cilium/blob/27fee207f5422c95479422162e9ea0d2f2b6c770/pkg/policy/api/ingress.go#L112-L134
+ 					cnpCpy := cnp.DeepCopy()
+ 
+-					groups.AddDerivativeCNPIfNeeded(cnpCpy.CiliumNetworkPolicy)
++					groups.AddDerivativeCNPIfNeeded(clientset, cnpCpy.CiliumNetworkPolicy)
+ 					if enableCNPStatusUpdates {
+ 						cnpStatusMgr.StartStatusHandler(cnpCpy)
+ 					}
+@@ -101,7 +101,7 @@ func enableCNPWatcher(clientset k8sClient.Clientset) error {
+ 						newCNPCpy := newCNP.DeepCopy()
+ 						oldCNPCpy := oldCNP.DeepCopy()
+ 
+-						groups.UpdateDerivativeCNPIfNeeded(newCNPCpy.CiliumNetworkPolicy, oldCNPCpy.CiliumNetworkPolicy)
++						groups.UpdateDerivativeCNPIfNeeded(clientset, newCNPCpy.CiliumNetworkPolicy, oldCNPCpy.CiliumNetworkPolicy)
+ 					}
+ 				}
+ 			},
+@@ -127,7 +127,7 @@ func enableCNPWatcher(clientset k8sClient.Clientset) error {
+ 	controller.NewManager().UpdateController("cnp-to-groups",
+ 		controller.ControllerParams{
+ 			DoFunc: func(ctx context.Context) error {
+-				groups.UpdateCNPInformation()
++				groups.UpdateCNPInformation(clientset)
+ 				return nil
+ 			},
+ 			RunInterval: 5 * time.Minute,
+diff --git a/operator/cmd/root.go b/operator/cmd/root.go
+index 4a8239d4..198471e3 100644
+--- a/operator/cmd/root.go
++++ b/operator/cmd/root.go
+@@ -231,6 +231,7 @@ func runOperator(lc *LeaderLifecycle, clientset k8sClient.Clientset, shutdowner
+ 
+ 	allSystemsGo := make(chan struct{})
+ 	IsLeader.Store(false)
++	k8sEnabled := operatorOption.Config.EnableK8s && clientset.IsEnabled()
+ 
+ 	// Configure API server for the operator.
+ 	srv, err := api.NewServer(shutdownSignal, allSystemsGo, getAPIServerAddr()...)
+@@ -239,9 +240,7 @@ func runOperator(lc *LeaderLifecycle, clientset k8sClient.Clientset, shutdowner
+ 	}
+ 	close(allSystemsGo)
+ 
+-	if operatorOption.Config.EnableK8s {
+-		k8s.SetClients(clientset, clientset.Slim(), clientset, clientset)
+-
++	if k8sEnabled {
+ 		go func() {
+ 			err = srv.WithStatusCheckFunc(func() error { return checkStatus(clientset) }).StartServer()
+ 			if err != nil {
+@@ -258,7 +257,7 @@ func runOperator(lc *LeaderLifecycle, clientset k8sClient.Clientset, shutdowner
+ 		pprof.Enable(operatorOption.Config.PProfPort)
+ 	}
+ 
+-	if k8s.IsEnabled() {
++	if k8sEnabled {
+ 		capabilities := k8sversion.Capabilities()
+ 		if !capabilities.MinimalVersionMet {
+ 			log.Fatalf("Minimal kubernetes version not met: %s < %s",
+@@ -268,8 +267,8 @@ func runOperator(lc *LeaderLifecycle, clientset k8sClient.Clientset, shutdowner
+ 
+ 	// Register the CRDs after validating that we are running on a supported
+ 	// version of K8s.
+-	if k8s.IsEnabled() && !operatorOption.Config.SkipCRDCreation {
+-		if err := client.RegisterCRDs(); err != nil {
++	if k8sEnabled && !operatorOption.Config.SkipCRDCreation {
++		if err := client.RegisterCRDs(clientset); err != nil {
+ 			log.WithError(err).Fatal("Unable to register CRDs")
+ 		}
+ 	} else {
+@@ -393,9 +392,10 @@ func (legacy *legacyOnLeader) onStop(_ hive.HookContext) error {
+ // in HA mode.
+ func (legacy *legacyOnLeader) onStart(_ hive.HookContext) error {
+ 	IsLeader.Store(true)
++	k8sEnabled := legacy.clientset.IsEnabled()
+ 
+ 	// If CiliumEndpointSlice feature is enabled, create CESController, start CEP watcher and run controller.
+-	if k8s.IsEnabled() && !option.Config.DisableCiliumEndpointCRD && option.Config.EnableCiliumEndpointSlice {
++	if k8sEnabled && !option.Config.DisableCiliumEndpointCRD && option.Config.EnableCiliumEndpointSlice {
+ 		log.Info("Create and run CES controller, start CEP watcher")
+ 		// Initialize  the CES controller
+ 		cesController := ces.NewCESController(legacy.clientset,
+@@ -415,7 +415,7 @@ func (legacy *legacyOnLeader) onStart(_ hive.HookContext) error {
+ 	// etcd from reaching out kube-dns in EKS.
+ 	// If this logic is modified, make sure the operator's clusterrole logic for
+ 	// pods/delete is also up-to-date.
+-	if !k8s.IsEnabled() {
++	if !k8sEnabled {
+ 		log.Infof("KubeDNS unmanaged pods controller disabled due to kubernetes support not enabled")
+ 	} else if option.Config.DisableCiliumEndpointCRD {
+ 		log.Infof("KubeDNS unmanaged pods controller disabled as %q option is set to 'disabled' in Cilium ConfigMap", option.DisableCiliumEndpointCRDName)
+@@ -462,12 +462,12 @@ func (legacy *legacyOnLeader) onStart(_ hive.HookContext) error {
+ 			"address": option.Config.KVStoreOpt[fmt.Sprintf("%s.address", option.Config.KVStore)],
+ 		})
+ 
+-		if k8s.IsEnabled() && operatorOption.Config.SyncK8sServices {
++		if k8sEnabled && operatorOption.Config.SyncK8sServices {
+ 			operatorWatchers.StartSynchronizingServices(legacy.clientset, true, option.Config)
+ 			// If K8s is enabled we can do the service translation automagically by
+ 			// looking at services from k8s and retrieve the service IP from that.
+ 			// This makes cilium to not depend on kube dns to interact with etcd
+-			if k8s.IsEnabled() {
++			if k8sEnabled {
+ 				svcURL, isETCDOperator := kvstore.IsEtcdOperator(option.Config.KVStore, option.Config.KVStoreOpt, option.Config.K8sNamespace)
+ 				if isETCDOperator {
+ 					scopedLog.Infof("%s running with service synchronization: automatic etcd service translation enabled", binaryName)
+@@ -527,14 +527,14 @@ func (legacy *legacyOnLeader) onStart(_ hive.HookContext) error {
+ 			scopedLog.WithError(err).Fatal("Unable to setup kvstore")
+ 		}
+ 
+-		if k8s.IsEnabled() && operatorOption.Config.SyncK8sNodes {
++		if k8sEnabled && operatorOption.Config.SyncK8sNodes {
+ 			withKVStore = true
+ 		}
+ 
+ 		startKvstoreWatchdog()
+ 	}
+ 
+-	if k8s.IsEnabled() &&
++	if k8sEnabled &&
+ 		(operatorOption.Config.RemoveCiliumNodeTaints || operatorOption.Config.SetCiliumIsUpCondition) {
+ 		stopCh := make(chan struct{})
+ 
+@@ -548,7 +548,7 @@ func (legacy *legacyOnLeader) onStart(_ hive.HookContext) error {
+ 		operatorWatchers.HandleNodeTolerationAndTaints(legacy.clientset, stopCh)
+ 	}
+ 
+-	if k8s.IsEnabled() {
++	if k8sEnabled {
+ 		if err := startSynchronizingCiliumNodes(legacy.ctx, legacy.clientset, nodeManager, withKVStore); err != nil {
+ 			log.WithError(err).Fatal("Unable to setup node watcher")
+ 		}
+@@ -588,7 +588,7 @@ func (legacy *legacyOnLeader) onStart(_ hive.HookContext) error {
+ 
+ 	switch option.Config.IdentityAllocationMode {
+ 	case option.IdentityAllocationModeCRD:
+-		if !k8s.IsEnabled() {
++		if !k8sEnabled {
+ 			log.Fatal("CRD Identity allocation mode requires k8s to be configured.")
+ 		}
+ 
+@@ -603,7 +603,7 @@ func (legacy *legacyOnLeader) onStart(_ hive.HookContext) error {
+ 		}
+ 	}
+ 
+-	if k8s.IsEnabled() {
++	if k8sEnabled {
+ 		if operatorOption.Config.EndpointGCInterval != 0 {
+ 			enableCiliumEndpointSyncGC(legacy.clientset, false)
+ 		} else {
+diff --git a/operator/watchers/bgp.go b/operator/watchers/bgp.go
+index 5415790f..3490a4cf 100644
+--- a/operator/watchers/bgp.go
++++ b/operator/watchers/bgp.go
+@@ -25,7 +25,7 @@ func StartLBIPAllocator(ctx context.Context, cfg ServiceSyncConfiguration, clien
+ 	swgEps := lock.NewStoppableWaitGroup()
+ 	InitServiceWatcher(cfg, clientset, swgSvcs, swgEps, optsModifier)
+ 
+-	m, err := manager.New(ctx, serviceIndexer)
++	m, err := manager.New(ctx, clientset, serviceIndexer)
+ 	if err != nil {
+ 		log.WithError(err).Fatal("Error creating BGP manager")
+ 	}
+diff --git a/pkg/aws/eni/migration.go b/pkg/aws/eni/migration.go
+index 3eee3744..1a177b3d 100644
+--- a/pkg/aws/eni/migration.go
++++ b/pkg/aws/eni/migration.go
+@@ -10,8 +10,8 @@ import (
+ 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+ 
+ 	enitypes "github.com/cilium/cilium/pkg/aws/eni/types"
+-	"github.com/cilium/cilium/pkg/k8s"
+ 	v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
++	k8sClient "github.com/cilium/cilium/pkg/k8s/client"
+ 	nodetypes "github.com/cilium/cilium/pkg/node/types"
+ )
+ 
+@@ -84,7 +84,7 @@ func (in *InterfaceDB) GetMACByInterfaceNumber(ifaceNum int) (string, error) {
+ }
+ 
+ func (in *InterfaceDB) fetchFromK8s(name string) (*v2.CiliumNode, error) {
+-	return k8s.CiliumClient().CiliumV2().CiliumNodes().Get(
++	return in.clientset.CiliumV2().CiliumNodes().Get(
+ 		context.TODO(),
+ 		nodetypes.GetName(),
+ 		v1.GetOptions{},
+@@ -95,5 +95,10 @@ func (in *InterfaceDB) fetchFromK8s(name string) (*v2.CiliumNode, error) {
+ // MAC addrs from interface numbers and vice versa, needed for the ENI
+ // migration. See https://github.com/cilium/cilium/issues/14336.
+ type InterfaceDB struct {
+-	cache enitypes.ENIStatus
++	clientset k8sClient.Clientset
++	cache     enitypes.ENIStatus
++}
++
++func NewInterfaceDB(clientset k8sClient.Clientset) *InterfaceDB {
++	return &InterfaceDB{clientset: clientset}
+ }
+diff --git a/pkg/bgp/k8s/client.go b/pkg/bgp/k8s/client.go
+index 72d9de6f..f09e2ac4 100644
+--- a/pkg/bgp/k8s/client.go
++++ b/pkg/bgp/k8s/client.go
+@@ -12,30 +12,28 @@ import (
+ 	v1 "k8s.io/api/core/v1"
+ 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+ 
+-	"github.com/cilium/cilium/pkg/k8s"
++	k8sClient "github.com/cilium/cilium/pkg/k8s/client"
+ )
+ 
+-func New(l *logrus.Logger) *Client {
++func New(clientset k8sClient.Clientset, l *logrus.Logger) *Client {
+ 	return &Client{
+-		K8sClient: k8s.Client(),
+-
+-		log: l,
++		clientset: clientset,
++		log:       l,
+ 	}
+ }
+ 
+ // Client wraps the K8s client so that it can conform to the client from
+ // MetalLB.
+ type Client struct {
+-	*k8s.K8sClient
+-
+-	log *logrus.Logger
++	clientset k8sClient.Clientset
++	log       *logrus.Logger
+ }
+ 
+ func (c *Client) Update(svc *v1.Service) (*v1.Service, error) {
+-	return c.CoreV1().Services(svc.GetNamespace()).Update(context.TODO(), svc, metav1.UpdateOptions{})
++	return c.clientset.CoreV1().Services(svc.GetNamespace()).Update(context.TODO(), svc, metav1.UpdateOptions{})
+ }
+ func (c *Client) UpdateStatus(svc *v1.Service) error {
+-	_, err := c.CoreV1().Services(svc.GetNamespace()).UpdateStatus(context.TODO(), svc, metav1.UpdateOptions{})
++	_, err := c.clientset.CoreV1().Services(svc.GetNamespace()).UpdateStatus(context.TODO(), svc, metav1.UpdateOptions{})
+ 	return err
+ }
+ 
+diff --git a/pkg/bgp/manager/manager.go b/pkg/bgp/manager/manager.go
+index bc306ad4..ba8b3b99 100644
+--- a/pkg/bgp/manager/manager.go
++++ b/pkg/bgp/manager/manager.go
+@@ -11,14 +11,16 @@ import (
+ 
+ 	"k8s.io/client-go/tools/cache"
+ 	"k8s.io/client-go/util/workqueue"
++
++	k8sClient "github.com/cilium/cilium/pkg/k8s/client"
+ )
+ 
+ // New creates a new BGP MetalLB manager. It contains the MetalLB service IP
+ // controller, which contains the allocator.
+ //
+ // New requires access to a cache.Store associated with the service watcher.
+-func New(ctx context.Context, indexer cache.Store) (*Manager, error) {
+-	ctrl, err := newMetalLBController(ctx)
++func New(ctx context.Context, clientset k8sClient.Clientset, indexer cache.Store) (*Manager, error) {
++	ctrl, err := newMetalLBController(ctx, clientset)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+diff --git a/pkg/bgp/manager/metallb.go b/pkg/bgp/manager/metallb.go
+index b98c9d9b..0aef46b2 100644
+--- a/pkg/bgp/manager/metallb.go
++++ b/pkg/bgp/manager/metallb.go
+@@ -19,6 +19,7 @@ import (
+ 	bgpconfig "github.com/cilium/cilium/pkg/bgp/config"
+ 	bgpk8s "github.com/cilium/cilium/pkg/bgp/k8s"
+ 	bgplog "github.com/cilium/cilium/pkg/bgp/log"
++	k8sClient "github.com/cilium/cilium/pkg/k8s/client"
+ 	"github.com/cilium/cilium/pkg/option"
+ )
+ 
+@@ -39,10 +40,10 @@ type metalLBController struct {
+ 	logger *bgplog.Logger
+ }
+ 
+-func newMetalLBController(ctx context.Context) (Controller, error) {
++func newMetalLBController(ctx context.Context, clientset k8sClient.Clientset) (Controller, error) {
+ 	logger := &bgplog.Logger{Entry: log}
+ 	c := &metallbctl.Controller{
+-		Client: bgpk8s.New(logger.Logger),
++		Client: bgpk8s.New(clientset, logger.Logger),
+ 		IPs:    metallballoc.New(),
+ 	}
+ 
+diff --git a/pkg/bgp/speaker/metallb.go b/pkg/bgp/speaker/metallb.go
+index 8d7dd3c9..a1601320 100644
+--- a/pkg/bgp/speaker/metallb.go
++++ b/pkg/bgp/speaker/metallb.go
+@@ -15,6 +15,7 @@ import (
+ 	bgpconfig "github.com/cilium/cilium/pkg/bgp/config"
+ 	bgpk8s "github.com/cilium/cilium/pkg/bgp/k8s"
+ 	bgplog "github.com/cilium/cilium/pkg/bgp/log"
++	k8sClient "github.com/cilium/cilium/pkg/k8s/client"
+ 	nodetypes "github.com/cilium/cilium/pkg/node/types"
+ 	"github.com/cilium/cilium/pkg/option"
+ )
+@@ -58,9 +59,9 @@ type metalLBSpeaker struct {
+ //
+ // The MetalLB speaker will use the value of nodetypes.GetName() as
+ // its node identity.
+-func newMetalLBSpeaker(ctx context.Context) (Speaker, error) {
++func newMetalLBSpeaker(ctx context.Context, clientset k8sClient.Clientset) (Speaker, error) {
+ 	logger := &bgplog.Logger{Entry: log}
+-	client := bgpk8s.New(logger.Logger)
++	client := bgpk8s.New(clientset, logger.Logger)
+ 
+ 	c, err := metallbspr.NewController(metallbspr.ControllerConfig{
+ 		MyNode:        nodetypes.GetName(),
+diff --git a/pkg/bgp/speaker/speaker.go b/pkg/bgp/speaker/speaker.go
+index 4e19e230..4d17c9ee 100644
+--- a/pkg/bgp/speaker/speaker.go
++++ b/pkg/bgp/speaker/speaker.go
+@@ -19,6 +19,7 @@ import (
+ 	"github.com/cilium/cilium/pkg/bgp/fence"
+ 	"github.com/cilium/cilium/pkg/k8s"
+ 	ciliumv2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
++	k8sClient "github.com/cilium/cilium/pkg/k8s/client"
+ 	slim_corev1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/core/v1"
+ 	slim_discover_v1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/discovery/v1"
+ 	slim_discover_v1beta1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/discovery/v1beta1"
+@@ -36,8 +37,8 @@ var _ subscriber.Node = (*MetalLBSpeaker)(nil)
+ 
+ // New creates a new MetalLB BGP speaker controller. Options are provided to
+ // specify what the Speaker should announce via BGP.
+-func New(ctx context.Context, opts Opts) (*MetalLBSpeaker, error) {
+-	ctrl, err := newMetalLBSpeaker(ctx)
++func New(ctx context.Context, clientset k8sClient.Clientset, opts Opts) (*MetalLBSpeaker, error) {
++	ctrl, err := newMetalLBSpeaker(ctx, clientset)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+diff --git a/pkg/bgpv1/agent/controller.go b/pkg/bgpv1/agent/controller.go
+index c9ae08e1..41098951 100644
+--- a/pkg/bgpv1/agent/controller.go
++++ b/pkg/bgpv1/agent/controller.go
+@@ -17,8 +17,8 @@ import (
+ 
+ 	"github.com/cilium/cilium/pkg/bgpv1"
+ 	ipamOption "github.com/cilium/cilium/pkg/ipam/option"
+-	"github.com/cilium/cilium/pkg/k8s"
+ 	v2alpha1api "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2alpha1"
++	k8sClient "github.com/cilium/cilium/pkg/k8s/client"
+ 	"github.com/cilium/cilium/pkg/k8s/client/informers/externalversions"
+ 	"github.com/cilium/cilium/pkg/k8s/client/listers/cilium.io/v2alpha1"
+ 	slimlabels "github.com/cilium/cilium/pkg/k8s/slim/k8s/apis/labels"
+@@ -176,14 +176,14 @@ func configureForClusterPoolIPAM(factory externalversions.SharedInformerFactory,
+ // NOTE: only GoBGP currently implemented.
+ //
+ // Cancel the provided CTX to stop the Controller.
+-func NewController(ctx context.Context, rtMgr BGPRouterManager, opts ...ControllerOpt) (*Controller, error) {
++func NewController(ctx context.Context, clientset k8sClient.Clientset, rtMgr BGPRouterManager, opts ...ControllerOpt) (*Controller, error) {
+ 	var (
+ 		// signaler used to trigger Controller reconciliation.
+ 		sig = NewSignaler()
+ 		// stop channel used to cancel informers.
+ 		stop = make(chan struct{}, 1)
+ 		// we'll use to list and watch BGPPeeringPolicies
+-		factory = externalversions.NewSharedInformerFactory(k8s.CiliumClient(), 0)
++		factory = externalversions.NewSharedInformerFactory(clientset, 0)
+ 		// an abtraction over obtaining Node Spec information depending on
+ 		// IPAM configuration.
+ 		nodeSpecer nodeSpecer
+@@ -201,7 +201,7 @@ func NewController(ctx context.Context, rtMgr BGPRouterManager, opts ...Controll
+ 		selfTweakList := externalversions.WithTweakListOptions(func(lo *metav1.ListOptions) {
+ 			lo.FieldSelector = "metadata.name=" + nodetypes.GetName()
+ 		})
+-		factory := externalversions.NewSharedInformerFactoryWithOptions(k8s.CiliumClient(), 0, selfTweakList)
++		factory := externalversions.NewSharedInformerFactoryWithOptions(clientset, 0, selfTweakList)
+ 		nodeSpecer, err = configureForClusterPoolIPAM(factory, sig, stop)
+ 		if err != nil {
+ 			return nil, fmt.Errorf("failed to configure listers and informers for ClusterPool IPAM: %w", err)
+@@ -211,7 +211,7 @@ func NewController(ctx context.Context, rtMgr BGPRouterManager, opts ...Controll
+ 		selfTweakList := informers.WithTweakListOptions(func(lo *metav1.ListOptions) {
+ 			lo.FieldSelector = "metadata.name=" + nodetypes.GetName()
+ 		})
+-		k8sfactory := informers.NewSharedInformerFactoryWithOptions(k8s.Client(), 0, selfTweakList)
++		k8sfactory := informers.NewSharedInformerFactoryWithOptions(clientset, 0, selfTweakList)
+ 		nodeSpecer, err = configureForK8sIPAM(k8sfactory, sig, stop)
+ 		if err != nil {
+ 			return nil, fmt.Errorf("failed to configure listers and informers for Kubernetes IPAM: %w", err)
+diff --git a/pkg/crypto/certificatemanager/certificate_manager.go b/pkg/crypto/certificatemanager/certificate_manager.go
+index 6003109e..bb72da52 100644
+--- a/pkg/crypto/certificatemanager/certificate_manager.go
++++ b/pkg/crypto/certificatemanager/certificate_manager.go
+@@ -9,6 +9,9 @@ import (
+ 	"os"
+ 	"path/filepath"
+ 
++	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
++	"k8s.io/client-go/kubernetes"
++
+ 	"github.com/cilium/cilium/pkg/policy/api"
+ )
+ 
+@@ -18,22 +21,18 @@ const (
+ 	privateDefaultName = "tls.key"
+ )
+ 
+-type k8sClient interface {
+-	GetSecrets(ctx context.Context, ns, name string) (map[string][]byte, error)
+-}
+-
+-// Manager will manage the way certificates are retrieved based in the given
+-// k8sClient and rootPath.
++// Manager will manage the way certificates are retrieved based on the given
++// Kubernetes client and rootPath.
+ type Manager struct {
+ 	rootPath  string
+-	k8sClient k8sClient
++	clientset kubernetes.Interface
+ }
+ 
+ // NewManager returns a new manager.
+-func NewManager(certsRootPath string, k8sClient k8sClient) *Manager {
++func NewManager(certsRootPath string, clientset kubernetes.Interface) *Manager {
+ 	return &Manager{
+ 		rootPath:  certsRootPath,
+-		k8sClient: k8sClient,
++		clientset: clientset,
+ 	}
+ }
+ 
+@@ -74,8 +73,14 @@ func (m *Manager) GetSecrets(ctx context.Context, secret *api.Secret, ns string)
+ 		}
+ 		return nsName, secrets, nil
+ 	}
+-	secrets, err := m.k8sClient.GetSecrets(ctx, ns, secret.Name)
+-	return nsName, secrets, err
++	if m.clientset == nil {
++		return nsName, nil, fmt.Errorf("kubernetes client is not configured, cannot access k8s secrets")
++	}
++	result, err := m.clientset.CoreV1().Secrets(ns).Get(ctx, secret.Name, metav1.GetOptions{})
++	if err != nil {
++		return nsName, nil, err
++	}
++	return nsName, result.Data, nil
+ }
+ 
+ // GetTLSContext returns a new ca, public and private certificates found based
+diff --git a/pkg/datapath/linux/devices.go b/pkg/datapath/linux/devices.go
+index 43db17d6..ceceaf2f 100644
+--- a/pkg/datapath/linux/devices.go
++++ b/pkg/datapath/linux/devices.go
+@@ -19,7 +19,7 @@ import (
+ 	"golang.org/x/sys/unix"
+ 
+ 	"github.com/cilium/cilium/pkg/datapath/linux/probes"
+-	"github.com/cilium/cilium/pkg/k8s"
++	k8sClient "github.com/cilium/cilium/pkg/k8s/client"
+ 	"github.com/cilium/cilium/pkg/lock"
+ 	"github.com/cilium/cilium/pkg/logging/logfields"
+ 	"github.com/cilium/cilium/pkg/mac"
+@@ -45,26 +45,28 @@ var (
+ 
+ type DeviceManager struct {
+ 	lock.Mutex
+-	devices map[string]struct{}
+-	filter  deviceFilter
+-	handle  *netlink.Handle
+-	netns   netns.NsHandle
++	devices   map[string]struct{}
++	filter    deviceFilter
++	handle    *netlink.Handle
++	netns     netns.NsHandle
++	clientset k8sClient.Clientset
+ }
+ 
+-func NewDeviceManager() (*DeviceManager, error) {
+-	return NewDeviceManagerAt(netns.None())
++func NewDeviceManager(clientset k8sClient.Clientset) (*DeviceManager, error) {
++	return NewDeviceManagerAt(netns.None(), clientset)
+ }
+ 
+-func NewDeviceManagerAt(netns netns.NsHandle) (*DeviceManager, error) {
++func NewDeviceManagerAt(netns netns.NsHandle, clientset k8sClient.Clientset) (*DeviceManager, error) {
+ 	handle, err := netlink.NewHandleAt(netns)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+ 	return &DeviceManager{
+-		devices: make(map[string]struct{}),
+-		filter:  deviceFilter(option.Config.GetDevices()),
+-		handle:  handle,
+-		netns:   netns,
++		devices:   make(map[string]struct{}),
++		filter:    deviceFilter(option.Config.GetDevices()),
++		handle:    handle,
++		netns:     netns,
++		clientset: clientset,
+ 	}, err
+ }
+ 
+@@ -133,7 +135,7 @@ func (dm *DeviceManager) Detect() ([]string, error) {
+ 		if err == nil {
+ 			k8sNodeDev = k8sNodeLink.Attrs().Name
+ 			dm.devices[k8sNodeDev] = struct{}{}
+-		} else if k8s.IsEnabled() {
++		} else if dm.clientset != nil && dm.clientset.IsEnabled() {
+ 			return nil, fmt.Errorf("k8s is enabled, but still failed to find node IP: %w", err)
+ 		}
+ 
+diff --git a/pkg/datapath/linux/devices_test.go b/pkg/datapath/linux/devices_test.go
+index c23dac50..83c16e38 100644
+--- a/pkg/datapath/linux/devices_test.go
++++ b/pkg/datapath/linux/devices_test.go
+@@ -72,7 +72,7 @@ func (s *DevicesSuite) TearDownTest(c *C) {
+ 
+ func (s *DevicesSuite) TestDetect(c *C) {
+ 	s.withFreshNetNS(c, func() {
+-		dm, err := NewDeviceManager()
++		dm, err := NewDeviceManager(nil)
+ 		c.Assert(err, IsNil)
+ 
+ 		option.Config.SetDevices([]string{})
+@@ -196,7 +196,7 @@ func (s *DevicesSuite) TestExpandDevices(c *C) {
+ 		c.Assert(createDummy("other1", "192.168.3.4/24", false), IsNil)
+ 		c.Assert(createDummy("unmatched", "192.168.4.5/24", false), IsNil)
+ 
+-		dm, err := NewDeviceManager()
++		dm, err := NewDeviceManager(nil)
+ 		c.Assert(err, IsNil)
+ 
+ 		// 1. Check expansion works and non-matching prefixes are ignored
+@@ -216,7 +216,7 @@ func (s *DevicesSuite) TestExpandDirectRoutingDevice(c *C) {
+ 		c.Assert(createDummy("dummy1", "192.168.1.2/24", false), IsNil)
+ 		c.Assert(createDummy("unmatched", "192.168.4.5/24", false), IsNil)
+ 
+-		dm, err := NewDeviceManager()
++		dm, err := NewDeviceManager(nil)
+ 		c.Assert(err, IsNil)
+ 
+ 		// 1. Check expansion works and non-matching prefixes are ignored
+@@ -238,7 +238,7 @@ func (s *DevicesSuite) TestListenForNewDevices(c *C) {
+ 		timeout := time.After(time.Second)
+ 
+ 		option.Config.SetDevices([]string{})
+-		dm, err := NewDeviceManager()
++		dm, err := NewDeviceManager(nil)
+ 		c.Assert(err, IsNil)
+ 
+ 		devicesChan, err := dm.Listen(ctx)
+@@ -297,7 +297,7 @@ func (s *DevicesSuite) TestListenForNewDevicesFiltered(c *C) {
+ 		timeout := time.After(time.Second)
+ 
+ 		option.Config.SetDevices([]string{"dummy+"})
+-		dm, err := NewDeviceManager()
++		dm, err := NewDeviceManager(nil)
+ 		c.Assert(err, IsNil)
+ 
+ 		devicesChan, err := dm.Listen(ctx)
+@@ -332,7 +332,7 @@ func (s *DevicesSuite) TestListenAfterDelete(c *C) {
+ 		timeout := time.After(time.Second)
+ 
+ 		option.Config.SetDevices([]string{"dummy+"})
+-		dm, err := NewDeviceManager()
++		dm, err := NewDeviceManager(nil)
+ 		c.Assert(err, IsNil)
+ 
+ 		c.Assert(createDummy("dummy0", "192.168.1.2/24", false), IsNil)
+diff --git a/pkg/ipam/allocator_test.go b/pkg/ipam/allocator_test.go
+index 2a120b14..a739aa4f 100644
+--- a/pkg/ipam/allocator_test.go
++++ b/pkg/ipam/allocator_test.go
+@@ -29,7 +29,7 @@ var mtuMock = mtu.NewConfiguration(0, false, false, false, 1500, nil)
+ 
+ func (s *IPAMSuite) TestAllocatedIPDump(c *C) {
+ 	fakeAddressing := fake.NewNodeAddressing()
+-	ipam := NewIPAM(fakeAddressing, &testConfiguration{}, &ownerMock{}, &ownerMock{}, &mtuMock)
++	ipam := NewIPAM(fakeAddressing, &testConfiguration{}, &ownerMock{}, &ownerMock{}, &mtuMock, nil)
+ 
+ 	allocv4, allocv6, status := ipam.Dump()
+ 	c.Assert(status, Not(Equals), "")
+@@ -48,7 +48,7 @@ func (s *IPAMSuite) TestExpirationTimer(c *C) {
+ 	timeout := 50 * time.Millisecond
+ 
+ 	fakeAddressing := fake.NewNodeAddressing()
+-	ipam := NewIPAM(fakeAddressing, &testConfiguration{}, &ownerMock{}, &ownerMock{}, &mtuMock)
++	ipam := NewIPAM(fakeAddressing, &testConfiguration{}, &ownerMock{}, &ownerMock{}, &mtuMock, nil)
+ 
+ 	err := ipam.AllocateIP(ip, "foo")
+ 	c.Assert(err, IsNil)
+@@ -114,7 +114,7 @@ func (s *IPAMSuite) TestAllocateNextWithExpiration(c *C) {
+ 	timeout := 50 * time.Millisecond
+ 
+ 	fakeAddressing := fake.NewNodeAddressing()
+-	ipam := NewIPAM(fakeAddressing, &testConfiguration{}, &ownerMock{}, &ownerMock{}, &mtuMock)
++	ipam := NewIPAM(fakeAddressing, &testConfiguration{}, &ownerMock{}, &ownerMock{}, &mtuMock, nil)
+ 
+ 	ipv4, ipv6, err := ipam.AllocateNextWithExpiration("", "foo", timeout)
+ 	c.Assert(err, IsNil)
+diff --git a/pkg/ipam/clusterpool.go b/pkg/ipam/clusterpool.go
+index 610eab8c..86062972 100644
+--- a/pkg/ipam/clusterpool.go
++++ b/pkg/ipam/clusterpool.go
+@@ -26,6 +26,7 @@ import (
+ 	"github.com/cilium/cilium/pkg/ipam/types"
+ 	"github.com/cilium/cilium/pkg/k8s"
+ 	ciliumv2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
++	k8sClient "github.com/cilium/cilium/pkg/k8s/client"
+ 	"github.com/cilium/cilium/pkg/k8s/watchers/subscriber"
+ 	"github.com/cilium/cilium/pkg/lock"
+ 	"github.com/cilium/cilium/pkg/logging/logfields"
+@@ -679,9 +680,9 @@ type clusterPoolAllocator struct {
+ 	pool *podCIDRPool
+ }
+ 
+-func newClusterPoolAllocator(family Family, conf Configuration, owner Owner, k8sEventReg K8sEventRegister) Allocator {
++func newClusterPoolAllocator(family Family, conf Configuration, owner Owner, k8sEventReg K8sEventRegister, clientset k8sClient.Clientset) Allocator {
+ 	crdWatcherInit.Do(func() {
+-		nodeClient := k8s.CiliumClient().CiliumV2().CiliumNodes()
++		nodeClient := clientset.CiliumV2().CiliumNodes()
+ 		sharedCRDWatcher = newCRDWatcher(conf, k8sEventReg, owner, nodeClient)
+ 	})
+ 
+diff --git a/pkg/ipam/crd.go b/pkg/ipam/crd.go
+index 6eb60018..4169230b 100644
+--- a/pkg/ipam/crd.go
++++ b/pkg/ipam/crd.go
+@@ -26,8 +26,8 @@ import (
+ 	"github.com/cilium/cilium/pkg/ip"
+ 	ipamOption "github.com/cilium/cilium/pkg/ipam/option"
+ 	ipamTypes "github.com/cilium/cilium/pkg/ipam/types"
+-	"github.com/cilium/cilium/pkg/k8s"
+ 	ciliumv2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
++	k8sClient "github.com/cilium/cilium/pkg/k8s/client"
+ 	"github.com/cilium/cilium/pkg/k8s/informer"
+ 	"github.com/cilium/cilium/pkg/k8s/utils"
+ 	"github.com/cilium/cilium/pkg/lock"
+@@ -76,11 +76,12 @@ type nodeStore struct {
+ 
+ 	conf      Configuration
+ 	mtuConfig MtuConfiguration
++	clientset k8sClient.Clientset
+ }
+ 
+ // newNodeStore initializes a new store which reflects the CiliumNode custom
+ // resource of the specified node name
+-func newNodeStore(nodeName string, conf Configuration, owner Owner, k8sEventReg K8sEventRegister, mtuConfig MtuConfiguration) *nodeStore {
++func newNodeStore(nodeName string, conf Configuration, owner Owner, k8sEventReg K8sEventRegister, mtuConfig MtuConfiguration, clientset k8sClient.Clientset) *nodeStore {
+ 	log.WithField(fieldName, nodeName).Info("Subscribed to CiliumNode custom resource")
+ 
+ 	store := &nodeStore{
+@@ -88,9 +89,10 @@ func newNodeStore(nodeName string, conf Configuration, owner Owner, k8sEventReg
+ 		allocationPoolSize: map[Family]int{},
+ 		conf:               conf,
+ 		mtuConfig:          mtuConfig,
++		clientset:          clientset,
+ 	}
+ 	store.restoreFinished = make(chan struct{})
+-	ciliumClient := k8s.CiliumClient()
++	ciliumClient := clientset
+ 
+ 	t, err := trigger.NewTrigger(trigger.Parameters{
+ 		Name:        "crd-allocator-node-refresher",
+@@ -497,8 +499,7 @@ func (n *nodeStore) refreshNode() error {
+ 	}
+ 
+ 	var err error
+-	ciliumClient := k8s.CiliumClient()
+-	_, err = ciliumClient.CiliumV2().CiliumNodes().UpdateStatus(context.TODO(), node, metav1.UpdateOptions{})
++	_, err = n.clientset.CiliumV2().CiliumNodes().UpdateStatus(context.TODO(), node, metav1.UpdateOptions{})
+ 
+ 	return err
+ }
+@@ -627,9 +628,9 @@ type crdAllocator struct {
+ }
+ 
+ // newCRDAllocator creates a new CRD-backed IP allocator
+-func newCRDAllocator(family Family, c Configuration, owner Owner, k8sEventReg K8sEventRegister, mtuConfig MtuConfiguration) Allocator {
++func newCRDAllocator(family Family, c Configuration, owner Owner, k8sEventReg K8sEventRegister, mtuConfig MtuConfiguration, clientset k8sClient.Clientset) Allocator {
+ 	initNodeStore.Do(func() {
+-		sharedNodeStore = newNodeStore(nodeTypes.GetName(), c, owner, k8sEventReg, mtuConfig)
++		sharedNodeStore = newNodeStore(nodeTypes.GetName(), c, owner, k8sEventReg, mtuConfig, clientset)
+ 	})
+ 
+ 	allocator := &crdAllocator{
+diff --git a/pkg/ipam/crd_test.go b/pkg/ipam/crd_test.go
+index 74949904..6ca24cd5 100644
+--- a/pkg/ipam/crd_test.go
++++ b/pkg/ipam/crd_test.go
+@@ -101,7 +101,7 @@ func (s *IPAMSuite) TestMarkForReleaseNoAllocate(c *C) {
+ 		sharedNodeStore = newFakeNodeStore(conf, c)
+ 		sharedNodeStore.ownNode = cn
+ 	})
+-	ipam := NewIPAM(fakeAddressing, conf, &ownerMock{}, &ownerMock{}, &mtuMock)
++	ipam := NewIPAM(fakeAddressing, conf, &ownerMock{}, &ownerMock{}, &mtuMock, nil)
+ 	sharedNodeStore.updateLocalNodeResource(cn)
+ 
+ 	// Allocate the first 3 IPs
+diff --git a/pkg/ipam/ipam.go b/pkg/ipam/ipam.go
+index a2a5be34..e7795954 100644
+--- a/pkg/ipam/ipam.go
++++ b/pkg/ipam/ipam.go
+@@ -11,6 +11,7 @@ import (
+ 	"github.com/cilium/cilium/pkg/cidr"
+ 	"github.com/cilium/cilium/pkg/datapath/types"
+ 	ipamOption "github.com/cilium/cilium/pkg/ipam/option"
++	k8sClient "github.com/cilium/cilium/pkg/k8s/client"
+ 	"github.com/cilium/cilium/pkg/k8s/watchers/subscriber"
+ 	"github.com/cilium/cilium/pkg/logging"
+ 	"github.com/cilium/cilium/pkg/logging/logfields"
+@@ -102,7 +103,7 @@ type MtuConfiguration interface {
+ }
+ 
+ // NewIPAM returns a new IP address manager
+-func NewIPAM(nodeAddressing types.NodeAddressing, c Configuration, owner Owner, k8sEventReg K8sEventRegister, mtuConfig MtuConfiguration) *IPAM {
++func NewIPAM(nodeAddressing types.NodeAddressing, c Configuration, owner Owner, k8sEventReg K8sEventRegister, mtuConfig MtuConfiguration, clientset k8sClient.Clientset) *IPAM {
+ 	ipam := &IPAM{
+ 		nodeAddressing:   nodeAddressing,
+ 		config:           c,
+@@ -131,19 +132,19 @@ func NewIPAM(nodeAddressing types.NodeAddressing, c Configuration, owner Owner,
+ 		log.Info("Initializing ClusterPool v2 IPAM")
+ 
+ 		if c.IPv6Enabled() {
+-			ipam.IPv6Allocator = newClusterPoolAllocator(IPv6, c, owner, k8sEventReg)
++			ipam.IPv6Allocator = newClusterPoolAllocator(IPv6, c, owner, k8sEventReg, clientset)
+ 		}
+ 		if c.IPv4Enabled() {
+-			ipam.IPv4Allocator = newClusterPoolAllocator(IPv4, c, owner, k8sEventReg)
++			ipam.IPv4Allocator = newClusterPoolAllocator(IPv4, c, owner, k8sEventReg, clientset)
+ 		}
+ 	case ipamOption.IPAMCRD, ipamOption.IPAMENI, ipamOption.IPAMAzure, ipamOption.IPAMAlibabaCloud:
+ 		log.Info("Initializing CRD-based IPAM")
+ 		if c.IPv6Enabled() {
+-			ipam.IPv6Allocator = newCRDAllocator(IPv6, c, owner, k8sEventReg, mtuConfig)
++			ipam.IPv6Allocator = newCRDAllocator(IPv6, c, owner, k8sEventReg, mtuConfig, clientset)
+ 		}
+ 
+ 		if c.IPv4Enabled() {
+-			ipam.IPv4Allocator = newCRDAllocator(IPv4, c, owner, k8sEventReg, mtuConfig)
++			ipam.IPv4Allocator = newCRDAllocator(IPv4, c, owner, k8sEventReg, mtuConfig, clientset)
+ 		}
+ 	case ipamOption.IPAMDelegatedPlugin:
+ 		log.Info("Initializing no-op IPAM since we're using a CNI delegated plugin")
+diff --git a/pkg/ipam/ipam_test.go b/pkg/ipam/ipam_test.go
+index 066a1b13..c2aa536b 100644
+--- a/pkg/ipam/ipam_test.go
++++ b/pkg/ipam/ipam_test.go
+@@ -45,7 +45,7 @@ func (t *testConfiguration) GetIPv4NativeRoutingCIDR() *cidr.CIDR     { return n
+ 
+ func (s *IPAMSuite) TestLock(c *C) {
+ 	fakeAddressing := fake.NewNodeAddressing()
+-	ipam := NewIPAM(fakeAddressing, &testConfiguration{}, &ownerMock{}, &ownerMock{}, &mtuMock)
++	ipam := NewIPAM(fakeAddressing, &testConfiguration{}, &ownerMock{}, &ownerMock{}, &mtuMock, nil)
+ 
+ 	// Since the IPs we have allocated to the endpoints might or might not
+ 	// be in the allocrange specified in cilium, we need to specify them
+@@ -72,7 +72,7 @@ func (s *IPAMSuite) TestLock(c *C) {
+ 
+ func (s *IPAMSuite) TestBlackList(c *C) {
+ 	fakeAddressing := fake.NewNodeAddressing()
+-	ipam := NewIPAM(fakeAddressing, &testConfiguration{}, &ownerMock{}, &ownerMock{}, &mtuMock)
++	ipam := NewIPAM(fakeAddressing, &testConfiguration{}, &ownerMock{}, &ownerMock{}, &mtuMock, nil)
+ 
+ 	ipv4 := fakeIPv4AllocCIDRIP(fakeAddressing)
+ 	ipv4 = ipv4.Next()
+@@ -98,7 +98,7 @@ func (s *IPAMSuite) TestDeriveFamily(c *C) {
+ 
+ func (s *IPAMSuite) TestOwnerRelease(c *C) {
+ 	fakeAddressing := fake.NewNodeAddressing()
+-	ipam := NewIPAM(fakeAddressing, &testConfiguration{}, &ownerMock{}, &ownerMock{}, &mtuMock)
++	ipam := NewIPAM(fakeAddressing, &testConfiguration{}, &ownerMock{}, &ownerMock{}, &mtuMock, nil)
+ 
+ 	ipv4 := fakeIPv4AllocCIDRIP(fakeAddressing)
+ 	ipv4 = ipv4.Next()
+diff --git a/pkg/k8s/annotate.go b/pkg/k8s/annotate.go
+index 5b72c9d9..ea2dfcfd 100644
+--- a/pkg/k8s/annotate.go
++++ b/pkg/k8s/annotate.go
+@@ -11,8 +11,6 @@ import (
+ 	"strconv"
+ 
+ 	"github.com/sirupsen/logrus"
+-	core_v1 "k8s.io/api/core/v1"
+-	apiextclientset "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
+ 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+ 	"k8s.io/apimachinery/pkg/types"
+ 	"k8s.io/client-go/kubernetes"
+@@ -20,34 +18,9 @@ import (
+ 	"github.com/cilium/cilium/pkg/annotation"
+ 	"github.com/cilium/cilium/pkg/cidr"
+ 	"github.com/cilium/cilium/pkg/controller"
+-	cilium_v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
+-	clientset "github.com/cilium/cilium/pkg/k8s/client/clientset/versioned"
+-	slimclientset "github.com/cilium/cilium/pkg/k8s/slim/k8s/client/clientset/versioned"
+ 	"github.com/cilium/cilium/pkg/logging/logfields"
+ )
+ 
+-// K8sClient is a wrapper around kubernetes.Interface.
+-type K8sClient struct {
+-	// kubernetes.Interface is the object through which interactions with
+-	// Kubernetes are performed.
+-	kubernetes.Interface
+-}
+-
+-// K8sSlimClient is a wrapper around slimclientset.Clientset.
+-type K8sSlimClient struct {
+-	slimclientset.Interface
+-}
+-
+-// K8sCiliumClient is a wrapper around clientset.Interface.
+-type K8sCiliumClient struct {
+-	clientset.Interface
+-}
+-
+-// K8sAPIExtensionsClient is a wrapper around clientset.Interface.
+-type K8sAPIExtensionsClient struct {
+-	apiextclientset.Interface
+-}
+-
+ func updateNodeAnnotation(c kubernetes.Interface, nodeName string, encryptKey uint8, v4CIDR, v6CIDR *cidr.CIDR, v4HealthIP, v6HealthIP, v4IngressIP, v6IngressIP, v4CiliumHostIP, v6CiliumHostIP net.IP) error {
+ 	annotations := map[string]string{}
+ 
+@@ -102,7 +75,7 @@ func updateNodeAnnotation(c kubernetes.Interface, nodeName string, encryptKey ui
+ // AnnotateNode writes v4 and v6 CIDRs and health IPs in the given k8s node name.
+ // In case of failure while updating the node, this function while spawn a go
+ // routine to retry the node update indefinitely.
+-func (k8sCli K8sClient) AnnotateNode(nodeName string, encryptKey uint8, v4CIDR, v6CIDR *cidr.CIDR, v4HealthIP, v6HealthIP, v4IngressIP, v6IngressIP, v4CiliumHostIP, v6CiliumHostIP net.IP) error {
++func AnnotateNode(clientset kubernetes.Interface, nodeName string, encryptKey uint8, v4CIDR, v6CIDR *cidr.CIDR, v4HealthIP, v6HealthIP, v4IngressIP, v6IngressIP, v4CiliumHostIP, v6CiliumHostIP net.IP) error {
+ 	scopedLog := log.WithFields(logrus.Fields{
+ 		logfields.NodeName:       nodeName,
+ 		logfields.V4Prefix:       v4CIDR,
+@@ -120,7 +93,7 @@ func (k8sCli K8sClient) AnnotateNode(nodeName string, encryptKey uint8, v4CIDR,
+ 	controller.NewManager().UpdateController("update-k8s-node-annotations",
+ 		controller.ControllerParams{
+ 			DoFunc: func(_ context.Context) error {
+-				err := updateNodeAnnotation(k8sCli, nodeName, encryptKey, v4CIDR, v6CIDR, v4HealthIP, v6HealthIP, v4IngressIP, v6IngressIP, v4CiliumHostIP, v6CiliumHostIP)
++				err := updateNodeAnnotation(clientset, nodeName, encryptKey, v4CIDR, v6CIDR, v4HealthIP, v6HealthIP, v4IngressIP, v6IngressIP, v4CiliumHostIP, v6CiliumHostIP)
+ 				if err != nil {
+ 					scopedLog.WithFields(logrus.Fields{}).WithError(err).Warn("Unable to patch node resource with annotation")
+ 				}
+@@ -130,34 +103,3 @@ func (k8sCli K8sClient) AnnotateNode(nodeName string, encryptKey uint8, v4CIDR,
+ 
+ 	return nil
+ }
+-
+-// GetSecrets returns the secrets found in the given namespace and name.
+-func (k8sCli K8sClient) GetSecrets(ctx context.Context, ns, name string) (map[string][]byte, error) {
+-	if k8sCli.Interface == nil {
+-		return nil, fmt.Errorf("GetSecrets: No k8s, cannot access k8s secrets")
+-	}
+-
+-	result, err := k8sCli.CoreV1().Secrets(ns).Get(ctx, name, v1.GetOptions{})
+-	if err != nil {
+-		return nil, err
+-	}
+-	return result.Data, nil
+-}
+-
+-// GetK8sNode returns the node with the given nodeName.
+-func (k8sCli K8sClient) GetK8sNode(ctx context.Context, nodeName string) (*core_v1.Node, error) {
+-	if k8sCli.Interface == nil {
+-		return nil, fmt.Errorf("GetK8sNode: No k8s, cannot access k8s nodes")
+-	}
+-
+-	return k8sCli.CoreV1().Nodes().Get(ctx, nodeName, v1.GetOptions{})
+-}
+-
+-// GetCiliumNode returns the CiliumNode with the given nodeName.
+-func (k8sCiliumCli K8sCiliumClient) GetCiliumNode(ctx context.Context, nodeName string) (*cilium_v2.CiliumNode, error) {
+-	if k8sCiliumCli.Interface == nil {
+-		return nil, fmt.Errorf("GetK8sNode: No k8s, cannot access k8s nodes")
+-	}
+-
+-	return k8sCiliumCli.CiliumV2().CiliumNodes().Get(ctx, nodeName, v1.GetOptions{})
+-}
+diff --git a/pkg/k8s/apis/cilium.io/client/register.go b/pkg/k8s/apis/cilium.io/client/register.go
+index 87594197..c598df3e 100644
+--- a/pkg/k8s/apis/cilium.io/client/register.go
++++ b/pkg/k8s/apis/cilium.io/client/register.go
+@@ -20,9 +20,9 @@ import (
+ 	"k8s.io/apimachinery/pkg/util/wait"
+ 	"sigs.k8s.io/yaml"
+ 
+-	"github.com/cilium/cilium/pkg/k8s"
+ 	k8sconstv2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
+ 	k8sconstv2alpha1 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2alpha1"
++	k8sClient "github.com/cilium/cilium/pkg/k8s/client"
+ 	"github.com/cilium/cilium/pkg/k8s/synced"
+ 	k8sversion "github.com/cilium/cilium/pkg/k8s/version"
+ 	"github.com/cilium/cilium/pkg/logging"
+@@ -623,8 +623,8 @@ func (p defaultPoll) Poll(
+ }
+ 
+ // RegisterCRDs registers all CRDs with the K8s apiserver.
+-func RegisterCRDs() error {
+-	if err := CreateCustomResourceDefinitions(k8s.APIExtClient()); err != nil {
++func RegisterCRDs(clientset k8sClient.Clientset) error {
++	if err := CreateCustomResourceDefinitions(clientset); err != nil {
+ 		return fmt.Errorf("Unable to create custom resource definition: %s", err)
+ 	}
+ 
+diff --git a/pkg/k8s/ccnpstatus.go b/pkg/k8s/ccnpstatus.go
+index 7d0f6459..f8206512 100644
+--- a/pkg/k8s/ccnpstatus.go
++++ b/pkg/k8s/ccnpstatus.go
+@@ -9,6 +9,7 @@ import (
+ 
+ 	"k8s.io/client-go/tools/cache"
+ 
++	clientset "github.com/cilium/cilium/pkg/k8s/client/clientset/versioned"
+ 	"github.com/cilium/cilium/pkg/kvstore"
+ )
+ 
+@@ -27,8 +28,8 @@ type CCNPStatusEventHandler struct {
+ 
+ // NewCCNPStatusEventHandler returns a new CCNPStatusEventHandler.
+ // which is more or less a wrapper around the CNPStatusEventHandler itself.
+-func NewCCNPStatusEventHandler(k8sStore cache.Store, updateInterval time.Duration) *CCNPStatusEventHandler {
++func NewCCNPStatusEventHandler(ciliumClient clientset.Interface, k8sStore cache.Store, updateInterval time.Duration) *CCNPStatusEventHandler {
+ 	return &CCNPStatusEventHandler{
+-		CNPStatusEventHandler: NewCNPStatusEventHandler(k8sStore, updateInterval),
++		CNPStatusEventHandler: NewCNPStatusEventHandler(ciliumClient, k8sStore, updateInterval),
+ 	}
+ }
+diff --git a/pkg/k8s/client.go b/pkg/k8s/client.go
+deleted file mode 100644
+index 87af20c7..00000000
+--- a/pkg/k8s/client.go
++++ /dev/null
+@@ -1,63 +0,0 @@
+-// SPDX-License-Identifier: Apache-2.0
+-// Copyright Authors of Cilium
+-
+-// Package k8s abstracts all Kubernetes specific behaviour
+-package k8s
+-
+-import (
+-	apiextclientset "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
+-	"k8s.io/client-go/kubernetes"
+-
+-	clientset "github.com/cilium/cilium/pkg/k8s/client/clientset/versioned"
+-	slimclientset "github.com/cilium/cilium/pkg/k8s/slim/k8s/client/clientset/versioned"
+-)
+-
+-var (
+-	// k8sCLI is the default client.
+-	k8sCLI = &K8sClient{}
+-
+-	// k8sWatcherCLI is the client dedicated k8s structure watchers.
+-	k8sWatcherCLI = &K8sSlimClient{}
+-
+-	// k8sCiliumCLI is the default Cilium client.
+-	k8sCiliumCLI = &K8sCiliumClient{}
+-
+-	// k8sCiliumCLI is the dedicated apiextensions client.
+-	k8sAPIExtCLI = &K8sAPIExtensionsClient{}
+-
+-	// k8sAPIExtWatcherCLI is the client dedicated k8s structure watchers.
+-	k8sAPIExtWatcherCLI = &K8sAPIExtensionsClient{}
+-)
+-
+-func SetClients(normal kubernetes.Interface, slim slimclientset.Interface, cilium clientset.Interface, apiext apiextclientset.Interface) {
+-	k8sCLI.Interface = normal
+-	k8sWatcherCLI.Interface = slim
+-	k8sCiliumCLI.Interface = cilium
+-	k8sAPIExtCLI = &K8sAPIExtensionsClient{apiext}
+-	k8sAPIExtWatcherCLI = &K8sAPIExtensionsClient{apiext}
+-}
+-
+-// Client returns the default Kubernetes client.
+-func Client() *K8sClient {
+-	return k8sCLI
+-}
+-
+-// WatcherClient returns the client dedicated to K8s watchers.
+-func WatcherClient() *K8sSlimClient {
+-	return k8sWatcherCLI
+-}
+-
+-// CiliumClient returns the default Cilium Kubernetes client.
+-func CiliumClient() *K8sCiliumClient {
+-	return k8sCiliumCLI
+-}
+-
+-// APIExtClient returns the default API Extension client.
+-func APIExtClient() *K8sAPIExtensionsClient {
+-	return k8sAPIExtCLI
+-}
+-
+-// WatcherAPIExtClient returns the client dedicated to API Extensions watchers.
+-func WatcherAPIExtClient() *K8sAPIExtensionsClient {
+-	return k8sAPIExtWatcherCLI
+-}
+diff --git a/pkg/k8s/cnpstatus.go b/pkg/k8s/cnpstatus.go
+index 2c525ae6..83625c82 100644
+--- a/pkg/k8s/cnpstatus.go
++++ b/pkg/k8s/cnpstatus.go
+@@ -15,6 +15,7 @@ import (
+ 
+ 	"github.com/cilium/cilium/pkg/inctimer"
+ 	cilium_v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
++	clientset "github.com/cilium/cilium/pkg/k8s/client/clientset/versioned"
+ 	"github.com/cilium/cilium/pkg/k8s/types"
+ 	"github.com/cilium/cilium/pkg/kvstore"
+ 	"github.com/cilium/cilium/pkg/kvstore/store"
+@@ -32,6 +33,7 @@ type CNPStatusEventHandler struct {
+ 	cnpStore       *store.SharedStore
+ 	k8sStore       cache.Store
+ 	updateInterval time.Duration
++	ciliumClient   clientset.Interface
+ }
+ 
+ // NodeStatusUpdater handles the lifecycle around sending CNP NodeStatus updates.
+@@ -87,11 +89,12 @@ func (c *cnpEventMap) delete(cnpKey string) {
+ }
+ 
+ // NewCNPStatusEventHandler returns a new CNPStatusEventHandler.
+-func NewCNPStatusEventHandler(k8sStore cache.Store, updateInterval time.Duration) *CNPStatusEventHandler {
++func NewCNPStatusEventHandler(ciliumClient clientset.Interface, k8sStore cache.Store, updateInterval time.Duration) *CNPStatusEventHandler {
+ 	return &CNPStatusEventHandler{
+ 		eventMap:       newCNPEventMap(),
+ 		k8sStore:       k8sStore,
+ 		updateInterval: updateInterval,
++		ciliumClient:   ciliumClient,
+ 	}
+ }
+ 
+@@ -264,7 +267,7 @@ func (c *CNPStatusEventHandler) runStatusHandler(cnpKey string, cnp *types.SlimC
+ 		// Now that we have collected all events for
+ 		// the given CNP, update the status for all nodes
+ 		// which have sent us updates.
+-		if err := updateStatusesByCapabilities(CiliumClient(), namespace, name, nodeStatusMap); err != nil {
++		if err := updateStatusesByCapabilities(c.ciliumClient, namespace, name, nodeStatusMap); err != nil {
+ 			scopedLog.WithError(err).Error("error updating status for CNP")
+ 		}
+ 	}
+diff --git a/pkg/k8s/config.go b/pkg/k8s/config.go
+deleted file mode 100644
+index 09edd404..00000000
+--- a/pkg/k8s/config.go
++++ /dev/null
+@@ -1,12 +0,0 @@
+-// SPDX-License-Identifier: Apache-2.0
+-// Copyright Authors of Cilium
+-
+-// Package k8s abstracts all Kubernetes specific behaviour
+-package k8s
+-
+-// IsEnabled checks if Cilium is being used in tandem with Kubernetes.
+-func IsEnabled() bool {
+-	// If clients have been set, then consider k8s enabled regardless
+-	// of config.
+-	return k8sCLI.Interface != nil
+-}
+diff --git a/pkg/k8s/init_test.go b/pkg/k8s/init_test.go
+index 317eedb1..1e6e1bdd 100644
+--- a/pkg/k8s/init_test.go
++++ b/pkg/k8s/init_test.go
+@@ -42,7 +42,6 @@ func (s *K8sSuite) TestUseNodeCIDR(c *C) {
+ 	// and we need to wait for the response of the channel.
+ 	patchChan := make(chan bool, 2)
+ 	fakeK8sClient := &fake.Clientset{}
+-	k8sCLI.Interface = fakeK8sClient
+ 	fakeK8sClient.AddReactor("patch", "nodes",
+ 		func(action testing.Action) (bool, runtime.Object, error) {
+ 			n1copy := node1.DeepCopy()
+@@ -66,7 +65,7 @@ func (s *K8sSuite) TestUseNodeCIDR(c *C) {
+ 	c.Assert(node.GetIPv4AllocRange().String(), Equals, "10.2.0.0/16")
+ 	// IPv6 Node range is not checked because it shouldn't be changed.
+ 
+-	err := k8sCLI.AnnotateNode("node1",
++	err := AnnotateNode(fakeK8sClient, "node1",
+ 		0,
+ 		node.GetIPv4AllocRange(),
+ 		node.GetIPv6AllocRange(),
+@@ -101,7 +100,6 @@ func (s *K8sSuite) TestUseNodeCIDR(c *C) {
+ 	failAttempts := 0
+ 
+ 	fakeK8sClient = &fake.Clientset{}
+-	k8sCLI.Interface = fakeK8sClient
+ 	fakeK8sClient.AddReactor("patch", "nodes",
+ 		func(action testing.Action) (bool, runtime.Object, error) {
+ 			// first call will be a patch for annotations
+@@ -133,7 +131,7 @@ func (s *K8sSuite) TestUseNodeCIDR(c *C) {
+ 	c.Assert(node.GetIPv4AllocRange().String(), Equals, "10.254.0.0/16")
+ 	c.Assert(node.GetIPv6AllocRange().String(), Equals, "aaaa:aaaa:aaaa:aaaa:beef:beef::/96")
+ 
+-	err = k8sCLI.AnnotateNode("node2",
++	err = AnnotateNode(fakeK8sClient, "node2",
+ 		0,
+ 		node.GetIPv4AllocRange(),
+ 		node.GetIPv6AllocRange(),
+diff --git a/pkg/k8s/synced/crd.go b/pkg/k8s/synced/crd.go
+index d8122ee0..e0d8d822 100644
+--- a/pkg/k8s/synced/crd.go
++++ b/pkg/k8s/synced/crd.go
+@@ -21,6 +21,7 @@ import (
+ 	"github.com/cilium/cilium/pkg/k8s"
+ 	v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
+ 	v2alpha1 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2alpha1"
++	k8sClient "github.com/cilium/cilium/pkg/k8s/client"
+ 	"github.com/cilium/cilium/pkg/k8s/informer"
+ 	slim_metav1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/apis/meta/v1"
+ 	k8sversion "github.com/cilium/cilium/pkg/k8s/version"
+@@ -86,11 +87,11 @@ func AllCRDResourceNames() []string {
+ // installed inside the K8s cluster. These CRDs are added by the
+ // Cilium Operator. This function will block until it finds all the
+ // CRDs or if a timeout occurs.
+-func SyncCRDs(ctx context.Context, crdNames []string, rs *Resources, ag *APIGroups) error {
++func SyncCRDs(ctx context.Context, clientset k8sClient.Clientset, crdNames []string, rs *Resources, ag *APIGroups) error {
+ 	crds := newCRDState(crdNames)
+ 
+ 	listerWatcher := newListWatchFromClient(
+-		newCRDGetter(k8s.WatcherAPIExtClient()),
++		newCRDGetter(clientset),
+ 		fields.Everything(),
+ 	)
+ 	_, crdController := informer.NewInformer(
+diff --git a/pkg/k8s/watchers/cilium_clusterwide_envoy_config.go b/pkg/k8s/watchers/cilium_clusterwide_envoy_config.go
+index 76dc9efe..1ee9985b 100644
+--- a/pkg/k8s/watchers/cilium_clusterwide_envoy_config.go
++++ b/pkg/k8s/watchers/cilium_clusterwide_envoy_config.go
+@@ -21,7 +21,8 @@ import (
+ 	"k8s.io/client-go/tools/cache"
+ )
+ 
+-func (k *K8sWatcher) ciliumClusterwideEnvoyConfigInit(ciliumNPClient *k8s.K8sCiliumClient) {
++func (k *K8sWatcher) ciliumClusterwideEnvoyConfigInit() {
++	ciliumNPClient := k.clientset
+ 	ccecStore := cache.NewStore(cache.DeletionHandlingMetaNamespaceKeyFunc)
+ 	apiGroup := k8sAPIGroupCiliumClusterwideEnvoyConfigV2
+ 	ccecController := informer.NewInformerWithStore(
+diff --git a/pkg/k8s/watchers/cilium_clusterwide_network_policy.go b/pkg/k8s/watchers/cilium_clusterwide_network_policy.go
+index 4ae06c0f..2810d961 100644
+--- a/pkg/k8s/watchers/cilium_clusterwide_network_policy.go
++++ b/pkg/k8s/watchers/cilium_clusterwide_network_policy.go
+@@ -13,7 +13,8 @@ import (
+ 	"github.com/cilium/cilium/pkg/k8s/watchers/resources"
+ )
+ 
+-func (k *K8sWatcher) ciliumClusterwideNetworkPoliciesInit(ciliumNPClient *k8s.K8sCiliumClient) {
++func (k *K8sWatcher) ciliumClusterwideNetworkPoliciesInit() {
++	ciliumNPClient := k.clientset
+ 	ccnpStore := cache.NewStore(cache.DeletionHandlingMetaNamespaceKeyFunc)
+ 	apiGroup := k8sAPIGroupCiliumClusterwideNetworkPolicyV2
+ 	ciliumV2ClusterwidePolicyController := informer.NewInformerWithStore(
+diff --git a/pkg/k8s/watchers/cilium_egress_gateway_policy.go b/pkg/k8s/watchers/cilium_egress_gateway_policy.go
+index 956fb4c4..c5a7f6a9 100644
+--- a/pkg/k8s/watchers/cilium_egress_gateway_policy.go
++++ b/pkg/k8s/watchers/cilium_egress_gateway_policy.go
+@@ -18,7 +18,8 @@ import (
+ 	"github.com/cilium/cilium/pkg/logging/logfields"
+ )
+ 
+-func (k *K8sWatcher) ciliumEgressGatewayPolicyInit(ciliumNPClient *k8s.K8sCiliumClient) {
++func (k *K8sWatcher) ciliumEgressGatewayPolicyInit() {
++	ciliumNPClient := k.clientset
+ 	apiGroup := k8sAPIGroupCiliumEgressGatewayPolicyV2
+ 	_, egpController := informer.NewInformer(
+ 		cache.NewListWatchFromClient(ciliumNPClient.CiliumV2().RESTClient(),
+@@ -95,7 +96,8 @@ func (k *K8sWatcher) deleteCiliumEgressGatewayPolicy(cegp *cilium_v2.CiliumEgres
+ 	k.egressGatewayManager.OnDeleteEgressPolicy(epID)
+ }
+ 
+-func (k *K8sWatcher) ciliumEgressNATPolicyInit(ciliumNPClient *k8s.K8sCiliumClient) {
++func (k *K8sWatcher) ciliumEgressNATPolicyInit() {
++	ciliumNPClient := k.clientset
+ 	apiGroup := k8sAPIGroupCiliumEgressNATPolicyV2
+ 	_, egpController := informer.NewInformer(
+ 		cache.NewListWatchFromClient(ciliumNPClient.CiliumV2alpha1().RESTClient(),
+diff --git a/pkg/k8s/watchers/cilium_endpoint.go b/pkg/k8s/watchers/cilium_endpoint.go
+index 08999006..c23f828f 100644
+--- a/pkg/k8s/watchers/cilium_endpoint.go
++++ b/pkg/k8s/watchers/cilium_endpoint.go
+@@ -25,7 +25,8 @@ import (
+ 	"github.com/cilium/cilium/pkg/u8proto"
+ )
+ 
+-func (k *K8sWatcher) ciliumEndpointsInit(ciliumNPClient *k8s.K8sCiliumClient, asyncControllers *sync.WaitGroup) {
++func (k *K8sWatcher) ciliumEndpointsInit(asyncControllers *sync.WaitGroup) {
++	ciliumNPClient := k.clientset
+ 	// CiliumEndpoint objects are used for ipcache discovery until the
+ 	// key-value store is connected
+ 	var once sync.Once
+diff --git a/pkg/k8s/watchers/cilium_endpoint_slice.go b/pkg/k8s/watchers/cilium_endpoint_slice.go
+index c4ac2931..7b5c6231 100644
+--- a/pkg/k8s/watchers/cilium_endpoint_slice.go
++++ b/pkg/k8s/watchers/cilium_endpoint_slice.go
+@@ -22,9 +22,10 @@ var (
+ 	cepMap = newCEPToCESMap()
+ )
+ 
+-func (k *K8sWatcher) ciliumEndpointSliceInit(client *k8s.K8sCiliumClient, asyncControllers *sync.WaitGroup) {
++func (k *K8sWatcher) ciliumEndpointSliceInit(asyncControllers *sync.WaitGroup) {
+ 	log.Info("Initializing CES controller")
+ 	var once sync.Once
++	client := k.clientset
+ 
+ 	// Register for all ces updates.
+ 	cesNotify.Register(newCESSubscriber(k))
+diff --git a/pkg/k8s/watchers/cilium_envoy_config.go b/pkg/k8s/watchers/cilium_envoy_config.go
+index 0291f1df..df6664a8 100644
+--- a/pkg/k8s/watchers/cilium_envoy_config.go
++++ b/pkg/k8s/watchers/cilium_envoy_config.go
+@@ -23,7 +23,8 @@ import (
+ 	"k8s.io/client-go/tools/cache"
+ )
+ 
+-func (k *K8sWatcher) ciliumEnvoyConfigInit(ciliumNPClient *k8s.K8sCiliumClient) {
++func (k *K8sWatcher) ciliumEnvoyConfigInit() {
++	ciliumNPClient := k.clientset
+ 	cecStore := cache.NewStore(cache.DeletionHandlingMetaNamespaceKeyFunc)
+ 	apiGroup := k8sAPIGroupCiliumEnvoyConfigV2
+ 	cecController := informer.NewInformerWithStore(
+diff --git a/pkg/k8s/watchers/cilium_local_redirect_policy.go b/pkg/k8s/watchers/cilium_local_redirect_policy.go
+index 02dbf06c..0aed53fe 100644
+--- a/pkg/k8s/watchers/cilium_local_redirect_policy.go
++++ b/pkg/k8s/watchers/cilium_local_redirect_policy.go
+@@ -17,7 +17,8 @@ import (
+ 	"github.com/cilium/cilium/pkg/redirectpolicy"
+ )
+ 
+-func (k *K8sWatcher) ciliumLocalRedirectPolicyInit(ciliumLRPClient *k8s.K8sCiliumClient) {
++func (k *K8sWatcher) ciliumLocalRedirectPolicyInit() {
++	ciliumLRPClient := k.clientset
+ 	apiGroup := k8sAPIGroupCiliumLocalRedirectPolicyV2
+ 	_, lrpController := informer.NewInformer(
+ 		cache.NewListWatchFromClient(ciliumLRPClient.CiliumV2().RESTClient(),
+diff --git a/pkg/k8s/watchers/cilium_network_policy.go b/pkg/k8s/watchers/cilium_network_policy.go
+index a110cef9..d211ec86 100644
+--- a/pkg/k8s/watchers/cilium_network_policy.go
++++ b/pkg/k8s/watchers/cilium_network_policy.go
+@@ -80,7 +80,8 @@ func (r *ruleImportMetadataCache) get(cnp *types.SlimCNP) (policyImportMetadata,
+ 	return policyImportMeta, ok
+ }
+ 
+-func (k *K8sWatcher) ciliumNetworkPoliciesInit(ciliumNPClient *k8s.K8sCiliumClient) {
++func (k *K8sWatcher) ciliumNetworkPoliciesInit() {
++	ciliumNPClient := k.clientset
+ 	cnpStore := cache.NewStore(cache.DeletionHandlingMetaNamespaceKeyFunc)
+ 
+ 	apiGroup := k8sAPIGroupCiliumNetworkPolicyV2
+diff --git a/pkg/k8s/watchers/cilium_node.go b/pkg/k8s/watchers/cilium_node.go
+index 223d5a8f..6f801969 100644
+--- a/pkg/k8s/watchers/cilium_node.go
++++ b/pkg/k8s/watchers/cilium_node.go
+@@ -32,7 +32,7 @@ func (k *K8sWatcher) RegisterCiliumNodeSubscriber(s subscriber.CiliumNode) {
+ 	k.CiliumNodeChain.Register(s)
+ }
+ 
+-func (k *K8sWatcher) ciliumNodeInit(ciliumNPClient *k8s.K8sCiliumClient, asyncControllers *sync.WaitGroup) {
++func (k *K8sWatcher) ciliumNodeInit(asyncControllers *sync.WaitGroup) {
+ 	// CiliumNode objects are used for node discovery until the key-value
+ 	// store is connected
+ 	var once sync.Once
+@@ -40,7 +40,7 @@ func (k *K8sWatcher) ciliumNodeInit(ciliumNPClient *k8s.K8sCiliumClient, asyncCo
+ 	for {
+ 		swgNodes := lock.NewStoppableWaitGroup()
+ 		ciliumNodeStore, ciliumNodeInformer := informer.NewInformer(
+-			utils.ListerWatcherFromTyped[*cilium_v2.CiliumNodeList](ciliumNPClient.CiliumV2().CiliumNodes()),
++			utils.ListerWatcherFromTyped[*cilium_v2.CiliumNodeList](k.clientset.CiliumV2().CiliumNodes()),
+ 			&cilium_v2.CiliumNode{},
+ 			0,
+ 			cache.ResourceEventHandlerFuncs{
+@@ -169,7 +169,7 @@ func (k *K8sWatcher) GetCiliumNode(ctx context.Context, nodeName string) (*ciliu
+ 
+ 	if getFromAPIServer {
+ 		// fallback to using the kube-apiserver
+-		return k8s.CiliumClient().CiliumV2().CiliumNodes().Get(ctx, nodeName, v1.GetOptions{})
++		return k.clientset.CiliumV2().CiliumNodes().Get(ctx, nodeName, v1.GetOptions{})
+ 	}
+ 
+ 	if err != nil {
+diff --git a/pkg/k8s/watchers/endpoint_slice.go b/pkg/k8s/watchers/endpoint_slice.go
+index 72642cdd..127ce1a2 100644
+--- a/pkg/k8s/watchers/endpoint_slice.go
++++ b/pkg/k8s/watchers/endpoint_slice.go
+@@ -233,8 +233,9 @@ func (k *K8sWatcher) addKubeAPIServerServiceEPSliceV1Beta1(eps *slim_discover_v1
+ 
+ // initEndpointsOrSlices initializes either the "Endpoints" or "EndpointSlice"
+ // resources for Kubernetes service backends.
+-func (k *K8sWatcher) initEndpointsOrSlices(slimClient slimclientset.Interface, serviceOptModifier func(*v1meta.ListOptions)) {
++func (k *K8sWatcher) initEndpointsOrSlices(serviceOptModifier func(*v1meta.ListOptions)) {
+ 	swgEps := lock.NewStoppableWaitGroup()
++	slimClient := k.clientset.Slim()
+ 	switch {
+ 	case k8s.SupportsEndpointSlice():
+ 		// We don't add the service option modifier here, as endpointslices do not
+diff --git a/pkg/k8s/watchers/endpointsynchronizer.go b/pkg/k8s/watchers/endpointsynchronizer.go
+index 42ba9ff5..cb597b54 100644
+--- a/pkg/k8s/watchers/endpointsynchronizer.go
++++ b/pkg/k8s/watchers/endpointsynchronizer.go
+@@ -20,6 +20,7 @@ import (
+ 	"github.com/cilium/cilium/pkg/endpoint"
+ 	"github.com/cilium/cilium/pkg/k8s"
+ 	cilium_v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
++	k8sClient "github.com/cilium/cilium/pkg/k8s/client"
+ 	v2 "github.com/cilium/cilium/pkg/k8s/client/clientset/versioned/typed/cilium.io/v2"
+ 	k8sversion "github.com/cilium/cilium/pkg/k8s/version"
+ 	pkgLabels "github.com/cilium/cilium/pkg/labels"
+@@ -35,7 +36,13 @@ const (
+ 
+ // EndpointSynchronizer currently is an empty type, which wraps around syncing
+ // of CiliumEndpoint resources.
+-type EndpointSynchronizer struct{}
++type EndpointSynchronizer struct {
++	clientset k8sClient.Clientset
++}
++
++func NewEndpointSynchronizer(clientset k8sClient.Clientset) *EndpointSynchronizer {
++	return &EndpointSynchronizer{clientset: clientset}
++}
+ 
+ // RunK8sCiliumEndpointSync starts a controller that synchronizes the endpoint
+ // to the corresponding k8s CiliumEndpoint CRD. It is expected that each CEP
+@@ -54,12 +61,12 @@ func (epSync *EndpointSynchronizer) RunK8sCiliumEndpointSync(e *endpoint.Endpoin
+ 		return
+ 	}
+ 
+-	if !k8s.IsEnabled() {
++	if !epSync.clientset.IsEnabled() {
+ 		scopedLog.Debug("Not starting controller because k8s is disabled")
+ 		return
+ 	}
+ 
+-	ciliumClient := k8s.CiliumClient().CiliumV2()
++	ciliumClient := epSync.clientset.CiliumV2()
+ 
+ 	// The health endpoint doesn't really exist in k8s and updates to it caused
+ 	// arbitrary errors. Disable the controller for these endpoints.
+@@ -317,11 +324,11 @@ func (epSync *EndpointSynchronizer) DeleteK8sCiliumEndpointSync(e *endpoint.Endp
+ 
+ 	scopedLog := e.Logger(subsysEndpointSync).WithField("controller", controllerName)
+ 
+-	if !k8s.IsEnabled() {
++	if !epSync.clientset.IsEnabled() {
+ 		scopedLog.Debug("Not starting controller because k8s is disabled")
+ 		return
+ 	}
+-	ciliumClient := k8s.CiliumClient().CiliumV2()
++	ciliumClient := epSync.clientset.CiliumV2()
+ 
+ 	// The health endpoint doesn't really exist in k8s and updates to it caused
+ 	// arbitrary errors. Disable the controller for these endpoints.
+diff --git a/pkg/k8s/watchers/namespace.go b/pkg/k8s/watchers/namespace.go
+index 263178d6..f0934c50 100644
+--- a/pkg/k8s/watchers/namespace.go
++++ b/pkg/k8s/watchers/namespace.go
+@@ -16,7 +16,6 @@ import (
+ 	"github.com/cilium/cilium/pkg/k8s/informer"
+ 	slim_corev1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/core/v1"
+ 	slim_metav1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/apis/meta/v1"
+-	slimclientset "github.com/cilium/cilium/pkg/k8s/slim/k8s/client/clientset/versioned"
+ 	"github.com/cilium/cilium/pkg/k8s/utils"
+ 	"github.com/cilium/cilium/pkg/k8s/watchers/resources"
+ 	"github.com/cilium/cilium/pkg/labels"
+@@ -25,8 +24,9 @@ import (
+ 	"github.com/cilium/cilium/pkg/policy"
+ )
+ 
+-func (k *K8sWatcher) namespacesInit(slimClient slimclientset.Interface, asyncControllers *sync.WaitGroup) {
++func (k *K8sWatcher) namespacesInit(asyncControllers *sync.WaitGroup) {
+ 	apiGroup := k8sAPIGroupNamespaceV1Core
++	slimClient := k.clientset.Slim()
+ 	namespaceStore, namespaceController := informer.NewInformer(
+ 		utils.ListerWatcherFromTyped[*slim_corev1.NamespaceList](slimClient.CoreV1().Namespaces()),
+ 		&slim_corev1.Namespace{},
+diff --git a/pkg/k8s/watchers/network_policy.go b/pkg/k8s/watchers/network_policy.go
+index 459152c6..75fa9ea5 100644
+--- a/pkg/k8s/watchers/network_policy.go
++++ b/pkg/k8s/watchers/network_policy.go
+@@ -10,7 +10,6 @@ import (
+ 	"github.com/cilium/cilium/pkg/k8s"
+ 	"github.com/cilium/cilium/pkg/k8s/informer"
+ 	slim_networkingv1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/networking/v1"
+-	slimclientset "github.com/cilium/cilium/pkg/k8s/slim/k8s/client/clientset/versioned"
+ 	"github.com/cilium/cilium/pkg/k8s/utils"
+ 	"github.com/cilium/cilium/pkg/k8s/watchers/resources"
+ 	"github.com/cilium/cilium/pkg/lock"
+@@ -19,8 +18,9 @@ import (
+ 	"github.com/cilium/cilium/pkg/policy"
+ )
+ 
+-func (k *K8sWatcher) networkPoliciesInit(slimClient slimclientset.Interface, swgKNPs *lock.StoppableWaitGroup) {
++func (k *K8sWatcher) networkPoliciesInit(swgKNPs *lock.StoppableWaitGroup) {
+ 	apiGroup := k8sAPIGroupNetworkingV1Core
++	slimClient := k.clientset.Slim()
+ 	store, policyController := informer.NewInformer(
+ 		utils.ListerWatcherFromTyped[*slim_networkingv1.NetworkPolicyList](
+ 			slimClient.NetworkingV1().NetworkPolicies("")),
+diff --git a/pkg/k8s/watchers/node.go b/pkg/k8s/watchers/node.go
+index 97353b1e..282a6ab2 100644
+--- a/pkg/k8s/watchers/node.go
++++ b/pkg/k8s/watchers/node.go
+@@ -46,14 +46,14 @@ func nodeEventsAreEqual(oldNode, newNode *v1.Node) bool {
+ 	return true
+ }
+ 
+-func (k *K8sWatcher) NodesInit(k8sClient *k8s.K8sClient) {
++func (k *K8sWatcher) NodesInit() {
+ 	apiGroup := k8sAPIGroupNodeV1Core
+ 	k.nodesInitOnce.Do(func() {
+ 		swg := lock.NewStoppableWaitGroup()
+ 
+ 		nodeStore, nodeController := informer.NewInformer(
+ 			utils.ListerWatcherWithFields(
+-				utils.ListerWatcherFromTyped[*v1.NodeList](k8sClient.CoreV1().Nodes()),
++				utils.ListerWatcherFromTyped[*v1.NodeList](k.clientset.CoreV1().Nodes()),
+ 				fields.ParseSelectorOrDie("metadata.name="+nodeTypes.GetName())),
+ 			&v1.Node{},
+ 			0,
+diff --git a/pkg/k8s/watchers/pod.go b/pkg/k8s/watchers/pod.go
+index 361abcb7..554d3266 100644
+--- a/pkg/k8s/watchers/pod.go
++++ b/pkg/k8s/watchers/pod.go
+@@ -117,8 +117,9 @@ func (k *K8sWatcher) createPodController(slimClient slimclientset.Interface, fie
+ 	)
+ }
+ 
+-func (k *K8sWatcher) podsInit(slimClient slimclientset.Interface, asyncControllers *sync.WaitGroup) {
++func (k *K8sWatcher) podsInit(asyncControllers *sync.WaitGroup) {
+ 	var once sync.Once
++	slimClient := k.clientset.Slim()
+ 	watchNodePods := func() chan struct{} {
+ 		// Only watch for pod events for our node.
+ 		podStore, podController := k.createPodController(
+@@ -341,7 +342,7 @@ func (k *K8sWatcher) updateK8sPodV1(oldK8sPod, newK8sPod *slim_corev1.Pod) error
+ 		}
+ 
+ 		// Synchronize Pod labels with CiliumEndpoint labels if there is a change.
+-		updateCiliumEndpointLabels(podEP, newPodLabels)
++		k.updateCiliumEndpointLabels(podEP, newPodLabels)
+ 	}
+ 
+ 	if annotationsChanged {
+@@ -393,7 +394,7 @@ func realizePodAnnotationUpdate(podEP *endpoint.Endpoint) {
+ 
+ // updateCiliumEndpointLabels runs a controller associated with the endpoint that updates
+ // the Labels in CiliumEndpoint object by mirroring those of the associated Pod.
+-func updateCiliumEndpointLabels(ep *endpoint.Endpoint, labels map[string]string) {
++func (k *K8sWatcher) updateCiliumEndpointLabels(ep *endpoint.Endpoint, labels map[string]string) {
+ 	var (
+ 		controllerName = fmt.Sprintf("sync-pod-labels-with-cilium-endpoint (%v)", ep.GetID())
+ 		scopedLog      = log.WithField("controller", controllerName)
+@@ -413,7 +414,7 @@ func updateCiliumEndpointLabels(ep *endpoint.Endpoint, labels map[string]string)
+ 					}).Debug(err)
+ 					return err
+ 				}
+-				ciliumClient := k8s.CiliumClient().CiliumV2()
++				ciliumClient := k.clientset.CiliumV2()
+ 
+ 				replaceLabels := []k8s.JSONPatch{
+ 					{
+diff --git a/pkg/k8s/watchers/secret.go b/pkg/k8s/watchers/secret.go
+index 80c5b36d..7aa116ef 100644
+--- a/pkg/k8s/watchers/secret.go
++++ b/pkg/k8s/watchers/secret.go
+@@ -16,7 +16,6 @@ import (
+ 	"github.com/cilium/cilium/pkg/k8s"
+ 	"github.com/cilium/cilium/pkg/k8s/informer"
+ 	slim_corev1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/core/v1"
+-	slimclientset "github.com/cilium/cilium/pkg/k8s/slim/k8s/client/clientset/versioned"
+ 	"github.com/cilium/cilium/pkg/k8s/utils"
+ 	"github.com/cilium/cilium/pkg/k8s/watchers/resources"
+ 	"github.com/cilium/cilium/pkg/lock"
+@@ -31,11 +30,12 @@ const (
+ 	caCrtAttribute = "ca.crt"
+ )
+ 
+-func (k *K8sWatcher) tlsSecretInit(slimClient slimclientset.Interface, namespace string, swgSecrets *lock.StoppableWaitGroup) {
++func (k *K8sWatcher) tlsSecretInit(namespace string, swgSecrets *lock.StoppableWaitGroup) {
+ 	// Watch for all Secret types
+ 	secretOptsModifier := func(options *metav1.ListOptions) {}
+ 
+ 	apiGroup := resources.K8sAPIGroupSecretV1Core
++	slimClient := k.clientset.Slim()
+ 	_, secretController := informer.NewInformer(
+ 		utils.ListerWatcherWithModifier(
+ 			utils.ListerWatcherFromTyped[*slim_corev1.SecretList](slimClient.CoreV1().Secrets(namespace)),
+diff --git a/pkg/k8s/watchers/service.go b/pkg/k8s/watchers/service.go
+index 8a4f0f51..e16d4d00 100644
+--- a/pkg/k8s/watchers/service.go
++++ b/pkg/k8s/watchers/service.go
+@@ -10,15 +10,15 @@ import (
+ 	"github.com/cilium/cilium/pkg/k8s"
+ 	"github.com/cilium/cilium/pkg/k8s/informer"
+ 	slim_corev1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/core/v1"
+-	slimclientset "github.com/cilium/cilium/pkg/k8s/slim/k8s/client/clientset/versioned"
+ 	"github.com/cilium/cilium/pkg/k8s/utils"
+ 	"github.com/cilium/cilium/pkg/k8s/watchers/resources"
+ 	"github.com/cilium/cilium/pkg/lock"
+ 	"github.com/cilium/cilium/pkg/option"
+ )
+ 
+-func (k *K8sWatcher) servicesInit(slimClient slimclientset.Interface, swgSvcs *lock.StoppableWaitGroup, optsModifier func(*v1meta.ListOptions)) {
++func (k *K8sWatcher) servicesInit(swgSvcs *lock.StoppableWaitGroup, optsModifier func(*v1meta.ListOptions)) {
+ 	apiGroup := resources.K8sAPIGroupServiceV1Core
++	slimClient := k.clientset.Slim()
+ 	_, svcController := informer.NewInformer(
+ 		utils.ListerWatcherWithModifier(
+ 			utils.ListerWatcherFromTyped[*slim_corev1.ServiceList](slimClient.CoreV1().Services("")),
+diff --git a/pkg/k8s/watchers/watcher.go b/pkg/k8s/watchers/watcher.go
+index 9afa526d..0004d4f6 100644
+--- a/pkg/k8s/watchers/watcher.go
++++ b/pkg/k8s/watchers/watcher.go
+@@ -32,6 +32,7 @@ import (
+ 	"github.com/cilium/cilium/pkg/k8s"
+ 	v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
+ 	"github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2alpha1"
++	k8sClient "github.com/cilium/cilium/pkg/k8s/client"
+ 	k8smetrics "github.com/cilium/cilium/pkg/k8s/metrics"
+ 	slim_corev1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/core/v1"
+ 	slim_discover_v1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/discovery/v1"
+@@ -188,6 +189,8 @@ type cgroupManager interface {
+ }
+ 
+ type K8sWatcher struct {
++	clientset k8sClient.Clientset
++
+ 	// k8sResourceSynced maps a resource name to a channel. Once the given
+ 	// resource name is synchronized with k8s, the channel for which that
+ 	// resource name maps to is closed.
+@@ -268,8 +271,10 @@ func NewK8sWatcher(
+ 	cfg WatcherConfiguration,
+ 	ipcache *ipcache.IPCache,
+ 	cgroupManager cgroupManager,
++	clientset k8sClient.Clientset,
+ ) *K8sWatcher {
+ 	return &K8sWatcher{
++		clientset:             clientset,
+ 		K8sSvcCache:           k8s.NewServiceCache(datapath.LocalNodeAddressing()),
+ 		endpointManager:       endpointManager,
+ 		nodeDiscoverManager:   nodeDiscoverManager,
+@@ -355,7 +360,7 @@ func (k *K8sWatcher) GetAPIGroups() []string {
+ // watcher, as those resource controllers need the resources to be registered
+ // with K8s first.
+ func (k *K8sWatcher) WaitForCRDsToRegister(ctx context.Context) error {
+-	return synced.SyncCRDs(ctx, synced.AgentCRDResourceNames(), &k.k8sResourceSynced, &k.k8sAPIGroups)
++	return synced.SyncCRDs(ctx, k.clientset, synced.AgentCRDResourceNames(), &k.k8sResourceSynced, &k.k8sAPIGroups)
+ }
+ 
+ type watcherKind int
+@@ -493,11 +498,10 @@ type WatcherConfiguration interface {
+ 
+ // enableK8sWatchers starts watchers for given resources.
+ func (k *K8sWatcher) enableK8sWatchers(ctx context.Context, resourceNames []string) error {
+-	if !k8s.IsEnabled() {
++	if !k.clientset.IsEnabled() {
+ 		log.Debug("Not enabling k8s event listener because k8s is not enabled")
+ 		return nil
+ 	}
+-	ciliumNPClient := k8s.CiliumClient()
+ 	asyncControllers := &sync.WaitGroup{}
+ 
+ 	serviceOptModifier, err := utils.GetServiceListOptionsModifier(k.cfg)
+@@ -510,51 +514,51 @@ func (k *K8sWatcher) enableK8sWatchers(ctx context.Context, resourceNames []stri
+ 		// Core Cilium
+ 		case resources.K8sAPIGroupPodV1Core:
+ 			asyncControllers.Add(1)
+-			go k.podsInit(k8s.WatcherClient(), asyncControllers)
++			go k.podsInit(asyncControllers)
+ 		case k8sAPIGroupNodeV1Core:
+-			k.NodesInit(k8s.Client())
++			k.NodesInit()
+ 		case k8sAPIGroupNamespaceV1Core:
+ 			asyncControllers.Add(1)
+-			go k.namespacesInit(k8s.WatcherClient(), asyncControllers)
++			go k.namespacesInit(asyncControllers)
+ 		case k8sAPIGroupCiliumNodeV2:
+ 			asyncControllers.Add(1)
+-			go k.ciliumNodeInit(ciliumNPClient, asyncControllers)
++			go k.ciliumNodeInit(asyncControllers)
+ 		// Kubernetes built-in resources
+ 		case k8sAPIGroupNetworkingV1Core:
+ 			swgKNP := lock.NewStoppableWaitGroup()
+-			k.networkPoliciesInit(k8s.WatcherClient(), swgKNP)
++			k.networkPoliciesInit(swgKNP)
+ 		case resources.K8sAPIGroupServiceV1Core:
+ 			swgSvcs := lock.NewStoppableWaitGroup()
+-			k.servicesInit(k8s.WatcherClient(), swgSvcs, serviceOptModifier)
++			k.servicesInit(swgSvcs, serviceOptModifier)
+ 		case resources.K8sAPIGroupEndpointSliceV1Beta1Discovery:
+ 			// no-op; handled in resources.K8sAPIGroupEndpointV1Core.
+ 		case resources.K8sAPIGroupEndpointSliceV1Discovery:
+ 			// no-op; handled in resources.K8sAPIGroupEndpointV1Core.
+ 		case resources.K8sAPIGroupEndpointV1Core:
+-			k.initEndpointsOrSlices(k8s.WatcherClient(), serviceOptModifier)
++			k.initEndpointsOrSlices(serviceOptModifier)
+ 		case resources.K8sAPIGroupSecretV1Core:
+ 			swgSecret := lock.NewStoppableWaitGroup()
+ 			// only watch secrets in cilium-secrets namespace
+-			k.tlsSecretInit(k8s.WatcherClient(), option.Config.EnvoySecretNamespace, swgSecret)
++			k.tlsSecretInit(option.Config.EnvoySecretNamespace, swgSecret)
+ 		// Custom resource definitions
+ 		case k8sAPIGroupCiliumNetworkPolicyV2:
+-			k.ciliumNetworkPoliciesInit(ciliumNPClient)
++			k.ciliumNetworkPoliciesInit()
+ 		case k8sAPIGroupCiliumClusterwideNetworkPolicyV2:
+-			k.ciliumClusterwideNetworkPoliciesInit(ciliumNPClient)
++			k.ciliumClusterwideNetworkPoliciesInit()
+ 		case k8sAPIGroupCiliumEndpointV2:
+-			k.initCiliumEndpointOrSlices(ciliumNPClient, asyncControllers)
++			k.initCiliumEndpointOrSlices(asyncControllers)
+ 		case k8sAPIGroupCiliumEndpointSliceV2Alpha1:
+ 			// no-op; handled in k8sAPIGroupCiliumEndpointV2
+ 		case k8sAPIGroupCiliumLocalRedirectPolicyV2:
+-			k.ciliumLocalRedirectPolicyInit(ciliumNPClient)
++			k.ciliumLocalRedirectPolicyInit()
+ 		case k8sAPIGroupCiliumEgressGatewayPolicyV2:
+-			k.ciliumEgressGatewayPolicyInit(ciliumNPClient)
++			k.ciliumEgressGatewayPolicyInit()
+ 		case k8sAPIGroupCiliumEgressNATPolicyV2:
+-			k.ciliumEgressNATPolicyInit(ciliumNPClient)
++			k.ciliumEgressNATPolicyInit()
+ 		case k8sAPIGroupCiliumClusterwideEnvoyConfigV2:
+-			k.ciliumClusterwideEnvoyConfigInit(ciliumNPClient)
++			k.ciliumClusterwideEnvoyConfigInit()
+ 		case k8sAPIGroupCiliumEnvoyConfigV2:
+-			k.ciliumEnvoyConfigInit(ciliumNPClient)
++			k.ciliumEnvoyConfigInit()
+ 		default:
+ 			log.WithFields(logrus.Fields{
+ 				logfields.Resource: r,
+@@ -968,14 +972,14 @@ func (k *K8sWatcher) GetStore(name string) cache.Store {
+ }
+ 
+ // initCiliumEndpointOrSlices intializes the ciliumEndpoints or ciliumEndpointSlice
+-func (k *K8sWatcher) initCiliumEndpointOrSlices(ciliumNPClient *k8s.K8sCiliumClient, asyncControllers *sync.WaitGroup) {
++func (k *K8sWatcher) initCiliumEndpointOrSlices(asyncControllers *sync.WaitGroup) {
+ 	// If CiliumEndpointSlice feature is enabled, Cilium-agent watches CiliumEndpointSlice
+ 	// objects instead of CiliumEndpoints. Hence, skip watching CiliumEndpoints if CiliumEndpointSlice
+ 	// feature is enabled.
+ 	asyncControllers.Add(1)
+ 	if option.Config.EnableCiliumEndpointSlice {
+-		go k.ciliumEndpointSliceInit(ciliumNPClient, asyncControllers)
++		go k.ciliumEndpointSliceInit(asyncControllers)
+ 	} else {
+-		go k.ciliumEndpointsInit(ciliumNPClient, asyncControllers)
++		go k.ciliumEndpointsInit(asyncControllers)
+ 	}
+ }
+diff --git a/pkg/k8s/watchers/watcher_test.go b/pkg/k8s/watchers/watcher_test.go
+index 540d9532..15969139 100644
+--- a/pkg/k8s/watchers/watcher_test.go
++++ b/pkg/k8s/watchers/watcher_test.go
+@@ -14,6 +14,7 @@ import (
+ 	fakeDatapath "github.com/cilium/cilium/pkg/datapath/fake"
+ 	"github.com/cilium/cilium/pkg/ipcache"
+ 	"github.com/cilium/cilium/pkg/k8s"
++	k8sclient "github.com/cilium/cilium/pkg/k8s/client"
+ 	slim_corev1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/core/v1"
+ 	slim_metav1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/apis/meta/v1"
+ 	"github.com/cilium/cilium/pkg/labels"
+@@ -35,6 +36,11 @@ var _ = Suite(&K8sWatcherSuite{})
+ 
+ type fakeWatcherConfiguration struct{}
+ 
++func newFakeClientset() k8sclient.Clientset {
++	_, cs := k8sclient.NewFakeClientset()
++	return cs
++}
++
+ func (f *fakeWatcherConfiguration) K8sServiceProxyNameValue() string {
+ 	return ""
+ }
+@@ -189,6 +195,7 @@ func (s *K8sWatcherSuite) TestUpdateToServiceEndpointsGH9525(c *C) {
+ 		&fakeWatcherConfiguration{},
+ 		ipcache.NewIPCache(nil),
+ 		nil,
++		newFakeClientset(),
+ 	)
+ 	go w.k8sServiceHandler()
+ 	swg := lock.NewStoppableWaitGroup()
+@@ -510,6 +517,7 @@ func (s *K8sWatcherSuite) Test_addK8sSVCs_ClusterIP(c *C) {
+ 		&fakeWatcherConfiguration{},
+ 		ipcache.NewIPCache(nil),
+ 		nil,
++		newFakeClientset(),
+ 	)
+ 	go w.k8sServiceHandler()
+ 	swg := lock.NewStoppableWaitGroup()
+@@ -660,6 +668,7 @@ func (s *K8sWatcherSuite) TestChangeSVCPort(c *C) {
+ 		&fakeWatcherConfiguration{},
+ 		ipcache.NewIPCache(nil),
+ 		nil,
++		newFakeClientset(),
+ 	)
+ 	go w.k8sServiceHandler()
+ 	swg := lock.NewStoppableWaitGroup()
+@@ -1139,6 +1148,7 @@ func (s *K8sWatcherSuite) Test_addK8sSVCs_NodePort(c *C) {
+ 		&fakeWatcherConfiguration{},
+ 		ipcache.NewIPCache(nil),
+ 		nil,
++		newFakeClientset(),
+ 	)
+ 	go w.k8sServiceHandler()
+ 	swg := lock.NewStoppableWaitGroup()
+@@ -1452,6 +1462,7 @@ func (s *K8sWatcherSuite) Test_addK8sSVCs_GH9576_1(c *C) {
+ 		&fakeWatcherConfiguration{},
+ 		ipcache.NewIPCache(nil),
+ 		nil,
++		newFakeClientset(),
+ 	)
+ 	go w.k8sServiceHandler()
+ 	swg := lock.NewStoppableWaitGroup()
+@@ -1758,6 +1769,7 @@ func (s *K8sWatcherSuite) Test_addK8sSVCs_GH9576_2(c *C) {
+ 		&fakeWatcherConfiguration{},
+ 		ipcache.NewIPCache(nil),
+ 		nil,
++		newFakeClientset(),
+ 	)
+ 	go w.k8sServiceHandler()
+ 	swg := lock.NewStoppableWaitGroup()
+@@ -2678,6 +2690,7 @@ func (s *K8sWatcherSuite) Test_addK8sSVCs_ExternalIPs(c *C) {
+ 		&fakeWatcherConfiguration{},
+ 		ipcache.NewIPCache(nil),
+ 		nil,
++		newFakeClientset(),
+ 	)
+ 	go w.k8sServiceHandler()
+ 	swg := lock.NewStoppableWaitGroup()
+diff --git a/pkg/nodediscovery/nodediscovery.go b/pkg/nodediscovery/nodediscovery.go
+index 1ee0e711..18f2c176 100644
+--- a/pkg/nodediscovery/nodediscovery.go
++++ b/pkg/nodediscovery/nodediscovery.go
+@@ -30,6 +30,7 @@ import (
+ 	ipamOption "github.com/cilium/cilium/pkg/ipam/option"
+ 	"github.com/cilium/cilium/pkg/k8s"
+ 	ciliumv2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
++	k8sClient "github.com/cilium/cilium/pkg/k8s/client"
+ 	k8sTypes "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/core/v1"
+ 	"github.com/cilium/cilium/pkg/lock"
+ 	"github.com/cilium/cilium/pkg/logging"
+@@ -70,6 +71,7 @@ type NodeDiscovery struct {
+ 	localStateInitialized chan struct{}
+ 	NetConf               *cnitypes.NetConf
+ 	k8sGetters            k8sGetters
++	clientset             k8sClient.Clientset
+ 	localNodeLock         lock.Mutex
+ 	localNode             nodeTypes.Node
+ }
+@@ -82,7 +84,7 @@ func enableLocalNodeRoute() bool {
+ }
+ 
+ // NewNodeDiscovery returns a pointer to new node discovery object
+-func NewNodeDiscovery(manager *nodemanager.Manager, mtuConfig mtu.Configuration, netConf *cnitypes.NetConf) *NodeDiscovery {
++func NewNodeDiscovery(manager *nodemanager.Manager, mtuConfig mtu.Configuration, netConf *cnitypes.NetConf, clientset k8sClient.Clientset) *NodeDiscovery {
+ 	auxPrefixes := []*cidr.CIDR{}
+ 
+ 	if option.Config.IPv4ServiceRange != AutoCIDR {
+@@ -104,7 +106,8 @@ func NewNodeDiscovery(manager *nodemanager.Manager, mtuConfig mtu.Configuration,
+ 	}
+ 
+ 	return &NodeDiscovery{
+-		Manager: manager,
++		Manager:   manager,
++		clientset: clientset,
+ 		LocalConfig: datapath.LocalNodeConfiguration{
+ 			MtuConfig:               mtuConfig,
+ 			UseSingleClusterRoute:   option.Config.UseSingleClusterRoute,
+@@ -305,7 +308,7 @@ func (n *NodeDiscovery) updateLocalNode() {
+ 		}()
+ 	}
+ 
+-	if k8s.IsEnabled() {
++	if n.clientset.IsEnabled() {
+ 		// CRD IPAM endpoint restoration depends on the completion of this
+ 		// to avoid custom resource update conflicts.
+ 		n.UpdateCiliumNodeResource()
+@@ -347,8 +350,6 @@ func (n *NodeDiscovery) UpdateCiliumNodeResource() {
+ 
+ 	log.WithField(logfields.Node, nodeTypes.GetName()).Info("Creating or updating CiliumNode resource")
+ 
+-	ciliumClient := k8s.CiliumClient()
+-
+ 	performGet := true
+ 	var nodeResource *ciliumv2.CiliumNode
+ 	for retryCount := 0; retryCount < maxRetryCount; retryCount++ {
+@@ -379,7 +380,7 @@ func (n *NodeDiscovery) UpdateCiliumNodeResource() {
+ 		// updating.
+ 		performGet = true
+ 		if performUpdate {
+-			if _, err := ciliumClient.CiliumV2().CiliumNodes().Update(context.TODO(), nodeResource, metav1.UpdateOptions{}); err != nil {
++			if _, err := n.clientset.CiliumV2().CiliumNodes().Update(context.TODO(), nodeResource, metav1.UpdateOptions{}); err != nil {
+ 				if k8serrors.IsConflict(err) {
+ 					log.WithError(err).Warn("Unable to update CiliumNode resource, will retry")
+ 					continue
+@@ -389,7 +390,7 @@ func (n *NodeDiscovery) UpdateCiliumNodeResource() {
+ 				return
+ 			}
+ 		} else {
+-			if _, err := ciliumClient.CiliumV2().CiliumNodes().Create(context.TODO(), nodeResource, metav1.CreateOptions{}); err != nil {
++			if _, err := n.clientset.CiliumV2().CiliumNodes().Create(context.TODO(), nodeResource, metav1.CreateOptions{}); err != nil {
+ 				if k8serrors.IsConflict(err) || k8serrors.IsAlreadyExists(err) {
+ 					log.WithError(err).Warn("Unable to create CiliumNode resource, will retry")
+ 					// Backoff before retrying
+diff --git a/pkg/policy/groups/actions.go b/pkg/policy/groups/actions.go
+index f10c1a52..7b24e030 100644
+--- a/pkg/policy/groups/actions.go
++++ b/pkg/policy/groups/actions.go
+@@ -11,8 +11,8 @@ import (
+ 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+ 
+ 	"github.com/cilium/cilium/pkg/controller"
+-	"github.com/cilium/cilium/pkg/k8s"
+ 	cilium_v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
++	k8sClient "github.com/cilium/cilium/pkg/k8s/client"
+ 	"github.com/cilium/cilium/pkg/logging/logfields"
+ 	"github.com/cilium/cilium/pkg/metrics"
+ )
+@@ -25,7 +25,7 @@ var (
+ // that need to create a new derivative policy.
+ // It returns a boolean, true in case that all actions are correct, false if
+ // something fails.
+-func AddDerivativeCNPIfNeeded(cnp *cilium_v2.CiliumNetworkPolicy) bool {
++func AddDerivativeCNPIfNeeded(clientset k8sClient.Clientset, cnp *cilium_v2.CiliumNetworkPolicy) bool {
+ 	if !cnp.RequiresDerivative() {
+ 		log.WithFields(logrus.Fields{
+ 			logfields.CiliumNetworkPolicyName: cnp.ObjectMeta.Name,
+@@ -36,7 +36,7 @@ func AddDerivativeCNPIfNeeded(cnp *cilium_v2.CiliumNetworkPolicy) bool {
+ 	controllerManager.UpdateController(fmt.Sprintf("add-derivative-cnp-%s", cnp.ObjectMeta.Name),
+ 		controller.ControllerParams{
+ 			DoFunc: func(ctx context.Context) error {
+-				return addDerivativePolicy(ctx, cnp, false)
++				return addDerivativePolicy(ctx, clientset, cnp, false)
+ 			},
+ 		})
+ 	return true
+@@ -46,7 +46,7 @@ func AddDerivativeCNPIfNeeded(cnp *cilium_v2.CiliumNetworkPolicy) bool {
+ // that need to create a new derivative policy.
+ // It returns a boolean, true in case that all actions are correct, false if
+ // something fails.
+-func AddDerivativeCCNPIfNeeded(cnp *cilium_v2.CiliumNetworkPolicy) bool {
++func AddDerivativeCCNPIfNeeded(clientset k8sClient.Clientset, cnp *cilium_v2.CiliumNetworkPolicy) bool {
+ 	if !cnp.RequiresDerivative() {
+ 		log.WithFields(logrus.Fields{
+ 			logfields.CiliumClusterwideNetworkPolicyName: cnp.ObjectMeta.Name,
+@@ -56,7 +56,7 @@ func AddDerivativeCCNPIfNeeded(cnp *cilium_v2.CiliumNetworkPolicy) bool {
+ 	controllerManager.UpdateController(fmt.Sprintf("add-derivative-ccnp-%s", cnp.ObjectMeta.Name),
+ 		controller.ControllerParams{
+ 			DoFunc: func(ctx context.Context) error {
+-				return addDerivativePolicy(ctx, cnp, true)
++				return addDerivativePolicy(ctx, clientset, cnp, true)
+ 			},
+ 		})
+ 	return true
+@@ -68,7 +68,7 @@ func AddDerivativeCCNPIfNeeded(cnp *cilium_v2.CiliumNetworkPolicy) bool {
+ // one, it will delete the old policy.
+ // The function returns true if an update is required for the derivative policy
+ // and false otherwise.
+-func UpdateDerivativeCNPIfNeeded(newCNP *cilium_v2.CiliumNetworkPolicy, oldCNP *cilium_v2.CiliumNetworkPolicy) bool {
++func UpdateDerivativeCNPIfNeeded(clientset k8sClient.Clientset, newCNP *cilium_v2.CiliumNetworkPolicy, oldCNP *cilium_v2.CiliumNetworkPolicy) bool {
+ 	if !newCNP.RequiresDerivative() && oldCNP.RequiresDerivative() {
+ 		log.WithFields(logrus.Fields{
+ 			logfields.CiliumNetworkPolicyName: newCNP.ObjectMeta.Name,
+@@ -78,7 +78,7 @@ func UpdateDerivativeCNPIfNeeded(newCNP *cilium_v2.CiliumNetworkPolicy, oldCNP *
+ 		controllerManager.UpdateController(fmt.Sprintf("delete-derivative-cnp-%s", oldCNP.ObjectMeta.Name),
+ 			controller.ControllerParams{
+ 				DoFunc: func(ctx context.Context) error {
+-					return DeleteDerivativeCNP(ctx, oldCNP)
++					return DeleteDerivativeCNP(ctx, clientset, oldCNP)
+ 				},
+ 			})
+ 		return false
+@@ -91,7 +91,7 @@ func UpdateDerivativeCNPIfNeeded(newCNP *cilium_v2.CiliumNetworkPolicy, oldCNP *
+ 	controllerManager.UpdateController(fmt.Sprintf("update-derivative-cnp-%s", newCNP.ObjectMeta.Name),
+ 		controller.ControllerParams{
+ 			DoFunc: func(ctx context.Context) error {
+-				return addDerivativePolicy(ctx, newCNP, false)
++				return addDerivativePolicy(ctx, clientset, newCNP, false)
+ 			},
+ 		})
+ 	return true
+@@ -103,7 +103,7 @@ func UpdateDerivativeCNPIfNeeded(newCNP *cilium_v2.CiliumNetworkPolicy, oldCNP *
+ // one, it will delete the old policy.
+ // The function returns true if an update is required for the derivative policy
+ // and false otherwise.
+-func UpdateDerivativeCCNPIfNeeded(newCCNP *cilium_v2.CiliumNetworkPolicy, oldCCNP *cilium_v2.CiliumNetworkPolicy) bool {
++func UpdateDerivativeCCNPIfNeeded(clientset k8sClient.Clientset, newCCNP *cilium_v2.CiliumNetworkPolicy, oldCCNP *cilium_v2.CiliumNetworkPolicy) bool {
+ 	if !newCCNP.RequiresDerivative() && oldCCNP.RequiresDerivative() {
+ 		log.WithFields(logrus.Fields{
+ 			logfields.CiliumClusterwideNetworkPolicyName: newCCNP.ObjectMeta.Name,
+@@ -112,7 +112,7 @@ func UpdateDerivativeCCNPIfNeeded(newCCNP *cilium_v2.CiliumNetworkPolicy, oldCCN
+ 		controllerManager.UpdateController(fmt.Sprintf("delete-derivative-ccnp-%s", oldCCNP.ObjectMeta.Name),
+ 			controller.ControllerParams{
+ 				DoFunc: func(ctx context.Context) error {
+-					return DeleteDerivativeCCNP(ctx, oldCCNP)
++					return DeleteDerivativeCCNP(ctx, clientset, oldCCNP)
+ 				},
+ 			})
+ 		return false
+@@ -125,7 +125,7 @@ func UpdateDerivativeCCNPIfNeeded(newCCNP *cilium_v2.CiliumNetworkPolicy, oldCCN
+ 	controllerManager.UpdateController(fmt.Sprintf("update-derivative-ccnp-%s", newCCNP.ObjectMeta.Name),
+ 		controller.ControllerParams{
+ 			DoFunc: func(ctx context.Context) error {
+-				return addDerivativePolicy(ctx, newCCNP, true)
++				return addDerivativePolicy(ctx, clientset, newCCNP, true)
+ 			},
+ 		})
+ 	return true
+@@ -139,7 +139,7 @@ func DeleteDerivativeFromCache(cnp *cilium_v2.CiliumNetworkPolicy) {
+ 
+ // DeleteDerivativeCNP if the given policy has a derivative constraint,the
+ // given CNP will be deleted from store and the cache.
+-func DeleteDerivativeCNP(ctx context.Context, cnp *cilium_v2.CiliumNetworkPolicy) error {
++func DeleteDerivativeCNP(ctx context.Context, clientset k8sClient.Clientset, cnp *cilium_v2.CiliumNetworkPolicy) error {
+ 	scopedLog := log.WithFields(logrus.Fields{
+ 		logfields.CiliumNetworkPolicyName: cnp.ObjectMeta.Name,
+ 		logfields.K8sNamespace:            cnp.ObjectMeta.Namespace,
+@@ -150,7 +150,7 @@ func DeleteDerivativeCNP(ctx context.Context, cnp *cilium_v2.CiliumNetworkPolicy
+ 		return nil
+ 	}
+ 
+-	err := k8s.CiliumClient().CiliumV2().CiliumNetworkPolicies(cnp.ObjectMeta.Namespace).DeleteCollection(
++	err := clientset.CiliumV2().CiliumNetworkPolicies(cnp.ObjectMeta.Namespace).DeleteCollection(
+ 		ctx,
+ 		v1.DeleteOptions{},
+ 		v1.ListOptions{LabelSelector: fmt.Sprintf("%s=%s", parentCNP, cnp.ObjectMeta.UID)})
+@@ -165,7 +165,7 @@ func DeleteDerivativeCNP(ctx context.Context, cnp *cilium_v2.CiliumNetworkPolicy
+ 
+ // DeleteDerivativeCCNP if the given policy has a derivative constraint, the
+ // given CCNP will be deleted from store and the cache.
+-func DeleteDerivativeCCNP(ctx context.Context, ccnp *cilium_v2.CiliumNetworkPolicy) error {
++func DeleteDerivativeCCNP(ctx context.Context, clientset k8sClient.Clientset, ccnp *cilium_v2.CiliumNetworkPolicy) error {
+ 	scopedLog := log.WithFields(logrus.Fields{
+ 		logfields.CiliumClusterwideNetworkPolicyName: ccnp.ObjectMeta.Name,
+ 	})
+@@ -175,7 +175,7 @@ func DeleteDerivativeCCNP(ctx context.Context, ccnp *cilium_v2.CiliumNetworkPoli
+ 		return nil
+ 	}
+ 
+-	err := k8s.CiliumClient().CiliumV2().CiliumClusterwideNetworkPolicies().DeleteCollection(
++	err := clientset.CiliumV2().CiliumClusterwideNetworkPolicies().DeleteCollection(
+ 		ctx,
+ 		v1.DeleteOptions{},
+ 		v1.ListOptions{LabelSelector: fmt.Sprintf("%s=%s", parentCNP, ccnp.ObjectMeta.UID)})
+@@ -187,7 +187,7 @@ func DeleteDerivativeCCNP(ctx context.Context, ccnp *cilium_v2.CiliumNetworkPoli
+ 	return nil
+ }
+ 
+-func addDerivativePolicy(ctx context.Context, cnp *cilium_v2.CiliumNetworkPolicy, clusterScoped bool) error {
++func addDerivativePolicy(ctx context.Context, clientset k8sClient.Clientset, cnp *cilium_v2.CiliumNetworkPolicy, clusterScoped bool) error {
+ 	var (
+ 		scopedLog          *logrus.Entry
+ 		derivativePolicy   v1.Object
+@@ -220,7 +220,7 @@ func addDerivativePolicy(ctx context.Context, cnp *cilium_v2.CiliumNetworkPolicy
+ 	if derivativeErr != nil {
+ 		metrics.PolicyImportErrorsTotal.Inc()
+ 		scopedLog.WithError(derivativeErr).Error("Cannot create derivative rule. Installing deny-all rule.")
+-		statusErr := updateDerivativeStatus(cnp, derivativePolicy.GetName(), derivativeErr, clusterScoped)
++		statusErr := updateDerivativeStatus(clientset, cnp, derivativePolicy.GetName(), derivativeErr, clusterScoped)
+ 		if statusErr != nil {
+ 			scopedLog.WithError(statusErr).Error("Cannot update status for derivative policy")
+ 		}
+@@ -229,13 +229,13 @@ func addDerivativePolicy(ctx context.Context, cnp *cilium_v2.CiliumNetworkPolicy
+ 
+ 	groupsCNPCache.UpdateCNP(cnp)
+ 	if clusterScoped {
+-		_, err = updateOrCreateCCNP(derivativeCCNP)
++		_, err = updateOrCreateCCNP(clientset, derivativeCCNP)
+ 	} else {
+-		_, err = updateOrCreateCNP(derivativeCNP)
++		_, err = updateOrCreateCNP(clientset, derivativeCNP)
+ 	}
+ 
+ 	if err != nil {
+-		statusErr := updateDerivativeStatus(cnp, derivativePolicy.GetName(), err, clusterScoped)
++		statusErr := updateDerivativeStatus(clientset, cnp, derivativePolicy.GetName(), err, clusterScoped)
+ 		if statusErr != nil {
+ 			metrics.PolicyImportErrorsTotal.Inc()
+ 			scopedLog.WithError(err).Error("Cannot update status for derivative policy")
+@@ -243,7 +243,7 @@ func addDerivativePolicy(ctx context.Context, cnp *cilium_v2.CiliumNetworkPolicy
+ 		return statusErr
+ 	}
+ 
+-	err = updateDerivativeStatus(cnp, derivativePolicy.GetName(), nil, clusterScoped)
++	err = updateDerivativeStatus(clientset, cnp, derivativePolicy.GetName(), nil, clusterScoped)
+ 	if err != nil {
+ 		scopedLog.WithError(err).Error("Cannot update status for derivative policy")
+ 	}
+diff --git a/pkg/policy/groups/controllers.go b/pkg/policy/groups/controllers.go
+index 04cd476b..00cab6b9 100644
+--- a/pkg/policy/groups/controllers.go
++++ b/pkg/policy/groups/controllers.go
+@@ -7,6 +7,7 @@ import (
+ 	"context"
+ 
+ 	cilium_v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
++	k8sClient "github.com/cilium/cilium/pkg/k8s/client"
+ )
+ 
+ const (
+@@ -18,7 +19,7 @@ const (
+ // from providers.  To avoid issues with rate-limiting this function will
+ // execute the addDerivative function with a max number of concurrent calls,
+ // defined on maxConcurrentUpdates.
+-func UpdateCNPInformation() {
++func UpdateCNPInformation(clientset k8sClient.Clientset) {
+ 	cnpToUpdate := groupsCNPCache.GetAllCNP()
+ 	sem := make(chan bool, maxConcurrentUpdates)
+ 	for _, cnp := range cnpToUpdate {
+@@ -27,9 +28,9 @@ func UpdateCNPInformation() {
+ 			defer func() { <-sem }()
+ 			// We use the saame cache for Clusterwide and Namespaced cilium policies
+ 			if cnp.ObjectMeta.Namespace == "" {
+-				addDerivativePolicy(context.TODO(), cnp, true)
++				addDerivativePolicy(context.TODO(), clientset, cnp, true)
+ 			} else {
+-				addDerivativePolicy(context.TODO(), cnp, false)
++				addDerivativePolicy(context.TODO(), clientset, cnp, false)
+ 			}
+ 
+ 		}(cnp)
+diff --git a/pkg/policy/groups/helpers.go b/pkg/policy/groups/helpers.go
+index e49bffb3..3f17a590 100644
+--- a/pkg/policy/groups/helpers.go
++++ b/pkg/policy/groups/helpers.go
+@@ -9,8 +9,8 @@ import (
+ 
+ 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+ 
+-	"github.com/cilium/cilium/pkg/k8s"
+ 	cilium_v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
++	k8sClient "github.com/cilium/cilium/pkg/k8s/client"
+ 	slimv1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/apis/meta/v1"
+ 	"github.com/cilium/cilium/pkg/policy/api"
+ )
+@@ -143,21 +143,21 @@ func denyEgressRule() *api.Rule {
+ 	}
+ }
+ 
+-func updateOrCreateCNP(cnp *cilium_v2.CiliumNetworkPolicy) (*cilium_v2.CiliumNetworkPolicy, error) {
+-	k8sCNP, err := k8s.CiliumClient().CiliumV2().CiliumNetworkPolicies(cnp.ObjectMeta.Namespace).
++func updateOrCreateCNP(clientset k8sClient.Clientset, cnp *cilium_v2.CiliumNetworkPolicy) (*cilium_v2.CiliumNetworkPolicy, error) {
++	k8sCNP, err := clientset.CiliumV2().CiliumNetworkPolicies(cnp.ObjectMeta.Namespace).
+ 		Get(context.TODO(), cnp.ObjectMeta.Name, v1.GetOptions{})
+ 	if err == nil {
+ 		k8sCNP.ObjectMeta.Labels = cnp.ObjectMeta.Labels
+ 		k8sCNP.Spec = cnp.Spec
+ 		k8sCNP.Specs = cnp.Specs
+ 		k8sCNP.Status = cilium_v2.CiliumNetworkPolicyStatus{}
+-		return k8s.CiliumClient().CiliumV2().CiliumNetworkPolicies(cnp.ObjectMeta.Namespace).Update(context.TODO(), k8sCNP, v1.UpdateOptions{})
++		return clientset.CiliumV2().CiliumNetworkPolicies(cnp.ObjectMeta.Namespace).Update(context.TODO(), k8sCNP, v1.UpdateOptions{})
+ 	}
+-	return k8s.CiliumClient().CiliumV2().CiliumNetworkPolicies(cnp.ObjectMeta.Namespace).Create(context.TODO(), cnp, v1.CreateOptions{})
++	return clientset.CiliumV2().CiliumNetworkPolicies(cnp.ObjectMeta.Namespace).Create(context.TODO(), cnp, v1.CreateOptions{})
+ }
+ 
+-func updateOrCreateCCNP(ccnp *cilium_v2.CiliumClusterwideNetworkPolicy) (*cilium_v2.CiliumClusterwideNetworkPolicy, error) {
+-	k8sCCNP, err := k8s.CiliumClient().CiliumV2().CiliumClusterwideNetworkPolicies().
++func updateOrCreateCCNP(clientset k8sClient.Clientset, ccnp *cilium_v2.CiliumClusterwideNetworkPolicy) (*cilium_v2.CiliumClusterwideNetworkPolicy, error) {
++	k8sCCNP, err := clientset.CiliumV2().CiliumClusterwideNetworkPolicies().
+ 		Get(context.TODO(), ccnp.ObjectMeta.Name, v1.GetOptions{})
+ 	if err == nil {
+ 		k8sCCNP.ObjectMeta.Labels = ccnp.ObjectMeta.Labels
+@@ -165,14 +165,14 @@ func updateOrCreateCCNP(ccnp *cilium_v2.CiliumClusterwideNetworkPolicy) (*cilium
+ 		k8sCCNP.Specs = ccnp.Specs
+ 		k8sCCNP.Status = cilium_v2.CiliumNetworkPolicyStatus{}
+ 
+-		return k8s.CiliumClient().CiliumV2().CiliumClusterwideNetworkPolicies().Update(context.TODO(), k8sCCNP, v1.UpdateOptions{})
++		return clientset.CiliumV2().CiliumClusterwideNetworkPolicies().Update(context.TODO(), k8sCCNP, v1.UpdateOptions{})
+ 	}
+ 
+-	return k8s.CiliumClient().CiliumV2().CiliumClusterwideNetworkPolicies().
++	return clientset.CiliumV2().CiliumClusterwideNetworkPolicies().
+ 		Create(context.TODO(), ccnp, v1.CreateOptions{})
+ }
+ 
+-func updateDerivativeStatus(cnp *cilium_v2.CiliumNetworkPolicy, derivativeName string, err error, clusterScoped bool) error {
++func updateDerivativeStatus(clientset k8sClient.Clientset, cnp *cilium_v2.CiliumNetworkPolicy, derivativeName string, err error, clusterScoped bool) error {
+ 	status := cilium_v2.CiliumNetworkPolicyNodeStatus{
+ 		LastUpdated: slimv1.Now(),
+ 		Enforcing:   false,
+@@ -186,17 +186,17 @@ func updateDerivativeStatus(cnp *cilium_v2.CiliumNetworkPolicy, derivativeName s
+ 	}
+ 
+ 	if clusterScoped {
+-		return updateDerivativeCCNPStatus(cnp, status, derivativeName)
++		return updateDerivativeCCNPStatus(clientset, cnp, status, derivativeName)
+ 	}
+ 
+-	return updateDerivativeCNPStatus(cnp, status, derivativeName)
++	return updateDerivativeCNPStatus(clientset, cnp, status, derivativeName)
+ }
+ 
+-func updateDerivativeCNPStatus(cnp *cilium_v2.CiliumNetworkPolicy, status cilium_v2.CiliumNetworkPolicyNodeStatus,
++func updateDerivativeCNPStatus(clientset k8sClient.Clientset, cnp *cilium_v2.CiliumNetworkPolicy, status cilium_v2.CiliumNetworkPolicyNodeStatus,
+ 	derivativeName string) error {
+ 	// This CNP can be modified by cilium agent or operator. To be able to push
+ 	// the status correctly fetch the last version to avoid updates issues.
+-	k8sCNP, clientErr := k8s.CiliumClient().CiliumV2().CiliumNetworkPolicies(cnp.ObjectMeta.Namespace).
++	k8sCNP, clientErr := clientset.CiliumV2().CiliumNetworkPolicies(cnp.ObjectMeta.Namespace).
+ 		Get(context.TODO(), cnp.ObjectMeta.Name, v1.GetOptions{})
+ 
+ 	if clientErr != nil {
+@@ -215,15 +215,15 @@ func updateDerivativeCNPStatus(cnp *cilium_v2.CiliumNetworkPolicy, status cilium
+ 	groupsCNPCache.UpdateCNP(k8sCNP)
+ 
+ 	// TODO: Switch to JSON patch.
+-	_, err := k8s.CiliumClient().CiliumV2().CiliumNetworkPolicies(cnp.ObjectMeta.Namespace).
++	_, err := clientset.CiliumV2().CiliumNetworkPolicies(cnp.ObjectMeta.Namespace).
+ 		UpdateStatus(context.TODO(), k8sCNP, v1.UpdateOptions{})
+ 
+ 	return err
+ }
+ 
+-func updateDerivativeCCNPStatus(cnp *cilium_v2.CiliumNetworkPolicy, status cilium_v2.CiliumNetworkPolicyNodeStatus,
++func updateDerivativeCCNPStatus(clientset k8sClient.Clientset, cnp *cilium_v2.CiliumNetworkPolicy, status cilium_v2.CiliumNetworkPolicyNodeStatus,
+ 	derivativeName string) error {
+-	k8sCCNP, clientErr := k8s.CiliumClient().CiliumV2().CiliumClusterwideNetworkPolicies().
++	k8sCCNP, clientErr := clientset.CiliumV2().CiliumClusterwideNetworkPolicies().
+ 		Get(context.TODO(), cnp.ObjectMeta.Name, v1.GetOptions{})
+ 
+ 	if clientErr != nil {
+@@ -250,7 +250,7 @@ func updateDerivativeCCNPStatus(cnp *cilium_v2.CiliumNetworkPolicy, status ciliu
+ 	})
+ 
+ 	// TODO: Switch to JSON patch
+-	_, err := k8s.CiliumClient().CiliumV2().CiliumClusterwideNetworkPolicies().
++	_, err := clientset.CiliumV2().CiliumClusterwideNetworkPolicies().
+ 		UpdateStatus(context.TODO(), k8sCCNP, v1.UpdateOptions{})
+ 
+ 	return err
+diff --git a/test/controlplane/suite/testcase.go b/test/controlplane/suite/testcase.go
+index 8b93c1f1..31a77172 100644
+--- a/test/controlplane/suite/testcase.go
++++ b/test/controlplane/suite/testcase.go
+@@ -37,7 +37,6 @@ import (
+ 	fakeDatapath "github.com/cilium/cilium/pkg/datapath/fake"
+ 	fqdnproxy "github.com/cilium/cilium/pkg/fqdn/proxy"
+ 	ipamOption "github.com/cilium/cilium/pkg/ipam/option"
+-	"github.com/cilium/cilium/pkg/k8s"
+ 	cilium_v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
+ 	k8sClient "github.com/cilium/cilium/pkg/k8s/client"
+ 	slim_corev1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/core/v1"
+@@ -104,7 +103,6 @@ func (cpt *ControlPlaneTest) SetupEnvironment(modConfig func(*agentOption.Daemon
+ 
+ 	// Configure k8s and perform capability detection with the fake client.
+ 	version.Update(cpt.clients, true)
+-	k8s.SetClients(cpt.clients, cpt.clients.Slim(), cpt.clients, cpt.clients)
+ 
+ 	agentOption.Config.Populate(agentCmd.Vp)
+ 	agentOption.Config.IdentityAllocationMode = agentOption.IdentityAllocationModeCRD

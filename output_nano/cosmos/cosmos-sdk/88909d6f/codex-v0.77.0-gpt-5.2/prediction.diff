@@ -1,0 +1,1634 @@
+diff --git a/Makefile b/Makefile
+index 927ecb0..ee5dd3d 100644
+--- a/Makefile
++++ b/Makefile
+@@ -375,7 +375,7 @@ format:
+ DEVDOC_SAVE = docker commit `docker ps -a -n 1 -q` devdoc:local
+ 
+ devdoc-init:
+-	$(DOCKER) run -it -v "$(CURDIR):/go/src/github.com/cosmos/cosmos-sdk" -w "/go/src/github.com/cosmos/cosmos-sdk" tendermint/devdoc echo
++	$(DOCKER) run -it -v "$(CURDIR):/go/src/github.com/cosmos/cosmos-sdk" -w "/go/src/github.com/cosmos/cosmos-sdk" cometbft/devdoc echo
+ 	# TODO make this safer
+ 	$(call DEVDOC_SAVE)
+ 
+@@ -390,7 +390,7 @@ devdoc-clean:
+ 	docker rmi -f $$(docker images -f "dangling=true" -q)
+ 
+ devdoc-update:
+-	docker pull tendermint/devdoc
++	docker pull cometbft/devdoc
+ 
+ .PHONY: devdoc devdoc-clean devdoc-init devdoc-save devdoc-update
+ 
+diff --git a/client/broadcast.go b/client/broadcast.go
+index fec6aae..7ae7a59 100644
+--- a/client/broadcast.go
++++ b/client/broadcast.go
+@@ -35,15 +35,15 @@ func (ctx Context) BroadcastTx(txBytes []byte) (res *sdk.TxResponse, err error)
+ 	return res, err
+ }
+ 
+-// CheckTendermintError checks if the error returned from BroadcastTx is a
+-// Tendermint error that is returned before the tx is submitted due to
+-// precondition checks that failed. If an Tendermint error is detected, this
++// CheckCometBFTError checks if the error returned from BroadcastTx is a
++// CometBFT error that is returned before the tx is submitted due to
++// precondition checks that failed. If a CometBFT error is detected, this
+ // function returns the correct code back in TxResponse.
+ //
+ // TODO: Avoid brittle string matching in favor of error matching. This requires
+-// a change to Tendermint's RPCError type to allow retrieval or matching against
++// a change to CometBFT's RPCError type to allow retrieval or matching against
+ // a concrete error type.
+-func CheckTendermintError(err error, tx tmtypes.Tx) *sdk.TxResponse {
++func CheckCometBFTError(err error, tx tmtypes.Tx) *sdk.TxResponse {
+ 	if err == nil {
+ 		return nil
+ 	}
+@@ -78,7 +78,14 @@ func CheckTendermintError(err error, tx tmtypes.Tx) *sdk.TxResponse {
+ 	}
+ }
+ 
+-// BroadcastTxSync broadcasts transaction bytes to a Tendermint node
++// CheckTendermintError is kept for backwards-compatibility; use CheckCometBFTError instead.
++//
++// Deprecated: use CheckCometBFTError.
++func CheckTendermintError(err error, tx tmtypes.Tx) *sdk.TxResponse {
++	return CheckCometBFTError(err, tx)
++}
++
++// BroadcastTxSync broadcasts transaction bytes to a CometBFT node
+ // synchronously (i.e. returns after CheckTx execution).
+ func (ctx Context) BroadcastTxSync(txBytes []byte) (*sdk.TxResponse, error) {
+ 	node, err := ctx.GetNode()
+@@ -87,14 +94,14 @@ func (ctx Context) BroadcastTxSync(txBytes []byte) (*sdk.TxResponse, error) {
+ 	}
+ 
+ 	res, err := node.BroadcastTxSync(context.Background(), txBytes)
+-	if errRes := CheckTendermintError(err, txBytes); errRes != nil {
++	if errRes := CheckCometBFTError(err, txBytes); errRes != nil {
+ 		return errRes, nil
+ 	}
+ 
+ 	return sdk.NewResponseFormatBroadcastTx(res), err
+ }
+ 
+-// BroadcastTxAsync broadcasts transaction bytes to a Tendermint node
++// BroadcastTxAsync broadcasts transaction bytes to a CometBFT node
+ // asynchronously (i.e. returns immediately).
+ func (ctx Context) BroadcastTxAsync(txBytes []byte) (*sdk.TxResponse, error) {
+ 	node, err := ctx.GetNode()
+@@ -103,7 +110,7 @@ func (ctx Context) BroadcastTxAsync(txBytes []byte) (*sdk.TxResponse, error) {
+ 	}
+ 
+ 	res, err := node.BroadcastTxAsync(context.Background(), txBytes)
+-	if errRes := CheckTendermintError(err, txBytes); errRes != nil {
++	if errRes := CheckCometBFTError(err, txBytes); errRes != nil {
+ 		return errRes, nil
+ 	}
+ 
+diff --git a/client/cometbft.go b/client/cometbft.go
+new file mode 100644
+index 0000000..cdffe19
+--- /dev/null
++++ b/client/cometbft.go
+@@ -0,0 +1,28 @@
++package client
++
++import (
++	"context"
++
++	rpcclient "github.com/cometbft/cometbft/rpc/client"
++	coretypes "github.com/cometbft/cometbft/rpc/core/types"
++)
++
++// CometBFTRPC defines the interface of a CometBFT RPC client needed for queries
++// and transaction handling.
++type CometBFTRPC interface {
++	rpcclient.ABCIClient
++
++	Validators(ctx context.Context, height *int64, page, perPage *int) (*coretypes.ResultValidators, error)
++	Status(context.Context) (*coretypes.ResultStatus, error)
++	Block(ctx context.Context, height *int64) (*coretypes.ResultBlock, error)
++	BlockchainInfo(ctx context.Context, minHeight, maxHeight int64) (*coretypes.ResultBlockchainInfo, error)
++	Commit(ctx context.Context, height *int64) (*coretypes.ResultCommit, error)
++	Tx(ctx context.Context, hash []byte, prove bool) (*coretypes.ResultTx, error)
++	TxSearch(
++		ctx context.Context,
++		query string,
++		prove bool,
++		page, perPage *int,
++		orderBy string,
++	) (*coretypes.ResultTxSearch, error)
++}
+diff --git a/client/config/toml.go b/client/config/toml.go
+index 202fbd7..b3ef23e 100644
+--- a/client/config/toml.go
++++ b/client/config/toml.go
+@@ -21,7 +21,7 @@ chain-id = "{{ .ChainID }}"
+ keyring-backend = "{{ .KeyringBackend }}"
+ # CLI output format (text|json)
+ output = "{{ .Output }}"
+-# <host>:<port> to Tendermint RPC interface for this chain
++# <host>:<port> to CometBFT RPC interface for this chain
+ node = "{{ .Node }}"
+ # Transaction broadcasting mode (sync|async)
+ broadcast-mode = "{{ .BroadcastMode }}"
+diff --git a/client/context.go b/client/context.go
+index 6158674..62e235d 100644
+--- a/client/context.go
++++ b/client/context.go
+@@ -25,7 +25,7 @@ type PreprocessTxFn func(chainID string, key keyring.KeyType, tx TxBuilder) erro
+ // handling and queries.
+ type Context struct {
+ 	FromAddress       sdk.AccAddress
+-	Client            TendermintRPC
++	Client            CometBFTRPC
+ 	GRPCClient        *grpc.ClientConn
+ 	ChainID           string
+ 	Codec             codec.Codec
+@@ -129,7 +129,7 @@ func (ctx Context) WithHeight(height int64) Context {
+ 
+ // WithClient returns a copy of the context with an updated RPC client
+ // instance.
+-func (ctx Context) WithClient(client TendermintRPC) Context {
++func (ctx Context) WithClient(client CometBFTRPC) Context {
+ 	ctx.Client = client
+ 	return ctx
+ }
+diff --git a/client/flags/flags.go b/client/flags/flags.go
+index 3f1a661..b3125e6 100644
+--- a/client/flags/flags.go
++++ b/client/flags/flags.go
+@@ -87,7 +87,7 @@ const (
+ 	// This differs from FlagOutputDocument that is used to set the output file.
+ 	FlagOutput = tmcli.OutputFlag
+ 
+-	// Tendermint logging flags
++	// CometBFT logging flags
+ 	FlagLogLevel  = "log_level"
+ 	FlagLogFormat = "log_format"
+ )
+@@ -98,7 +98,7 @@ var LineBreak = &cobra.Command{Run: func(*cobra.Command, []string) {}}
+ 
+ // AddQueryFlagsToCmd adds common flags to a module query command.
+ func AddQueryFlagsToCmd(cmd *cobra.Command) {
+-	cmd.Flags().String(FlagNode, "tcp://localhost:26657", "<host>:<port> to Tendermint RPC interface for this chain")
++	cmd.Flags().String(FlagNode, "tcp://localhost:26657", "<host>:<port> to CometBFT RPC interface for this chain")
+ 	cmd.Flags().String(FlagGRPC, "", "the gRPC endpoint to use for this chain")
+ 	cmd.Flags().Bool(FlagGRPCInsecure, false, "allow gRPC over insecure channels, if not the server must use TLS")
+ 	cmd.Flags().Int64(FlagHeight, 0, "Use a specific height to query state at (this can error if the node is pruning state)")
+@@ -119,7 +119,7 @@ func AddTxFlagsToCmd(cmd *cobra.Command) {
+ 	f.String(FlagNote, "", "Note to add a description to the transaction (previously --memo)")
+ 	f.String(FlagFees, "", "Fees to pay along with transaction; eg: 10uatom")
+ 	f.String(FlagGasPrices, "", "Gas prices in decimal format to determine the transaction fee (e.g. 0.1uatom)")
+-	f.String(FlagNode, "tcp://localhost:26657", "<host>:<port> to tendermint rpc interface for this chain")
++	f.String(FlagNode, "tcp://localhost:26657", "<host>:<port> to cometbft rpc interface for this chain")
+ 	f.Bool(FlagUseLedger, false, "Use a connected Ledger device")
+ 	f.Float64(FlagGasAdjustment, DefaultGasAdjustment, "adjustment factor to be multiplied against the estimate returned by the tx simulation; if the gas limit is set manually this flag is ignored ")
+ 	f.StringP(FlagBroadcastMode, "b", BroadcastSync, "Transaction broadcasting mode (sync|async)")
+diff --git a/client/grpc/tmservice/service.go b/client/grpc/tmservice/service.go
+index 68d1cf7..cc1d293 100644
+--- a/client/grpc/tmservice/service.go
++++ b/client/grpc/tmservice/service.go
+@@ -245,8 +245,8 @@ func (s queryServer) ABCIQuery(ctx context.Context, req *ABCIQueryRequest) (*ABC
+ 	return FromABCIResponseQuery(res), nil
+ }
+ 
+-// RegisterTendermintService registers the tendermint queries on the gRPC router.
+-func RegisterTendermintService(
++// RegisterCometBFTService registers the CometBFT queries on the gRPC router.
++func RegisterCometBFTService(
+ 	clientCtx client.Context,
+ 	server gogogrpc.Server,
+ 	iRegistry codectypes.InterfaceRegistry,
+@@ -255,6 +255,18 @@ func RegisterTendermintService(
+ 	RegisterServiceServer(server, NewQueryServer(clientCtx, iRegistry, queryFn))
+ }
+ 
++// RegisterTendermintService is kept for backwards-compatibility; use RegisterCometBFTService instead.
++//
++// Deprecated: use RegisterCometBFTService.
++func RegisterTendermintService(
++	clientCtx client.Context,
++	server gogogrpc.Server,
++	iRegistry codectypes.InterfaceRegistry,
++	queryFn abciQueryFn,
++) {
++	RegisterCometBFTService(clientCtx, server, iRegistry, queryFn)
++}
++
+ // RegisterGRPCGatewayRoutes mounts the tendermint service's GRPC-gateway routes on the
+ // given Mux.
+ func RegisterGRPCGatewayRoutes(clientConn gogogrpc.ClientConn, mux *runtime.ServeMux) {
+diff --git a/client/grpc_query.go b/client/grpc_query.go
+index 7617ced..569eff0 100644
+--- a/client/grpc_query.go
++++ b/client/grpc_query.go
+@@ -33,7 +33,7 @@ var fallBackCodec = codec.NewProtoCodec(failingInterfaceRegistry{})
+ // Invoke implements the grpc ClientConn.Invoke method
+ func (ctx Context) Invoke(grpcCtx gocontext.Context, method string, req, reply interface{}, opts ...grpc.CallOption) (err error) {
+ 	// Two things can happen here:
+-	// 1. either we're broadcasting a Tx, in which call we call Tendermint's broadcast endpoint directly,
++	// 1. either we're broadcasting a Tx, in which call we call CometBFT's broadcast endpoint directly,
+ 	// 2-1. or we are querying for state, in which case we call grpc if grpc client set.
+ 	// 2-2. or we are querying for state, in which case we call ABCI's Query if grpc client not set.
+ 
+diff --git a/client/keys/root.go b/client/keys/root.go
+index 6faf2f4..5149547 100644
+--- a/client/keys/root.go
++++ b/client/keys/root.go
+@@ -10,11 +10,11 @@ import (
+ // Commands registers a sub-tree of commands to interact with
+ // local private key storage.
+ func Commands(defaultNodeHome string) *cobra.Command {
+-	cmd := &cobra.Command{
++cmd := &cobra.Command{
+ 		Use:   "keys",
+ 		Short: "Manage your application's keys",
+ 		Long: `Keyring management commands. These keys may be in any format supported by the
+-Tendermint crypto library and can be used by light-clients, full nodes, or any other application
++CometBFT crypto library and can be used by light-clients, full nodes, or any other application
+ that needs to sign with a private key.
+ 
+ The keyring supports the following backends:
+diff --git a/client/query.go b/client/query.go
+index 7120704..9e6a90e 100644
+--- a/client/query.go
++++ b/client/query.go
+@@ -20,7 +20,7 @@ import (
+ 
+ // GetNode returns an RPC client. If the context's client is not defined, an
+ // error is returned.
+-func (ctx Context) GetNode() (TendermintRPC, error) {
++func (ctx Context) GetNode() (CometBFTRPC, error) {
+ 	if ctx.Client == nil {
+ 		return nil, errors.New("no RPC client is defined in offline mode")
+ 	}
+@@ -28,28 +28,28 @@ func (ctx Context) GetNode() (TendermintRPC, error) {
+ 	return ctx.Client, nil
+ }
+ 
+-// Query performs a query to a Tendermint node with the provided path.
++// Query performs a query to a CometBFT node with the provided path.
+ // It returns the result and height of the query upon success or an error if
+ // the query fails.
+ func (ctx Context) Query(path string) ([]byte, int64, error) {
+ 	return ctx.query(path, nil)
+ }
+ 
+-// QueryWithData performs a query to a Tendermint node with the provided path
++// QueryWithData performs a query to a CometBFT node with the provided path
+ // and a data payload. It returns the result and height of the query upon success
+ // or an error if the query fails.
+ func (ctx Context) QueryWithData(path string, data []byte) ([]byte, int64, error) {
+ 	return ctx.query(path, data)
+ }
+ 
+-// QueryStore performs a query to a Tendermint node with the provided key and
++// QueryStore performs a query to a CometBFT node with the provided key and
+ // store name. It returns the result and height of the query upon success
+ // or an error if the query fails.
+ func (ctx Context) QueryStore(key tmbytes.HexBytes, storeName string) ([]byte, int64, error) {
+ 	return ctx.queryStore(key, storeName, "key")
+ }
+ 
+-// QueryABCI performs a query to a Tendermint node with the provide RequestQuery.
++// QueryABCI performs a query to a CometBFT node with the provide RequestQuery.
+ // It returns the ResultQuery obtained from the query. The height used to perform
+ // the query is the RequestQuery Height if it is non-zero, otherwise the context
+ // height is used.
+@@ -126,7 +126,7 @@ func sdkErrorToGRPCError(resp abci.ResponseQuery) error {
+ 	}
+ }
+ 
+-// query performs a query to a Tendermint node with the provided store name
++// query performs a query to a CometBFT node with the provided store name
+ // and path. It returns the result and height of the query upon success
+ // or an error if the query fails.
+ func (ctx Context) query(path string, key tmbytes.HexBytes) ([]byte, int64, error) {
+@@ -142,7 +142,7 @@ func (ctx Context) query(path string, key tmbytes.HexBytes) ([]byte, int64, erro
+ 	return resp.Value, resp.Height, nil
+ }
+ 
+-// queryStore performs a query to a Tendermint node with the provided a store
++// queryStore performs a query to a CometBFT node with the provided a store
+ // name and path. It returns the result and height of the query upon success
+ // or an error if the query fails.
+ func (ctx Context) queryStore(key tmbytes.HexBytes, storeName, endPath string) ([]byte, int64, error) {
+diff --git a/client/rpc/status.go b/client/rpc/status.go
+index 841cc78..87cd5d5 100644
+--- a/client/rpc/status.go
++++ b/client/rpc/status.go
+@@ -15,7 +15,7 @@ import (
+ 	cryptotypes "github.com/cosmos/cosmos-sdk/crypto/types"
+ )
+ 
+-// ValidatorInfo is info about the node's validator, same as Tendermint,
++// ValidatorInfo is info about the node's validator, same as CometBFT,
+ // except that we use our own PubKey.
+ type validatorInfo struct {
+ 	Address     bytes.HexBytes
+@@ -23,7 +23,7 @@ type validatorInfo struct {
+ 	VotingPower int64
+ }
+ 
+-// ResultStatus is node's info, same as Tendermint, except that we use our own
++// ResultStatus is node's info, same as CometBFT, except that we use our own
+ // PubKey.
+ type resultStatus struct {
+ 	NodeInfo      p2p.DefaultNodeInfo
+diff --git a/client/rpc/validators.go b/client/rpc/validators.go
+index 7eebb7f..9b80e7e 100644
+--- a/client/rpc/validators.go
++++ b/client/rpc/validators.go
+@@ -22,9 +22,10 @@ import (
+ // ValidatorCommand returns the validator set for a given height
+ func ValidatorCommand() *cobra.Command {
+ 	cmd := &cobra.Command{
+-		Use:   "tendermint-validator-set [height]",
+-		Short: "Get the full tendermint validator set at given height",
+-		Args:  cobra.MaximumNArgs(1),
++		Use:     "cometbft-validator-set [height]",
++		Aliases: []string{"tendermint-validator-set"},
++		Short:   "Get the full CometBFT validator set at given height",
++		Args:    cobra.MaximumNArgs(1),
+ 		RunE: func(cmd *cobra.Command, args []string) error {
+ 			clientCtx, err := client.GetClientQueryContext(cmd)
+ 			if err != nil {
+@@ -57,7 +58,7 @@ func ValidatorCommand() *cobra.Command {
+ 		},
+ 	}
+ 
+-	cmd.Flags().String(flags.FlagNode, "tcp://localhost:26657", "<host>:<port> to Tendermint RPC interface for this chain")
++	cmd.Flags().String(flags.FlagNode, "tcp://localhost:26657", "<host>:<port> to CometBFT RPC interface for this chain")
+ 	cmd.Flags().StringP(flags.FlagOutput, "o", "text", "Output format (text|json)")
+ 	cmd.Flags().Int(flags.FlagPage, query.DefaultPage, "Query a specific page of paginated results")
+ 	cmd.Flags().Int(flags.FlagLimit, 100, "Query number of results returned per page")
+diff --git a/client/tendermint.go b/client/tendermint.go
+index 66ef0a9..a80db8a 100644
+--- a/client/tendermint.go
++++ b/client/tendermint.go
+@@ -1,28 +1,6 @@
+ package client
+ 
+-import (
+-	"context"
+-
+-	rpcclient "github.com/cometbft/cometbft/rpc/client"
+-	coretypes "github.com/cometbft/cometbft/rpc/core/types"
+-)
+-
+-// TendermintRPC defines the interface of a Tendermint RPC client needed for
+-// queries and transaction handling.
+-type TendermintRPC interface {
+-	rpcclient.ABCIClient
+-
+-	Validators(ctx context.Context, height *int64, page, perPage *int) (*coretypes.ResultValidators, error)
+-	Status(context.Context) (*coretypes.ResultStatus, error)
+-	Block(ctx context.Context, height *int64) (*coretypes.ResultBlock, error)
+-	BlockchainInfo(ctx context.Context, minHeight, maxHeight int64) (*coretypes.ResultBlockchainInfo, error)
+-	Commit(ctx context.Context, height *int64) (*coretypes.ResultCommit, error)
+-	Tx(ctx context.Context, hash []byte, prove bool) (*coretypes.ResultTx, error)
+-	TxSearch(
+-		ctx context.Context,
+-		query string,
+-		prove bool,
+-		page, perPage *int,
+-		orderBy string,
+-	) (*coretypes.ResultTxSearch, error)
+-}
++// TendermintRPC is kept for backwards-compatibility; use CometBFTRPC instead.
++//
++// Deprecated: use CometBFTRPC.
++type TendermintRPC = CometBFTRPC
+diff --git a/client/tx/tx.go b/client/tx/tx.go
+index 420119c..9311bbd 100644
+--- a/client/tx/tx.go
++++ b/client/tx/tx.go
+@@ -120,7 +120,7 @@ func BroadcastTx(clientCtx client.Context, txf Factory, msgs ...sdk.Msg) error {
+ 		return err
+ 	}
+ 
+-	// broadcast to a Tendermint node
++	// broadcast to a CometBFT node
+ 	res, err := clientCtx.BroadcastTx(txBytes)
+ 	if err != nil {
+ 		return err
+diff --git a/client/utils.go b/client/utils.go
+index 1c5ef0a..e2f3a2a 100644
+--- a/client/utils.go
++++ b/client/utils.go
+@@ -73,7 +73,7 @@ func ReadPageRequest(flagSet *pflag.FlagSet) (*query.PageRequest, error) {
+ 	}, nil
+ }
+ 
+-// NewClientFromNode sets up Client implementation that communicates with a Tendermint node over
++// NewClientFromNode sets up Client implementation that communicates with a CometBFT node over
+ // JSON RPC and WebSockets
+ func NewClientFromNode(nodeURI string) (*rpchttp.HTTP, error) {
+ 	return rpchttp.New(nodeURI, "/websocket")
+diff --git a/codec/amino.go b/codec/amino.go
+index 569b4f3..c2ce494 100644
+--- a/codec/amino.go
++++ b/codec/amino.go
+@@ -27,7 +27,7 @@ func NewLegacyAmino() *LegacyAmino {
+ 	return &LegacyAmino{amino.NewCodec()}
+ }
+ 
+-// RegisterEvidences registers Tendermint evidence types with the provided Amino
++// RegisterEvidences registers CometBFT evidence types with the provided Amino
+ // codec.
+ func RegisterEvidences(cdc *LegacyAmino) {
+ 	cdc.Amino.RegisterInterface((*tmtypes.Evidence)(nil), nil)
+diff --git a/codec/legacy/codec.go b/codec/legacy/codec.go
+index 0bc2e74..b552dc7 100644
+--- a/codec/legacy/codec.go
++++ b/codec/legacy/codec.go
+@@ -8,7 +8,7 @@ import (
+ )
+ 
+ // Cdc defines a global generic sealed Amino codec to be used throughout sdk. It
+-// has all Tendermint crypto and evidence types registered.
++// has all CometBFT crypto and evidence types registered.
+ //
+ // TODO: Deprecated - remove this global.
+ var Cdc = codec.NewLegacyAmino()
+diff --git a/contrib/rosetta/docker-compose.yaml b/contrib/rosetta/docker-compose.yaml
+index c5c4cc3..9656147 100644
+--- a/contrib/rosetta/docker-compose.yaml
++++ b/contrib/rosetta/docker-compose.yaml
+@@ -19,7 +19,7 @@ services:
+       "rosetta",
+       "--blockchain", "app",
+       "--network", "network",
+-      "--tendermint", "cosmos:26657",
++      "--cometbft", "cosmos:26657",
+       "--grpc", "cosmos:9090",
+       "--addr", ":8080",
+     ]
+diff --git a/crypto/codec/tm.go b/crypto/codec/tm.go
+index 4eb365e..b4c9573 100644
+--- a/crypto/codec/tm.go
++++ b/crypto/codec/tm.go
+@@ -11,7 +11,7 @@ import (
+ 	sdkerrors "github.com/cosmos/cosmos-sdk/types/errors"
+ )
+ 
+-// FromTmProtoPublicKey converts a TM's tmprotocrypto.PublicKey into our own PubKey.
++// FromTmProtoPublicKey converts a CometBFT tmprotocrypto.PublicKey into our own PubKey.
+ func FromTmProtoPublicKey(protoPk tmprotocrypto.PublicKey) (cryptotypes.PubKey, error) {
+ 	switch protoPk := protoPk.Sum.(type) {
+ 	case *tmprotocrypto.PublicKey_Ed25519:
+@@ -23,11 +23,11 @@ func FromTmProtoPublicKey(protoPk tmprotocrypto.PublicKey) (cryptotypes.PubKey,
+ 			Key: protoPk.Secp256K1,
+ 		}, nil
+ 	default:
+-		return nil, sdkerrors.Wrapf(sdkerrors.ErrInvalidType, "cannot convert %v from Tendermint public key", protoPk)
++		return nil, sdkerrors.Wrapf(sdkerrors.ErrInvalidType, "cannot convert %v from CometBFT public key", protoPk)
+ 	}
+ }
+ 
+-// ToTmProtoPublicKey converts our own PubKey to TM's tmprotocrypto.PublicKey.
++// ToTmProtoPublicKey converts our own PubKey to a CometBFT tmprotocrypto.PublicKey.
+ func ToTmProtoPublicKey(pk cryptotypes.PubKey) (tmprotocrypto.PublicKey, error) {
+ 	switch pk := pk.(type) {
+ 	case *ed25519.PubKey:
+@@ -43,11 +43,11 @@ func ToTmProtoPublicKey(pk cryptotypes.PubKey) (tmprotocrypto.PublicKey, error)
+ 			},
+ 		}, nil
+ 	default:
+-		return tmprotocrypto.PublicKey{}, sdkerrors.Wrapf(sdkerrors.ErrInvalidType, "cannot convert %v to Tendermint public key", pk)
++		return tmprotocrypto.PublicKey{}, sdkerrors.Wrapf(sdkerrors.ErrInvalidType, "cannot convert %v to CometBFT public key", pk)
+ 	}
+ }
+ 
+-// FromTmPubKeyInterface converts TM's tmcrypto.PubKey to our own PubKey.
++// FromTmPubKeyInterface converts a CometBFT tmcrypto.PubKey to our own PubKey.
+ func FromTmPubKeyInterface(tmPk tmcrypto.PubKey) (cryptotypes.PubKey, error) {
+ 	tmProtoPk, err := encoding.PubKeyToProto(tmPk)
+ 	if err != nil {
+@@ -57,7 +57,7 @@ func FromTmPubKeyInterface(tmPk tmcrypto.PubKey) (cryptotypes.PubKey, error) {
+ 	return FromTmProtoPublicKey(tmProtoPk)
+ }
+ 
+-// ToTmPubKeyInterface converts our own PubKey to TM's tmcrypto.PubKey.
++// ToTmPubKeyInterface converts our own PubKey to a CometBFT tmcrypto.PubKey.
+ func ToTmPubKeyInterface(pk cryptotypes.PubKey) (tmcrypto.PubKey, error) {
+ 	tmProtoPk, err := ToTmProtoPublicKey(pk)
+ 	if err != nil {
+diff --git a/crypto/keyring/types.go b/crypto/keyring/types.go
+index 0b893ea..55ba89a 100644
+--- a/crypto/keyring/types.go
++++ b/crypto/keyring/types.go
+@@ -66,6 +66,6 @@ func (kt KeyType) String() string {
+ type (
+ 	// DeriveKeyFunc defines the function to derive a new key from a seed and hd path
+ 	DeriveKeyFunc func(mnemonic string, bip39Passphrase, hdPath string, algo hd.PubKeyType) ([]byte, error)
+-	// PrivKeyGenFunc defines the function to convert derived key bytes to a tendermint private key
++	// PrivKeyGenFunc defines the function to convert derived key bytes to a CometBFT private key
+ 	PrivKeyGenFunc func(bz []byte, algo hd.PubKeyType) (cryptotypes.PrivKey, error)
+ )
+diff --git a/runtime/app.go b/runtime/app.go
+index ca7301d..c5968f7 100644
+--- a/runtime/app.go
++++ b/runtime/app.go
+@@ -141,7 +141,7 @@ func (a *App) RegisterAPIRoutes(apiSvr *api.Server, _ config.APIConfig) {
+ 	// Register new tx routes from grpc-gateway.
+ 	authtx.RegisterGRPCGatewayRoutes(clientCtx, apiSvr.GRPCGatewayRouter)
+ 
+-	// Register new tendermint queries routes from grpc-gateway.
++	// Register CometBFT queries routes from grpc-gateway.
+ 	tmservice.RegisterGRPCGatewayRoutes(clientCtx, apiSvr.GRPCGatewayRouter)
+ 
+ 	// Register node gRPC service for grpc-gateway.
+@@ -156,9 +156,9 @@ func (a *App) RegisterTxService(clientCtx client.Context) {
+ 	authtx.RegisterTxService(a.GRPCQueryRouter(), clientCtx, a.Simulate, a.interfaceRegistry)
+ }
+ 
+-// RegisterTendermintService implements the Application.RegisterTendermintService method.
+-func (a *App) RegisterTendermintService(clientCtx client.Context) {
+-	tmservice.RegisterTendermintService(
++// RegisterCometBFTService registers the CometBFT Query service on the app gRPC router.
++func (a *App) RegisterCometBFTService(clientCtx client.Context) {
++	tmservice.RegisterCometBFTService(
+ 		clientCtx,
+ 		a.GRPCQueryRouter(),
+ 		a.interfaceRegistry,
+@@ -166,6 +166,13 @@ func (a *App) RegisterTendermintService(clientCtx client.Context) {
+ 	)
+ }
+ 
++// RegisterTendermintService is kept for backwards-compatibility; use RegisterCometBFTService instead.
++//
++// Deprecated: use RegisterCometBFTService.
++func (a *App) RegisterTendermintService(clientCtx client.Context) {
++	a.RegisterCometBFTService(clientCtx)
++}
++
+ // RegisterNodeService registers the node gRPC service on the app gRPC router.
+ func (a *App) RegisterNodeService(clientCtx client.Context) {
+ 	nodeservice.RegisterNodeService(clientCtx, a.GRPCQueryRouter())
+diff --git a/server/api/server.go b/server/api/server.go
+index 9927574..95b74b4 100644
+--- a/server/api/server.go
++++ b/server/api/server.go
+@@ -86,9 +86,9 @@ func New(clientCtx client.Context, logger log.Logger, grpcSrv *grpc.Server) *Ser
+ 	}
+ }
+ 
+-// Start starts the API server. Internally, the API server leverages Tendermint's
++// Start starts the API server. Internally, the API server leverages CometBFT's
+ // JSON RPC server. Configuration options are provided via config.APIConfig
+-// and are delegated to the Tendermint JSON RPC server. The process is
++// and are delegated to the CometBFT JSON RPC server. The process is
+ // non-blocking, so an external signal handler must be used.
+ func (s *Server) Start(cfg config.Config) error {
+ 	s.mtx.Lock()
+diff --git a/server/cmd/execute.go b/server/cmd/execute.go
+index 843cfc0..9b46ad6 100644
+--- a/server/cmd/execute.go
++++ b/server/cmd/execute.go
+@@ -20,7 +20,7 @@ func Execute(rootCmd *cobra.Command, envPrefix string, defaultHome string) error
+ 	// Create and set a client.Context on the command's Context. During the pre-run
+ 	// of the root command, a default initialized client.Context is provided to
+ 	// seed child command execution with values such as AccountRetriever, Keyring,
+-	// and a Tendermint RPC. This requires the use of a pointer reference when
++	// and a CometBFT RPC. This requires the use of a pointer reference when
+ 	// getting and setting the client.Context. Ideally, we utilize
+ 	// https://github.com/spf13/cobra/pull/1118.
+ 	ctx := CreateExecuteContext(context.Background())
+diff --git a/server/config/config.go b/server/config/config.go
+index 47295f4..fdb9bd5 100644
+--- a/server/config/config.go
++++ b/server/config/config.go
+@@ -61,15 +61,15 @@ type BaseConfig struct {
+ 
+ 	// MinRetainBlocks defines the minimum block height offset from the current
+ 	// block being committed, such that blocks past this offset may be pruned
+-	// from Tendermint. It is used as part of the process of determining the
++	// from CometBFT. It is used as part of the process of determining the
+ 	// ResponseCommit.RetainHeight value during ABCI Commit. A value of 0 indicates
+ 	// that no blocks should be pruned.
+ 	//
+-	// This configuration value is only responsible for pruning Tendermint blocks.
++	// This configuration value is only responsible for pruning CometBFT blocks.
+ 	// It has no bearing on application state pruning which is determined by the
+ 	// "pruning-*" configurations.
+ 	//
+-	// Note: Tendermint block pruning is dependant on this parameter in conjunction
++	// Note: CometBFT block pruning is dependant on this parameter in conjunction
+ 	// with the unbonding (safety threshold) period, state pruning and state sync
+ 	// snapshot parameters to determine the correct minimum value of
+ 	// ResponseCommit.RetainHeight.
+@@ -79,7 +79,7 @@ type BaseConfig struct {
+ 	InterBlockCache bool `mapstructure:"inter-block-cache"`
+ 
+ 	// IndexEvents defines the set of events in the form {eventType}.{attributeKey},
+-	// which informs Tendermint what to index. If empty, all events will be indexed.
++	// which informs CometBFT what to index. If empty, all events will be indexed.
+ 	IndexEvents []string `mapstructure:"index-events"`
+ 
+ 	// IavlCacheSize set the size of the iavl tree cache.
+@@ -92,7 +92,7 @@ type BaseConfig struct {
+ 	IAVLLazyLoading bool `mapstructure:"iavl-lazy-loading"`
+ 
+ 	// AppDBBackend defines the type of Database to use for the application and snapshots databases.
+-	// An empty string indicates that the Tendermint config's DBBackend value should be used.
++	// An empty string indicates that the CometBFT config's DBBackend value should be used.
+ 	AppDBBackend string `mapstructure:"app-db-backend"`
+ }
+ 
+@@ -113,13 +113,13 @@ type APIConfig struct {
+ 	// MaxOpenConnections defines the number of maximum open connections
+ 	MaxOpenConnections uint `mapstructure:"max-open-connections"`
+ 
+-	// RPCReadTimeout defines the Tendermint RPC read timeout (in seconds)
++	// RPCReadTimeout defines the CometBFT RPC read timeout (in seconds)
+ 	RPCReadTimeout uint `mapstructure:"rpc-read-timeout"`
+ 
+-	// RPCWriteTimeout defines the Tendermint RPC write timeout (in seconds)
++	// RPCWriteTimeout defines the CometBFT RPC write timeout (in seconds)
+ 	RPCWriteTimeout uint `mapstructure:"rpc-write-timeout"`
+ 
+-	// RPCMaxBodyBytes defines the Tendermint maximum response body (in bytes)
++	// RPCMaxBodyBytes defines the CometBFT maximum response body (in bytes)
+ 	RPCMaxBodyBytes uint `mapstructure:"rpc-max-body-bytes"`
+ 
+ 	// TODO: TLS/Proxy configuration.
+diff --git a/server/config/toml.go b/server/config/toml.go
+index 6302def..dff802a 100644
+--- a/server/config/toml.go
++++ b/server/config/toml.go
+@@ -46,15 +46,15 @@ halt-time = {{ .BaseConfig.HaltTime }}
+ 
+ # MinRetainBlocks defines the minimum block height offset from the current
+ # block being committed, such that all blocks past this offset are pruned
+-# from Tendermint. It is used as part of the process of determining the
++# from CometBFT. It is used as part of the process of determining the
+ # ResponseCommit.RetainHeight value during ABCI Commit. A value of 0 indicates
+ # that no blocks should be pruned.
+ #
+-# This configuration value is only responsible for pruning Tendermint blocks.
++# This configuration value is only responsible for pruning CometBFT blocks.
+ # It has no bearing on application state pruning which is determined by the
+ # "pruning-*" configurations.
+ #
+-# Note: Tendermint block pruning is dependant on this parameter in conjunction
++# Note: CometBFT block pruning is dependant on this parameter in conjunction
+ # with the unbonding (safety threshold) period, state pruning and state sync
+ # snapshot parameters to determine the correct minimum value of
+ # ResponseCommit.RetainHeight.
+@@ -64,7 +64,7 @@ min-retain-blocks = {{ .BaseConfig.MinRetainBlocks }}
+ inter-block-cache = {{ .BaseConfig.InterBlockCache }}
+ 
+ # IndexEvents defines the set of events in the form {eventType}.{attributeKey},
+-# which informs Tendermint what to index. If empty, all events will be indexed.
++# which informs CometBFT what to index. If empty, all events will be indexed.
+ #
+ # Example:
+ # ["message.sender", "message.recipient"]
+@@ -84,7 +84,7 @@ iavl-lazy-loading = {{ .BaseConfig.IAVLLazyLoading }}
+ # AppDBBackend defines the database backend type to use for the application and snapshots DBs.
+ # An empty string indicates that a fallback will be used.
+ # First fallback is the deprecated compile-time types.DBBackend value.
+-# Second fallback (if the types.DBBackend also isn't set), is the db-backend value set in Tendermint's config.toml.
++# Second fallback (if the types.DBBackend also isn't set), is the db-backend value set in CometBFT's config.toml.
+ app-db-backend = "{{ .BaseConfig.AppDBBackend }}"
+ 
+ ###############################################################################
+@@ -140,13 +140,13 @@ address = "{{ .API.Address }}"
+ # MaxOpenConnections defines the number of maximum open connections.
+ max-open-connections = {{ .API.MaxOpenConnections }}
+ 
+-# RPCReadTimeout defines the Tendermint RPC read timeout (in seconds).
++# RPCReadTimeout defines the CometBFT RPC read timeout (in seconds).
+ rpc-read-timeout = {{ .API.RPCReadTimeout }}
+ 
+-# RPCWriteTimeout defines the Tendermint RPC write timeout (in seconds).
++# RPCWriteTimeout defines the CometBFT RPC write timeout (in seconds).
+ rpc-write-timeout = {{ .API.RPCWriteTimeout }}
+ 
+-# RPCMaxBodyBytes defines the Tendermint maximum response body (in bytes).
++# RPCMaxBodyBytes defines the CometBFT maximum response body (in bytes).
+ rpc-max-body-bytes = {{ .API.RPCMaxBodyBytes }}
+ 
+ # EnableUnsafeCORS defines if CORS should be enabled (unsafe - use it at your own risk).
+diff --git a/server/export.go b/server/export.go
+index e66b869..30e20eb 100644
+--- a/server/export.go
++++ b/server/export.go
+@@ -96,7 +96,7 @@ func ExportCmd(appExporter types.AppExporter, defaultNodeHome string) *cobra.Com
+ 				},
+ 			}
+ 
+-			// NOTE: Tendermint uses a custom JSON decoder for GenesisDoc
++			// NOTE: CometBFT uses a custom JSON decoder for GenesisDoc
+ 			// (except for stuff inside AppState). Inside AppState, we're free
+ 			// to encode as protobuf or amino.
+ 			encoded, err := tmjson.Marshal(doc)
+diff --git a/server/rollback.go b/server/rollback.go
+index 87196b9..5fa1331 100644
+--- a/server/rollback.go
++++ b/server/rollback.go
+@@ -9,19 +9,19 @@ import (
+ 	"github.com/spf13/cobra"
+ )
+ 
+-// NewRollbackCmd creates a command to rollback tendermint and multistore state by one height.
++// NewRollbackCmd creates a command to rollback CometBFT and multistore state by one height.
+ func NewRollbackCmd(appCreator types.AppCreator, defaultNodeHome string) *cobra.Command {
+ 	var removeBlock bool
+ 
+ 	cmd := &cobra.Command{
+ 		Use:   "rollback",
+-		Short: "rollback cosmos-sdk and tendermint state by one height",
++		Short: "rollback cosmos-sdk and CometBFT state by one height",
+ 		Long: `
+ A state rollback is performed to recover from an incorrect application state transition,
+-when Tendermint has persisted an incorrect app hash and is thus unable to make
++when CometBFT has persisted an incorrect app hash and is thus unable to make
+ progress. Rollback overwrites a state at height n with the state at height n - 1.
+ The application also rolls back to height n - 1. No blocks are removed, so upon
+-restarting Tendermint the transactions in block n will be re-executed against the
++restarting CometBFT the transactions in block n will be re-executed against the
+ application.
+ `,
+ 		RunE: func(cmd *cobra.Command, args []string) error {
+@@ -33,10 +33,10 @@ application.
+ 				return err
+ 			}
+ 			app := appCreator(ctx.Logger, db, nil, ctx.Viper)
+-			// rollback tendermint state
++			// rollback CometBFT state
+ 			height, hash, err := tmcmd.RollbackState(ctx.Config, removeBlock)
+ 			if err != nil {
+-				return fmt.Errorf("failed to rollback tendermint state: %w", err)
++				return fmt.Errorf("failed to rollback cometbft state: %w", err)
+ 			}
+ 			// rollback the multistore
+ 
+diff --git a/server/start.go b/server/start.go
+index 2652710..dd1b53c 100644
+--- a/server/start.go
++++ b/server/start.go
+@@ -32,7 +32,11 @@ import (
+ )
+ 
+ const (
+-	// Tendermint full-node start flags
++	// CometBFT full-node start flags
++	flagWithCometBFT = "with-cometbft"
++	// flagWithTendermint is kept for backwards-compatibility; use flagWithCometBFT instead.
++	//
++	// Deprecated: use flagWithCometBFT.
+ 	flagWithTendermint     = "with-tendermint"
+ 	flagAddress            = "address"
+ 	flagTransport          = "transport"
+@@ -80,13 +84,13 @@ const (
+ )
+ 
+ // StartCmd runs the service passed in, either stand-alone or in-process with
+-// Tendermint.
++// CometBFT.
+ func StartCmd(appCreator types.AppCreator, defaultNodeHome string) *cobra.Command {
+ 	cmd := &cobra.Command{
+ 		Use:   "start",
+ 		Short: "Run the full node",
+-		Long: `Run the full node application with Tendermint in or out of process. By
+-default, the application will run with Tendermint in process.
++		Long: `Run the full node application with CometBFT in or out of process. By
++default, the application will run with CometBFT in process.
+ 
+ Pruning options can be provided via the '--pruning' flag or alternatively with '--pruning-keep-recent', and
+ 'pruning-interval' together.
+@@ -108,7 +112,7 @@ For profiling and benchmarking purposes, CPU profiling can be enabled via the '-
+ which accepts a path for the resulting pprof file.
+ 
+ The node may be started in a 'query only' mode where only the gRPC and JSON HTTP
+-API services are enabled via the 'grpc-only' flag. In this mode, Tendermint is
++API services are enabled via the 'grpc-only' flag. In this mode, CometBFT is
+ bypassed and can be used when legacy queries are needed after an on-chain upgrade
+ is performed. Note, when enabled, gRPC will also be automatically enabled.
+ `,
+@@ -131,9 +135,12 @@ is performed. Note, when enabled, gRPC will also be automatically enabled.
+ 				return err
+ 			}
+ 
+-			withTM, _ := cmd.Flags().GetBool(flagWithTendermint)
++			withTM, _ := cmd.Flags().GetBool(flagWithCometBFT)
++			if cmd.Flags().Changed(flagWithTendermint) {
++				withTM, _ = cmd.Flags().GetBool(flagWithTendermint)
++			}
+ 			if !withTM {
+-				serverCtx.Logger.Info("starting ABCI without Tendermint")
++				serverCtx.Logger.Info("starting ABCI without CometBFT")
+ 				return startStandAlone(serverCtx, appCreator)
+ 			}
+ 
+@@ -150,7 +157,8 @@ is performed. Note, when enabled, gRPC will also be automatically enabled.
+ 	}
+ 
+ 	cmd.Flags().String(flags.FlagHome, defaultNodeHome, "The application home directory")
+-	cmd.Flags().Bool(flagWithTendermint, true, "Run abci app embedded in-process with tendermint")
++	cmd.Flags().Bool(flagWithCometBFT, true, "Run abci app embedded in-process with cometbft")
++	cmd.Flags().Bool(flagWithTendermint, true, "Run abci app embedded in-process with tendermint (deprecated; use --with-cometbft)")
+ 	cmd.Flags().String(flagAddress, "tcp://0.0.0.0:26658", "Listen address")
+ 	cmd.Flags().String(flagTransport, "socket", "Transport protocol: socket, grpc")
+ 	cmd.Flags().String(flagTraceStore, "", "Enable KVStore tracing to an output file")
+@@ -165,18 +173,18 @@ is performed. Note, when enabled, gRPC will also be automatically enabled.
+ 	cmd.Flags().Uint64(FlagPruningKeepRecent, 0, "Number of recent heights to keep on disk (ignored if pruning is not 'custom')")
+ 	cmd.Flags().Uint64(FlagPruningInterval, 0, "Height interval at which pruned heights are removed from disk (ignored if pruning is not 'custom')")
+ 	cmd.Flags().Uint(FlagInvCheckPeriod, 0, "Assert registered invariants every N blocks")
+-	cmd.Flags().Uint64(FlagMinRetainBlocks, 0, "Minimum block height offset during ABCI commit to prune Tendermint blocks")
++	cmd.Flags().Uint64(FlagMinRetainBlocks, 0, "Minimum block height offset during ABCI commit to prune CometBFT blocks")
+ 
+ 	cmd.Flags().Bool(FlagAPIEnable, false, "Define if the API server should be enabled")
+ 	cmd.Flags().Bool(FlagAPISwagger, false, "Define if swagger documentation should automatically be registered (Note: the API must also be enabled)")
+ 	cmd.Flags().String(FlagAPIAddress, serverconfig.DefaultAPIAddress, "the API server address to listen on")
+ 	cmd.Flags().Uint(FlagAPIMaxOpenConnections, 1000, "Define the number of maximum open connections")
+-	cmd.Flags().Uint(FlagRPCReadTimeout, 10, "Define the Tendermint RPC read timeout (in seconds)")
+-	cmd.Flags().Uint(FlagRPCWriteTimeout, 0, "Define the Tendermint RPC write timeout (in seconds)")
+-	cmd.Flags().Uint(FlagRPCMaxBodyBytes, 1000000, "Define the Tendermint maximum response body (in bytes)")
++	cmd.Flags().Uint(FlagRPCReadTimeout, 10, "Define the CometBFT RPC read timeout (in seconds)")
++	cmd.Flags().Uint(FlagRPCWriteTimeout, 0, "Define the CometBFT RPC write timeout (in seconds)")
++	cmd.Flags().Uint(FlagRPCMaxBodyBytes, 1000000, "Define the CometBFT maximum response body (in bytes)")
+ 	cmd.Flags().Bool(FlagAPIEnableUnsafeCORS, false, "Define if CORS should be enabled (unsafe - use it at your own risk)")
+ 
+-	cmd.Flags().Bool(flagGRPCOnly, false, "Start the node in gRPC query only mode (no Tendermint process is started)")
++	cmd.Flags().Bool(flagGRPCOnly, false, "Start the node in gRPC query only mode (no CometBFT process is started)")
+ 	cmd.Flags().Bool(flagGRPCEnable, true, "Define if the gRPC server should be enabled")
+ 	cmd.Flags().String(flagGRPCAddress, serverconfig.DefaultGRPCAddress, "the gRPC server address to listen on")
+ 
+@@ -189,7 +197,7 @@ is performed. Note, when enabled, gRPC will also be automatically enabled.
+ 
+ 	cmd.Flags().Int(FlagMempoolMaxTxs, mempool.DefaultMaxTx, "Sets MaxTx value for the app-side mempool")
+ 
+-	// add support for all Tendermint-specific command line options
++	// add support for all CometBFT-specific command line options
+ 	tcmd.AddNodeFlags(cmd)
+ 	return cmd
+ }
+@@ -321,10 +329,10 @@ func startInProcess(ctx *Context, clientCtx client.Context, appCreator types.App
+ 	)
+ 
+ 	if gRPCOnly {
+-		ctx.Logger.Info("starting node in gRPC only mode; Tendermint is disabled")
++		ctx.Logger.Info("starting node in gRPC only mode; CometBFT is disabled")
+ 		config.GRPC.Enable = true
+ 	} else {
+-		ctx.Logger.Info("starting node with ABCI Tendermint in-process")
++		ctx.Logger.Info("starting node with ABCI CometBFT in-process")
+ 
+ 		tmNode, err = node.NewNode(
+ 			cfg,
+@@ -347,14 +355,18 @@ func startInProcess(ctx *Context, clientCtx client.Context, appCreator types.App
+ 
+ 	// Add the tx service to the gRPC router. We only need to register this
+ 	// service if API or gRPC is enabled, and avoid doing so in the general
+-	// case, because it spawns a new local tendermint RPC client.
++	// case, because it spawns a new local CometBFT RPC client.
+ 	if (config.API.Enable || config.GRPC.Enable) && tmNode != nil {
+ 		// re-assign for making the client available below
+ 		// do not use := to avoid shadowing clientCtx
+ 		clientCtx = clientCtx.WithClient(local.New(tmNode))
+ 
+ 		app.RegisterTxService(clientCtx)
+-		app.RegisterTendermintService(clientCtx)
++		if registrar, ok := app.(interface{ RegisterCometBFTService(client.Context) }); ok {
++			registrar.RegisterCometBFTService(clientCtx)
++		} else {
++			app.RegisterTendermintService(clientCtx)
++		}
+ 		app.RegisterNodeService(clientCtx)
+ 	}
+ 
+@@ -453,7 +465,7 @@ func startInProcess(ctx *Context, clientCtx client.Context, appCreator types.App
+ 	}
+ 
+ 	// At this point it is safe to block the process if we're in gRPC only mode as
+-	// we do not need to handle any Tendermint related processes.
++	// we do not need to handle any CometBFT related processes.
+ 	if gRPCOnly {
+ 		// wait for signal capture and gracefully return
+ 		return WaitForQuitSignals()
+diff --git a/server/tm_cmds.go b/server/tm_cmds.go
+index 1956855..1df26d4 100644
+--- a/server/tm_cmds.go
++++ b/server/tm_cmds.go
+@@ -14,7 +14,7 @@ import (
+ 	sdk "github.com/cosmos/cosmos-sdk/types"
+ )
+ 
+-// ShowNodeIDCmd - ported from Tendermint, dump node ID to stdout
++// ShowNodeIDCmd - ported from CometBFT (formerly Tendermint), dump node ID to stdout
+ func ShowNodeIDCmd() *cobra.Command {
+ 	return &cobra.Command{
+ 		Use:   "show-node-id",
+@@ -34,11 +34,11 @@ func ShowNodeIDCmd() *cobra.Command {
+ 	}
+ }
+ 
+-// ShowValidatorCmd - ported from Tendermint, show this node's validator info
++// ShowValidatorCmd - ported from CometBFT (formerly Tendermint), show this node's validator info
+ func ShowValidatorCmd() *cobra.Command {
+ 	cmd := cobra.Command{
+ 		Use:   "show-validator",
+-		Short: "Show this node's tendermint validator info",
++		Short: "Show this node's CometBFT validator info",
+ 		RunE: func(cmd *cobra.Command, args []string) error {
+ 			serverCtx := GetServerContextFromCmd(cmd)
+ 			cfg := serverCtx.Config
+@@ -72,7 +72,7 @@ func ShowValidatorCmd() *cobra.Command {
+ func ShowAddressCmd() *cobra.Command {
+ 	cmd := &cobra.Command{
+ 		Use:   "show-address",
+-		Short: "Shows this node's tendermint validator consensus address",
++		Short: "Shows this node's CometBFT validator consensus address",
+ 		RunE: func(cmd *cobra.Command, args []string) error {
+ 			serverCtx := GetServerContextFromCmd(cmd)
+ 			cfg := serverCtx.Config
+@@ -88,19 +88,21 @@ func ShowAddressCmd() *cobra.Command {
+ 	return cmd
+ }
+ 
+-// VersionCmd prints tendermint and ABCI version numbers.
++// VersionCmd prints CometBFT and ABCI version numbers.
+ func VersionCmd() *cobra.Command {
+ 	return &cobra.Command{
+ 		Use:   "version",
+-		Short: "Print tendermint libraries' version",
++		Short: "Print CometBFT libraries' version",
+ 		Long:  "Print protocols' and libraries' version numbers against which this app has been compiled.",
+ 		RunE: func(cmd *cobra.Command, args []string) error {
+ 			bs, err := yaml.Marshal(&struct {
++				CometBFT      string
+ 				Tendermint    string
+ 				ABCI          string
+ 				BlockProtocol uint64
+ 				P2PProtocol   uint64
+ 			}{
++				CometBFT:      tversion.TMCoreSemVer,
+ 				Tendermint:    tversion.TMCoreSemVer,
+ 				ABCI:          tversion.ABCIVersion,
+ 				BlockProtocol: tversion.BlockProtocol,
+diff --git a/server/types/app.go b/server/types/app.go
+index 44e5015..0db8592 100644
+--- a/server/types/app.go
++++ b/server/types/app.go
+@@ -53,7 +53,7 @@ type (
+ 		// simulation, fetching txs by hash...).
+ 		RegisterTxService(client.Context)
+ 
+-		// RegisterTendermintService registers the gRPC Query service for tendermint queries.
++		// RegisterTendermintService registers the gRPC Query service for CometBFT queries.
+ 		RegisterTendermintService(client.Context)
+ 
+ 		// RegisterNodeService registers the node gRPC Query service.
+diff --git a/server/util.go b/server/util.go
+index 21b45c7..ab29703 100644
+--- a/server/util.go
++++ b/server/util.go
+@@ -108,13 +108,13 @@ func bindFlags(basename string, cmd *cobra.Command, v *viper.Viper) (err error)
+ 
+ // InterceptConfigsPreRunHandler performs a pre-run function for the root daemon
+ // application command. It will create a Viper literal and a default server
+-// Context. The server Tendermint configuration will either be read and parsed
++// Context. The server CometBFT configuration will either be read and parsed
+ // or created and saved to disk, where the server Context is updated to reflect
+-// the Tendermint configuration. It takes custom app config template and config
+-// settings to create a custom Tendermint configuration. If the custom template
++// the CometBFT configuration. It takes custom app config template and config
++// settings to create a custom CometBFT configuration. If the custom template
+ // is empty, it uses default-template provided by the server. The Viper literal
+ // is used to read and parse the application configuration. Command handlers can
+-// fetch the server Context to get the Tendermint configuration or to get access
++// fetch the server Context to get the CometBFT configuration or to get access
+ // to Viper.
+ func InterceptConfigsPreRunHandler(cmd *cobra.Command, customAppConfigTemplate string, customAppConfig interface{}, tmConfig *tmcfg.Config) error {
+ 	serverCtx := NewDefaultContext()
+@@ -199,9 +199,9 @@ func SetCmdServerContext(cmd *cobra.Command, serverCtx *Context) error {
+ 	return nil
+ }
+ 
+-// interceptConfigs parses and updates a Tendermint configuration file or
++// interceptConfigs parses and updates a CometBFT configuration file or
+ // creates a new one and saves it. It also parses and saves the application
+-// configuration file. The Tendermint configuration file is parsed given a root
++// configuration file. The CometBFT configuration file is parsed given a root
+ // Viper object, whereas the application is parsed with the private package-aware
+ // viperCfg object.
+ func interceptConfigs(rootViper *viper.Viper, customAppTemplate string, customConfig interface{}, tmConfig *tmcfg.Config) (*tmcfg.Config, error) {
+@@ -280,12 +280,13 @@ func interceptConfigs(rootViper *viper.Viper, customAppTemplate string, customCo
+ 
+ // add server commands
+ func AddCommands(rootCmd *cobra.Command, defaultNodeHome string, appCreator types.AppCreator, appExport types.AppExporter, addStartFlags types.ModuleInitFlags) {
+-	tendermintCmd := &cobra.Command{
+-		Use:   "tendermint",
+-		Short: "Tendermint subcommands",
++	cometbftCmd := &cobra.Command{
++		Use:     "cometbft",
++		Aliases: []string{"tendermint"},
++		Short:   "CometBFT subcommands",
+ 	}
+ 
+-	tendermintCmd.AddCommand(
++	cometbftCmd.AddCommand(
+ 		ShowNodeIDCmd(),
+ 		ShowValidatorCmd(),
+ 		ShowAddressCmd(),
+@@ -299,7 +300,7 @@ func AddCommands(rootCmd *cobra.Command, defaultNodeHome string, appCreator type
+ 
+ 	rootCmd.AddCommand(
+ 		startCmd,
+-		tendermintCmd,
++		cometbftCmd,
+ 		ExportCmd(appExport, defaultNodeHome),
+ 		version.NewVersionCommand(),
+ 		NewRollbackCmd(appCreator, defaultNodeHome),
+diff --git a/simapp/app.go b/simapp/app.go
+index e74e679..5a500b6 100644
+--- a/simapp/app.go
++++ b/simapp/app.go
+@@ -672,7 +672,7 @@ func (app *SimApp) RegisterAPIRoutes(apiSvr *api.Server, apiConfig config.APICon
+ 	// Register new tx routes from grpc-gateway.
+ 	authtx.RegisterGRPCGatewayRoutes(clientCtx, apiSvr.GRPCGatewayRouter)
+ 
+-	// Register new tendermint queries routes from grpc-gateway.
++	// Register CometBFT queries routes from grpc-gateway.
+ 	tmservice.RegisterGRPCGatewayRoutes(clientCtx, apiSvr.GRPCGatewayRouter)
+ 
+ 	// Register node gRPC service for grpc-gateway.
+@@ -692,9 +692,9 @@ func (app *SimApp) RegisterTxService(clientCtx client.Context) {
+ 	authtx.RegisterTxService(app.BaseApp.GRPCQueryRouter(), clientCtx, app.BaseApp.Simulate, app.interfaceRegistry)
+ }
+ 
+-// RegisterTendermintService implements the Application.RegisterTendermintService method.
+-func (app *SimApp) RegisterTendermintService(clientCtx client.Context) {
+-	tmservice.RegisterTendermintService(
++// RegisterCometBFTService registers the CometBFT Query service on the app gRPC router.
++func (app *SimApp) RegisterCometBFTService(clientCtx client.Context) {
++	tmservice.RegisterCometBFTService(
+ 		clientCtx,
+ 		app.BaseApp.GRPCQueryRouter(),
+ 		app.interfaceRegistry,
+@@ -702,6 +702,13 @@ func (app *SimApp) RegisterTendermintService(clientCtx client.Context) {
+ 	)
+ }
+ 
++// RegisterTendermintService is kept for backwards-compatibility; use RegisterCometBFTService instead.
++//
++// Deprecated: use RegisterCometBFTService.
++func (app *SimApp) RegisterTendermintService(clientCtx client.Context) {
++	app.RegisterCometBFTService(clientCtx)
++}
++
+ func (app *SimApp) RegisterNodeService(clientCtx client.Context) {
+ 	nodeservice.RegisterNodeService(clientCtx, app.GRPCQueryRouter())
+ }
+diff --git a/simapp/export.go b/simapp/export.go
+index c7554e5..86676b9 100644
+--- a/simapp/export.go
++++ b/simapp/export.go
+@@ -23,7 +23,7 @@ func (app *SimApp) ExportAppStateAndValidators(forZeroHeight bool, jailAllowedAd
+ 	ctx := app.NewContext(true, tmproto.Header{Height: app.LastBlockHeight()})
+ 
+ 	// We export at last height + 1, because that's the height at which
+-	// Tendermint will start InitChain.
++	// CometBFT will start InitChain.
+ 	height := app.LastBlockHeight() + 1
+ 	if forZeroHeight {
+ 		height = 0
+diff --git a/simapp/simd/cmd/root.go b/simapp/simd/cmd/root.go
+index 06f98ed..00176c4 100644
+--- a/simapp/simd/cmd/root.go
++++ b/simapp/simd/cmd/root.go
+@@ -97,7 +97,7 @@ func NewRootCmd() *cobra.Command {
+ 			}
+ 
+ 			customAppTemplate, customAppConfig := initAppConfig()
+-			customTMConfig := initTendermintConfig()
++			customTMConfig := initCometBFTConfig()
+ 
+ 			return server.InterceptConfigsPreRunHandler(cmd, customAppTemplate, customAppConfig, customTMConfig)
+ 		},
+@@ -112,9 +112,9 @@ func NewRootCmd() *cobra.Command {
+ 	return rootCmd
+ }
+ 
+-// initTendermintConfig helps to override default Tendermint Config values.
++// initCometBFTConfig helps to override default CometBFT Config values.
+ // return tmcfg.DefaultConfig if no custom configuration is required for the application.
+-func initTendermintConfig() *tmcfg.Config {
++func initCometBFTConfig() *tmcfg.Config {
+ 	cfg := tmcfg.DefaultConfig()
+ 
+ 	// these values put a higher strain on node memory
+@@ -124,6 +124,13 @@ func initTendermintConfig() *tmcfg.Config {
+ 	return cfg
+ }
+ 
++// initTendermintConfig is kept for backwards-compatibility; use initCometBFTConfig instead.
++//
++// Deprecated: use initCometBFTConfig.
++func initTendermintConfig() *tmcfg.Config {
++	return initCometBFTConfig()
++}
++
+ // initAppConfig helps to override default appConfig template and configs.
+ // return "", nil if no custom configuration is required for the application.
+ func initAppConfig() (string, interface{}) {
+diff --git a/simapp/state.go b/simapp/state.go
+index 9f00be6..5c5e45b 100644
+--- a/simapp/state.go
++++ b/simapp/state.go
+@@ -206,7 +206,7 @@ func AppStateFromGenesisFileFn(r io.Reader, cdc codec.JSONCodec, genesisFile str
+ 	}
+ 
+ 	var genesis tmtypes.GenesisDoc
+-	// NOTE: Tendermint uses a custom JSON decoder for GenesisDoc
++	// NOTE: CometBFT uses a custom JSON decoder for GenesisDoc
+ 	err = tmjson.Unmarshal(bytes, &genesis)
+ 	if err != nil {
+ 		panic(err)
+@@ -226,8 +226,8 @@ func AppStateFromGenesisFileFn(r io.Reader, cdc codec.JSONCodec, genesisFile str
+ 	newAccs := make([]simtypes.Account, len(authGenesis.Accounts))
+ 	for i, acc := range authGenesis.Accounts {
+ 		// Pick a random private key, since we don't know the actual key
+-		// This should be fine as it's only used for mock Tendermint validators
+-		// and these keys are never actually used to sign by mock Tendermint.
++		// This should be fine as it's only used for mock CometBFT validators
++		// and these keys are never actually used to sign by mock CometBFT.
+ 		privkeySeed := make([]byte, 15)
+ 		if _, err := r.Read(privkeySeed); err != nil {
+ 			panic(err)
+diff --git a/simapp/upgrades.go b/simapp/upgrades.go
+index 9d35259..73b0874 100644
+--- a/simapp/upgrades.go
++++ b/simapp/upgrades.go
+@@ -24,7 +24,7 @@ func (app SimApp) RegisterUpgradeHandlers() {
+ 	app.UpgradeKeeper.SetUpgradeHandler(
+ 		UpgradeName,
+ 		func(ctx sdk.Context, _ upgradetypes.Plan, fromVM module.VersionMap) (module.VersionMap, error) {
+-			// Migrate Tendermint consensus parameters from x/params module to a
++			// Migrate CometBFT consensus parameters from x/params module to a
+ 			// dedicated x/consensus module.
+ 			baseapp.MigrateParams(ctx, baseAppLegacySS, &app.ConsensusParamsKeeper)
+ 
+diff --git a/testutil/cli/tm_mocks.go b/testutil/cli/tm_mocks.go
+index b744953..76b377a 100644
+--- a/testutil/cli/tm_mocks.go
++++ b/testutil/cli/tm_mocks.go
+@@ -13,25 +13,37 @@ import (
+ 	"github.com/cosmos/cosmos-sdk/client"
+ )
+ 
+-var _ client.TendermintRPC = (*MockTendermintRPC)(nil)
++var _ client.CometBFTRPC = (*MockCometBFTRPC)(nil)
+ 
+-type MockTendermintRPC struct {
++type MockCometBFTRPC struct {
+ 	rpcclientmock.Client
+ 
+ 	responseQuery abci.ResponseQuery
+ }
+ 
+-// NewMockTendermintRPC returns a mock TendermintRPC implementation.
++// NewMockCometBFTRPC returns a mock CometBFTRPC implementation.
+ // It is used for CLI testing.
++func NewMockCometBFTRPC(respQuery abci.ResponseQuery) MockCometBFTRPC {
++	return MockCometBFTRPC{responseQuery: respQuery}
++}
++
++// MockTendermintRPC is kept for backwards-compatibility; use MockCometBFTRPC instead.
++//
++// Deprecated: use MockCometBFTRPC.
++type MockTendermintRPC = MockCometBFTRPC
++
++// NewMockTendermintRPC is kept for backwards-compatibility; use NewMockCometBFTRPC instead.
++//
++// Deprecated: use NewMockCometBFTRPC.
+ func NewMockTendermintRPC(respQuery abci.ResponseQuery) MockTendermintRPC {
+-	return MockTendermintRPC{responseQuery: respQuery}
++	return NewMockCometBFTRPC(respQuery)
+ }
+ 
+-func (MockTendermintRPC) BroadcastTxSync(context.Context, tmtypes.Tx) (*coretypes.ResultBroadcastTx, error) {
++func (MockCometBFTRPC) BroadcastTxSync(context.Context, tmtypes.Tx) (*coretypes.ResultBroadcastTx, error) {
+ 	return &coretypes.ResultBroadcastTx{Code: 0}, nil
+ }
+ 
+-func (m MockTendermintRPC) ABCIQueryWithOptions(
++func (m MockCometBFTRPC) ABCIQueryWithOptions(
+ 	_ context.Context,
+ 	_ string,
+ 	_ tmbytes.HexBytes,
+diff --git a/tools/rosetta/CHANGELOG.md b/tools/rosetta/CHANGELOG.md
+index 3e8c6b1..0e0d015 100644
+--- a/tools/rosetta/CHANGELOG.md
++++ b/tools/rosetta/CHANGELOG.md
+@@ -42,7 +42,7 @@ Ref: https://keepachangelog.com/en/1.0.0/
+ 
+ ### Bug Fixes
+ 
+-* [#14285](https://github.com/cosmos/cosmos-sdk/pull/14285) Sets tendermint errors status codes to 500
++* [#14285](https://github.com/cosmos/cosmos-sdk/pull/14285) Sets CometBFT errors status codes to 500
+ 
+ ## v0.2.0 2022-12-07
+ 
+@@ -54,11 +54,11 @@ Ref: https://keepachangelog.com/en/1.0.0/
+ 
+ ### Bug Fixes
+ 
+-* [#13832](https://github.com/cosmos/cosmos-sdk/pull/13832) Wrap tendermint RPC errors to rosetta errors.
++* [#13832](https://github.com/cosmos/cosmos-sdk/pull/13832) Wrap CometBFT RPC errors to rosetta errors.
+ 
+ ## v0.1.0 2022-11-04
+ 
+-**From `v0.1.0` the minimum version of Tendermint is `v0.37+`, due event type changes.**
++**From `v0.1.0` the minimum version of CometBFT is `v0.37+`, due event type changes.**
+ 
+ ### Improvements
+ 
+diff --git a/tools/rosetta/README.md b/tools/rosetta/README.md
+index 3d8467a..9d28597 100644
+--- a/tools/rosetta/README.md
++++ b/tools/rosetta/README.md
+@@ -52,7 +52,7 @@ To test and run Rosetta API endpoints for applications that are running and expo
+ simd rosetta
+      --blockchain "your application name (ex: gaia)"
+      --network "your chain identifier (ex: testnet-1)"
+-     --tendermint "tendermint endpoint (ex: localhost:26657)"
++     --cometbft "cometbft endpoint (ex: localhost:26657)"
+      --grpc "gRPC endpoint (ex: localhost:9090)"
+      --addr "rosetta binding address (ex: :8080)"
+ ```
+diff --git a/tools/rosetta/client_online.go b/tools/rosetta/client_online.go
+index 677fbd2..5bd5d09 100644
+--- a/tools/rosetta/client_online.go
++++ b/tools/rosetta/client_online.go
+@@ -108,7 +108,7 @@ func (c *Client) Bootstrap() error {
+ 		return err
+ 	}
+ 
+-	tmRPC, err := http.New(c.config.TendermintRPC, tmWebsocketPath)
++	tmRPC, err := http.New(c.config.CometBFTRPC, tmWebsocketPath)
+ 	if err != nil {
+ 		return err
+ 	}
+diff --git a/tools/rosetta/config.go b/tools/rosetta/config.go
+index 6b54938..8619ab1 100644
+--- a/tools/rosetta/config.go
++++ b/tools/rosetta/config.go
+@@ -24,8 +24,12 @@ const (
+ 	DefaultAddr = ":8080"
+ 	// DefaultRetries is the default number of retries
+ 	DefaultRetries = 5
+-	// DefaultTendermintEndpoint is the default value for the tendermint endpoint
+-	DefaultTendermintEndpoint = "localhost:26657"
++	// DefaultCometBFTEndpoint is the default value for the CometBFT endpoint.
++	DefaultCometBFTEndpoint = "localhost:26657"
++	// DefaultTendermintEndpoint is kept for backwards-compatibility; use DefaultCometBFTEndpoint instead.
++	//
++	// Deprecated: use DefaultCometBFTEndpoint.
++	DefaultTendermintEndpoint = DefaultCometBFTEndpoint
+ 	// DefaultGRPCEndpoint is the default value for the gRPC endpoint
+ 	DefaultGRPCEndpoint = "localhost:9090"
+ 	// DefaultNetwork defines the default network name
+@@ -42,8 +46,12 @@ const (
+ 
+ // configuration flags
+ const (
+-	FlagBlockchain          = "blockchain"
+-	FlagNetwork             = "network"
++	FlagBlockchain       = "blockchain"
++	FlagNetwork          = "network"
++	FlagCometBFTEndpoint = "cometbft"
++	// FlagTendermintEndpoint is kept for backwards-compatibility; use FlagCometBFTEndpoint instead.
++	//
++	// Deprecated: use FlagCometBFTEndpoint.
+ 	FlagTendermintEndpoint  = "tendermint"
+ 	FlagGRPCEndpoint        = "grpc"
+ 	FlagAddr                = "addr"
+@@ -62,9 +70,13 @@ type Config struct {
+ 	Blockchain string
+ 	// Network defines the network name
+ 	Network string
+-	// TendermintRPC defines the endpoint to connect to
+-	// tendermint RPC, specifying 'tcp://' before is not
++	// CometBFTRPC defines the endpoint to connect to.
++	// For CometBFT RPC, specifying 'tcp://' before is not
+ 	// required, usually it's at port 26657 of the
++	CometBFTRPC string
++	// TendermintRPC is kept for backwards-compatibility; use CometBFTRPC instead.
++	//
++	// Deprecated: use CometBFTRPC.
+ 	TendermintRPC string
+ 	// GRPCEndpoint defines the cosmos application gRPC endpoint
+ 	// usually it is located at 9090 port
+@@ -139,11 +151,18 @@ func (c *Config) validate() error {
+ 	if c.GRPCEndpoint == "" {
+ 		return fmt.Errorf("grpc endpoint not provided")
+ 	}
++	if c.CometBFTRPC == "" {
++		c.CometBFTRPC = c.TendermintRPC
++	}
++	if c.CometBFTRPC == "" {
++		return fmt.Errorf("cometbft rpc not provided")
++	}
+ 	if c.TendermintRPC == "" {
+-		return fmt.Errorf("tendermint rpc not provided")
++		c.TendermintRPC = c.CometBFTRPC
+ 	}
+-	if !strings.HasPrefix(c.TendermintRPC, "tcp://") {
+-		c.TendermintRPC = fmt.Sprintf("tcp://%s", c.TendermintRPC)
++	if !strings.HasPrefix(c.CometBFTRPC, "tcp://") {
++		c.CometBFTRPC = fmt.Sprintf("tcp://%s", c.CometBFTRPC)
++		c.TendermintRPC = c.CometBFTRPC
+ 	}
+ 
+ 	return nil
+@@ -165,10 +184,18 @@ func FromFlags(flags *pflag.FlagSet) (*Config, error) {
+ 	if err != nil {
+ 		return nil, err
+ 	}
++	cometbftRPC, err := flags.GetString(FlagCometBFTEndpoint)
++	if err != nil {
++		return nil, err
++	}
+ 	tendermintRPC, err := flags.GetString(FlagTendermintEndpoint)
+ 	if err != nil {
+ 		return nil, err
+ 	}
++	// Prefer the new flag, but keep the old one working.
++	if flags.Changed(FlagCometBFTEndpoint) {
++		tendermintRPC = cometbftRPC
++	}
+ 	gRPCEndpoint, err := flags.GetString(FlagGRPCEndpoint)
+ 	if err != nil {
+ 		return nil, err
+@@ -213,6 +240,7 @@ func FromFlags(flags *pflag.FlagSet) (*Config, error) {
+ 	conf := &Config{
+ 		Blockchain:          blockchain,
+ 		Network:             network,
++		CometBFTRPC:         tendermintRPC,
+ 		TendermintRPC:       tendermintRPC,
+ 		GRPCEndpoint:        gRPCEndpoint,
+ 		Addr:                addr,
+@@ -257,7 +285,8 @@ func ServerFromConfig(conf *Config) (crg.Server, error) {
+ func SetFlags(flags *pflag.FlagSet) {
+ 	flags.String(FlagBlockchain, DefaultBlockchain, "the blockchain type")
+ 	flags.String(FlagNetwork, DefaultNetwork, "the network name")
+-	flags.String(FlagTendermintEndpoint, DefaultTendermintEndpoint, "the tendermint rpc endpoint, without tcp://")
++	flags.String(FlagCometBFTEndpoint, DefaultCometBFTEndpoint, "the cometbft rpc endpoint, without tcp://")
++	flags.String(FlagTendermintEndpoint, DefaultTendermintEndpoint, "the tendermint rpc endpoint, without tcp:// (deprecated; use --cometbft)")
+ 	flags.String(FlagGRPCEndpoint, DefaultGRPCEndpoint, "the app gRPC endpoint")
+ 	flags.String(FlagAddr, DefaultAddr, "the address rosetta will bind to")
+ 	flags.Int(FlagRetries, DefaultRetries, "the number of retries that will be done before quitting")
+diff --git a/tools/rosetta/converter.go b/tools/rosetta/converter.go
+index 481dae3..a9593ae 100644
+--- a/tools/rosetta/converter.go
++++ b/tools/rosetta/converter.go
+@@ -29,25 +29,25 @@ import (
+ )
+ 
+ // Converter is a utility that can be used to convert
+-// back and forth from rosetta to sdk and tendermint types
++// back and forth from rosetta to sdk and CometBFT types
+ // IMPORTANT NOTES:
+ //   - IT SHOULD BE USED ONLY TO DEAL WITH THINGS
+ //     IN A STATELESS WAY! IT SHOULD NEVER INTERACT DIRECTLY
+-//     WITH TENDERMINT RPC AND COSMOS GRPC
++//     WITH COMETBFT RPC AND COSMOS GRPC
+ //
+ // - IT SHOULD RETURN cosmos rosetta gateway error types!
+ type Converter interface {
+ 	// ToSDK exposes the methods that convert
+-	// rosetta types to cosmos sdk and tendermint types
++	// rosetta types to cosmos sdk and CometBFT types
+ 	ToSDK() ToSDKConverter
+ 	// ToRosetta exposes the methods that convert
+-	// sdk and tendermint types to rosetta types
++	// sdk and CometBFT types to rosetta types
+ 	ToRosetta() ToRosettaConverter
+ }
+ 
+ // ToRosettaConverter is an interface that exposes
+ // all the functions used to convert sdk and
+-// tendermint types to rosetta known types
++// CometBFT types to rosetta known types
+ type ToRosettaConverter interface {
+ 	// BlockResponse returns a block response given a result block
+ 	BlockResponse(block *tmcoretypes.ResultBlock) crgtypes.BlockResponse
+@@ -67,21 +67,21 @@ type ToRosettaConverter interface {
+ 	SignerData(anyAccount *codectypes.Any) (*SignerData, error)
+ 	// SigningComponents returns rosetta's components required to build a signable transaction
+ 	SigningComponents(tx authsigning.Tx, metadata *ConstructionMetadata, rosPubKeys []*rosettatypes.PublicKey) (txBytes []byte, payloadsToSign []*rosettatypes.SigningPayload, err error)
+-	// Tx converts a tendermint transaction and tx result if provided to a rosetta tx
++	// Tx converts a CometBFT transaction and tx result if provided to a rosetta tx
+ 	Tx(rawTx tmtypes.Tx, txResult *abci.ResponseDeliverTx) (*rosettatypes.Transaction, error)
+-	// TxIdentifiers converts a tendermint tx to transaction identifiers
++	// TxIdentifiers converts a CometBFT tx to transaction identifiers
+ 	TxIdentifiers(txs []tmtypes.Tx) []*rosettatypes.TransactionIdentifier
+ 	// BalanceOps converts events to balance operations
+ 	BalanceOps(status string, events []abci.Event) []*rosettatypes.Operation
+-	// SyncStatus converts a tendermint status to sync status
++	// SyncStatus converts a CometBFT status to sync status
+ 	SyncStatus(status *tmcoretypes.ResultStatus) *rosettatypes.SyncStatus
+-	// Peers converts tendermint peers to rosetta
++	// Peers converts CometBFT peers to rosetta
+ 	Peers(peers []tmcoretypes.Peer) []*rosettatypes.Peer
+ }
+ 
+ // ToSDKConverter is an interface that exposes
+ // all the functions used to convert rosetta types
+-// to tendermint and sdk types
++// to CometBFT and sdk types
+ type ToSDKConverter interface {
+ 	// UnsignedTx converts rosetta operations to an unsigned cosmos sdk transactions
+ 	UnsignedTx(ops []*rosettatypes.Operation) (tx authsigning.Tx, err error)
+diff --git a/tools/rosetta/converter_test.go b/tools/rosetta/converter_test.go
+index 44caf03..4a30d9b 100644
+--- a/tools/rosetta/converter_test.go
++++ b/tools/rosetta/converter_test.go
+@@ -119,7 +119,6 @@ func (s *ConverterTestSuite) TestMsgToMetaMetaToMsg() {
+ 		ToAddress:   "addr2",
+ 		Amount:      sdk.NewCoins(sdk.NewInt64Coin("test", 10)),
+ 	}
+-	msg.Route()
+ 
+ 	meta, err := s.c.ToRosetta().Meta(msg)
+ 	s.Require().NoError(err)
+diff --git a/tools/rosetta/lib/errors/errors.go b/tools/rosetta/lib/errors/errors.go
+index 8d659f0..482f43f 100644
+--- a/tools/rosetta/lib/errors/errors.go
++++ b/tools/rosetta/lib/errors/errors.go
+@@ -74,15 +74,15 @@ func ToRosetta(err error) *types.Error {
+ 	if rosErr == nil || !ok {
+ 		tmErr, ok := err.(*tmtypes.RPCError)
+ 		if tmErr != nil && ok {
+-			return fromTendermintToRosettaError(tmErr).rosErr
++			return fromCometBFTToRosettaError(tmErr).rosErr
+ 		}
+ 		return ToRosetta(WrapError(ErrUnknown, ErrUnknown.Error()))
+ 	}
+ 	return rosErr.rosErr
+ }
+ 
+-// fromTendermintToRosettaError converts a tendermint jsonrpc error to rosetta error
+-func fromTendermintToRosettaError(err *tmtypes.RPCError) *Error {
++// fromCometBFTToRosettaError converts a CometBFT JSON-RPC error to a Rosetta error.
++func fromCometBFTToRosettaError(err *tmtypes.RPCError) *Error {
+ 	return &Error{rosErr: &types.Error{
+ 		Code:    http.StatusInternalServerError,
+ 		Message: err.Message,
+@@ -92,6 +92,13 @@ func fromTendermintToRosettaError(err *tmtypes.RPCError) *Error {
+ 	}}
+ }
+ 
++// fromTendermintToRosettaError is kept for backwards-compatibility; use fromCometBFTToRosettaError instead.
++//
++// Deprecated: use fromCometBFTToRosettaError.
++func fromTendermintToRosettaError(err *tmtypes.RPCError) *Error {
++	return fromCometBFTToRosettaError(err)
++}
++
+ // FromGRPCToRosettaError converts a gRPC error to rosetta error
+ func FromGRPCToRosettaError(err error) *Error {
+ 	status, ok := grpcstatus.FromError(err)
+diff --git a/tools/rosetta/lib/internal/service/block.go b/tools/rosetta/lib/internal/service/block.go
+index 48b96a4..2e489df 100644
+--- a/tools/rosetta/lib/internal/service/block.go
++++ b/tools/rosetta/lib/internal/service/block.go
+@@ -65,7 +65,7 @@ func (on OnlineNetwork) Block(ctx context.Context, request *types.BlockRequest)
+ }
+ 
+ // BlockTransaction gets the given transaction in the specified block, we do not need to check the block itself too
+-// due to the fact that tendermint achieves instant finality
++// due to the fact that CometBFT achieves instant finality
+ func (on OnlineNetwork) BlockTransaction(ctx context.Context, request *types.BlockTransactionRequest) (*types.BlockTransactionResponse, *types.Error) {
+ 	tx, err := on.client.GetTx(ctx, request.TransactionIdentifier.Hash)
+ 	if err != nil {
+diff --git a/tools/rosetta/lib/internal/service/online.go b/tools/rosetta/lib/internal/service/online.go
+index c2f03fe..fb286da 100644
+--- a/tools/rosetta/lib/internal/service/online.go
++++ b/tools/rosetta/lib/internal/service/online.go
+@@ -37,7 +37,7 @@ func NewOnlineNetwork(network *types.NetworkIdentifier, client crgtypes.Client,
+ 
+ // OnlineNetwork groups together all the components required for the full rosetta implementation
+ type OnlineNetwork struct {
+-	client crgtypes.Client // used to query cosmos app + tendermint
++	client crgtypes.Client // used to query cosmos app + CometBFT
+ 
+ 	network        *types.NetworkIdentifier      // identifies the network, it's static
+ 	networkOptions *types.NetworkOptionsResponse // identifies the network options, it's static
+diff --git a/tools/rosetta/types.go b/tools/rosetta/types.go
+index 0d1eada..fbc7f13 100644
+--- a/tools/rosetta/types.go
++++ b/tools/rosetta/types.go
+@@ -13,7 +13,7 @@ const (
+ )
+ 
+ // In rosetta all state transitions must be represented as transactions
+-// since in tendermint begin block and end block are state transitions
++// since in CometBFT begin block and end block are state transitions
+ // which are not represented as transactions we mock only the balance changes
+ // happening at those levels as transactions. (check BeginBlockTxHash for more info)
+ const (
+diff --git a/types/staking.go b/types/staking.go
+index 471515e..962de16 100644
+--- a/types/staking.go
++++ b/types/staking.go
+@@ -11,8 +11,8 @@ import (
+ // validators are expected to sign blocks beginning at block 11+X.
+ //
+ // This value is constant as this should not change without a hard fork.
+-// For Tendermint this should be set to 1 block, for more details see:
+-// https://tendermint.com/docs/spec/abci/apps.html#endblock
++// For CometBFT this should be set to 1 block, for more details see:
++// https://github.com/cometbft/cometbft/blob/main/spec/abci/apps.md#endblock
+ const ValidatorUpdateDelay int64 = 1
+ 
+ var (
+diff --git a/x/auth/client/cli/tips.go b/x/auth/client/cli/tips.go
+index fcf5a2c..ab4f893 100644
+--- a/x/auth/client/cli/tips.go
++++ b/x/auth/client/cli/tips.go
+@@ -65,7 +65,7 @@ func GetAuxToFeeCommand() *cobra.Command {
+ 				return err
+ 			}
+ 
+-			// broadcast to a Tendermint node
++			// broadcast to a CometBFT node
+ 			res, err := clientCtx.BroadcastTx(txBytes)
+ 			if err != nil {
+ 				return err
+diff --git a/x/bank/client/cli/query.go b/x/bank/client/cli/query.go
+index c493c39..7c1a0f7 100644
+--- a/x/bank/client/cli/query.go
++++ b/x/bank/client/cli/query.go
+@@ -19,7 +19,7 @@ const (
+ )
+ 
+ // GetQueryCmd returns the parent command for all x/bank CLi query commands. The
+-// provided clientCtx should have, at a minimum, a verifier, Tendermint RPC client,
++// provided clientCtx should have, at a minimum, a verifier, CometBFT RPC client,
+ // and marshaler set.
+ func GetQueryCmd() *cobra.Command {
+ 	cmd := &cobra.Command{
+diff --git a/x/staking/types/exported.go b/x/staking/types/exported.go
+index bf83ab0..1a7383b 100644
+--- a/x/staking/types/exported.go
++++ b/x/staking/types/exported.go
+@@ -25,11 +25,11 @@ type ValidatorI interface {
+ 	IsUnbonding() bool                                       // check if has status unbonding
+ 	GetOperator() sdk.ValAddress                             // operator address to receive/return validators coins
+ 	ConsPubKey() (cryptotypes.PubKey, error)                 // validation consensus pubkey (cryptotypes.PubKey)
+-	TmConsPublicKey() (tmprotocrypto.PublicKey, error)       // validation consensus pubkey (Tendermint)
++	TmConsPublicKey() (tmprotocrypto.PublicKey, error)       // validation consensus pubkey (CometBFT)
+ 	GetConsAddr() (sdk.ConsAddress, error)                   // validation consensus address
+ 	GetTokens() math.Int                                     // validation tokens
+ 	GetBondedTokens() math.Int                               // validator bonded tokens
+-	GetConsensusPower(math.Int) int64                        // validation power in tendermint
++	GetConsensusPower(math.Int) int64                        // validation power in CometBFT
+ 	GetCommission() math.LegacyDec                           // validator commission rate
+ 	GetMinSelfDelegation() math.Int                          // validator minimum self delegation
+ 	GetDelegatorShares() math.LegacyDec                      // total outstanding delegator shares
+diff --git a/x/staking/types/validator_test.go b/x/staking/types/validator_test.go
+index 14dc231..5944444 100644
+--- a/x/staking/types/validator_test.go
++++ b/x/staking/types/validator_test.go
+@@ -271,8 +271,8 @@ func TestValidatorsSortDeterminism(t *testing.T) {
+ 	}
+ }
+ 
+-// Check SortTendermint sorts the same as tendermint
+-func TestValidatorsSortTendermint(t *testing.T) {
++// Check SortCometBFT sorts the same as CometBFT.
++func TestValidatorsSortCometBFT(t *testing.T) {
+ 	vals := make([]types.Validator, 100)
+ 
+ 	for i := range vals {
+@@ -289,19 +289,19 @@ func TestValidatorsSortTendermint(t *testing.T) {
+ 
+ 	valz := types.Validators(vals)
+ 
+-	// create expected tendermint validators by converting to tendermint then sorting
++	// create expected CometBFT validators by converting to CometBFT then sorting
+ 	expectedVals, err := testutil.ToTmValidators(valz, sdk.DefaultPowerReduction)
+ 	require.NoError(t, err)
+ 	sort.Sort(tmtypes.ValidatorsByVotingPower(expectedVals))
+ 
+-	// sort in SDK and then convert to tendermint
++	// sort in SDK and then convert to CometBFT
+ 	sort.SliceStable(valz, func(i, j int) bool {
+ 		return types.ValidatorsByVotingPower(valz).Less(i, j, sdk.DefaultPowerReduction)
+ 	})
+ 	actualVals, err := testutil.ToTmValidators(valz, sdk.DefaultPowerReduction)
+ 	require.NoError(t, err)
+ 
+-	require.Equal(t, expectedVals, actualVals, "sorting in SDK is not the same as sorting in Tendermint")
++	require.Equal(t, expectedVals, actualVals, "sorting in SDK is not the same as sorting in CometBFT")
+ }
+ 
+ func TestValidatorToTm(t *testing.T) {
