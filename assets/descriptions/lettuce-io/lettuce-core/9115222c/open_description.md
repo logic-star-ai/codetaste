@@ -1,1 +1,1 @@
-Autonomously identify and execute improvements to the **entire** codebase. Optimize structure, architecture, code quality and/or logic flow. Proceed directly to modifying the actual codebase; do not output analysis, plan, roadmap or similar files.
+Without any user intervention. Improve and refactor the entire codebase. Perform modifications on the actual codebase; do NOT output analysis, plan, roadmap or similar files.
