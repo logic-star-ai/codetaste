@@ -1,0 +1,1 @@
+Enable `noImplicitAny` and add explicit type declarations

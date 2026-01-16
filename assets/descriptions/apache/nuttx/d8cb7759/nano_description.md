@@ -1,0 +1,1 @@
+Refactor SMP pause mechanism: rename xxxx_pause.c → xxxx_smpcall.c

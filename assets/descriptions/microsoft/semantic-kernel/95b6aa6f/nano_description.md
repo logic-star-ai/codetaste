@@ -1,0 +1,1 @@
+Rename VectorStoreProperty and attribute members for clarity and brevity

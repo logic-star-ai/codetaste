@@ -1,0 +1,1 @@
+Simplify state backend by fixing transaction type to `PrefixedMemoryDB`

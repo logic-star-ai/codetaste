@@ -1,0 +1,1 @@
+Refactor: use 'any' instead of 'interface{}' for consistency

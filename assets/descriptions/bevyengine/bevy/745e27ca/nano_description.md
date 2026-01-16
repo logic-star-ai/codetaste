@@ -1,0 +1,1 @@
+Remove `bevy_image` re-export from `bevy_render`

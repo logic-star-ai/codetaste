@@ -1,0 +1,1 @@
+Refactor: Remove preferences and global state dependencies from tests

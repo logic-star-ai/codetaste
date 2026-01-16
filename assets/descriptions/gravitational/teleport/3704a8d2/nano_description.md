@@ -1,0 +1,1 @@
+Refactor tctl commands to use lazy auth client initialization

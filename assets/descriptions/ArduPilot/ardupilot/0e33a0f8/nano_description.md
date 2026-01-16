@@ -1,0 +1,1 @@
+Remove `ENABLE/ENABLED/DISABLE/DISABLED` macro definitions from Copter

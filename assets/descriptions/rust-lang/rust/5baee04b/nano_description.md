@@ -1,0 +1,1 @@
+Remove `#[macro_use] extern crate tracing` from multiple compiler crates

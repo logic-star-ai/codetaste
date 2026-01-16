@@ -1,0 +1,1 @@
+Refactor: Module build methods to directly update `build_info` and `build_meta`, remove `Option` wrappers

@@ -1,0 +1,1 @@
+Refactor `ProjectIdentity` to enforce path invariants and remove DM dependencies

@@ -1,0 +1,1 @@
+Refactor: Remove dependency on static Scene

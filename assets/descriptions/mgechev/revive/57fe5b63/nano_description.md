@@ -1,0 +1,1 @@
+Replace failure `Category` raw strings with typed constants

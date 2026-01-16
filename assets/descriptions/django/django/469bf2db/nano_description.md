@@ -1,0 +1,1 @@
+Simplify imports from `django.db` and `django.contrib.gis.db` modules

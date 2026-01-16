@@ -1,0 +1,1 @@
+Rename `mu::extensions` namespace to `muse::extensions`

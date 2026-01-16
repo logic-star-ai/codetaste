@@ -1,0 +1,1 @@
+Extract JSON-RPC API definitions into separate `sui-json-rpc-api` crate

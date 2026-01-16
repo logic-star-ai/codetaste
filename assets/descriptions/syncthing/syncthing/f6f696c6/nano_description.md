@@ -1,0 +1,1 @@
+Remove global `events.Default` singleton and pass `events.Logger` explicitly

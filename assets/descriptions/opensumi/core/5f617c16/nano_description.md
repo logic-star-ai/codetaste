@@ -1,0 +1,1 @@
+Refactor: Split AI Editor Feature Capabilities into Dedicated Handlers

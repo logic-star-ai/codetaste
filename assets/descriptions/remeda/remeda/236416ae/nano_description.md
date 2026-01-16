@@ -1,0 +1,1 @@
+Migrate functions data to Astro Content Collections API

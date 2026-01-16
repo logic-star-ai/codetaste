@@ -1,0 +1,1 @@
+Remove regex engine singleton and pass explicitly as dependency

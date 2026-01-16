@@ -1,0 +1,1 @@
+Refactor: Consolidate schedule configuration traits using generics

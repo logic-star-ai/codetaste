@@ -1,0 +1,1 @@
+Refactor `return_dict` Logic to Remove Complicated if/else Paths

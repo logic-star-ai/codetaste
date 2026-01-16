@@ -1,0 +1,1 @@
+Remove six dependency from awscli codebase

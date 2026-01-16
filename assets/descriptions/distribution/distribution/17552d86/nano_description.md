@@ -1,0 +1,1 @@
+Deprecate internal reference package, migrate to extracted module

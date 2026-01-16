@@ -1,0 +1,1 @@
+Add `_check_option` utility for parameter validation

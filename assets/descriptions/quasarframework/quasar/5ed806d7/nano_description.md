@@ -1,0 +1,1 @@
+Reorganize component folder structure

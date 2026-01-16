@@ -1,0 +1,1 @@
+Rename `GitCommandHelpers` to `Commands` and simplify method names

@@ -1,0 +1,1 @@
+Migrate codebase to Python 3.7+ only (drop Python 2 support)

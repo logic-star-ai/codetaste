@@ -1,0 +1,1 @@
+Remove `ApiException` in favor of `BadRequestException`

@@ -1,0 +1,1 @@
+Refactor AttrKind enums to use scoped enums and align with DeclKind pattern

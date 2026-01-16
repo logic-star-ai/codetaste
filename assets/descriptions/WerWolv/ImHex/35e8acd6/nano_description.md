@@ -1,0 +1,1 @@
+Refactor Event Manager into categorized modules

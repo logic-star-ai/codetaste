@@ -1,0 +1,1 @@
+Internalize `i18n`, `docsgen`, and `client_example` modules

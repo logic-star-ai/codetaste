@@ -1,0 +1,1 @@
+Refactor Model_Infotable and Model_Setting API naming conventions

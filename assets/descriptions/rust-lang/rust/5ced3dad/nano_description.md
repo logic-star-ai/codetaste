@@ -1,0 +1,1 @@
+Rename things in new solver and `rustc_type_ir` for clarity

@@ -1,0 +1,1 @@
+Move unit types to separate package and rename `UnitType` to `Type`

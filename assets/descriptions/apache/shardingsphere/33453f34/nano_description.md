@@ -1,0 +1,1 @@
+Rename statistics classes to improve naming clarity

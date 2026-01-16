@@ -1,0 +1,1 @@
+Reorganize non-constant global statics into structs

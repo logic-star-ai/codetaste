@@ -1,0 +1,1 @@
+Refactor `setting` package to improve testability and structure

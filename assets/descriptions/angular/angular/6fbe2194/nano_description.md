@@ -1,0 +1,1 @@
+Refactor: Break circular dependencies in `@angular/core` by extracting symbols to dedicated files

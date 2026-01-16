@@ -1,0 +1,1 @@
+Rename FramedConnection to Http2Connection and HttpStream to HttpCodec

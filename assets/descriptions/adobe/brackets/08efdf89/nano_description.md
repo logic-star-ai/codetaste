@@ -1,0 +1,1 @@
+Convert core code to new EventDispatcher API for non-DOM events

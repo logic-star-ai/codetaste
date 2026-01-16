@@ -1,0 +1,1 @@
+Refactor Authentication SPI and Picketlink to use ProviderSession

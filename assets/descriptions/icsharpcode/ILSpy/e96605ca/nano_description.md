@@ -1,0 +1,1 @@
+Replace singletons with DI patterns and decouple service dependencies

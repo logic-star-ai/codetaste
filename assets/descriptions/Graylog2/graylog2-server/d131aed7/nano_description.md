@@ -1,0 +1,1 @@
+Add custom MongoDB interface for entity collections

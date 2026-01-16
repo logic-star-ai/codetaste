@@ -1,0 +1,1 @@
+Move WindowUUID into Common module

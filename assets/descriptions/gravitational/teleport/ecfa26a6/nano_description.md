@@ -1,0 +1,1 @@
+Refactor `client.Key` → `client.KeyRing` and un-embed `PrivateKey`

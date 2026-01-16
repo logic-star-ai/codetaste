@@ -1,0 +1,1 @@
+Refactor package structure: Move conans.client → conan.internal

@@ -1,0 +1,1 @@
+Extract Lexical tests into dedicated suite

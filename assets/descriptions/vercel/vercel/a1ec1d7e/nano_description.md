@@ -1,0 +1,1 @@
+Refactor: Decouple `Output` from `Client` for improved testability

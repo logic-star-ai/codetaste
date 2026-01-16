@@ -1,0 +1,1 @@
+Rename `scalar_exists()` to `has_rows()` and remove `IndicoModel.has_rows()`

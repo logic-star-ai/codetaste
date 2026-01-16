@@ -1,0 +1,1 @@
+Refactor: Remove duplicated code in proxy implementations

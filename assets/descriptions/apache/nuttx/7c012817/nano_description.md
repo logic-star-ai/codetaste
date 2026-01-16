@@ -1,0 +1,1 @@
+Unify scheduler context switch calls with `nxsched_switch_context` across architectures

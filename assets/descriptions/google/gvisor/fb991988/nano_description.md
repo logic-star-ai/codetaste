@@ -1,0 +1,1 @@
+Decouple memory allocation from platform abstraction

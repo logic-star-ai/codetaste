@@ -1,0 +1,1 @@
+Refactor: Remove trie → triedb dependency via interface abstraction

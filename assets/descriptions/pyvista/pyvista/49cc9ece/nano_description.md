@@ -1,0 +1,1 @@
+Decouple core and plotting APIs to improve imports and tighten public namespace

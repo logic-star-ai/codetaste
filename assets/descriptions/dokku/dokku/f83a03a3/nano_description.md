@@ -1,0 +1,1 @@
+Consolidate Golang Plugin Binaries to Reduce Build Time and Package Size

@@ -1,0 +1,1 @@
+Rename `bt_audio_codec_qos` to `bt_bap_qos_cfg` for clarity

@@ -1,0 +1,1 @@
+Remove deprecated `annotation` module, `BaseSeriesAnnotator`, `Y` parameter, and `HierarchyEnsembleForecaster.fitted_list`

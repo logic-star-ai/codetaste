@@ -1,0 +1,1 @@
+Consolidate DAG scheduling parameters into single `schedule` argument

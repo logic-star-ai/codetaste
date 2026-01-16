@@ -1,0 +1,1 @@
+Refactor SD configuration to remove `config` dependency

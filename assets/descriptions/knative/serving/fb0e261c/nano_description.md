@@ -1,0 +1,1 @@
+Rename `pkg/controller` to `pkg/reconciler`

@@ -1,0 +1,1 @@
+Flatten `Animated` directory structure by removing legacy `src/` subdirectory

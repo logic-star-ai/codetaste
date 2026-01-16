@@ -1,0 +1,1 @@
+Replace module extension methods with module API

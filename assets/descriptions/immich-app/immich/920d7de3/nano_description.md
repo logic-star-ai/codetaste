@@ -1,0 +1,1 @@
+Refactor Enum Casing to PascalCase

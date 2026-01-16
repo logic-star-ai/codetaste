@@ -1,0 +1,1 @@
+Refactor: Introduce `UnifiedScanArgs` to consolidate scan arguments

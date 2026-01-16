@@ -1,0 +1,1 @@
+Restructure compactor package hierarchy

@@ -1,0 +1,1 @@
+Refactor to eliminate global state (Viper, i18n, etc.)

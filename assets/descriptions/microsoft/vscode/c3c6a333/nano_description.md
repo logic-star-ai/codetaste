@@ -1,0 +1,1 @@
+Rename "InteractiveSession" to "Chat" throughout codebase

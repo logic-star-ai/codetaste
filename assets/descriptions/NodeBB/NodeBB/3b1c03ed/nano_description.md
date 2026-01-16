@@ -1,0 +1,1 @@
+Refactor: Move plugin hook methods to `plugin.hooks.*` namespace

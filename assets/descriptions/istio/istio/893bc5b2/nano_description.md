@@ -1,0 +1,1 @@
+Refactor: Rename "manager" to "pilot" across entire codebase

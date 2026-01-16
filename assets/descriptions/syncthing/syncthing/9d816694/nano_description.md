@@ -1,0 +1,1 @@
+Rename core terminology: Repository → Folder, Node → Device

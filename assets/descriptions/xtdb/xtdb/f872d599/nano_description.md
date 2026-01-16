@@ -1,0 +1,1 @@
+Unify VectorReader and IVectorReader interfaces with consistent naming
