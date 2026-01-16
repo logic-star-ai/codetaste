@@ -13,7 +13,7 @@ from refactoring_benchmark.analyze.metrics import ALL_METRICS
 from refactoring_benchmark.analyze.models import AnalysisData, AgentDescriptionData
 from refactoring_benchmark.analyze.plotting import create_plot, save_plot
 from refactoring_benchmark.analyze.config import PlotConfig
-from refactoring_benchmark.analyze.filters import filter_successful_only
+from refactoring_benchmark.analyze.filters import filter_no_timeouts, filter_successful_only
 from refactoring_benchmark.utils.common import load_instances_from_csv
 
 
@@ -252,7 +252,9 @@ Examples:
         return
 
     # Prepare filters
-    filters = []
+    default_filters = [filter_no_timeouts()]
+    print("Applying default filter: Exclude timed-out inference runs (finish_reason='timeout')")
+    filters = default_filters + []
     if args.successful_only:
         filters.append(filter_successful_only())
         print("Filtering: Only successful inference runs (finish_reason='success')")

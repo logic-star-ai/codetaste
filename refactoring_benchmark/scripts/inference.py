@@ -48,6 +48,7 @@ def main():
         logger.error(f"Invalid agent configuration: {e}")
         sys.exit(1)
 
+    logger.info(f"Description Type: {args.description_type}")
     # Sanitize agent ID for filesystem use
     try:
         sanitized_agent_id = sanitize_agent_id(agent_config.id)
