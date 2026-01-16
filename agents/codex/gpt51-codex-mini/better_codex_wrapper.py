@@ -1,5 +1,6 @@
 import asyncio
 import os
+import signal
 import sys
 import json
 import argparse
@@ -97,7 +98,8 @@ async def run_limited_task_async(prompt: str, unknown_args: list) -> bool:
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=sys.stdout.fileno(),
-        stderr=asyncio.subprocess.PIPE
+        stderr=asyncio.subprocess.PIPE,
+        start_new_session=True
     )
 
     reason = "success"
@@ -125,7 +127,7 @@ async def run_limited_task_async(prompt: str, unknown_args: list) -> bool:
             monitor.update()
             tmp_cost = compute_cost(monitor.tokens)
             if tmp_cost != current_cost:
-                print(f"Cost: ${tmp_cost:.4f}")
+                print(f"Cost: ${tmp_cost:.4f} ({get_timestamp()})")
                 current_cost = tmp_cost
             
             if current_cost >= MAX_BUDGET_USD:
@@ -140,7 +142,7 @@ async def run_limited_task_async(prompt: str, unknown_args: list) -> bool:
                 line_task = asyncio.create_task(proc.stderr.readline())
                 line = await asyncio.wait_for(line_task, timeout=1.0)
                 if line:
-                    print(line.decode(errors="replace"), file=sys.stderr, flush=True)
+                    print(line.decode(errors="replace"), file=sys.stderr, flush=True, end="")
                     last_read_dt = datetime.now(timezone.utc)
                 else:
                     # EOF reached on stderr
@@ -152,9 +154,23 @@ async def run_limited_task_async(prompt: str, unknown_args: list) -> bool:
         try:
             exit_code = await asyncio.wait_for(proc.wait(), timeout=5.0)
         except asyncio.TimeoutError:
-            print("[!] Process unresponsive. Sending SIGKILL.")
-            proc.kill()
-            exit_code = await proc.wait()
+            print("[!] Process unresponsive. Sending SIGKILL to group.")
+            try:
+                pgid = os.getpgid(proc.pid)
+                os.killpg(pgid, signal.SIGKILL)
+            except Exception:
+                proc.kill()
+
+            try:
+                # communicate() is the best way to drain the pipe
+                _, stderr_data = await asyncio.wait_for(proc.communicate(), timeout=5.0)
+                if stderr_data:
+                    remaining_text = stderr_data.decode(errors="replace").strip()
+                    print(f"Remaining Output: {remaining_text}", file=sys.stderr, flush=True)
+                exit_code = proc.returncode
+            except asyncio.TimeoutError:
+                print("[!] Pipes stayed open (orphaned children?). Moving on.")
+                exit_code = -1
 
         if reason == "success" and exit_code != 0:
             reason = "error"
