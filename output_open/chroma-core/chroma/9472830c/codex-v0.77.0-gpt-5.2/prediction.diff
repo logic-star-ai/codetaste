@@ -1,0 +1,579 @@
+diff --git a/chromadb/cli/cli.py b/chromadb/cli/cli.py
+index 7bc6f11..b44ec79 100644
+--- a/chromadb/cli/cli.py
++++ b/chromadb/cli/cli.py
+@@ -1,19 +1,19 @@
+-from typing import Optional
++import os
++from pathlib import Path
++import webbrowser
+ 
++import typer
++import uvicorn
+ from rich.console import Console
+ from rich.progress import Progress, SpinnerColumn, TextColumn
+-import typer.rich_utils
+ from typing_extensions import Annotated
+-import typer
+-import uvicorn
+-import os
+-import webbrowser
+ 
+-from chromadb.cli.utils import get_directory_size, set_log_file_path, sizeof_fmt
++from chromadb.cli.utils import set_log_file_path, sizeof_fmt
+ from chromadb.config import Settings, System
+ from chromadb.db.impl.sqlite import SqliteDB
+ from chromadb.ingest.impl.utils import trigger_vector_segments_max_seq_id_migration
+ from chromadb.segment import SegmentManager
++from chromadb.utils.directory import get_directory_size
+ 
+ app = typer.Typer()
+ utils_app = typer.Typer(short_help="Use maintenance utilities")
+@@ -41,10 +41,10 @@ def run(
+         "./chroma_data", help="The path to the file or directory."
+     ),
+     host: Annotated[
+-        Optional[str], typer.Option(help="The host to listen to. Default: localhost")
++        str, typer.Option(help="The host to listen to. Default: localhost")
+     ] = "localhost",
+     log_path: Annotated[
+-        Optional[str], typer.Option(help="The path to the log file.")
++        str, typer.Option(help="The path to the log file.")
+     ] = "chroma.log",
+     port: int = typer.Option(8000, help="The port to run the server on."),
+     test: bool = typer.Option(False, help="Test mode.", show_envvar=False, hidden=True),
+@@ -72,12 +72,8 @@ def run(
+     os.environ["CHROMA_SERVER_NOFILE"] = "65535"
+     os.environ["CHROMA_CLI"] = "True"
+ 
+-    # get the path where chromadb is installed
+-    chromadb_path = os.path.dirname(os.path.realpath(__file__))
+-
+-    # this is the path of the CLI, we want to move up one directory
+-    chromadb_path = os.path.dirname(chromadb_path)
+-    log_config = set_log_file_path(f"{chromadb_path}/log_config.yml", f"{log_path}")
++    log_config_path = Path(__file__).resolve().parent.parent / "log_config.yml"
++    log_config = set_log_file_path(log_config_path, log_path)
+     config = {
+         "app": "chromadb.app:app",
+         "host": host,
+@@ -96,6 +92,7 @@ def run(
+ @utils_app.command()  # type: ignore
+ def vacuum(
+     path: str = typer.Option(
++        ...,
+         help="The path to a Chroma data directory.",
+     ),
+     force: bool = typer.Option(False, help="Force vacuuming without confirmation."),
+@@ -111,11 +108,14 @@ def vacuum(
+         highlight=False
+     )  # by default, rich highlights numbers which makes the output look weird when we try to color numbers ourselves
+ 
+-    if not os.path.exists(path):
++    data_dir = Path(path)
++    sqlite_path = data_dir / "chroma.sqlite3"
++
++    if not data_dir.exists():
+         console.print(f"[bold red]Path {path} does not exist.[/bold red]")
+         raise typer.Exit(code=1)
+ 
+-    if not os.path.exists(f"{path}/chroma.sqlite3"):
++    if not sqlite_path.exists():
+         console.print(
+             f"[bold red]Path {path} is not a Chroma data directory.[/bold red]"
+         )
+@@ -129,11 +129,11 @@ def vacuum(
+ 
+     settings = Settings()
+     settings.is_persistent = True
+-    settings.persist_directory = path
++    settings.persist_directory = str(data_dir)
+     system = System(settings=settings)
+     sqlite = system.instance(SqliteDB)
+ 
+-    directory_size_before_vacuum = get_directory_size(path)
++    directory_size_before_vacuum = get_directory_size(str(data_dir))
+ 
+     console.print()  # Add a newline before the progress bar
+ 
+@@ -167,11 +167,16 @@ def vacuum(
+ 
+         progress.update(task, advance=100)
+ 
+-    directory_size_after_vacuum = get_directory_size(path)
++    directory_size_after_vacuum = get_directory_size(str(data_dir))
+     size_diff = directory_size_before_vacuum - directory_size_after_vacuum
++    pct = (
++        (size_diff * 100 / directory_size_before_vacuum)
++        if directory_size_before_vacuum > 0
++        else 0.0
++    )
+ 
+     console.print(
+-        f":soap: [bold]vacuum complete![/bold] Database size reduced by [green]{sizeof_fmt(size_diff)}[/green] (:arrow_down: [bold green]{(size_diff * 100 / directory_size_before_vacuum):.1f}%[/bold green])."
++        f":soap: [bold]vacuum complete![/bold] Database size reduced by [green]{sizeof_fmt(size_diff)}[/green] (:arrow_down: [bold green]{pct:.1f}%[/bold green])."
+     )
+ 
+ 
+diff --git a/chromadb/cli/utils.py b/chromadb/cli/utils.py
+index 0f69018..85974cd 100644
+--- a/chromadb/cli/utils.py
++++ b/chromadb/cli/utils.py
+@@ -1,35 +1,41 @@
+-from typing import Any, Dict
++from __future__ import annotations
+ 
+ import os
++from pathlib import Path
++from typing import Any, Dict, Union
++
+ import yaml
+ 
+ 
++_PathLikeStr = Union[str, os.PathLike[str]]
++
++
+ def set_log_file_path(
+-    log_config_path: str, new_filename: str = "chroma.log"
++    log_config_path: _PathLikeStr,
++    new_filename: _PathLikeStr = "chroma.log",
+ ) -> Dict[str, Any]:
+     """This works with the standard log_config.yml file.
+     It will not work with custom log configs that may use different handlers"""
+-    with open(f"{log_config_path}", "r") as file:
+-        log_config = yaml.safe_load(file)
+-    for handler in log_config["handlers"].values():
+-        if handler.get("class") == "logging.handlers.RotatingFileHandler":
+-            handler["filename"] = new_filename
++    log_config_path = Path(log_config_path)
++    with log_config_path.open("r", encoding="utf-8") as file:
++        log_config = yaml.safe_load(file) or {}
++
++    handlers = log_config.get("handlers")
++    if not isinstance(handlers, dict):
++        raise ValueError(
++            f"Invalid log config: expected top-level 'handlers' dict in {log_config_path}"
++        )
++
++    for handler in handlers.values():
++        if (
++            isinstance(handler, dict)
++            and handler.get("class") == "logging.handlers.RotatingFileHandler"
++        ):
++            handler["filename"] = str(new_filename)
+ 
+     return log_config
+ 
+ 
+-def get_directory_size(directory: str) -> int:
+-    """Get the size of a directory in bytes"""
+-    total = 0
+-    with os.scandir(directory) as it:
+-        for entry in it:
+-            if entry.is_file():
+-                total += entry.stat().st_size
+-            elif entry.is_dir():
+-                total += get_directory_size(entry.path)
+-    return total
+-
+-
+ # https://stackoverflow.com/a/1094933
+ def sizeof_fmt(num: int, suffix: str = "B") -> str:
+     n: float = float(num)
+diff --git a/chromadb/config.py b/chromadb/config.py
+index 37ff84f..beb8d46 100644
+--- a/chromadb/config.py
++++ b/chromadb/config.py
+@@ -101,8 +101,8 @@ class Settings(BaseSettings):  # type: ignore
+     chroma_api_impl: str = "chromadb.api.segment.SegmentAPI"
+ 
+     @validator("chroma_server_nofile", pre=True, always=True, allow_reuse=True)
+-    def empty_str_to_none(cls, v: str) -> Optional[str]:
+-        if type(v) is str and v.strip() == "":
++    def empty_str_to_none(cls, v: Any) -> Any:
++        if isinstance(v, str) and v.strip() == "":
+             return None
+         return v
+ 
+diff --git a/chromadb/db/impl/sqlite.py b/chromadb/db/impl/sqlite.py
+index 9cc0ca5..40fd90f 100644
+--- a/chromadb/db/impl/sqlite.py
++++ b/chromadb/db/impl/sqlite.py
+@@ -85,8 +85,9 @@ class SqliteDB(MigratableDB, SqlEmbeddingsQueue, SqlSysDB):
+             self._db_file = "file::memory:?cache=shared"
+             self._conn_pool = LockPool(self._db_file, is_uri=True)
+         else:
+-            self._db_file = (
+-                self._settings.require("persist_directory") + "/chroma.sqlite3"
++            self._db_file = os.path.join(
++                self._settings.require("persist_directory"),
++                "chroma.sqlite3",
+             )
+             if not os.path.exists(self._db_file):
+                 os.makedirs(os.path.dirname(self._db_file), exist_ok=True)
+@@ -108,7 +109,7 @@ class SqliteDB(MigratableDB, SqlEmbeddingsQueue, SqlSysDB):
+             self._settings.require("migrations") == "apply"
+             and self.config.get_parameter("automatically_purge").value is False
+         ):
+-            logger.warn(
++            logger.warning(
+                 "⚠️ It looks like you upgraded from a version below 0.6 and could benefit from vacuuming your database. Run chromadb utils vacuum --help for more information."
+             )
+ 
+diff --git a/chromadb/segment/impl/metadata/grpc_segment.py b/chromadb/segment/impl/metadata/grpc_segment.py
+index cbb0178..facc0cf 100644
+--- a/chromadb/segment/impl/metadata/grpc_segment.py
++++ b/chromadb/segment/impl/metadata/grpc_segment.py
+@@ -107,6 +107,157 @@ class GrpcMetadataSegment(MetadataReader):
+ 
+         return results
+ 
++    @staticmethod
++    def _exact_kind(value: object) -> Optional[str]:
++        if type(value) is str:
++            return "str"
++        if type(value) is bool:
++            return "bool"
++        if type(value) is int:
++            return "int"
++        if type(value) is float:
++            return "float"
++        return None
++
++    @staticmethod
++    def _apply_scalar_comparison(
++        dc: pb.DirectComparison, operator: str, operand: object
++    ) -> None:
++        kind = GrpcMetadataSegment._exact_kind(operand)
++        if kind is None:
++            raise ValueError(
++                "Expected where operand value to be a string, bool, int, or float, "
++                f"got {operand}"
++            )
++
++        if kind == "str":
++            if not isinstance(operand, str):
++                raise AssertionError("Invariant violation: kind=str but operand != str")
++            if operator == "$eq":
++                comparator = pb.GenericComparator.EQ
++            elif operator == "$ne":
++                comparator = pb.GenericComparator.NE
++            else:
++                raise ValueError(
++                    f"Expected where operator to be $eq or $ne, got {operator}"
++                )
++            ssc = pb.SingleStringComparison(value=operand, comparator=comparator)
++            dc.single_string_operand.CopyFrom(ssc)
++            return
++
++        if kind == "bool":
++            if not isinstance(operand, bool):
++                raise AssertionError(
++                    "Invariant violation: kind=bool but operand != bool"
++                )
++            if operator == "$eq":
++                comparator = pb.GenericComparator.EQ
++            elif operator == "$ne":
++                comparator = pb.GenericComparator.NE
++            else:
++                raise ValueError(
++                    f"Expected where operator to be $eq or $ne, got {operator}"
++                )
++            sbc = pb.SingleBoolComparison(value=operand, comparator=comparator)
++            dc.single_bool_operand.CopyFrom(sbc)
++            return
++
++        if kind == "int":
++            if not isinstance(operand, int) or isinstance(operand, bool):
++                raise AssertionError("Invariant violation: kind=int but operand != int")
++            sic = pb.SingleIntComparison(value=operand)
++            if operator == "$eq":
++                sic.generic_comparator = pb.GenericComparator.EQ
++            elif operator == "$ne":
++                sic.generic_comparator = pb.GenericComparator.NE
++            elif operator == "$gt":
++                sic.number_comparator = pb.NumberComparator.GT
++            elif operator == "$lt":
++                sic.number_comparator = pb.NumberComparator.LT
++            elif operator == "$gte":
++                sic.number_comparator = pb.NumberComparator.GTE
++            elif operator == "$lte":
++                sic.number_comparator = pb.NumberComparator.LTE
++            else:
++                raise ValueError(
++                    f"Expected where operator to be one of $eq, $ne, $gt, $lt, $gte, $lte, got {operator}"
++                )
++            dc.single_int_operand.CopyFrom(sic)
++            return
++
++        if kind == "float":
++            if not isinstance(operand, float):
++                raise AssertionError(
++                    "Invariant violation: kind=float but operand != float"
++                )
++            sfc = pb.SingleDoubleComparison(value=operand)
++            if operator == "$eq":
++                sfc.generic_comparator = pb.GenericComparator.EQ
++            elif operator == "$ne":
++                sfc.generic_comparator = pb.GenericComparator.NE
++            elif operator == "$gt":
++                sfc.number_comparator = pb.NumberComparator.GT
++            elif operator == "$lt":
++                sfc.number_comparator = pb.NumberComparator.LT
++            elif operator == "$gte":
++                sfc.number_comparator = pb.NumberComparator.GTE
++            elif operator == "$lte":
++                sfc.number_comparator = pb.NumberComparator.LTE
++            else:
++                raise ValueError(
++                    f"Expected where operator to be one of $eq, $ne, $gt, $lt, $gte, $lte, got {operator}"
++                )
++            dc.single_double_operand.CopyFrom(sfc)
++            return
++
++        raise AssertionError(f"Unreachable: kind={kind}")
++
++    @staticmethod
++    def _apply_list_comparison(
++        dc: pb.DirectComparison, operator: str, operand: object
++    ) -> None:
++        if not isinstance(operand, list):
++            raise ValueError(
++                f"Expected where value for $in or $nin to be a list of values, got {operand}"
++            )
++        if len(operand) == 0:
++            raise ValueError(
++                "Expected where operand value to be a non-empty list, got []"
++            )
++
++        first = operand[0]
++        kind = GrpcMetadataSegment._exact_kind(first)
++        if kind is None or not all(type(x) is type(first) for x in operand):
++            raise ValueError(
++                "Expected where operand value to be a non-empty list, and all values to be of the same type "
++                f"got {operand}"
++            )
++
++        list_operator = pb.ListOperator.IN if operator == "$in" else pb.ListOperator.NIN
++
++        if kind == "str":
++            slo = pb.StringListComparison(list_operator=list_operator)
++            slo.values.extend(operand)
++            dc.string_list_operand.CopyFrom(slo)
++            return
++        if kind == "bool":
++            blo = pb.BoolListComparison(list_operator=list_operator)
++            blo.values.extend(operand)
++            dc.bool_list_operand.CopyFrom(blo)
++            return
++        if kind == "int":
++            ilo = pb.IntListComparison(list_operator=list_operator)
++            ilo.values.extend(operand)
++            dc.int_list_operand.CopyFrom(ilo)
++            return
++        if kind == "float":
++            dlo = pb.DoubleListComparison(list_operator=list_operator)
++            dlo.values.extend(operand)
++            dc.double_list_operand.CopyFrom(dlo)
++            return
++
++        raise AssertionError(f"Unreachable: kind={kind}")
++
+     def _where_to_proto(self, where: Optional[Where]) -> pb.Where:
+         response = pb.Where()
+         if where is None:
+@@ -144,151 +295,22 @@ class GrpcMetadataSegment(MetadataReader):
+ 
+             if not isinstance(value, dict):
+                 # {'key': 'value'} case
+-                if type(value) is str:
+-                    ssc = pb.SingleStringComparison()
+-                    ssc.value = value
+-                    ssc.comparator = pb.GenericComparator.EQ
+-                    dc.single_string_operand.CopyFrom(ssc)
+-                elif type(value) is bool:
+-                    sbc = pb.SingleBoolComparison()
+-                    sbc.value = value
+-                    sbc.comparator = pb.GenericComparator.EQ
+-                    dc.single_bool_operand.CopyFrom(sbc)
+-                elif type(value) is int:
+-                    sic = pb.SingleIntComparison()
+-                    sic.value = value
+-                    sic.generic_comparator = pb.GenericComparator.EQ
+-                    dc.single_int_operand.CopyFrom(sic)
+-                elif type(value) is float:
+-                    sdc = pb.SingleDoubleComparison()
+-                    sdc.value = value
+-                    sdc.generic_comparator = pb.GenericComparator.EQ
+-                    dc.single_double_operand.CopyFrom(sdc)
++                self._apply_scalar_comparison(dc, "$eq", value)
++            else:
++                if len(value) != 1:
++                    raise ValueError(
++                        "Expected where value dict to have exactly one operator, got "
++                        f"{value}"
++                    )
++                operator, operand = next(iter(value.items()))
++                if operator in ("$in", "$nin"):
++                    self._apply_list_comparison(dc, operator, operand)
++                elif operator in ("$eq", "$ne", "$gt", "$lt", "$gte", "$lte"):
++                    self._apply_scalar_comparison(dc, operator, operand)
+                 else:
+                     raise ValueError(
+-                        f"Expected where value to be a string, int, or float, got {value}"
++                        f"Expected where operator to be one of $in, $nin, $eq, $ne, $gt, $lt, $gte, $lte, got {operator}"
+                     )
+-            else:
+-                for operator, operand in value.items():
+-                    if operator in ["$in", "$nin"]:
+-                        if not isinstance(operand, list):
+-                            raise ValueError(
+-                                f"Expected where value for $in or $nin to be a list of values, got {value}"
+-                            )
+-                        if len(operand) == 0 or not all(
+-                            isinstance(x, type(operand[0])) for x in operand
+-                        ):
+-                            raise ValueError(
+-                                f"Expected where operand value to be a non-empty list, and all values to be of the same type "
+-                                f"got {operand}"
+-                            )
+-                        list_operator = None
+-                        if operator == "$in":
+-                            list_operator = pb.ListOperator.IN
+-                        else:
+-                            list_operator = pb.ListOperator.NIN
+-                        if type(operand[0]) is str:
+-                            slo = pb.StringListComparison()
+-                            for x in operand:
+-                                slo.values.extend([x])  # type: ignore
+-                            slo.list_operator = list_operator
+-                            dc.string_list_operand.CopyFrom(slo)
+-                        elif type(operand[0]) is bool:
+-                            blo = pb.BoolListComparison()
+-                            for x in operand:
+-                                blo.values.extend([x])  # type: ignore
+-                            blo.list_operator = list_operator
+-                            dc.bool_list_operand.CopyFrom(blo)
+-                        elif type(operand[0]) is int:
+-                            ilo = pb.IntListComparison()
+-                            for x in operand:
+-                                ilo.values.extend([x])  # type: ignore
+-                            ilo.list_operator = list_operator
+-                            dc.int_list_operand.CopyFrom(ilo)
+-                        elif type(operand[0]) is float:
+-                            dlo = pb.DoubleListComparison()
+-                            for x in operand:
+-                                dlo.values.extend([x])  # type: ignore
+-                            dlo.list_operator = list_operator
+-                            dc.double_list_operand.CopyFrom(dlo)
+-                        else:
+-                            raise ValueError(
+-                                f"Expected where operand value to be a list of strings, ints, or floats, got {operand}"
+-                            )
+-                    elif operator in ["$eq", "$ne", "$gt", "$lt", "$gte", "$lte"]:
+-                        # Direct comparison to a single value.
+-                        if type(operand) is str:
+-                            ssc = pb.SingleStringComparison()
+-                            ssc.value = operand
+-                            if operator == "$eq":
+-                                ssc.comparator = pb.GenericComparator.EQ
+-                            elif operator == "$ne":
+-                                ssc.comparator = pb.GenericComparator.NE
+-                            else:
+-                                raise ValueError(
+-                                    f"Expected where operator to be $eq or $ne, got {operator}"
+-                                )
+-                            dc.single_string_operand.CopyFrom(ssc)
+-                        elif type(operand) is bool:
+-                            sbc = pb.SingleBoolComparison()
+-                            sbc.value = operand
+-                            if operator == "$eq":
+-                                sbc.comparator = pb.GenericComparator.EQ
+-                            elif operator == "$ne":
+-                                sbc.comparator = pb.GenericComparator.NE
+-                            else:
+-                                raise ValueError(
+-                                    f"Expected where operator to be $eq or $ne, got {operator}"
+-                                )
+-                            dc.single_bool_operand.CopyFrom(sbc)
+-                        elif type(operand) is int:
+-                            sic = pb.SingleIntComparison()
+-                            sic.value = operand
+-                            if operator == "$eq":
+-                                sic.generic_comparator = pb.GenericComparator.EQ
+-                            elif operator == "$ne":
+-                                sic.generic_comparator = pb.GenericComparator.NE
+-                            elif operator == "$gt":
+-                                sic.number_comparator = pb.NumberComparator.GT
+-                            elif operator == "$lt":
+-                                sic.number_comparator = pb.NumberComparator.LT
+-                            elif operator == "$gte":
+-                                sic.number_comparator = pb.NumberComparator.GTE
+-                            elif operator == "$lte":
+-                                sic.number_comparator = pb.NumberComparator.LTE
+-                            else:
+-                                raise ValueError(
+-                                    f"Expected where operator to be one of $eq, $ne, $gt, $lt, $gte, $lte, got {operator}"
+-                                )
+-                            dc.single_int_operand.CopyFrom(sic)
+-                        elif type(operand) is float:
+-                            sfc = pb.SingleDoubleComparison()
+-                            sfc.value = operand
+-                            if operator == "$eq":
+-                                sfc.generic_comparator = pb.GenericComparator.EQ
+-                            elif operator == "$ne":
+-                                sfc.generic_comparator = pb.GenericComparator.NE
+-                            elif operator == "$gt":
+-                                sfc.number_comparator = pb.NumberComparator.GT
+-                            elif operator == "$lt":
+-                                sfc.number_comparator = pb.NumberComparator.LT
+-                            elif operator == "$gte":
+-                                sfc.number_comparator = pb.NumberComparator.GTE
+-                            elif operator == "$lte":
+-                                sfc.number_comparator = pb.NumberComparator.LTE
+-                            else:
+-                                raise ValueError(
+-                                    f"Expected where operator to be one of $eq, $ne, $gt, $lt, $gte, $lte, got {operator}"
+-                                )
+-                            dc.single_double_operand.CopyFrom(sfc)
+-                        else:
+-                            raise ValueError(
+-                                f"Expected where operand value to be a string, int, or float, got {operand}"
+-                            )
+-                    else:
+-                        # This case should never happen, as we've already
+-                        # handled the case for direct comparisons.
+-                        pass
+ 
+             response.direct_comparison.CopyFrom(dc)
+         return response
+diff --git a/chromadb/test/conftest.py b/chromadb/test/conftest.py
+index c6c4443..23f9c4d 100644
+--- a/chromadb/test/conftest.py
++++ b/chromadb/test/conftest.py
+@@ -23,6 +23,11 @@ import uvicorn
+ from httpx import ConnectError
+ from typing_extensions import Protocol
+ 
++os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
++os.environ.setdefault("OMP_NUM_THREADS", "1")
++os.environ.setdefault("MKL_NUM_THREADS", "1")
++os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
++
+ from chromadb.api.async_fastapi import AsyncFastAPI
+ from chromadb.api.fastapi import FastAPI
+ import chromadb.server.fastapi
+diff --git a/pyproject.toml b/pyproject.toml
+index 21c1898..7e2347f 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -50,6 +50,9 @@ dependencies = [
+ line-length = 88
+ required-version = "23.3.0"                         # Black will refuse to run if it's not this version.
+ target-version = ['py38', 'py39', 'py310', 'py311']
++extend-exclude = '''
++chromadb/proto/
++'''
+ 
+ [tool.pytest.ini_options]
+ pythonpath = ["."]

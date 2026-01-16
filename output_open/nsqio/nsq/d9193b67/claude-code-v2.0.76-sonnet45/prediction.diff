@@ -1,0 +1,430 @@
+diff --git a/internal/util/errors.go b/internal/util/errors.go
+index c59eb44..c0cfbb6 100644
+--- a/internal/util/errors.go
++++ b/internal/util/errors.go
+@@ -1,9 +1,21 @@
+ package util
+ 
++import "errors"
++
+ type ChildErr interface {
+ 	Parent() error
+ }
+ 
++// Unwrap provides support for errors.Is and errors.As
++func (e *ClientErr) Unwrap() error {
++	return e.ParentErr
++}
++
++// Unwrap provides support for errors.Is and errors.As
++func (e *FatalClientErr) Unwrap() error {
++	return e.ParentErr
++}
++
+ // ClientErr provides a way for NSQ daemons to log a human reabable
+ // error string and return a machine readable string to the client.
+ //
+@@ -49,3 +61,15 @@ func (e *FatalClientErr) Parent() error {
+ func NewFatalClientErr(parent error, code string, description string) *FatalClientErr {
+ 	return &FatalClientErr{parent, code, description}
+ }
++
++// IsFatalClientErr checks if an error is or wraps a FatalClientErr
++func IsFatalClientErr(err error) bool {
++	var fatalErr *FatalClientErr
++	return errors.As(err, &fatalErr)
++}
++
++// IsClientErr checks if an error is or wraps a ClientErr
++func IsClientErr(err error) bool {
++	var clientErr *ClientErr
++	return errors.As(err, &clientErr)
++}
+diff --git a/internal/util/logger.go b/internal/util/logger.go
+index 8532193..a6774e9 100644
+--- a/internal/util/logger.go
++++ b/internal/util/logger.go
+@@ -1,5 +1,17 @@
+ package util
+ 
++import "fmt"
++
+ type logger interface {
+ 	Output(maxdepth int, s string) error
+ }
++
++// Logf formats and logs a message using the provided logger.
++// If logger is nil, the function returns without logging.
++// The calldepth parameter is added to account for the call stack.
++func Logf(logger logger, calldepth int, format string, args ...interface{}) {
++	if logger == nil {
++		return
++	}
++	logger.Output(calldepth, fmt.Sprintf(format, args...))
++}
+diff --git a/internal/util/tcp_server.go b/internal/util/tcp_server.go
+index 211bd7c..5f86c4f 100644
+--- a/internal/util/tcp_server.go
++++ b/internal/util/tcp_server.go
+@@ -11,6 +11,12 @@ type TCPHandler interface {
+ 	Handle(net.Conn)
+ }
+ 
++// ResolveTCPAddr resolves a TCP address string to *net.TCPAddr.
++// Returns an error if the address cannot be resolved.
++func ResolveTCPAddr(address string) (*net.TCPAddr, error) {
++	return net.ResolveTCPAddr("tcp", address)
++}
++
+ func TCPServer(listener net.Listener, handler TCPHandler, l logger) {
+ 	l.Output(2, fmt.Sprintf("TCP: listening on %s", listener.Addr()))
+ 
+diff --git a/nsqadmin/nsqadmin.go b/nsqadmin/nsqadmin.go
+index cbb1da3..d1a866e 100644
+--- a/nsqadmin/nsqadmin.go
++++ b/nsqadmin/nsqadmin.go
+@@ -3,7 +3,6 @@ package main
+ import (
+ 	"bytes"
+ 	"encoding/json"
+-	"fmt"
+ 	"net"
+ 	"net/http"
+ 	"net/url"
+@@ -41,7 +40,7 @@ func NewNSQAdmin(opts *nsqadminOptions) *NSQAdmin {
+ 	// verify that the supplied address is valid
+ 	verifyAddress := func(arg string, address string) *net.TCPAddr {
+ 
+-		addr, err := net.ResolveTCPAddr("tcp", address)
++		addr, err := util.ResolveTCPAddr(address)
+ 		if err != nil {
+ 			n.logf("FATAL: failed to resolve %s address (%s) - %s", arg, address, err)
+ 			os.Exit(1)
+@@ -76,10 +75,7 @@ func NewNSQAdmin(opts *nsqadminOptions) *NSQAdmin {
+ }
+ 
+ func (n *NSQAdmin) logf(f string, args ...interface{}) {
+-	if n.opts.Logger == nil {
+-		return
+-	}
+-	n.opts.Logger.Output(2, fmt.Sprintf(f, args...))
++	util.Logf(n.opts.Logger, 2, f, args...)
+ }
+ 
+ func (n *NSQAdmin) handleAdminActions() {
+@@ -112,7 +108,9 @@ func (n *NSQAdmin) Main() {
+ }
+ 
+ func (n *NSQAdmin) Exit() {
+-	n.httpListener.Close()
++	if err := n.httpListener.Close(); err != nil {
++		n.logf("ERROR: failed to close HTTP listener - %s", err)
++	}
+ 	close(n.notifications)
+ 	n.waitGroup.Wait()
+ }
+diff --git a/nsqd/client_v2.go b/nsqd/client_v2.go
+index 27892bd..e90fc8a 100644
+--- a/nsqd/client_v2.go
++++ b/nsqd/client_v2.go
+@@ -25,9 +25,6 @@ const (
+ )
+ 
+ type identifyDataV2 struct {
+-	ShortID string `json:"short_id"` // TODO: deprecated, remove in 1.0
+-	LongID  string `json:"long_id"`  // TODO: deprecated, remove in 1.0
+-
+ 	ClientID            string `json:"client_id"`
+ 	Hostname            string `json:"hostname"`
+ 	HeartbeatInterval   int    `json:"heartbeat_interval"`
+@@ -155,20 +152,9 @@ func (c *clientV2) String() string {
+ func (c *clientV2) Identify(data identifyDataV2) error {
+ 	c.ctx.nsqd.logf("[%s] IDENTIFY: %+v", c, data)
+ 
+-	// TODO: for backwards compatibility, remove in 1.0
+-	hostname := data.Hostname
+-	if hostname == "" {
+-		hostname = data.LongID
+-	}
+-	// TODO: for backwards compatibility, remove in 1.0
+-	clientID := data.ClientID
+-	if clientID == "" {
+-		clientID = data.ShortID
+-	}
+-
+ 	c.Lock()
+-	c.ClientID = clientID
+-	c.Hostname = hostname
++	c.ClientID = data.ClientID
++	c.Hostname = data.Hostname
+ 	c.UserAgent = data.UserAgent
+ 	c.Unlock()
+ 
+diff --git a/nsqd/diskqueue.go b/nsqd/diskqueue.go
+index 75ec15d..13b388f 100644
+--- a/nsqd/diskqueue.go
++++ b/nsqd/diskqueue.go
+@@ -13,6 +13,8 @@ import (
+ 	"sync"
+ 	"sync/atomic"
+ 	"time"
++
++	"github.com/bitly/nsq/internal/util"
+ )
+ 
+ // diskQueue implements the BackendQueue interface
+@@ -95,10 +97,7 @@ func newDiskQueue(name string, dataPath string, maxBytesPerFile int64,
+ }
+ 
+ func (d *diskQueue) logf(f string, args ...interface{}) {
+-	if d.logger == nil {
+-		return
+-	}
+-	d.logger.Output(2, fmt.Sprintf(f, args...))
++	util.Logf(d.logger, 2, f, args...)
+ }
+ 
+ // Depth returns the depth of the queue
+@@ -154,12 +153,16 @@ func (d *diskQueue) exit(deleted bool) error {
+ 	<-d.exitSyncChan
+ 
+ 	if d.readFile != nil {
+-		d.readFile.Close()
++		if err := d.readFile.Close(); err != nil {
++			d.logf("ERROR: failed to close read file - %s", err)
++		}
+ 		d.readFile = nil
+ 	}
+ 
+ 	if d.writeFile != nil {
+-		d.writeFile.Close()
++		if err := d.writeFile.Close(); err != nil {
++			d.logf("ERROR: failed to close write file - %s", err)
++		}
+ 		d.writeFile = nil
+ 	}
+ 
+@@ -198,12 +201,16 @@ func (d *diskQueue) skipToNextRWFile() error {
+ 	var err error
+ 
+ 	if d.readFile != nil {
+-		d.readFile.Close()
++		if err := d.readFile.Close(); err != nil {
++			d.logf("ERROR: failed to close read file - %s", err)
++		}
+ 		d.readFile = nil
+ 	}
+ 
+ 	if d.writeFile != nil {
+-		d.writeFile.Close()
++		if err := d.writeFile.Close(); err != nil {
++			d.logf("ERROR: failed to close write file - %s", err)
++		}
+ 		d.writeFile = nil
+ 	}
+ 
+diff --git a/nsqd/nsqd.go b/nsqd/nsqd.go
+index df7f525..2e1a6ee 100644
+--- a/nsqd/nsqd.go
++++ b/nsqd/nsqd.go
+@@ -81,14 +81,14 @@ func NewNSQD(opts *nsqdOptions) *NSQD {
+ 		os.Exit(1)
+ 	}
+ 
+-	tcpAddr, err := net.ResolveTCPAddr("tcp", opts.TCPAddress)
++	tcpAddr, err := util.ResolveTCPAddr(opts.TCPAddress)
+ 	if err != nil {
+ 		n.logf("FATAL: failed to resolve TCP address (%s) - %s", opts.TCPAddress, err)
+ 		os.Exit(1)
+ 	}
+ 	n.tcpAddr = tcpAddr
+ 
+-	httpAddr, err := net.ResolveTCPAddr("tcp", opts.HTTPAddress)
++	httpAddr, err := util.ResolveTCPAddr(opts.HTTPAddress)
+ 	if err != nil {
+ 		n.logf("FATAL: failed to resolve HTTP address (%s) - %s", opts.HTTPAddress, err)
+ 		os.Exit(1)
+@@ -96,7 +96,7 @@ func NewNSQD(opts *nsqdOptions) *NSQD {
+ 	n.httpAddr = httpAddr
+ 
+ 	if opts.HTTPSAddress != "" {
+-		httpsAddr, err := net.ResolveTCPAddr("tcp", opts.HTTPSAddress)
++		httpsAddr, err := util.ResolveTCPAddr(opts.HTTPSAddress)
+ 		if err != nil {
+ 			n.logf("FATAL: failed to resolve HTTPS address (%s) - %s", opts.HTTPSAddress, err)
+ 			os.Exit(1)
+@@ -138,10 +138,7 @@ func NewNSQD(opts *nsqdOptions) *NSQD {
+ }
+ 
+ func (n *NSQD) logf(f string, args ...interface{}) {
+-	if n.opts.Logger == nil {
+-		return
+-	}
+-	n.opts.Logger.Output(2, fmt.Sprintf(f, args...))
++	util.Logf(n.opts.Logger, 2, f, args...)
+ }
+ 
+ func (n *NSQD) SetHealth(err error) {
+@@ -365,15 +362,21 @@ func (n *NSQD) PersistMetadata() error {
+ 
+ func (n *NSQD) Exit() {
+ 	if n.tcpListener != nil {
+-		n.tcpListener.Close()
++		if err := n.tcpListener.Close(); err != nil {
++			n.logf("ERROR: failed to close TCP listener - %s", err)
++		}
+ 	}
+ 
+ 	if n.httpListener != nil {
+-		n.httpListener.Close()
++		if err := n.httpListener.Close(); err != nil {
++			n.logf("ERROR: failed to close HTTP listener - %s", err)
++		}
+ 	}
+ 
+ 	if n.httpsListener != nil {
+-		n.httpsListener.Close()
++		if err := n.httpsListener.Close(); err != nil {
++			n.logf("ERROR: failed to close HTTPS listener - %s", err)
++		}
+ 	}
+ 
+ 	n.Lock()
+@@ -383,7 +386,9 @@ func (n *NSQD) Exit() {
+ 	}
+ 	n.logf("NSQ: closing topics")
+ 	for _, topic := range n.topicMap {
+-		topic.Close()
++		if err := topic.Close(); err != nil {
++			n.logf("ERROR: failed to close topic %s - %s", topic.name, err)
++		}
+ 	}
+ 	n.Unlock()
+ 
+diff --git a/nsqd/protocol_v2.go b/nsqd/protocol_v2.go
+index 16f8118..8276fc3 100644
+--- a/nsqd/protocol_v2.go
++++ b/nsqd/protocol_v2.go
+@@ -91,7 +91,7 @@ func (p *protocolV2) IOLoop(conn net.Conn) error {
+ 			}
+ 
+ 			// errors of type FatalClientErr should forceably close the connection
+-			if _, ok := err.(*util.FatalClientErr); ok {
++			if util.IsFatalClientErr(err) {
+ 				break
+ 			}
+ 			continue
+diff --git a/nsqlookupd/context.go b/nsqlookupd/context.go
+index e7132ef..feccee5 100644
+--- a/nsqlookupd/context.go
++++ b/nsqlookupd/context.go
+@@ -1,5 +1,5 @@
+ package nsqlookupd
+ 
+-type Context struct {
++type context struct {
+ 	nsqlookupd *NSQLookupd
+ }
+diff --git a/nsqlookupd/http.go b/nsqlookupd/http.go
+index b35dfb7..f5dbb7c 100644
+--- a/nsqlookupd/http.go
++++ b/nsqlookupd/http.go
+@@ -11,7 +11,7 @@ import (
+ )
+ 
+ type httpServer struct {
+-	ctx *Context
++	ctx *context
+ }
+ 
+ func (s *httpServer) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+diff --git a/nsqlookupd/lookup_protocol_v1.go b/nsqlookupd/lookup_protocol_v1.go
+index d88f566..3146bfa 100644
+--- a/nsqlookupd/lookup_protocol_v1.go
++++ b/nsqlookupd/lookup_protocol_v1.go
+@@ -17,7 +17,7 @@ import (
+ )
+ 
+ type LookupProtocolV1 struct {
+-	ctx *Context
++	ctx *context
+ }
+ 
+ func (p *LookupProtocolV1) IOLoop(conn net.Conn) error {
+diff --git a/nsqlookupd/nsqlookupd.go b/nsqlookupd/nsqlookupd.go
+index 4278c89..9c45e79 100644
+--- a/nsqlookupd/nsqlookupd.go
++++ b/nsqlookupd/nsqlookupd.go
+@@ -1,7 +1,6 @@
+ package nsqlookupd
+ 
+ import (
+-	"fmt"
+ 	"net"
+ 	"os"
+ 
+@@ -24,14 +23,14 @@ func NewNSQLookupd(opts *nsqlookupdOptions) *NSQLookupd {
+ 		DB:   NewRegistrationDB(),
+ 	}
+ 
+-	tcpAddr, err := net.ResolveTCPAddr("tcp", opts.TCPAddress)
++	tcpAddr, err := util.ResolveTCPAddr(opts.TCPAddress)
+ 	if err != nil {
+ 		n.logf("FATAL: failed to resolve TCP address (%s) - %s", opts.TCPAddress, err)
+ 		os.Exit(1)
+ 	}
+ 	n.tcpAddr = tcpAddr
+ 
+-	httpAddr, err := net.ResolveTCPAddr("tcp", opts.HTTPAddress)
++	httpAddr, err := util.ResolveTCPAddr(opts.HTTPAddress)
+ 	if err != nil {
+ 		n.logf("FATAL: failed to resolve HTTP address (%s) - %s", opts.HTTPAddress, err)
+ 		os.Exit(1)
+@@ -44,14 +43,11 @@ func NewNSQLookupd(opts *nsqlookupdOptions) *NSQLookupd {
+ }
+ 
+ func (l *NSQLookupd) logf(f string, args ...interface{}) {
+-	if l.opts.Logger == nil {
+-		return
+-	}
+-	l.opts.Logger.Output(2, fmt.Sprintf(f, args...))
++	util.Logf(l.opts.Logger, 2, f, args...)
+ }
+ 
+ func (l *NSQLookupd) Main() {
+-	ctx := &Context{l}
++	ctx := &context{l}
+ 
+ 	tcpListener, err := net.Listen("tcp", l.tcpAddr.String())
+ 	if err != nil {
+@@ -78,11 +74,15 @@ func (l *NSQLookupd) Main() {
+ 
+ func (l *NSQLookupd) Exit() {
+ 	if l.tcpListener != nil {
+-		l.tcpListener.Close()
++		if err := l.tcpListener.Close(); err != nil {
++			l.logf("ERROR: failed to close TCP listener - %s", err)
++		}
+ 	}
+ 
+ 	if l.httpListener != nil {
+-		l.httpListener.Close()
++		if err := l.httpListener.Close(); err != nil {
++			l.logf("ERROR: failed to close HTTP listener - %s", err)
++		}
+ 	}
+ 	l.waitGroup.Wait()
+ }
+diff --git a/nsqlookupd/tcp.go b/nsqlookupd/tcp.go
+index bd61ea7..a7d636f 100644
+--- a/nsqlookupd/tcp.go
++++ b/nsqlookupd/tcp.go
+@@ -8,7 +8,7 @@ import (
+ )
+ 
+ type tcpServer struct {
+-	ctx *Context
++	ctx *context
+ }
+ 
+ func (p *tcpServer) Handle(clientConn net.Conn) {

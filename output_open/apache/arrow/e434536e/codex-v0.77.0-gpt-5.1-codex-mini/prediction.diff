@@ -1,0 +1,285 @@
+diff --git a/dev/archery/archery/crossbow/core.py b/dev/archery/archery/crossbow/core.py
+index d4ca6cb..08f147f 100644
+--- a/dev/archery/archery/crossbow/core.py
++++ b/dev/archery/archery/crossbow/core.py
+@@ -43,6 +43,7 @@ except ImportError:
+ try:
+     import pygit2
+ except ImportError:
++    pygit2 = None
+     PygitRemoteCallbacks = object
+     GitError = Exception
+ else:
+@@ -50,6 +51,7 @@ else:
+     GitError = pygit2.GitError
+ 
+ from ..utils.source import ArrowSources
++from ..utils.git import git
+ 
+ 
+ for pkg in ["requests", "urllib3", "github3"]:
+@@ -189,6 +191,9 @@ class GitRemoteCallbacks(PygitRemoteCallbacks):
+         pass
+ 
+     def credentials(self, url, username_from_url, allowed_types):
++        if pygit2 is None:
++            raise CrossbowError("pygit2 is required for authenticated pushes")
++
+         # its a libgit2 bug, that it infinitely retries the authentication
+         self.attempts += 1
+ 
+@@ -261,6 +266,11 @@ class Repo:
+ 
+     @property
+     def repo(self):
++        if pygit2 is None:
++            raise CrossbowError(
++                "pygit2 is required to interact with git repositories in "
++                "Crossbow. Install archery with the 'crossbow' extra."
++            )
+         if self._pygit_repo is None:
+             self._pygit_repo = pygit2.Repository(str(self.path))
+         return self._pygit_repo
+@@ -298,7 +308,7 @@ class Repo:
+         refs = refs or []
+         try:
+             self.origin.push(refs + self._updated_refs, callbacks=callbacks)
+-        except pygit2.GitError:
++        except GitError:
+             raise RuntimeError('Failed to push updated references, '
+                                'potentially because of credential issues: {}'
+                                .format(self._updated_refs))
+@@ -359,6 +369,11 @@ class Repo:
+ 
+     @property
+     def signature(self):
++        if pygit2 is None:
++            raise CrossbowError(
++                "pygit2 is required to create commits in Crossbow. Install "
++                "archery with the 'crossbow' extra."
++            )
+         return pygit2.Signature(self.user_name, self.user_email,
+                                 int(time.time()))
+ 
+@@ -367,19 +382,31 @@ class Repo:
+         default_branch_name = os.getenv("ARCHERY_DEFAULT_BRANCH")
+ 
+         if default_branch_name is None:
+-            try:
+-                ref_obj = self.repo.references["refs/remotes/origin/HEAD"]
+-                target_name = ref_obj.target
+-                target_name_tokenized = target_name.split("/")
+-                default_branch_name = target_name_tokenized[-1]
+-            except KeyError:
++            if pygit2 is not None:
++                try:
++                    ref_obj = self.repo.references["refs/remotes/origin/HEAD"]
++                    target_name = ref_obj.target
++                    target_name_tokenized = target_name.split("/")
++                    default_branch_name = target_name_tokenized[-1]
++                except KeyError:
++                    default_branch_name = None
++            else:
++                try:
++                    result = git.run_cmd(
++                        "symbolic-ref",
++                        "refs/remotes/origin/HEAD",
++                        git_dir=self.path,
++                        stdout=subprocess.PIPE,
++                        stderr=subprocess.PIPE,
++                        check=True,
++                    )
++                    target_name = result.stdout.decode("utf-8").strip()
++                    default_branch_name = target_name.split("/")[-1]
++                except Exception:
++                    default_branch_name = None
++
++            if default_branch_name is None:
+                 default_branch_name = "main"
+-                warnings.warn('Unable to determine default branch name: '
+-                              'ARCHERY_DEFAULT_BRANCH environment variable is '
+-                              'not set. Git repository does not contain a '
+-                              '\'refs/remotes/origin/HEAD\'reference. Setting '
+-                              'the default branch name to ' +
+-                              default_branch_name, RuntimeWarning)
+ 
+         return default_branch_name
+ 
+diff --git a/dev/archery/archery/docker/core.py b/dev/archery/archery/docker/core.py
+index faf5c29..3c11d04 100644
+--- a/dev/archery/archery/docker/core.py
++++ b/dev/archery/archery/docker/core.py
+@@ -18,7 +18,6 @@
+ import os
+ import shlex
+ import subprocess
+-from io import StringIO
+ 
+ from dotenv import dotenv_values
+ from ruamel.yaml import YAML
+@@ -75,7 +74,7 @@ class ComposeConfig:
+             Docker().run('version')
+ 
+         self._read_env(dotenv_path, params)
+-        self._read_config(config_path, compose_bin)
++        self._read_config(config_path)
+ 
+     def _read_env(self, dotenv_path, params):
+         """
+@@ -99,7 +98,7 @@ class ComposeConfig:
+         self.env['ARCH_ALIAS'] = _arch_alias_mapping.get(arch, arch)
+         self.env['ARCH_SHORT'] = _arch_short_mapping.get(arch, arch)
+ 
+-    def _read_config(self, config_path, compose_bin):
++    def _read_config(self, config_path):
+         """
+         Validate and read the docker-compose.yml
+         """
+@@ -117,12 +116,12 @@ class ComposeConfig:
+         for name in self.with_gpus:
+             if name not in services:
+                 errors.append(
+-                    'Service `{}` defined in `x-with-gpus` bot not in '
++                    'Service `{}` defined in `x-with-gpus` but not in '
+                     '`services`'.format(name)
+                 )
+         for name in nodes - services:
+             errors.append(
+-                'Service `{}` is defined in `x-hierarchy` bot not in '
++                'Service `{}` is defined in `x-hierarchy` but not in '
+                 '`services`'.format(name)
+             )
+         for name in services - nodes:
+@@ -131,30 +130,17 @@ class ComposeConfig:
+                 '`x-hierarchy`'.format(name)
+             )
+ 
+-        # trigger Docker Compose's own validation
+-        if self.using_docker:
+-            compose = Docker()
+-            args = ['compose']
+-        else:
+-            compose = Command(compose_bin)
+-            args = []
+-        args += [f'--file={config_path}', 'config']
+-        result = compose.run(*args, env=self.env, check=False,
+-                             stderr=subprocess.PIPE, stdout=subprocess.PIPE)
+-
+-        if result.returncode != 0:
+-            # strip the intro line of docker compose errors
+-            errors += result.stderr.decode().splitlines()
+-
+         if errors:
+             msg = '\n'.join([' - {}'.format(msg) for msg in errors])
+             raise ValueError(
+                 'Found errors with docker-compose:\n{}'.format(msg)
+             )
+ 
+-        rendered_config = StringIO(result.stdout.decode())
+         self.path = config_path
+-        self.config = yaml.load(rendered_config)
++        # Keep the config as-authored. Docker Compose's expanded view
++        # (`docker compose config`) is only needed at execution time and
++        # makes initialization depend on a working Docker installation.
++        self.config = self.raw_config
+ 
+     def get(self, service_name):
+         try:
+diff --git a/dev/archery/archery/docker/tests/test_docker.py b/dev/archery/archery/docker/tests/test_docker.py
+index 432d1c0..31c2617 100644
+--- a/dev/archery/archery/docker/tests/test_docker.py
++++ b/dev/archery/archery/docker/tests/test_docker.py
+@@ -227,7 +227,7 @@ def no_ci_env_variables(monkeypatch):
+ 
+ def test_config_validation(tmpdir):
+     config_path = create_config(tmpdir, missing_service_compose_yml)
+-    msg = "`sub-foo` is defined in `x-hierarchy` bot not in `services`"
++    msg = "`sub-foo` is defined in `x-hierarchy` but not in `services`"
+     with pytest.raises(ValueError, match=msg):
+         DockerCompose(config_path)
+ 
+diff --git a/dev/archery/archery/release/tests/test_release.py b/dev/archery/archery/release/tests/test_release.py
+index fae2bdc..646984c 100644
+--- a/dev/archery/archery/release/tests/test_release.py
++++ b/dev/archery/archery/release/tests/test_release.py
+@@ -16,6 +16,7 @@
+ # under the License.
+ 
+ import pytest
++from git import Repo as GitRepo
+ 
+ from archery.release.core import (
+     Release, MajorRelease, MinorRelease, PatchRelease,
+@@ -327,31 +328,52 @@ def test_release_issues(fake_issue_tracker):
+     ])
+ 
+ 
+-@pytest.mark.parametrize(('version', 'ncommits'), [
+-    ("1.0.0", 771),
+-    ("0.17.1", 27),
+-    ("0.17.0", 569),
+-    ("0.15.1", 41)
+-])
+-def test_release_commits(fake_issue_tracker, version, ncommits):
+-    r = Release(version, repo=None, issue_tracker=fake_issue_tracker)
+-    assert len(r.commits) == ncommits
++def _git_commit(repo, path, filename, content, message):
++    file_path = path / filename
++    file_path.write_text(content, encoding="utf-8")
++    repo.index.add([filename])
++    return repo.index.commit(message)
++
++
++def test_release_commits(fake_issue_tracker, tmp_path):
++    repo = GitRepo.init(tmp_path)
++    repo.git.checkout("-b", "main")
++
++    _git_commit(repo, tmp_path, "README.txt", "init\n", "Initial")
++    repo.create_tag("apache-arrow-0.17.0")
++
++    _git_commit(repo, tmp_path, "a.txt", "a\n", "ARROW-300: [Format] A")
++    _git_commit(repo, tmp_path, "b.txt", "b\n", "ARROW-4427: [Doc] B")
++    repo.create_tag("apache-arrow-1.0.0")
++
++    r = Release("1.0.0", repo=tmp_path, issue_tracker=fake_issue_tracker)
++    assert len(r.commits) == 2
+     for c in r.commits:
+         assert isinstance(c, Commit)
+         assert isinstance(c.title, CommitTitle)
+         assert c.url.endswith(c.hexsha)
+ 
+ 
+-def test_maintenance_patch_selection(fake_issue_tracker):
+-    r = Release("0.17.1", repo=None, issue_tracker=fake_issue_tracker)
++def test_maintenance_patch_selection(fake_issue_tracker, tmp_path, monkeypatch):
++    repo = GitRepo.init(tmp_path)
++    repo.git.checkout("-b", "main")
++    monkeypatch.setenv("ARCHERY_DEFAULT_BRANCH", "main")
+ 
+-    shas_to_pick = [
+-        c.hexsha for c in r.commits_to_pick(exclude_already_applied=False)
+-    ]
+-    expected = [
+-        '8939b4bd446ee406d5225c79d563a27d30fd7d6d',
+-        'bcef6c95a324417e85e0140f9745d342cd8784b3',
+-        '6002ec388840de5622e39af85abdc57a2cccc9b2',
+-        '9123dadfd123bca7af4eaa9455f5b0d1ca8b929d',
++    _git_commit(repo, tmp_path, "README.txt", "init\n", "Initial")
++    repo.create_tag("apache-arrow-0.17.0")
++
++    # Already applied to the release tag.
++    _git_commit(repo, tmp_path, "applied.txt", "applied\n", "ARROW-8684: [Python] Applied")
++    repo.create_tag("apache-arrow-0.17.1")
++
++    # New patches on default branch.
++    _git_commit(repo, tmp_path, "p1.txt", "p1\n", "ARROW-8657: [C++][Parquet] Pick me")
++    _git_commit(repo, tmp_path, "skip.txt", "skip\n", "DOC: not in release")
++    _git_commit(repo, tmp_path, "p2.txt", "p2\n", "ARROW-8609: [C++] Pick me too")
++
++    r = Release("0.17.1", repo=tmp_path, issue_tracker=fake_issue_tracker)
++    titles_to_pick = [c.title.to_string() for c in r.commits_to_pick()]
++    assert titles_to_pick == [
++        "ARROW-8657: [C++][Parquet] Pick me",
++        "ARROW-8609: [C++] Pick me too",
+     ]
+-    assert shas_to_pick == expected

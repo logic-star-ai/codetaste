@@ -1,0 +1,431 @@
+diff --git a/packages/graphql-js/src/client.ts b/packages/graphql-js/src/client.ts
+index 9f211f3..1e29651 100644
+--- a/packages/graphql-js/src/client.ts
++++ b/packages/graphql-js/src/client.ts
+@@ -189,6 +189,18 @@ export class NhostGraphqlClient {
+     this.accessToken = accessToken
+   }
+ 
++  /**
++   * Use `nhost.graphql.setAdminSecret` to set an admin secret to be used in subsequent graphql requests.
++   *
++   * @example
++   * ```ts
++   * nhost.graphql.setAdminSecret('your-admin-secret')
++   * ```
++   */
++  setAdminSecret(adminSecret: string | undefined) {
++    this.adminSecret = adminSecret
++  }
++
+   private generateAccessTokenHeaders(): NhostGraphqlRequestConfig['headers'] {
+     if (this.adminSecret) {
+       return {
+diff --git a/packages/hasura-auth-js/src/hasura-auth-client.ts b/packages/hasura-auth-js/src/hasura-auth-client.ts
+index f7bb382..a39a0ba 100644
+--- a/packages/hasura-auth-js/src/hasura-auth-client.ts
++++ b/packages/hasura-auth-js/src/hasura-auth-client.ts
+@@ -200,7 +200,7 @@ export class HasuraAuthClient {
+       const { provider, options } = params
+       const providerUrl = encodeQueryParameters(
+         `${this._client.backendUrl}/signin/provider/${provider}`,
+-        rewriteRedirectTo(this._client.clientUrl, options as any)
++        rewriteRedirectTo(this._client.clientUrl, options)
+       )
+       if (isBrowser()) {
+         window.location.href = providerUrl
+diff --git a/packages/hasura-auth-js/src/internal-client.ts b/packages/hasura-auth-js/src/internal-client.ts
+index 9a32299..34e4690 100644
+--- a/packages/hasura-auth-js/src/internal-client.ts
++++ b/packages/hasura-auth-js/src/internal-client.ts
+@@ -122,9 +122,8 @@ export class AuthClient {
+       // * Note: in React, the Xstate interpreter does not start from the global state, but from the root component
+       this._subscriptionsQueue.add(fn)
+       return () => {
+-        console.log(
+-          'onTokenChanged was added before the interpreter started. Cannot unsubscribe listener.'
+-        )
++        // Note: onTokenChanged was added before the interpreter started.
++        // Cannot unsubscribe listener that was never subscribed.
+       }
+     }
+   }
+diff --git a/packages/hasura-auth-js/src/machines/authentication/helpers.ts b/packages/hasura-auth-js/src/machines/authentication/helpers.ts
+new file mode 100644
+index 0000000..3aa7594
+--- /dev/null
++++ b/packages/hasura-auth-js/src/machines/authentication/helpers.ts
+@@ -0,0 +1,48 @@
++import { TOKEN_REFRESH_MARGIN } from '../../constants'
++
++/**
++ * Calculate the time remaining before a token expires
++ * @param expiresAt Token expiration date
++ * @returns Time remaining in milliseconds
++ */
++export const calculateTokenRefreshTime = (expiresAt: Date): number => {
++  const expiresIn = expiresAt.getTime() - Date.now()
++  return expiresIn - 1_000 * TOKEN_REFRESH_MARGIN
++}
++
++/**
++ * Calculate the next refresh time based on access token expiration
++ * @param accessTokenExpiresIn Token expiration in seconds
++ * @returns Date when the next refresh should occur
++ */
++export const calculateNextRefreshTime = (accessTokenExpiresIn: number): Date => {
++  return new Date(Date.now() + accessTokenExpiresIn * 1_000)
++}
++
++/**
++ * Check if enough time has elapsed since last refresh attempt
++ * @param lastAttemptTime Time of last refresh attempt
++ * @param minInterval Minimum interval in milliseconds
++ * @returns True if enough time has elapsed
++ */
++export const hasElapsedMinInterval = (
++  lastAttemptTime: Date,
++  minInterval: number = 1000
++): boolean => {
++  const elapsed = Date.now() - lastAttemptTime.getTime()
++  return elapsed > minInterval
++}
++
++/**
++ * Check if refresh has been running for too long
++ * @param startedAt Time when refresh started
++ * @param maxDuration Maximum duration in milliseconds
++ * @returns True if max duration exceeded
++ */
++export const hasExceededMaxDuration = (
++  startedAt: Date,
++  maxDuration: number = 10000
++): boolean => {
++  const elapsed = Date.now() - startedAt.getTime()
++  return elapsed > maxDuration
++}
+diff --git a/packages/hasura-auth-js/src/machines/authentication/machine.ts b/packages/hasura-auth-js/src/machines/authentication/machine.ts
+index 3fa277d..65b5466 100644
+--- a/packages/hasura-auth-js/src/machines/authentication/machine.ts
++++ b/packages/hasura-auth-js/src/machines/authentication/machine.ts
+@@ -9,9 +9,14 @@ import { assign, createMachine, InterpreterFrom, send } from 'xstate'
+ import {
+   NHOST_JWT_EXPIRES_AT_KEY,
+   NHOST_REFRESH_TOKEN_KEY,
+-  REFRESH_TOKEN_MAX_ATTEMPTS,
+-  TOKEN_REFRESH_MARGIN
++  REFRESH_TOKEN_MAX_ATTEMPTS
+ } from '../../constants'
++import {
++  calculateTokenRefreshTime,
++  calculateNextRefreshTime,
++  hasElapsedMinInterval,
++  hasExceededMaxDuration
++} from './helpers'
+ import {
+   CodifiedError,
+   INVALID_EMAIL_ERROR,
+@@ -527,7 +532,7 @@ export const createAuthMachine = ({
+           accessToken: (_, { data }) => {
+             if (data.session) {
+               const { accessTokenExpiresIn, accessToken } = data.session
+-              const nextRefresh = new Date(Date.now() + accessTokenExpiresIn * 1_000)
++              const nextRefresh = calculateNextRefreshTime(accessTokenExpiresIn)
+               storageSetter(NHOST_JWT_EXPIRES_AT_KEY, nextRefresh.toISOString())
+               return {
+                 value: accessToken,
+@@ -630,22 +635,18 @@ export const createAuthMachine = ({
+             if (ctx.refreshTimer.attempts > REFRESH_TOKEN_MAX_ATTEMPTS) {
+               return false
+             }
+-            const elapsed = Date.now() - ctx.refreshTimer.lastAttempt.getTime()
+             // * Exponential backoff
+-            return elapsed > Math.pow(2, ctx.refreshTimer.attempts - 1) * 5_000
++            const minInterval = Math.pow(2, ctx.refreshTimer.attempts - 1) * 5_000
++            return hasElapsedMinInterval(ctx.refreshTimer.lastAttempt, minInterval)
+           }
+-          if (refreshIntervalTime) {
++          if (refreshIntervalTime && ctx.refreshTimer.startedAt) {
+             // * If a refreshIntervalTime has been passed on as an option, it will notify
+-            // * the token should be refershed when this interval is overdue
+-            const elapsed = Date.now() - ctx.refreshTimer.startedAt!.getTime()
+-            if (elapsed > refreshIntervalTime * 1_000) {
+-              return true
+-            }
++            // * the token should be refreshed when this interval is overdue
++            return hasExceededMaxDuration(ctx.refreshTimer.startedAt, refreshIntervalTime * 1_000)
+           }
+           // * In any case, it's time to refresh when there's less than
+-          // * TOKEN_REFRESH_MARGIN seconds before the JWT exprires
+-          const expiresIn = expiresAt.getTime() - Date.now()
+-          const remaining = expiresIn - 1_000 * TOKEN_REFRESH_MARGIN
++          // * TOKEN_REFRESH_MARGIN seconds before the JWT expires
++          const remaining = calculateTokenRefreshTime(expiresAt)
+           return remaining <= 0
+         },
+         // * Untyped action payload. See https://github.com/statelyai/xstate/issues/3037
+diff --git a/packages/hasura-auth-js/src/machines/enable-mfa.ts b/packages/hasura-auth-js/src/machines/enable-mfa.ts
+index aa670f5..ba7afcc 100644
+--- a/packages/hasura-auth-js/src/machines/enable-mfa.ts
++++ b/packages/hasura-auth-js/src/machines/enable-mfa.ts
+@@ -105,8 +105,7 @@ export const createEnableMfaMachine = ({ backendUrl, interpreter }: AuthClient)
+           imageUrl: (_, { data: { imageUrl } }: any) => imageUrl,
+           secret: (_, { data: { totpSecret } }: any) => totpSecret
+         }),
+-        reportError: send((ctx, event) => {
+-          console.log('REPORT', ctx, event)
++        reportError: send((ctx) => {
+           return { type: 'ERROR', error: ctx.error }
+         }),
+         reportSuccess: send('SUCCESS'),
+diff --git a/packages/hasura-auth-js/src/utils/error-handler.ts b/packages/hasura-auth-js/src/utils/error-handler.ts
+new file mode 100644
+index 0000000..6730f31
+--- /dev/null
++++ b/packages/hasura-auth-js/src/utils/error-handler.ts
+@@ -0,0 +1,59 @@
++import { ErrorPayload } from '../types'
++import { NETWORK_ERROR_CODE } from '../errors'
++
++/**
++ * Standardized error response creator
++ */
++export const createErrorResponse = (
++  status: number,
++  message: string,
++  error: string
++): ErrorPayload => ({
++  status,
++  message,
++  error
++})
++
++/**
++ * Create a network error response
++ */
++export const createNetworkError = (message: string = 'Network Error'): ErrorPayload => ({
++  status: NETWORK_ERROR_CODE,
++  message,
++  error: 'network'
++})
++
++/**
++ * Extract error message from various error types
++ */
++export const extractErrorMessage = (error: unknown): string => {
++  if (error instanceof Error) {
++    return error.message
++  }
++  if (typeof error === 'string') {
++    return error
++  }
++  if (error && typeof error === 'object' && 'message' in error) {
++    return String((error as { message: unknown }).message)
++  }
++  return 'Unknown error occurred'
++}
++
++/**
++ * Safe JSON parse with error handling
++ */
++export const safeJsonParse = async <T = unknown>(
++  response: Response
++): Promise<{ data: T | null; error: ErrorPayload | null }> => {
++  try {
++    const data = await response.json()
++    return { data, error: null }
++  } catch (e) {
++    const error = createErrorResponse(
++      response.status,
++      extractErrorMessage(e),
++      'json_parse_error'
++    )
++    return { data: null, error }
++  }
++}
+diff --git a/packages/hasura-auth-js/src/utils/fetch.ts b/packages/hasura-auth-js/src/utils/fetch.ts
+index 8ac258a..f274cec 100644
+--- a/packages/hasura-auth-js/src/utils/fetch.ts
++++ b/packages/hasura-auth-js/src/utils/fetch.ts
+@@ -1,6 +1,6 @@
+ import fetch from 'cross-fetch'
+-import { NETWORK_ERROR_CODE } from '../errors'
+ import { NullableErrorResponse } from '../types'
++import { createNetworkError, extractErrorMessage } from './error-handler'
+ 
+ interface FetcResponse<T> extends NullableErrorResponse {
+   data: T
+@@ -9,7 +9,7 @@ interface FetcResponse<T> extends NullableErrorResponse {
+ const fetchWrapper = async <T>(
+   url: string,
+   method: 'GET' | 'POST',
+-  { token, body }: { token?: string | null; body?: any } = {}
++  { token, body }: { token?: string | null; body?: unknown } = {}
+ ): Promise<FetcResponse<T>> => {
+   const headers: HeadersInit = {
+     'Content-Type': 'application/json',
+@@ -36,21 +36,17 @@ const fetchWrapper = async <T>(
+       return { data, error: null }
+     } catch {
+       console.warn(`Unexpected response: can't parse the response of the server at ${url}`)
+-      return { data: 'OK' as any, error: null }
++      return { data: {} as T, error: null }
+     }
+   } catch (e) {
+-    const error = {
+-      message: 'Network Error',
+-      status: NETWORK_ERROR_CODE,
+-      error: 'network'
+-    }
++    const error = createNetworkError(extractErrorMessage(e))
+     return Promise.reject<FetcResponse<T>>({ error })
+   }
+ }
+ 
+ export const postFetch = async <T>(
+   url: string,
+-  body: any,
++  body: unknown,
+   token?: string | null
+ ): Promise<FetcResponse<T>> => fetchWrapper<T>(url, 'POST', { token, body })
+ 
+diff --git a/packages/hasura-auth-js/src/utils/validators.ts b/packages/hasura-auth-js/src/utils/validators.ts
+index 97e13d6..db48683 100644
+--- a/packages/hasura-auth-js/src/utils/validators.ts
++++ b/packages/hasura-auth-js/src/utils/validators.ts
+@@ -12,9 +12,20 @@ export const isValidEmail = (email?: string | null) =>
+ export const isValidPassword = (password?: string | null) =>
+   !!password && typeof password === 'string' && password.length >= MIN_PASSWORD_LENGTH
+ 
+-// TODO improve validation
+-export const isValidPhoneNumber = (phoneNumber?: string | null) =>
+-  !!phoneNumber && typeof phoneNumber === 'string'
++export const isValidPhoneNumber = (phoneNumber?: string | null): boolean => {
++  if (!phoneNumber || typeof phoneNumber !== 'string') {
++    return false
++  }
++
++  // Remove common formatting characters
++  const cleaned = phoneNumber.replace(/[\s\-\(\)\.]/g, '')
++
++  // Check if it starts with + (international format) or is just digits
++  const isValidFormat = /^(\+?\d{7,15})$/.test(cleaned)
++
++  // Basic length validation: 7-15 digits (ITU-T E.164 standard)
++  return isValidFormat && cleaned.length >= 7 && cleaned.length <= 15
++}
+ 
+ export const isValidTicket = (ticket?: string | null) =>
+   ticket &&
+diff --git a/packages/hasura-storage-js/src/utils/upload.ts b/packages/hasura-storage-js/src/utils/upload.ts
+index 851f1c2..60a0d37 100644
+--- a/packages/hasura-storage-js/src/utils/upload.ts
++++ b/packages/hasura-storage-js/src/utils/upload.ts
+@@ -56,14 +56,19 @@ export const fetchUpload = async (
+       const response = await fetch(url, {
+         method: 'POST',
+         headers,
+-        body: data as any // * https://github.com/form-data/form-data/issues/513
++        body: data as unknown as BodyInit
+       })
+ 
+       if (!response.ok) {
++        let errorMessage: string
++        try {
++          errorMessage = await response.text()
++        } catch {
++          errorMessage = response.statusText
++        }
+         const error: ErrorPayload = {
+           status: response.status,
+-          message: await response.text(),
+-          // * errors from hasura-storage are not codified
++          message: errorMessage,
+           error: response.statusText
+         }
+         return { error, fileMetadata: null }
+@@ -73,8 +78,8 @@ export const fetchUpload = async (
+     } catch (e) {
+       const error: ErrorPayload = {
+         status: 0,
+-        message: (e as Error).message,
+-        error: (e as Error).message
++        message: e instanceof Error ? e.message : 'Unknown error occurred',
++        error: e instanceof Error ? e.message : 'Unknown error occurred'
+       }
+       return { error, fileMetadata: null }
+     }
+@@ -85,7 +90,7 @@ export const fetchUpload = async (
+     xhr.responseType = 'json'
+ 
+     xhr.onload = () => {
+-      if (xhr.status < 200 && xhr.status >= 300) {
++      if (xhr.status < 200 || xhr.status >= 300) {
+         return resolve({
+           fileMetadata: null,
+           error: { error: xhr.statusText, message: xhr.statusText, status: xhr.status }
+@@ -112,6 +117,6 @@ export const fetchUpload = async (
+       xhr.setRequestHeader(key, value)
+     })
+ 
+-    xhr.send(data as any) // * https://github.com/form-data/form-data/issues/513
++    xhr.send(data as unknown as XMLHttpRequestBodyInit)
+   })
+ }
+diff --git a/packages/nextjs/src/create-server-side-client.ts b/packages/nextjs/src/create-server-side-client.ts
+index c2871a6..9725e98 100644
+--- a/packages/nextjs/src/create-server-side-client.ts
++++ b/packages/nextjs/src/create-server-side-client.ts
+@@ -41,9 +41,11 @@ export const createServerSideClient = async (
+         return typeof urlValue === 'string' ? urlValue : cookieValue ?? nextCtxValue
+       },
+       setItem: (key, value) => {
+-        // TODO: Set expires based on the actual refresh token expire time
+-        // For now, we're using 30 days so the cookie is not removed when the browser is closed because if `expiers` is omitted, the cookie becomes a session cookie.
+-        Cookies.set(key, value, { httpOnly: false, sameSite: 'strict', expires: 30 })
++        // Note: js-cookie runs in the browser context and cannot set httpOnly cookies.
++        // For production, use Next.js API routes with server-side Set-Cookie headers
++        // to set httpOnly cookies for better security against XSS attacks.
++        // Set expires based on token lifetime - using 30 days to prevent session expiry on browser close
++        Cookies.set(key, value, { sameSite: 'strict', secure: true, expires: 30 })
+       },
+       removeItem: (key) => {
+         Cookies.remove(key)
+diff --git a/packages/nhost-js/src/clients/functions/index.ts b/packages/nhost-js/src/clients/functions/index.ts
+index 06bbf00..0e3415c 100644
+--- a/packages/nhost-js/src/clients/functions/index.ts
++++ b/packages/nhost-js/src/clients/functions/index.ts
+@@ -122,6 +122,18 @@ export class NhostFunctionsClient {
+     this.accessToken = accessToken
+   }
+ 
++  /**
++   * Use `nhost.functions.setAdminSecret` to set an admin secret to be used in subsequent functions requests.
++   *
++   * @example
++   * ```ts
++   * nhost.functions.setAdminSecret('your-admin-secret')
++   * ```
++   */
++  setAdminSecret(adminSecret: string | undefined) {
++    this.adminSecret = adminSecret
++  }
++
+   generateAccessTokenHeaders(): NhostFunctionCallConfig['headers'] {
+     if (this.adminSecret) {
+       return {
+diff --git a/packages/nhost-js/src/clients/nhost.ts b/packages/nhost-js/src/clients/nhost.ts
+index ce77b61..e8b1601 100644
+--- a/packages/nhost-js/src/clients/nhost.ts
++++ b/packages/nhost-js/src/clients/nhost.ts
+@@ -79,8 +79,7 @@ export class NhostClient {
+   set adminSecret(newValue: string | undefined) {
+     this._adminSecret = newValue
+     this.storage.setAdminSecret(newValue)
+-    // TODO inconsistent API: storage can change admin secret, but functions/graphql cannot
+-    // this.functions.setAdminSecret(newValue)
+-    // this.graphql.setAdminSecret(newValue)
++    this.functions.setAdminSecret(newValue)
++    this.graphql.setAdminSecret(newValue)
+   }
+ }

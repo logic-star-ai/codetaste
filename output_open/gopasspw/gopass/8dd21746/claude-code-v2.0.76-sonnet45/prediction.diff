@@ -1,0 +1,964 @@
+diff --git a/command_helpers.go b/command_helpers.go
+new file mode 100644
+index 0000000..51ae6b5
+--- /dev/null
++++ b/command_helpers.go
+@@ -0,0 +1,43 @@
++package main
++
++import (
++	"context"
++
++	ap "github.com/gopasspw/gopass/pkg/action"
++	"github.com/urfave/cli/v2"
++)
++
++// initBeforeFunc creates a Before function that initializes the store
++func initBeforeFunc(ctx context.Context, action *ap.Action) func(*cli.Context) error {
++	return func(c *cli.Context) error {
++		return action.Initialized(withGlobalFlags(ctx, c), c)
++	}
++}
++
++// completeFunc creates a BashComplete function
++func completeFunc(ctx context.Context, action *ap.Action) func(*cli.Context) {
++	return func(c *cli.Context) {
++		action.Complete(ctx, c)
++	}
++}
++
++// gitCredentialBeforeFunc creates a Before function for git credential commands
++func gitCredentialBeforeFunc(ctx context.Context, action *ap.Action) func(*cli.Context) error {
++	return func(c *cli.Context) error {
++		return action.GitCredentialBefore(withGlobalFlags(ctx, c), c)
++	}
++}
++
++// makeActionFunc creates an action function with global flags
++func makeActionFunc(ctx context.Context, fn func(context.Context, *cli.Context) error) func(*cli.Context) error {
++	return func(c *cli.Context) error {
++		return fn(withGlobalFlags(ctx, c), c)
++	}
++}
++
++// makeActionWithStoreFunc creates an action function that passes the store
++func makeActionWithStoreFunc(ctx context.Context, action *ap.Action, fn func(context.Context, *cli.Context, interface{}) error) func(*cli.Context) error {
++	return func(c *cli.Context) error {
++		return fn(withGlobalFlags(ctx, c), c, action.Store)
++	}
++}
+diff --git a/commands_xc_test.go b/commands_xc_test.go
+index 2079bdc..daa5d07 100644
+--- a/commands_xc_test.go
++++ b/commands_xc_test.go
+@@ -1,3 +1,4 @@
++//go:build xc
+ // +build xc
+ 
+ package main
+diff --git a/context.go b/context.go
+index 86a85e5..365269b 100644
+--- a/context.go
++++ b/context.go
+@@ -16,20 +16,36 @@ import (
+ )
+ 
+ func initContext(ctx context.Context, cfg *config.Config) context.Context {
+-	// always trust
+-	ctx = gpg.WithAlwaysTrust(ctx, true)
++	ctx = initGPGContext(ctx)
++	ctx = initDebugContext(ctx)
++	ctx = initColorContext(ctx)
++	ctx = initTerminalContext(ctx)
++	ctx = initStdinContext(ctx)
++	ctx = initPlatformContext(ctx)
++	return ctx
++}
+ 
++// initGPGContext initializes GPG-related context settings
++func initGPGContext(ctx context.Context) context.Context {
++	ctx = gpg.WithAlwaysTrust(ctx, true)
+ 	// check recipients conflicts with always trust, make sure it's not enabled
+ 	// when always trust is
+ 	if gpg.IsAlwaysTrust(ctx) {
+ 		ctx = sub.WithCheckRecipients(ctx, false)
+ 	}
++	return ctx
++}
+ 
+-	// debug flag
+-	if gdb := os.Getenv("GOPASS_DEBUG"); gdb != "" {
++// initDebugContext initializes debug mode based on environment
++func initDebugContext(ctx context.Context) context.Context {
++	if os.Getenv("GOPASS_DEBUG") != "" {
+ 		ctx = ctxutil.WithDebug(ctx, true)
+ 	}
++	return ctx
++}
+ 
++// initColorContext initializes color settings based on environment
++func initColorContext(ctx context.Context) context.Context {
+ 	// need this override for our integration tests
+ 	if nc := os.Getenv("GOPASS_NOCOLOR"); nc == "true" || ctxutil.IsNoColor(ctx) {
+ 		color.NoColor = true
+@@ -37,11 +53,15 @@ func initContext(ctx context.Context, cfg *config.Config) context.Context {
+ 	}
+ 
+ 	// support for no-color.org
+-	if nc := os.Getenv("NO_COLOR"); nc != "" {
++	if os.Getenv("NO_COLOR") != "" {
+ 		color.NoColor = true
+ 		ctx = ctxutil.WithColor(ctx, false)
+ 	}
++	return ctx
++}
+ 
++// initTerminalContext initializes terminal-related settings
++func initTerminalContext(ctx context.Context) context.Context {
+ 	// only emit color codes when stdout is a terminal
+ 	if !terminal.IsTerminal(int(os.Stdout.Fd())) {
+ 		color.NoColor = true
+@@ -49,13 +69,20 @@ func initContext(ctx context.Context, cfg *config.Config) context.Context {
+ 		ctx = ctxutil.WithTerminal(ctx, false)
+ 		ctx = ctxutil.WithInteractive(ctx, false)
+ 	}
++	return ctx
++}
+ 
+-	// reading from stdin?
++// initStdinContext checks if reading from stdin
++func initStdinContext(ctx context.Context) context.Context {
+ 	if info, err := os.Stdin.Stat(); err == nil && info.Mode()&os.ModeCharDevice == 0 {
+ 		ctx = ctxutil.WithInteractive(ctx, false)
+ 		ctx = ctxutil.WithStdin(ctx, true)
+ 	}
++	return ctx
++}
+ 
++// initPlatformContext handles platform-specific initialization
++func initPlatformContext(ctx context.Context) context.Context {
+ 	// disable colored output on windows since cmd.exe doesn't support ANSI color
+ 	// codes. Other terminal may do, but until we can figure that out better
+ 	// disable this for all terms on this platform
+@@ -63,6 +90,5 @@ func initContext(ctx context.Context, cfg *config.Config) context.Context {
+ 		color.NoColor = true
+ 		ctx = ctxutil.WithColor(ctx, false)
+ 	}
+-
+ 	return ctx
+ }
+diff --git a/flags.go b/flags.go
+new file mode 100644
+index 0000000..3be8c34
+--- /dev/null
++++ b/flags.go
+@@ -0,0 +1,72 @@
++package main
++
++import "github.com/urfave/cli/v2"
++
++// Common flags used across multiple commands
++var (
++	forceFlag = &cli.BoolFlag{
++		Name:    "force",
++		Aliases: []string{"f"},
++		Usage:   "Force the operation and overwrite existing items",
++	}
++
++	storeFlag = &cli.StringFlag{
++		Name:  "store",
++		Usage: "Store to operate on",
++	}
++
++	clipFlag = &cli.BoolFlag{
++		Name:    "clip",
++		Aliases: []string{"c"},
++		Usage:   "Copy to clipboard",
++	}
++
++	echoFlag = &cli.BoolFlag{
++		Name:    "echo",
++		Aliases: []string{"e"},
++		Usage:   "Display secret while typing",
++	}
++
++	recursiveFlag = &cli.BoolFlag{
++		Name:    "recursive",
++		Aliases: []string{"r"},
++		Usage:   "Recursive operation",
++	}
++
++	editorFlag = &cli.StringFlag{
++		Name:    "editor",
++		Aliases: []string{"e"},
++		Usage:   "Use this editor binary",
++	}
++
++	printFlag = &cli.BoolFlag{
++		Name:  "print",
++		Usage: "Print to terminal",
++	}
++)
++
++// cloneForceFlag creates a new force flag for a specific use case
++func cloneForceFlag(usage string) *cli.BoolFlag {
++	return &cli.BoolFlag{
++		Name:    "force",
++		Aliases: []string{"f"},
++		Usage:   usage,
++	}
++}
++
++// cloneStoreFlag creates a new store flag
++func cloneStoreFlag() *cli.StringFlag {
++	return &cli.StringFlag{
++		Name:  "store",
++		Usage: "Store to operate on",
++	}
++}
++
++// cloneClipFlag creates a new clip flag for a specific use case
++func cloneClipFlag(usage string) *cli.BoolFlag {
++	return &cli.BoolFlag{
++		Name:    "clip",
++		Aliases: []string{"c"},
++		Usage:   usage,
++	}
++}
+diff --git a/main.go b/main.go
+index 3694417..c226072 100644
+--- a/main.go
++++ b/main.go
+@@ -106,7 +106,12 @@ type errorWriter struct {
+ }
+ 
+ func (e errorWriter) Write(p []byte) (int, error) {
+-	return e.out.Write([]byte("\n" + color.RedString("Error: %s", p)))
++	errMsg := color.RedString("Error: %s", p)
++	// Add newline prefix for better formatting
++	if len(p) > 0 {
++		return e.out.Write([]byte("\n" + errMsg))
++	}
++	return 0, nil
+ }
+ 
+ func withGlobalFlags(ctx context.Context, c *cli.Context) context.Context {
+diff --git a/pkg/action/binary/copy.go b/pkg/action/binary/copy.go
+index bfd7566..1fb96ab 100644
+--- a/pkg/action/binary/copy.go
++++ b/pkg/action/binary/copy.go
+@@ -5,7 +5,7 @@ import (
+ 	"crypto/sha256"
+ 	"encoding/base64"
+ 	"fmt"
+-	"io/ioutil"
++	"os"
+ 	"strings"
+ 
+ 	"github.com/gopasspw/gopass/pkg/action"
+@@ -84,7 +84,7 @@ func binaryCopyFromFileToStore(ctx context.Context, from, to string, deleteSourc
+ 	}
+ 
+ 	// copy from FS to store
+-	buf, err := ioutil.ReadFile(from)
++	buf, err := os.ReadFile(from)
+ 	if err != nil {
+ 		return errors.Wrapf(err, "failed to read file from '%s'", from)
+ 	}
+@@ -120,7 +120,7 @@ func binaryCopyFromStoreToFile(ctx context.Context, from, to string, deleteSourc
+ 	if err != nil {
+ 		return errors.Wrapf(err, "failed to read data from '%s'", from)
+ 	}
+-	if err := ioutil.WriteFile(to, buf, 0600); err != nil {
++	if err := os.WriteFile(to, buf, 0600); err != nil {
+ 		return errors.Wrapf(err, "failed to write data to '%s'", to)
+ 	}
+ 
+diff --git a/pkg/action/create/create.go b/pkg/action/create/create.go
+index 33d222f..4a3bf00 100644
+--- a/pkg/action/create/create.go
++++ b/pkg/action/create/create.go
+@@ -4,7 +4,7 @@ import (
+ 	"context"
+ 	"encoding/json"
+ 	"fmt"
+-	"io/ioutil"
++	"os"
+ 	"net/url"
+ 	"strconv"
+ 	"strings"
+@@ -333,7 +333,7 @@ func (s *creator) createGCP(ctx context.Context, c *cli.Context) error {
+ 	if err != nil {
+ 		return err
+ 	}
+-	buf, err := ioutil.ReadFile(svcaccfn)
++	buf, err := os.ReadFile(svcaccfn)
+ 	if err != nil {
+ 		return err
+ 	}
+diff --git a/pkg/action/fsck.go b/pkg/action/fsck.go
+index 38e86c8..195ae50 100644
+--- a/pkg/action/fsck.go
++++ b/pkg/action/fsck.go
+@@ -3,7 +3,7 @@ package action
+ import (
+ 	"context"
+ 	"fmt"
+-	"io/ioutil"
++	"io"
+ 	"os"
+ 	"path/filepath"
+ 
+@@ -50,7 +50,7 @@ func (s *Action) Fsck(ctx context.Context, c *cli.Context) error {
+ 	}
+ 	if out.IsHidden(ctx) {
+ 		old := goprogressbar.Stdout
+-		goprogressbar.Stdout = ioutil.Discard
++		goprogressbar.Stdout = io.Discard
+ 		defer func() {
+ 			goprogressbar.Stdout = old
+ 		}()
+diff --git a/pkg/action/hibp.go b/pkg/action/hibp.go
+index d11e3e5..16719fb 100644
+--- a/pkg/action/hibp.go
++++ b/pkg/action/hibp.go
+@@ -4,7 +4,7 @@ import (
+ 	"context"
+ 	"crypto/sha1"
+ 	"fmt"
+-	"io/ioutil"
++	"io"
+ 	"sort"
+ 
+ 	hibpapi "github.com/gopasspw/gopass/pkg/hibp/api"
+@@ -112,7 +112,7 @@ func (s *Action) hibpPrecomputeHashes(ctx context.Context) (map[string]string, [
+ 	}
+ 	if out.IsHidden(ctx) {
+ 		old := goprogressbar.Stdout
+-		goprogressbar.Stdout = ioutil.Discard
++		goprogressbar.Stdout = io.Discard
+ 		defer func() {
+ 			goprogressbar.Stdout = old
+ 		}()
+diff --git a/pkg/action/init.go b/pkg/action/init.go
+index 3f4ba1a..f63fee9 100644
+--- a/pkg/action/init.go
++++ b/pkg/action/init.go
+@@ -3,7 +3,7 @@ package action
+ import (
+ 	"context"
+ 	"fmt"
+-	"io/ioutil"
++	"os"
+ 
+ 	"github.com/gopasspw/gopass/pkg/backend"
+ 	"github.com/gopasspw/gopass/pkg/config"
+@@ -281,7 +281,7 @@ https://github.com/gopasspw/gopass/blob/master/docs/entropy.md`)
+ 	if err != nil {
+ 		return errors.Wrapf(err, "failed to export public key")
+ 	}
+-	_ = ioutil.WriteFile(fn, pk, 06444)
++	_ = os.WriteFile(fn, pk, 0644)
+ 	out.Cyan(ctx, "Public key exported to '%s'", fn)
+ 	out.Green(ctx, "Done")
+ 	return nil
+diff --git a/pkg/action/jsonapi_others.go b/pkg/action/jsonapi_others.go
+index 302e2c1..42e0ec8 100644
+--- a/pkg/action/jsonapi_others.go
++++ b/pkg/action/jsonapi_others.go
+@@ -4,7 +4,6 @@ package action
+ 
+ import (
+ 	"context"
+-	"io/ioutil"
+ 	"os"
+ 	"path/filepath"
+ 
+@@ -70,13 +69,13 @@ func (s *Action) SetupNativeMessaging(ctx context.Context, c *cli.Context) error
+ 	if err := os.MkdirAll(filepath.Dir(wrapperPath), 0755); err != nil {
+ 		return ExitError(ctx, ExitIO, err, "failed to create wrapper path: %s", err)
+ 	}
+-	if err := ioutil.WriteFile(wrapperPath, wrap, 0755); err != nil {
++	if err := os.WriteFile(wrapperPath, wrap, 0755); err != nil {
+ 		return ExitError(ctx, ExitIO, err, "failed to write wrapper script: %s", err)
+ 	}
+ 	if err := os.MkdirAll(filepath.Dir(manifestPath), 0755); err != nil {
+ 		return ExitError(ctx, ExitIO, err, "failed to create manifest path: %s", err)
+ 	}
+-	if err := ioutil.WriteFile(manifestPath, mf, 0644); err != nil {
++	if err := os.WriteFile(manifestPath, mf, 0644); err != nil {
+ 		return ExitError(ctx, ExitIO, err, "failed to write manifest file: %s", err)
+ 	}
+ 	return nil
+diff --git a/pkg/action/jsonapi_windows.go b/pkg/action/jsonapi_windows.go
+index 23e8d4a..e0aa9de 100644
+--- a/pkg/action/jsonapi_windows.go
++++ b/pkg/action/jsonapi_windows.go
+@@ -5,7 +5,7 @@ package action
+ import (
+ 	"context"
+ 	"io"
+-	"io/ioutil"
++	"os"
+ 	"os"
+ 	"path/filepath"
+ 
+@@ -81,7 +81,7 @@ func (s *Action) SetupNativeMessaging(ctx context.Context, c *cli.Context) error
+ 	if err := os.MkdirAll(filepath.Dir(manifestPath), 0755); err != nil {
+ 		return ExitError(ctx, ExitIO, err, "failed to create manifest path: %s", err)
+ 	}
+-	if err := ioutil.WriteFile(manifestPath, mf, 0644); err != nil {
++	if err := os.WriteFile(manifestPath, mf, 0644); err != nil {
+ 		return ExitError(ctx, ExitIO, err, "failed to write manifest file: %s", err)
+ 	}
+ 
+diff --git a/pkg/action/xc/xc.go b/pkg/action/xc/xc.go
+index d86e073..b50b3d7 100644
+--- a/pkg/action/xc/xc.go
++++ b/pkg/action/xc/xc.go
+@@ -4,7 +4,7 @@ package xc
+ 
+ import (
+ 	"context"
+-	"io/ioutil"
++	"os"
+ 	"os"
+ 	"strings"
+ 
+@@ -134,7 +134,7 @@ func ExportPublicKey(ctx context.Context, c *cli.Context) error {
+ 		return action.ExitError(ctx, action.ExitUnknown, err, "failed to export key: %s", err)
+ 	}
+ 
+-	if err := ioutil.WriteFile(file, pk, 0600); err != nil {
++	if err := os.WriteFile(file, pk, 0600); err != nil {
+ 		return action.ExitError(ctx, action.ExitIO, err, "failed to write file")
+ 	}
+ 	return nil
+@@ -156,7 +156,7 @@ func ImportPublicKey(ctx context.Context, c *cli.Context) error {
+ 		return action.ExitError(ctx, action.ExitNotFound, nil, "input file not found")
+ 	}
+ 
+-	buf, err := ioutil.ReadFile(file)
++	buf, err := os.ReadFile(file)
+ 	if err != nil {
+ 		return action.ExitError(ctx, action.ExitIO, err, "failed to read file")
+ 	}
+@@ -203,7 +203,7 @@ func ExportPrivateKey(ctx context.Context, c *cli.Context) error {
+ 		return action.ExitError(ctx, action.ExitUnknown, err, "failed to export key: %s", err)
+ 	}
+ 
+-	if err := ioutil.WriteFile(file, pk, 0600); err != nil {
++	if err := os.WriteFile(file, pk, 0600); err != nil {
+ 		return action.ExitError(ctx, action.ExitIO, err, "failed to write file")
+ 	}
+ 	return nil
+@@ -225,7 +225,7 @@ func ImportPrivateKey(ctx context.Context, c *cli.Context) error {
+ 		return action.ExitError(ctx, action.ExitNotFound, nil, "input file not found")
+ 	}
+ 
+-	buf, err := ioutil.ReadFile(file)
++	buf, err := os.ReadFile(file)
+ 	if err != nil {
+ 		return action.ExitError(ctx, action.ExitIO, err, "failed to read file")
+ 	}
+@@ -257,7 +257,7 @@ func EncryptFile(ctx context.Context, c *cli.Context) error {
+ 		return action.ExitError(ctx, action.ExitIO, nil, "output file already exists")
+ 	}
+ 
+-	plaintext, err := ioutil.ReadFile(inFile)
++	plaintext, err := os.ReadFile(inFile)
+ 	if err != nil {
+ 		return action.ExitError(ctx, action.ExitIO, err, "failed to read file")
+ 	}
+@@ -265,7 +265,7 @@ func EncryptFile(ctx context.Context, c *cli.Context) error {
+ 	if err != nil {
+ 		return action.ExitError(ctx, action.ExitUnknown, err, "failed to encrypt file: %s", err)
+ 	}
+-	if err := ioutil.WriteFile(outFile, ciphertext, 0600); err != nil {
++	if err := os.WriteFile(outFile, ciphertext, 0600); err != nil {
+ 		return action.ExitError(ctx, action.ExitUnknown, err, "failed to write ciphertext")
+ 	}
+ 	return nil
+@@ -297,7 +297,7 @@ func DecryptFile(ctx context.Context, c *cli.Context) error {
+ 		return action.ExitError(ctx, action.ExitIO, nil, "output file already exists")
+ 	}
+ 
+-	ciphertext, err := ioutil.ReadFile(inFile)
++	ciphertext, err := os.ReadFile(inFile)
+ 	if err != nil {
+ 		return action.ExitError(ctx, action.ExitIO, err, "failed to read file")
+ 	}
+@@ -307,7 +307,7 @@ func DecryptFile(ctx context.Context, c *cli.Context) error {
+ 		return action.ExitError(ctx, action.ExitUnknown, err, "failed to decrypt file: %s", err)
+ 	}
+ 
+-	if err := ioutil.WriteFile(outFile, plaintext, 0600); err != nil {
++	if err := os.WriteFile(outFile, plaintext, 0600); err != nil {
+ 		return action.ExitError(ctx, action.ExitUnknown, err, "failed to write plaintext")
+ 	}
+ 	return nil
+diff --git a/pkg/audit/audit.go b/pkg/audit/audit.go
+index b6b5461..e2f3751 100644
+--- a/pkg/audit/audit.go
++++ b/pkg/audit/audit.go
+@@ -5,7 +5,7 @@ import (
+ 	"context"
+ 	"errors"
+ 	"fmt"
+-	"io/ioutil"
++	"io"
+ 
+ 	"github.com/gopasspw/gopass/pkg/notify"
+ 	"github.com/gopasspw/gopass/pkg/out"
+@@ -82,7 +82,7 @@ func Batch(ctx context.Context, secrets []string, secStore secretGetter) error {
+ 	}
+ 	if out.IsHidden(ctx) {
+ 		old := goprogressbar.Stdout
+-		goprogressbar.Stdout = ioutil.Discard
++		goprogressbar.Stdout = io.Discard
+ 		defer func() {
+ 			goprogressbar.Stdout = old
+ 		}()
+diff --git a/pkg/backend/crypto/plain/backend.go b/pkg/backend/crypto/plain/backend.go
+index 14bcf97..4b099bd 100644
+--- a/pkg/backend/crypto/plain/backend.go
++++ b/pkg/backend/crypto/plain/backend.go
+@@ -4,7 +4,7 @@ import (
+ 	"context"
+ 	"crypto/sha256"
+ 	"fmt"
+-	"io/ioutil"
++	"os"
+ 	"strings"
+ 	"time"
+ 
+@@ -118,24 +118,24 @@ func (m *Mocker) Binary() string {
+ 
+ // Sign writes the hashsum to the given file
+ func (m *Mocker) Sign(ctx context.Context, in string, sigf string) error {
+-	buf, err := ioutil.ReadFile(in)
++	buf, err := os.ReadFile(in)
+ 	if err != nil {
+ 		return err
+ 	}
+ 	sum := sha256.New()
+ 	_, _ = sum.Write(buf)
+ 	hexsum := fmt.Sprintf("%X", sum.Sum(nil))
+-	return ioutil.WriteFile(sigf, []byte(hexsum), 0644)
++	return os.WriteFile(sigf, []byte(hexsum), 0644)
+ }
+ 
+ // Verify does a pseudo-verification
+ func (m *Mocker) Verify(ctx context.Context, sigf string, in string) error {
+-	sigb, err := ioutil.ReadFile(sigf)
++	sigb, err := os.ReadFile(sigf)
+ 	if err != nil {
+ 		return err
+ 	}
+ 
+-	buf, err := ioutil.ReadFile(in)
++	buf, err := os.ReadFile(in)
+ 	if err != nil {
+ 		return err
+ 	}
+diff --git a/pkg/backend/crypto/xc/keyring/pubring.go b/pkg/backend/crypto/xc/keyring/pubring.go
+index d1cf655..4c2c527 100644
+--- a/pkg/backend/crypto/xc/keyring/pubring.go
++++ b/pkg/backend/crypto/xc/keyring/pubring.go
+@@ -2,7 +2,6 @@ package keyring
+ 
+ import (
+ 	"fmt"
+-	"io/ioutil"
+ 	"os"
+ 	"sort"
+ 	"sync"
+@@ -39,7 +38,7 @@ func LoadPubring(file string, sec *Secring) (*Pubring, error) {
+ 	pr := NewPubring(sec)
+ 	pr.File = file
+ 
+-	buf, err := ioutil.ReadFile(file)
++	buf, err := os.ReadFile(file)
+ 	if os.IsNotExist(err) {
+ 		return pr, nil
+ 	}
+@@ -60,7 +59,7 @@ func (p *Pubring) Save() error {
+ 	if err != nil {
+ 		return err
+ 	}
+-	return ioutil.WriteFile(p.File, buf, 0600)
++	return os.WriteFile(p.File, buf, 0600)
+ }
+ 
+ // Contains checks if a given key is in the keyring
+diff --git a/pkg/backend/crypto/xc/keyring/secring.go b/pkg/backend/crypto/xc/keyring/secring.go
+index 6ee1489..3006bb9 100644
+--- a/pkg/backend/crypto/xc/keyring/secring.go
++++ b/pkg/backend/crypto/xc/keyring/secring.go
+@@ -2,7 +2,6 @@ package keyring
+ 
+ import (
+ 	"fmt"
+-	"io/ioutil"
+ 	"os"
+ 	"path/filepath"
+ 	"sort"
+@@ -37,7 +36,7 @@ func LoadSecring(file string) (*Secring, error) {
+ 	pr := NewSecring()
+ 	pr.File = file
+ 
+-	buf, err := ioutil.ReadFile(file)
++	buf, err := os.ReadFile(file)
+ 	if os.IsNotExist(err) {
+ 		return pr, nil
+ 	}
+@@ -61,7 +60,7 @@ func (p *Secring) Save() error {
+ 	if err := os.MkdirAll(filepath.Dir(p.File), 0700); err != nil {
+ 		return err
+ 	}
+-	return ioutil.WriteFile(p.File, buf, 0600)
++	return os.WriteFile(p.File, buf, 0600)
+ }
+ 
+ // Contains returns true if the given key is found in the keyring
+diff --git a/pkg/backend/rcs/git/cli/config.go b/pkg/backend/rcs/git/cli/config.go
+index da5f63e..2de77d1 100644
+--- a/pkg/backend/rcs/git/cli/config.go
++++ b/pkg/backend/rcs/git/cli/config.go
+@@ -3,7 +3,6 @@ package cli
+ import (
+ 	"context"
+ 	"fmt"
+-	"io/ioutil"
+ 	"os"
+ 	"os/exec"
+ 	"path/filepath"
+@@ -56,7 +55,7 @@ func (g *Git) InitConfig(ctx context.Context, userName, userEmail string) error
+ 		return errors.Wrapf(err, "failed to fix git config")
+ 	}
+ 
+-	if err := ioutil.WriteFile(filepath.Join(g.path, ".gitattributes"), []byte("*.gpg diff=gpg\n"), fileMode); err != nil {
++	if err := os.WriteFile(filepath.Join(g.path, ".gitattributes"), []byte("*.gpg diff=gpg\n"), fileMode); err != nil {
+ 		return errors.Errorf("Failed to initialize git: %s", err)
+ 	}
+ 	if err := g.Add(ctx, g.path+"/.gitattributes"); err != nil {
+diff --git a/pkg/backend/storage/fs/store.go b/pkg/backend/storage/fs/store.go
+index 0c7ca15..7120500 100644
+--- a/pkg/backend/storage/fs/store.go
++++ b/pkg/backend/storage/fs/store.go
+@@ -3,7 +3,6 @@ package fs
+ import (
+ 	"context"
+ 	"fmt"
+-	"io/ioutil"
+ 	"os"
+ 	"path/filepath"
+ 	"runtime"
+@@ -38,7 +37,7 @@ func (s *Store) Get(ctx context.Context, name string) ([]byte, error) {
+ 	}
+ 	path := filepath.Join(s.path, filepath.Clean(name))
+ 	out.Debug(ctx, "fs.Get(%s) - %s", name, path)
+-	return ioutil.ReadFile(path)
++	return os.ReadFile(path)
+ }
+ 
+ // Set writes the given content
+@@ -54,7 +53,7 @@ func (s *Store) Set(ctx context.Context, name string, value []byte) error {
+ 		}
+ 	}
+ 	out.Debug(ctx, "fs.Set(%s) - %s", name, filepath.Join(s.path, name))
+-	return ioutil.WriteFile(filepath.Join(s.path, name), value, 0644)
++	return os.WriteFile(filepath.Join(s.path, name), value, 0644)
+ }
+ 
+ // Delete removes the named entity
+diff --git a/pkg/clipboard/clipboard_others.go b/pkg/clipboard/clipboard_others.go
+index b79202e..d377366 100644
+--- a/pkg/clipboard/clipboard_others.go
++++ b/pkg/clipboard/clipboard_others.go
+@@ -7,7 +7,6 @@ import (
+ 	"context"
+ 	"crypto/sha256"
+ 	"fmt"
+-	"io/ioutil"
+ 	"os"
+ 	"os/exec"
+ 	"strconv"
+@@ -35,7 +34,7 @@ func clear(ctx context.Context, content []byte, timeout int) error {
+ 
+ func walkFn(pid int, killFn func(int)) {
+ 	// read the commandline for this process
+-	cmdline, err := ioutil.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
++	cmdline, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
+ 	if err != nil {
+ 		return
+ 	}
+diff --git a/pkg/config/io.go b/pkg/config/io.go
+index 23e6676..3b69cb4 100644
+--- a/pkg/config/io.go
++++ b/pkg/config/io.go
+@@ -2,7 +2,6 @@ package config
+ 
+ import (
+ 	"fmt"
+-	"io/ioutil"
+ 	"os"
+ 	"path/filepath"
+ 
+@@ -57,7 +56,7 @@ func load(cf string) (*Config, error) {
+ 	if _, err := os.Stat(cf); err != nil {
+ 		return nil, ErrConfigNotFound
+ 	}
+-	buf, err := ioutil.ReadFile(cf)
++	buf, err := os.ReadFile(cf)
+ 	if err != nil {
+ 		fmt.Printf("Error reading config from %s: %s\n", cf, err)
+ 		return nil, ErrConfigNotFound
+@@ -147,7 +146,7 @@ func (c *Config) Save() error {
+ 			return errors.Wrapf(err, "failed to create dir '%s'", cfgDir)
+ 		}
+ 	}
+-	if err := ioutil.WriteFile(cfgLoc, buf, 0600); err != nil {
++	if err := os.WriteFile(cfgLoc, buf, 0600); err != nil {
+ 		return errors.Wrapf(err, "failed to write config file to '%s'", cfgLoc)
+ 	}
+ 	if debug {
+diff --git a/pkg/ctxutil/helpers.go b/pkg/ctxutil/helpers.go
+new file mode 100644
+index 0000000..fc4df38
+--- /dev/null
++++ b/pkg/ctxutil/helpers.go
+@@ -0,0 +1,105 @@
++package ctxutil
++
++import "context"
++
++// boolContextHelper provides helper functions for boolean context values
++type boolContextHelper struct {
++	key          contextKey
++	defaultValue bool
++}
++
++// newBoolHelper creates a new boolean context helper
++func newBoolHelper(key contextKey, defaultValue bool) boolContextHelper {
++	return boolContextHelper{
++		key:          key,
++		defaultValue: defaultValue,
++	}
++}
++
++// With returns a context with the specified boolean value
++func (h boolContextHelper) With(ctx context.Context, value bool) context.Context {
++	return context.WithValue(ctx, h.key, value)
++}
++
++// Has returns true if a value has been set in this context
++func (h boolContextHelper) Has(ctx context.Context) bool {
++	_, ok := ctx.Value(h.key).(bool)
++	return ok
++}
++
++// Is returns the value or the default if not set
++func (h boolContextHelper) Is(ctx context.Context) bool {
++	bv, ok := ctx.Value(h.key).(bool)
++	if !ok {
++		return h.defaultValue
++	}
++	return bv
++}
++
++// stringContextHelper provides helper functions for string context values
++type stringContextHelper struct {
++	key          contextKey
++	defaultValue string
++}
++
++// newStringHelper creates a new string context helper
++func newStringHelper(key contextKey, defaultValue string) stringContextHelper {
++	return stringContextHelper{
++		key:          key,
++		defaultValue: defaultValue,
++	}
++}
++
++// With returns a context with the specified string value
++func (h stringContextHelper) With(ctx context.Context, value string) context.Context {
++	return context.WithValue(ctx, h.key, value)
++}
++
++// Has returns true if a value has been set in this context
++func (h stringContextHelper) Has(ctx context.Context) bool {
++	_, ok := ctx.Value(h.key).(string)
++	return ok
++}
++
++// Get returns the value or the default if not set
++func (h stringContextHelper) Get(ctx context.Context) string {
++	sv, ok := ctx.Value(h.key).(string)
++	if !ok {
++		return h.defaultValue
++	}
++	return sv
++}
++
++// intContextHelper provides helper functions for integer context values
++type intContextHelper struct {
++	key          contextKey
++	defaultValue int
++}
++
++// newIntHelper creates a new integer context helper
++func newIntHelper(key contextKey, defaultValue int) intContextHelper {
++	return intContextHelper{
++		key:          key,
++		defaultValue: defaultValue,
++	}
++}
++
++// With returns a context with the specified integer value
++func (h intContextHelper) With(ctx context.Context, value int) context.Context {
++	return context.WithValue(ctx, h.key, value)
++}
++
++// Has returns true if a value has been set in this context
++func (h intContextHelper) Has(ctx context.Context) bool {
++	_, ok := ctx.Value(h.key).(int)
++	return ok
++}
++
++// Get returns the value or the default if not set
++func (h intContextHelper) Get(ctx context.Context) int {
++	iv, ok := ctx.Value(h.key).(int)
++	if !ok {
++		return h.defaultValue
++	}
++	return iv
++}
+diff --git a/pkg/editor/editor.go b/pkg/editor/editor.go
+index 112ef2e..ea09784 100644
+--- a/pkg/editor/editor.go
++++ b/pkg/editor/editor.go
+@@ -4,7 +4,6 @@ import (
+ 	"bytes"
+ 	"context"
+ 	"io"
+-	"io/ioutil"
+ 	"os"
+ 	"os/exec"
+ 	"runtime"
+@@ -73,7 +72,7 @@ func Invoke(ctx context.Context, editor string, content []byte) ([]byte, error)
+ 		return []byte{}, errors.Errorf("failed to run %s with %s file: %s", editor, tmpfile.Name(), err)
+ 	}
+ 
+-	nContent, err := ioutil.ReadFile(tmpfile.Name())
++	nContent, err := os.ReadFile(tmpfile.Name())
+ 	if err != nil {
+ 		return []byte{}, errors.Errorf("failed to read from tmpfile: %v", err)
+ 	}
+diff --git a/pkg/hibp/api/client.go b/pkg/hibp/api/client.go
+index 427f41c..b47c461 100644
+--- a/pkg/hibp/api/client.go
++++ b/pkg/hibp/api/client.go
+@@ -3,7 +3,7 @@ package api
+ import (
+ 	"context"
+ 	"fmt"
+-	"io/ioutil"
++	"io"
+ 	"net/http"
+ 	"strconv"
+ 	"strings"
+@@ -45,7 +45,7 @@ func Lookup(ctx context.Context, shaSum string) (uint64, error) {
+ 			return nil
+ 		}
+ 
+-		body, err := ioutil.ReadAll(resp.Body)
++		body, err := io.ReadAll(resp.Body)
+ 		if err != nil {
+ 			return err
+ 		}
+diff --git a/pkg/otp/otp.go b/pkg/otp/otp.go
+index d2160eb..83df097 100644
+--- a/pkg/otp/otp.go
++++ b/pkg/otp/otp.go
+@@ -2,7 +2,7 @@ package otp
+ 
+ import (
+ 	"context"
+-	"io/ioutil"
++	"os"
+ 	"strings"
+ 
+ 	"github.com/gopasspw/gopass/pkg/store"
+@@ -59,7 +59,7 @@ func WriteQRFile(ctx context.Context, otp twofactor.OTP, label, file string) err
+ 		return errors.Wrapf(err, "%s", err)
+ 	}
+ 
+-	if err := ioutil.WriteFile(file, qr, 0600); err != nil {
++	if err := os.WriteFile(file, qr, 0600); err != nil {
+ 		return errors.Wrapf(err, "failed to write QR code: %s", err)
+ 	}
+ 	return nil
+diff --git a/pkg/tempfile/file.go b/pkg/tempfile/file.go
+index f9a647f..916f767 100644
+--- a/pkg/tempfile/file.go
++++ b/pkg/tempfile/file.go
+@@ -2,7 +2,6 @@ package tempfile
+ 
+ import (
+ 	"context"
+-	"io/ioutil"
+ 	"os"
+ 	"path/filepath"
+ 
+@@ -24,7 +23,7 @@ type File struct {
+ 
+ // New returns a new tempfile wrapper
+ func New(ctx context.Context, prefix string) (*File, error) {
+-	td, err := ioutil.TempDir(tempdirBase(), globalPrefix+prefix)
++	td, err := os.MkdirTemp(tempdirBase(), globalPrefix+prefix)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+diff --git a/pkg/updater/update.go b/pkg/updater/update.go
+index bdb6ac2..4c36c8e 100644
+--- a/pkg/updater/update.go
++++ b/pkg/updater/update.go
+@@ -6,7 +6,6 @@ import (
+ 	"context"
+ 	"fmt"
+ 	"io"
+-	"io/ioutil"
+ 	"net"
+ 	"net/http"
+ 	"net/url"
+@@ -204,7 +203,7 @@ func download(ctx context.Context, dest, url string) error {
+ 		}
+ 		if out.IsHidden(ctx) {
+ 			old := goprogressbar.Stdout
+-			goprogressbar.Stdout = ioutil.Discard
++			goprogressbar.Stdout = io.Discard
+ 			defer func() {
+ 				goprogressbar.Stdout = old
+ 			}()
+diff --git a/pkg/updater/update_others.go b/pkg/updater/update_others.go
+index 372c138..ebb4ce2 100644
+--- a/pkg/updater/update_others.go
++++ b/pkg/updater/update_others.go
+@@ -5,7 +5,6 @@ package updater
+ import (
+ 	"context"
+ 	"fmt"
+-	"io/ioutil"
+ 	"net/url"
+ 	"os"
+ 	"os/exec"
+@@ -37,7 +36,7 @@ func updateGopass(ctx context.Context, version string, urlStr string) error {
+ 		return err
+ 	}
+ 
+-	td, err := ioutil.TempDir("", "gopass-")
++	td, err := os.MkdirTemp("", "gopass-")
+ 	if err != nil {
+ 		return errors.Wrapf(err, "failed to create tempdir")
+ 	}

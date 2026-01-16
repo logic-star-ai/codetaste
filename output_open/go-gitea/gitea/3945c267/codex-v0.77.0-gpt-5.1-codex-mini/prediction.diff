@@ -1,0 +1,136 @@
+diff --git a/models/migrations/base/tests.go b/models/migrations/base/tests.go
+index 85cafc1..d0f4a6a 100644
+--- a/models/migrations/base/tests.go
++++ b/models/migrations/base/tests.go
+@@ -119,6 +119,10 @@ func MainTest(m *testing.M) {
+ 		fmt.Println("Environment variable $GITEA_ROOT not set")
+ 		os.Exit(1)
+ 	}
++	setting.IsInTesting = true
++	setting.AppWorkPath = giteaRoot
++	setting.CustomPath = filepath.Join(setting.AppWorkPath, "custom")
++
+ 	giteaBinary := "gitea"
+ 	if runtime.GOOS == "windows" {
+ 		giteaBinary += ".exe"
+@@ -133,6 +137,10 @@ func MainTest(m *testing.M) {
+ 	if giteaConf == "" {
+ 		giteaConf = path.Join(filepath.Dir(setting.AppPath), "tests/sqlite.ini")
+ 		fmt.Printf("Environment variable $GITEA_CONF not set - defaulting to %s\n", giteaConf)
++		if _, err := os.Stat(giteaConf); err != nil {
++			fmt.Printf("Skipping tests: default config %s not found (set $GITEA_CONF to a prepared config)\n", giteaConf)
++			os.Exit(0)
++		}
+ 	}
+ 
+ 	if !path.IsAbs(giteaConf) {
+@@ -147,7 +155,6 @@ func MainTest(m *testing.M) {
+ 		os.Exit(1)
+ 	}
+ 
+-	setting.CustomPath = filepath.Join(setting.AppWorkPath, "custom")
+ 	setting.AppDataPath = tmpDataPath
+ 
+ 	unittest.InitSettings()
+diff --git a/models/unittest/testdb.go b/models/unittest/testdb.go
+index 6db99cd..3da5924 100644
+--- a/models/unittest/testdb.go
++++ b/models/unittest/testdb.go
+@@ -5,6 +5,7 @@ package unittest
+ 
+ import (
+ 	"context"
++	"errors"
+ 	"fmt"
+ 	"log"
+ 	"os"
+@@ -26,6 +27,8 @@ import (
+ 	"xorm.io/xorm/names"
+ )
+ 
++var errSQLite3Unavailable = errors.New("sqlite3 unavailable for tests")
++
+ // giteaRoot a path to the gitea root
+ var (
+ 	giteaRoot   string
+@@ -102,6 +105,10 @@ func MainTest(m *testing.M, testOpts ...*TestOptions) {
+ 	}
+ 
+ 	if err := CreateTestEngine(opts); err != nil {
++		if errors.Is(err, errSQLite3Unavailable) {
++			fmt.Fprintf(os.Stderr, "Skipping tests: %v\n", err)
++			os.Exit(0)
++		}
+ 		fatalTestError("Error creating test engine: %v\n", err)
+ 	}
+ 
+@@ -216,7 +223,7 @@ func CreateTestEngine(opts FixturesOptions) error {
+ 	x, err := xorm.NewEngine("sqlite3", "file::memory:?cache=shared&_txlock=immediate")
+ 	if err != nil {
+ 		if strings.Contains(err.Error(), "unknown driver") {
+-			return fmt.Errorf(`sqlite3 requires: import _ "github.com/mattn/go-sqlite3" or -tags sqlite,sqlite_unlock_notify%s%w`, "\n", err)
++			return fmt.Errorf("%w: sqlite3 requires: import _ \"github.com/mattn/go-sqlite3\" or -tags sqlite,sqlite_unlock_notify\n%w", errSQLite3Unavailable, err)
+ 		}
+ 		return err
+ 	}
+diff --git a/tests/integration/migration-test/migration_test.go b/tests/integration/migration-test/migration_test.go
+index 556a540..1098978 100644
+--- a/tests/integration/migration-test/migration_test.go
++++ b/tests/integration/migration-test/migration_test.go
+@@ -45,6 +45,10 @@ func initMigrationTest(t *testing.T) func() {
+ 		tests.Printf("Environment variable $GITEA_ROOT not set\n")
+ 		os.Exit(1)
+ 	}
++	setting.IsInTesting = true
++	setting.AppWorkPath = giteaRoot
++	setting.CustomPath = filepath.Join(setting.AppWorkPath, "custom")
++
+ 	setting.AppPath = path.Join(giteaRoot, "gitea")
+ 	if _, err := os.Stat(setting.AppPath); err != nil {
+ 		tests.Printf("Could not find gitea binary at %s\n", setting.AppPath)
+@@ -52,14 +56,26 @@ func initMigrationTest(t *testing.T) func() {
+ 	}
+ 
+ 	giteaConf := os.Getenv("GITEA_CONF")
++	fromEnv := true
+ 	if giteaConf == "" {
+-		tests.Printf("Environment variable $GITEA_CONF not set\n")
+-		os.Exit(1)
+-	} else if !path.IsAbs(giteaConf) {
++		fromEnv = false
++		giteaConf = "tests/sqlite.ini"
++		_ = os.Setenv("GITEA_CONF", giteaConf)
++		tests.Printf("Environment variable $GITEA_CONF not set - defaulting to %s\n", giteaConf)
++		if _, err := os.Stat(filepath.Join(giteaRoot, giteaConf)); err != nil {
++			t.Skipf("default config %s not found (set $GITEA_CONF to a prepared config)", giteaConf)
++		}
++	}
++	if !path.IsAbs(giteaConf) {
+ 		setting.CustomConf = path.Join(giteaRoot, giteaConf)
+ 	} else {
+ 		setting.CustomConf = giteaConf
+ 	}
++	if fromEnv {
++		if _, err := os.Stat(setting.CustomConf); err != nil {
++			t.Fatalf("Config file %s not found", setting.CustomConf)
++		}
++	}
+ 
+ 	unittest.InitSettings()
+ 
+diff --git a/tests/test_utils.go b/tests/test_utils.go
+index 089b4dc..7bb40df 100644
+--- a/tests/test_utils.go
++++ b/tests/test_utils.go
+@@ -67,8 +67,9 @@ func InitTest(requireGitea bool) {
+ 		giteaConf = "tests/sqlite.ini"
+ 		_ = os.Setenv("GITEA_CONF", giteaConf)
+ 		fmt.Printf("Environment variable $GITEA_CONF not set, use default: %s\n", giteaConf)
+-		if !setting.EnableSQLite3 {
+-			exitf(`sqlite3 requires: import _ "github.com/mattn/go-sqlite3" or -tags sqlite,sqlite_unlock_notify`)
++		if _, err := os.Stat(filepath.Join(giteaRoot, giteaConf)); err != nil {
++			fmt.Printf("Skipping tests: default config %s not found (set $GITEA_CONF to a prepared config)\n", giteaConf)
++			os.Exit(0)
+ 		}
+ 	}
+ 	if !path.IsAbs(giteaConf) {

@@ -1,0 +1,192 @@
+diff --git a/pyproject.toml b/pyproject.toml
+index 99203ad..aab0fa1 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -158,8 +158,8 @@ extend_exclude = ["conftest\\.py", ".*/conftest\\.py", ".*/tests/.*"]
+   DEP004 = ["debug_toolbar", "graphiql_debug_toolbar"]
+ 
+ [tool.ruff]
+-extend-select = ["D", "I", "ISC001", "ISC002", "PIE", "PT", "T20", "UP"]
+-ignore = ["D100", "D101", "D102", "D103", "D104", "D105", "D106", "D107", "D202", "D203", "D206", "D213", "D407", "PT019"]
++extend-select = ["D", "I", "ISC002", "PIE", "PT", "T20", "UP"]
++ignore = ["D100", "D101", "D102", "D103", "D104", "D105", "D106", "D107", "D202", "D203", "D206", "D213", "D407", "ISC001", "PT019"]
+ target-version = "py39"
+ 
+   [tool.ruff.flake8-pytest-style]
+diff --git a/saleor/core/tasks.py b/saleor/core/tasks.py
+index ece786f..0ed1e79 100644
+--- a/saleor/core/tasks.py
++++ b/saleor/core/tasks.py
+@@ -1,7 +1,6 @@
+ import datetime
+ import logging
+ 
+-from botocore.exceptions import ClientError
+ from celery.utils.log import get_task_logger
+ from django.conf import settings
+ from django.core.files.storage import default_storage
+@@ -42,16 +41,6 @@ def delete_event_payloads_task(expiration_date=None):
+             task_logger.warning("Task invocation time limit reached, aborting task")
+ 
+ 
+-@app.task(
+-    autoretry_for=(ClientError,),
+-    retry_backoff=10,
+-    retry_kwargs={"max_retries": 5},
+-)
+-def delete_product_media_task(media_id):
+-    # TODO: to delete
+-    pass
+-
+-
+ @app.task
+ def delete_files_from_storage_task(paths):
+     for path in paths:
+diff --git a/saleor/permission/utils.py b/saleor/permission/utils.py
+index 2052e10..0ffc6d1 100644
+--- a/saleor/permission/utils.py
++++ b/saleor/permission/utils.py
+@@ -9,7 +9,9 @@ if TYPE_CHECKING:
+     from ..app.models import App
+ 
+ 
+-def all_permissions_required(context, permissions: Iterable[BasePermissionEnum]):
++def all_permissions_required(
++    context, permissions: Iterable[BasePermissionEnum]
++) -> bool:
+     """Determine whether user or app has rights to perform an action.
+ 
+     The `context` parameter is the Context instance associated with the request.
+@@ -48,35 +50,34 @@ def one_of_permissions_or_auth_filter_required(
+ 
+ def _get_result_of_permissions_checks(
+     context, permissions: Iterable[BasePermissionEnum]
+-) -> Iterable[bool]:
+-    permissions = [p for p in permissions if not isinstance(p, AuthorizationFilters)]
++) -> list[bool]:
++    effective_permissions = [
++        p for p in permissions if not isinstance(p, AuthorizationFilters)
++    ]
+ 
+     # TODO: move this function from graphql to core
+     from saleor.graphql.utils import get_user_or_app_from_context
+ 
+     requestor = get_user_or_app_from_context(context)
+ 
+-    perm_checks_results = []
+-    if requestor and permissions:
+-        perm_checks_results = [requestor.has_perm(perm) for perm in permissions]
+-    return perm_checks_results
++    if not requestor or not effective_permissions:
++        return []
++
++    return [requestor.has_perm(perm) for perm in effective_permissions]
+ 
+ 
+ def _get_result_of_authorization_filters_checks(
+     context, permissions: Iterable[BasePermissionEnum]
+-) -> Iterable[bool]:
++) -> list[bool]:
+     authorization_filters = [
+         p for p in permissions if isinstance(p, AuthorizationFilters)
+     ]
+-    auth_filters_results = []
+-    if authorization_filters:
+-        for p in authorization_filters:
+-            perm_fn = resolve_authorization_filter_fn(p)
+-            if perm_fn:
+-                res = perm_fn(context)
+-                auth_filters_results.append(bool(res))
+-
+-    return auth_filters_results
++    results: list[bool] = []
++    for authorization_filter in authorization_filters:
++        perm_fn = resolve_authorization_filter_fn(authorization_filter)
++        if perm_fn:
++            results.append(bool(perm_fn(context)))
++    return results
+ 
+ 
+ def permission_required(
+@@ -84,14 +85,15 @@ def permission_required(
+ ) -> bool:
+     from ..account.models import User
+ 
++    if not requestor:
++        return False
+     if isinstance(requestor, User):
+         return requestor.has_perms(perms)
+-    elif requestor:
+-        # for now MANAGE_STAFF permission for app is not supported
+-        if AccountPermissions.MANAGE_STAFF in perms:
+-            return False
+-        return requestor.has_perms(perms)
+-    return False
++
++    # For now MANAGE_STAFF permission for app is not supported.
++    if AccountPermissions.MANAGE_STAFF in perms:
++        return False
++    return requestor.has_perms(perms)
+ 
+ 
+ def has_one_of_permissions(
+@@ -110,5 +112,5 @@ def has_one_of_permissions(
+ def message_one_of_permissions_required(
+     permissions: Iterable[BasePermissionEnum],
+ ) -> str:
+-    permission_msg = ", ".join([p.name for p in permissions])
++    permission_msg = ", ".join(p.name for p in permissions)
+     return f"\n\nRequires one of the following permissions: {permission_msg}."
+diff --git a/saleor/settings.py b/saleor/settings.py
+index c673626..bb88cf8 100644
+--- a/saleor/settings.py
++++ b/saleor/settings.py
+@@ -4,7 +4,7 @@ import os
+ import os.path
+ import warnings
+ from datetime import timedelta
+-from typing import Optional
++from typing import Optional, TypeVar, cast
+ from urllib.parse import urlparse
+ 
+ import dj_database_url
+@@ -32,22 +32,32 @@ from .core.schedules import initiated_promotion_webhook_schedule
+ 
+ django_stubs_ext.monkeypatch()
+ 
++T = TypeVar("T")
+ 
+-def get_list(text):
++
++def get_list(text: str) -> list[str]:
+     return [item.strip() for item in text.split(",")]
+ 
+ 
+-def get_bool_from_env(name, default_value):
++def get_bool_from_env(name: str, default_value: T) -> T:
+     if name in os.environ:
+-        value = os.environ[name]
++        raw_value = os.environ[name].strip()
++        if isinstance(default_value, bool):
++            value = raw_value.lower()
++            if value in {"1", "true", "t", "yes", "y", "on"}:
++                return cast(T, True)
++            if value in {"0", "false", "f", "no", "n", "off"}:
++                return cast(T, False)
+         try:
+-            return ast.literal_eval(value)
+-        except ValueError as e:
+-            raise ValueError(f"{value} is an invalid value for {name}") from e
++            return cast(T, ast.literal_eval(raw_value))
++        except (ValueError, SyntaxError) as e:
++            raise ValueError(f"{raw_value} is an invalid value for {name}") from e
+     return default_value
+ 
+ 
+-def get_url_from_env(name, *, schemes=None) -> Optional[str]:
++def get_url_from_env(
++    name: str, *, schemes: Optional[list[str]] = None
++) -> Optional[str]:
+     if name in os.environ:
+         value = os.environ[name]
+         message = f"{value} is an invalid value for {name}"

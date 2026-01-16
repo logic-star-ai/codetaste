@@ -1,0 +1,699 @@
+diff --git a/saleor/checkout/complete_checkout.py b/saleor/checkout/complete_checkout.py
+index 37890c9..90bb69d 100644
+--- a/saleor/checkout/complete_checkout.py
++++ b/saleor/checkout/complete_checkout.py
+@@ -888,13 +888,34 @@ def complete_checkout_post_payment_part(
+     lines: Iterable["CheckoutLineInfo"],
+     payment: Optional[Payment],
+     txn: Optional[Transaction],
+-    order_data,
+-    user,
+-    app,
+-    site_settings=None,
++    order_data: dict,
++    user: Optional["User"],
++    app: Optional["App"],
++    site_settings: Optional["SiteSettings"] = None,
+     metadata_list: Optional[list] = None,
+     private_metadata_list: Optional[list] = None,
+ ) -> tuple[Optional[Order], bool, dict]:
++    """Complete checkout after payment processing.
++
++    Handles order creation, voucher processing, and action requirements
++    after payment has been processed.
++
++    Args:
++        manager: Plugin manager instance
++        checkout_info: Checkout information
++        lines: Checkout line items
++        payment: Payment instance if using legacy payment
++        txn: Transaction if using new payment flow
++        order_data: Prepared order data
++        user: User making the purchase
++        app: App processing the checkout
++        site_settings: Site configuration settings
++        metadata_list: Order metadata to attach
++        private_metadata_list: Private order metadata to attach
++
++    Returns:
++        Tuple of (created order, action_required flag, action_data)
++    """
+     action_required = False
+     action_data: dict[str, str] = {}
+ 
+diff --git a/saleor/core/transactions.py b/saleor/core/transactions.py
+index 7cc17f1..aff97b7 100644
+--- a/saleor/core/transactions.py
++++ b/saleor/core/transactions.py
+@@ -1,3 +1,4 @@
++from collections.abc import Generator
+ from contextlib import contextmanager
+ 
+ from django.db import DatabaseError
+@@ -6,15 +7,28 @@ from ..core.tracing import traced_atomic_transaction
+ 
+ 
+ @contextmanager
+-def transaction_with_commit_on_errors():
+-    """Perform transaction and raise an error in any occurred."""
++def transaction_with_commit_on_errors() -> Generator[None, None, None]:
++    """Perform transaction and raise an error if any occurred.
++
++    This context manager commits the transaction even if a non-database error
++    occurs, then re-raises that error. Database errors cause an immediate
++    rollback as expected.
++
++    Yields:
++        None
++
++    Raises:
++        Exception: Re-raises any non-DatabaseError exception after committing
++    """
+     error = None
+     with traced_atomic_transaction():
+         try:
+             yield
+         except DatabaseError:
++            # Let database errors rollback immediately
+             raise
+         except Exception as e:
++            # Capture non-database errors to raise after commit
+             error = e
+     if error:
+         raise error
+diff --git a/saleor/graphql/account/mutations/authentication/utils.py b/saleor/graphql/account/mutations/authentication/utils.py
+index 7ebfaef..916fb98 100644
+--- a/saleor/graphql/account/mutations/authentication/utils.py
++++ b/saleor/graphql/account/mutations/authentication/utils.py
+@@ -13,9 +13,20 @@ from .....permission.enums import get_permissions_from_names
+ 
+ 
+ def get_user(payload):
++    """Extract and validate user from JWT payload.
++
++    Args:
++        payload: Decoded JWT payload
++
++    Returns:
++        User instance with effective permissions set
++
++    Raises:
++        ValidationError: If token is invalid or user not found
++    """
+     try:
+         user = get_user_from_payload(payload)
+-    except Exception:
++    except (jwt.InvalidTokenError, ValueError, TypeError, KeyError):
+         user = None
+     if not user:
+         raise ValidationError(
+diff --git a/saleor/graphql/app/mutations/app_fetch_manifest.py b/saleor/graphql/app/mutations/app_fetch_manifest.py
+index b19d390..1cc22a1 100644
+--- a/saleor/graphql/app/mutations/app_fetch_manifest.py
++++ b/saleor/graphql/app/mutations/app_fetch_manifest.py
+@@ -51,8 +51,8 @@ class AppFetchManifest(BaseMutation):
+             msg = "Incorrect structure of manifest."
+             code = AppErrorCode.INVALID_MANIFEST_FORMAT.value
+             raise ValidationError({"manifest_url": ValidationError(msg, code=code)})
+-        except Exception:
+-            msg = "Can't fetch manifest data. Please try later."
++        except (requests.RequestException, OSError, RuntimeError) as e:
++            msg = f"Can't fetch manifest data: {str(e)}"
+             code = AppErrorCode.INVALID.value
+             raise ValidationError({"manifest_url": ValidationError(msg, code=code)})
+ 
+diff --git a/saleor/graphql/checkout/filters.py b/saleor/graphql/checkout/filters.py
+index 07e2de6..20b51a3 100644
+--- a/saleor/graphql/checkout/filters.py
++++ b/saleor/graphql/checkout/filters.py
+@@ -34,14 +34,14 @@ def get_checkout_token_from_query(value):
+ def get_payment_id_from_query(value):
+     try:
+         return from_global_id_or_error(value, only_type="Payment")[1]
+-    except Exception:
++    except (ValueError, TypeError, AttributeError):
+         return None
+ 
+ 
+ def get_checkout_id_from_query(value):
+     try:
+         return from_global_id_or_error(value, only_type="Checkout")[1]
+-    except Exception:
++    except (ValueError, TypeError, AttributeError):
+         return None
+ 
+ 
+diff --git a/saleor/graphql/core/validators/query_cost.py b/saleor/graphql/core/validators/query_cost.py
+index 10607df..4b34005 100644
+--- a/saleor/graphql/core/validators/query_cost.py
++++ b/saleor/graphql/core/validators/query_cost.py
+@@ -84,7 +84,7 @@ class CostValidator(ValidationRule):
+                         child_node.arguments,
+                         self.variables,
+                     )
+-                except Exception as e:
++                except (GraphQLError, TypeError, ValueError) as e:
+                     report_error(self.context, e)
+                     field_args = {}
+ 
+diff --git a/saleor/graphql/order/bulk_mutations/order_bulk_create.py b/saleor/graphql/order/bulk_mutations/order_bulk_create.py
+index ec19698..2d27f5d 100644
+--- a/saleor/graphql/order/bulk_mutations/order_bulk_create.py
++++ b/saleor/graphql/order/bulk_mutations/order_bulk_create.py
+@@ -604,68 +604,93 @@ class OrderBulkCreate(BaseMutation, I18nMixin):
+         support_private_meta_field = True
+ 
+     @classmethod
+-    def get_all_instances(cls, orders_input) -> dict[str, Any]:
+-        """Retrieve all required instances to process orders.
++    def _collect_identifiers_from_orders(cls, orders_input, identifiers):
++        """Collect all model keys from order input data."""
++        for order in orders_input:
++            cls._collect_order_identifiers(order, identifiers)
+ 
+-        Return:
+-            Dictionary with keys "{model_name}.{key_name}.{key_value}" and model
+-            instances as values.
++    @classmethod
++    def _collect_order_identifiers(cls, order, identifiers):
++        """Collect identifiers from a single order."""
++        # User identifiers
++        identifiers.user_ids.keys.append(order["user"].get("id"))
++        identifiers.user_emails.keys.append(order["user"].get("email"))
++        identifiers.user_external_references.keys.append(
++            order["user"].get("external_reference")
++        )
+ 
+-        """
+-        # Collect all model keys from input
+-        identifiers = ModelIdentifiers()
+-        for order in orders_input:
+-            identifiers.user_ids.keys.append(order["user"].get("id"))
+-            identifiers.user_emails.keys.append(order["user"].get("email"))
++        # Order-level identifiers
++        identifiers.channel_slugs.keys.append(order.get("channel"))
++        identifiers.voucher_codes.keys.append(order.get("voucher_code"))
++        identifiers.order_external_references.keys.append(
++            order.get("external_reference")
++        )
++
++        # Delivery method identifiers
++        if delivery_method := order.get("delivery_method"):
++            identifiers.warehouse_ids.keys.append(
++                delivery_method.get("warehouse_id")
++            )
++            identifiers.shipping_method_ids.keys.append(
++                delivery_method.get("shipping_method_id")
++            )
++            identifiers.tax_class_ids.keys.append(
++                delivery_method.get("shipping_tax_class_id")
++            )
++
++        # Note identifiers
++        cls._collect_note_identifiers(order.get("notes") or [], identifiers)
++
++        # Order line identifiers
++        cls._collect_order_line_identifiers(order.get("lines") or [], identifiers)
++
++        # Fulfillment identifiers
++        cls._collect_fulfillment_identifiers(
++            order.get("fulfillments") or [], identifiers
++        )
++
++        # Gift card identifiers
++        for gift_card_code in order.get("gift_cards") or []:
++            identifiers.gift_card_codes.keys.append(gift_card_code)
++
++    @classmethod
++    def _collect_note_identifiers(cls, notes, identifiers):
++        """Collect identifiers from order notes."""
++        for note in notes:
++            identifiers.user_ids.keys.append(note.get("user_id"))
++            identifiers.user_emails.keys.append(note.get("user_email"))
+             identifiers.user_external_references.keys.append(
+-                order["user"].get("external_reference")
++                note.get("user_external_reference")
+             )
+-            identifiers.channel_slugs.keys.append(order.get("channel"))
+-            identifiers.voucher_codes.keys.append(order.get("voucher_code"))
+-            identifiers.order_external_references.keys.append(
+-                order.get("external_reference")
++            identifiers.app_ids.keys.append(note.get("app_id"))
++
++    @classmethod
++    def _collect_order_line_identifiers(cls, order_lines, identifiers):
++        """Collect identifiers from order lines."""
++        for order_line in order_lines:
++            identifiers.variant_ids.keys.append(order_line.get("variant_id"))
++            identifiers.variant_skus.keys.append(order_line.get("variant_sku"))
++            identifiers.variant_external_references.keys.append(
++                order_line.get("variant_external_reference")
+             )
+-            if delivery_method := order.get("delivery_method"):
+-                identifiers.warehouse_ids.keys.append(
+-                    delivery_method.get("warehouse_id")
+-                )
+-                identifiers.shipping_method_ids.keys.append(
+-                    delivery_method.get("shipping_method_id")
+-                )
+-                identifiers.tax_class_ids.keys.append(
+-                    delivery_method.get("shipping_tax_class_id")
+-                )
+-            notes = order.get("notes") or []
+-            for note in notes:
+-                identifiers.user_ids.keys.append(note.get("user_id"))
+-                identifiers.user_emails.keys.append(note.get("user_email"))
+-                identifiers.user_external_references.keys.append(
+-                    note.get("user_external_reference")
+-                )
+-                identifiers.app_ids.keys.append(note.get("app_id"))
+-            order_lines = order.get("lines") or []
+-            for order_line in order_lines:
+-                identifiers.variant_ids.keys.append(order_line.get("variant_id"))
+-                identifiers.variant_skus.keys.append(order_line.get("variant_sku"))
++            identifiers.warehouse_ids.keys.append(order_line.get("warehouse"))
++            identifiers.tax_class_ids.keys.append(order_line.get("tax_class_id"))
++
++    @classmethod
++    def _collect_fulfillment_identifiers(cls, fulfillments, identifiers):
++        """Collect identifiers from fulfillments."""
++        for fulfillment in fulfillments:
++            for line in fulfillment.get("lines") or []:
++                identifiers.variant_ids.keys.append(line.get("variant_id"))
++                identifiers.variant_skus.keys.append(line.get("variant_sku"))
+                 identifiers.variant_external_references.keys.append(
+-                    order_line.get("variant_external_reference")
++                    line.get("variant_external_reference")
+                 )
+-                identifiers.warehouse_ids.keys.append(order_line.get("warehouse"))
+-                identifiers.tax_class_ids.keys.append(order_line.get("tax_class_id"))
+-            fulfillments = order.get("fulfillments") or []
+-            for fulfillment in fulfillments:
+-                for line in fulfillment.get("lines") or []:
+-                    identifiers.variant_ids.keys.append(line.get("variant_id"))
+-                    identifiers.variant_skus.keys.append(line.get("variant_sku"))
+-                    identifiers.variant_external_references.keys.append(
+-                        line.get("variant_external_reference")
+-                    )
+-                    identifiers.warehouse_ids.keys.append(line.get("warehouse"))
+-            gift_cards = order.get("gift_cards") or []
+-            for gift_card_code in gift_cards:
+-                identifiers.gift_card_codes.keys.append(gift_card_code)
++                identifiers.warehouse_ids.keys.append(line.get("warehouse"))
+ 
+-        # Convert global ids to model ids and get rid of Nones
++    @classmethod
++    def _convert_global_ids_to_model_ids(cls, identifiers):
++        """Convert global IDs to model IDs and remove None values."""
+         for field in dataclass_fields(identifiers):
+             identifier = getattr(identifiers, field.name)
+             model, keys = identifier.model, identifier.keys
+@@ -683,35 +708,42 @@ class OrderBulkCreate(BaseMutation, I18nMixin):
+                         pass
+                 setattr(identifier, "keys", model_ids)
+ 
+-        # Make DB calls
+-        users = User.objects.filter(
+-            Q(pk__in=identifiers.user_ids.keys)
+-            | Q(email__in=identifiers.user_emails.keys)
+-            | Q(external_reference__in=identifiers.user_external_references.keys)
+-        )
+-        variants = ProductVariant.objects.filter(
+-            Q(pk__in=identifiers.variant_ids.keys)
+-            | Q(sku__in=identifiers.variant_skus.keys)
+-            | Q(external_reference__in=identifiers.variant_external_references.keys)
+-        )
+-        channels = Channel.objects.filter(slug__in=identifiers.channel_slugs.keys)
+-        voucher_codes = VoucherCode.objects.filter(
+-            code__in=identifiers.voucher_codes.keys
+-        ).select_related("voucher")
+-        warehouses = Warehouse.objects.filter(pk__in=identifiers.warehouse_ids.keys)
+-        shipping_methods = ShippingMethod.objects.filter(
+-            pk__in=identifiers.shipping_method_ids.keys
+-        )
+-        tax_classes = TaxClass.objects.filter(pk__in=identifiers.tax_class_ids.keys)
+-        apps = App.objects.filter(pk__in=identifiers.app_ids.keys)
+-        gift_cards = GiftCard.objects.filter(code__in=identifiers.gift_card_codes.keys)
+-        orders = Order.objects.filter(
+-            external_reference__in=identifiers.order_external_references.keys
+-        )
++    @classmethod
++    def _fetch_instances_from_db(cls, identifiers):
++        """Fetch all required instances from the database."""
++        return {
++            "users": User.objects.filter(
++                Q(pk__in=identifiers.user_ids.keys)
++                | Q(email__in=identifiers.user_emails.keys)
++                | Q(external_reference__in=identifiers.user_external_references.keys)
++            ),
++            "variants": ProductVariant.objects.filter(
++                Q(pk__in=identifiers.variant_ids.keys)
++                | Q(sku__in=identifiers.variant_skus.keys)
++                | Q(external_reference__in=identifiers.variant_external_references.keys)
++            ),
++            "channels": Channel.objects.filter(slug__in=identifiers.channel_slugs.keys),
++            "voucher_codes": VoucherCode.objects.filter(
++                code__in=identifiers.voucher_codes.keys
++            ).select_related("voucher"),
++            "warehouses": Warehouse.objects.filter(pk__in=identifiers.warehouse_ids.keys),
++            "shipping_methods": ShippingMethod.objects.filter(
++                pk__in=identifiers.shipping_method_ids.keys
++            ),
++            "tax_classes": TaxClass.objects.filter(pk__in=identifiers.tax_class_ids.keys),
++            "apps": App.objects.filter(pk__in=identifiers.app_ids.keys),
++            "gift_cards": GiftCard.objects.filter(code__in=identifiers.gift_card_codes.keys),
++            "orders": Order.objects.filter(
++                external_reference__in=identifiers.order_external_references.keys
++            ),
++        }
+ 
+-        # Create dictionary
++    @classmethod
++    def _build_object_storage(cls, instances):
++        """Build dictionary mapping from instance keys to instances."""
+         object_storage: dict[str, Any] = {}
+-        for user in users:
++
++        for user in instances["users"]:
+             object_storage[f"User.id.{user.id}"] = user
+             object_storage[f"User.email.{user.email}"] = user
+             if user.external_reference:
+@@ -719,7 +751,7 @@ class OrderBulkCreate(BaseMutation, I18nMixin):
+                     f"User.external_reference.{user.external_reference}"
+                 ] = user
+ 
+-        for variant in variants:
++        for variant in instances["variants"]:
+             object_storage[f"ProductVariant.id.{variant.id}"] = variant
+             if variant.sku:
+                 object_storage[f"ProductVariant.id.{variant.sku}"] = variant
+@@ -728,25 +760,45 @@ class OrderBulkCreate(BaseMutation, I18nMixin):
+                     f"ProductVariant.external_reference.{variant.external_reference}"
+                 ] = variant
+ 
+-        for channel in channels:
++        for channel in instances["channels"]:
+             object_storage[f"Channel.slug.{channel.slug}"] = channel
+ 
+-        for voucher_code in voucher_codes:
++        for voucher_code in instances["voucher_codes"]:
+             object_storage[f"VoucherCode.code.{voucher_code.code}"] = voucher_code
+ 
+-        for gift_card in gift_cards:
++        for gift_card in instances["gift_cards"]:
+             object_storage[f"GiftCard.code.{gift_card.code}"] = gift_card
+ 
+-        for order in orders:
++        for order in instances["orders"]:
+             object_storage[
+                 f"Order.external_reference.{order.external_reference}"
+             ] = order
+ 
+-        for object in [*warehouses, *shipping_methods, *tax_classes, *apps]:
+-            object_storage[f"{object.__class__.__name__}.id.{object.pk}"] = object
++        for obj in [
++            *instances["warehouses"],
++            *instances["shipping_methods"],
++            *instances["tax_classes"],
++            *instances["apps"],
++        ]:
++            object_storage[f"{obj.__class__.__name__}.id.{obj.pk}"] = obj
+ 
+         return object_storage
+ 
++    @classmethod
++    def get_all_instances(cls, orders_input) -> dict[str, Any]:
++        """Retrieve all required instances to process orders.
++
++        Return:
++            Dictionary with keys "{model_name}.{key_name}.{key_value}" and model
++            instances as values.
++
++        """
++        identifiers = ModelIdentifiers()
++        cls._collect_identifiers_from_orders(orders_input, identifiers)
++        cls._convert_global_ids_to_model_ids(identifiers)
++        instances = cls._fetch_instances_from_db(identifiers)
++        return cls._build_object_storage(instances)
++
+     @classmethod
+     def is_datetime_valid(cls, date: datetime) -> bool:
+         """We accept future time values with 5 minutes from current time.
+diff --git a/saleor/order/actions.py b/saleor/order/actions.py
+index 0df69a4..a7a37b2 100644
+--- a/saleor/order/actions.py
++++ b/saleor/order/actions.py
+@@ -94,7 +94,7 @@ def order_created(
+     manager: "PluginsManager",
+     from_draft: bool = False,
+     site_settings: Optional["SiteSettings"] = None,
+-):
++) -> None:
+     order = order_info.order
+     events.order_created_event(order=order, user=user, app=app, from_draft=from_draft)
+     call_event(manager.order_created, order)
+@@ -130,7 +130,7 @@ def order_confirmed(
+     app: Optional["App"],
+     manager: "PluginsManager",
+     send_confirmation_email: bool = False,
+-):
++) -> None:
+     """Order confirmed.
+ 
+     Trigger event, plugin hooks and optionally confirmation email.
+@@ -147,7 +147,7 @@ def handle_fully_paid_order(
+     user: Optional[User] = None,
+     app: Optional["App"] = None,
+     site_settings: Optional["SiteSettings"] = None,
+-):
++) -> None:
+     from ..giftcard.utils import fulfill_non_shippable_gift_cards
+ 
+     order = order_info.order
+@@ -175,9 +175,9 @@ def cancel_order(
+     user: Optional[User],
+     app: Optional["App"],
+     manager: "PluginsManager",
+-    webhooks_cancelled=None,
+-    webhooks_updated=None,
+-):
++    webhooks_cancelled: Optional[list] = None,
++    webhooks_updated: Optional[list] = None,
++) -> None:
+     """Cancel order.
+ 
+     Release allocation of unfulfilled order items.
+@@ -199,11 +199,11 @@ def order_refunded(
+     order: "Order",
+     user: Optional[User],
+     app: Optional["App"],
+-    amount: "Decimal",
++    amount: Decimal,
+     payment: Optional["Payment"],
+     manager: "PluginsManager",
+     trigger_order_updated: bool = True,
+-):
++) -> None:
+     if payment:
+         call_event(
+             events.payment_refunded_event,
+@@ -256,7 +256,7 @@ def order_voided(
+     app: Optional["App"],
+     payment: "Payment",
+     manager: "PluginsManager",
+-):
++) -> None:
+     events.payment_voided_event(order=order, user=user, app=app, payment=payment)
+     call_event(manager.order_updated, order)
+ 
+@@ -266,7 +266,7 @@ def order_returned(
+     user: Optional[User],
+     app: Optional["App"],
+     returned_lines: list[tuple[QuantityType, OrderLine]],
+-):
++) -> None:
+     order_returned_event(order=order, user=user, app=app, returned_lines=returned_lines)
+     update_order_status(order)
+ 
+@@ -279,8 +279,8 @@ def order_fulfilled(
+     manager: "PluginsManager",
+     gift_card_lines_info: list[GiftCardLineData],
+     site_settings: "SiteSettings",
+-    notify_customer=True,
+-):
++    notify_customer: bool = True,
++) -> None:
+     from ..giftcard.utils import gift_cards_create
+ 
+     order = fulfillments[0].order
+@@ -323,8 +323,8 @@ def order_awaits_fulfillment_approval(
+     manager: "PluginsManager",
+     _gift_card_lines: list["GiftCardLineData"],
+     _site_settings: "SiteSettings",
+-    _notify_customer=True,
+-):
++    _notify_customer: bool = True,
++) -> None:
+     order = fulfillments[0].order
+     events.fulfillment_awaits_approval_event(
+         order=order, user=user, app=app, fulfillment_lines=fulfillment_lines
+@@ -336,10 +336,10 @@ def order_authorized(
+     order: "Order",
+     user: Optional[User],
+     app: Optional["App"],
+-    amount: "Decimal",
++    amount: Decimal,
+     payment: "Payment",
+     manager: "PluginsManager",
+-):
++) -> None:
+     events.payment_authorized_event(
+         order=order, user=user, app=app, amount=amount, payment=payment
+     )
+@@ -350,11 +350,11 @@ def order_charged(
+     order_info: "OrderInfo",
+     user: Optional[User],
+     app: Optional["App"],
+-    amount: Optional["Decimal"],
++    amount: Optional[Decimal],
+     payment: Optional["Payment"],
+     manager: "PluginsManager",
+     site_settings: Optional["SiteSettings"] = None,
+-):
++) -> None:
+     order = order_info.order
+     if payment and amount is not None:
+         events.payment_captured_event(
+@@ -377,7 +377,7 @@ def order_transaction_updated(
+     previous_charged_value: Decimal,
+     previous_refunded_value: Decimal,
+     site_settings: Optional["SiteSettings"] = None,
+-):
++) -> None:
+     order_updated = False
+     if transaction_item.authorized_value != previous_authorized_value:
+         order_updated = True
+diff --git a/saleor/payment/utils.py b/saleor/payment/utils.py
+index 8920e5c..9023e6f 100644
+--- a/saleor/payment/utils.py
++++ b/saleor/payment/utils.py
+@@ -271,8 +271,26 @@ def create_payment(
+ ) -> Payment:
+     """Create a payment instance.
+ 
+-    This method is responsible for creating payment instances that works for
+-    both Django views and GraphQL mutations.
++    This method creates payment instances that work for both Django views and
++    GraphQL mutations.
++
++    Args:
++        gateway: Payment gateway identifier
++        total: Payment amount
++        currency: Currency code (e.g., 'USD', 'EUR')
++        email: Customer email address
++        customer_ip_address: IP address of the customer
++        payment_token: Token for stored payment method
++        extra_data: Additional payment gateway-specific data
++        checkout: Associated checkout instance
++        order: Associated order instance
++        return_url: URL to redirect after payment
++        external_reference: External system reference ID
++        store_payment_method: Whether to store the payment method
++        metadata: Additional metadata key-value pairs
++
++    Returns:
++        Payment: The created payment instance
+     """
+ 
+     if extra_data is None:
+@@ -469,9 +487,8 @@ def gateway_postprocess(transaction, payment: Payment):
+     changed_fields: list[str] = []
+ 
+     if not transaction.is_success or transaction.already_processed:
++        # Save payment only if there are actual changes to persist
+         if changed_fields:
+-            # FIXME: verify that we actually want to save the payment here
+-            # as with empty changed_fields it won't be saved
+             payment.save(update_fields=changed_fields)
+         return
+ 
+diff --git a/saleor/plugins/manager.py b/saleor/plugins/manager.py
+index e304aba..f89737b 100644
+--- a/saleor/plugins/manager.py
++++ b/saleor/plugins/manager.py
+@@ -1874,9 +1874,15 @@ class PluginsManager(PaymentInterface):
+                         self._plugin_configs_per_channel[channel][pc.identifier] = pc
+             return self._global_plugin_configs, self._plugin_configs_per_channel
+ 
+-    # FIXME these methods should be more generic
+-
+-    def assign_tax_code_to_object_meta(self, obj: "TaxClass", tax_code: Optional[str]):
++    def assign_tax_code_to_object_meta(
++        self, obj: "TaxClass", tax_code: Optional[str]
++    ) -> None:
++        """Assign tax code to object metadata via plugins.
++
++        Args:
++            obj: Tax class object to assign code to
++            tax_code: Tax code to assign
++        """
+         default_value = None
+         return self.__run_method_on_plugins(
+             "assign_tax_code_to_object_meta", default_value, obj, tax_code
+@@ -1885,6 +1891,14 @@ class PluginsManager(PaymentInterface):
+     def get_tax_code_from_object_meta(
+         self, obj: Union["Product", "ProductType", "TaxClass"]
+     ) -> TaxType:
++        """Retrieve tax code from object metadata via plugins.
++
++        Args:
++            obj: Object to retrieve tax code from
++
++        Returns:
++            TaxType with code and description
++        """
+         default_value = TaxType(code="", description="")
+         return self.__run_method_on_plugins(
+             "get_tax_code_from_object_meta", default_value, obj
+diff --git a/saleor/webhook/observability/buffers.py b/saleor/webhook/observability/buffers.py
+index 1d7aa7c..61e271d 100644
+--- a/saleor/webhook/observability/buffers.py
++++ b/saleor/webhook/observability/buffers.py
+@@ -35,6 +35,11 @@ class BaseBuffer:
+         self.timeout = timeout
+ 
+     def decode(self, value: bytes) -> Any:
++        """Decode a compressed pickled value.
++
++        Warning: This uses pickle.loads which can execute arbitrary code.
++        Only use with trusted data from internal sources.
++        """
+         return pickle.loads(zlib.decompress(value))
+ 
+     def encode(self, value: Any) -> bytes:
+diff --git a/saleor/webhook/observability/utils.py b/saleor/webhook/observability/utils.py
+index 2fc07fd..cee00e7 100644
+--- a/saleor/webhook/observability/utils.py
++++ b/saleor/webhook/observability/utils.py
+@@ -98,8 +98,8 @@ def put_event(generate_payload: Callable[[], Any]):
+                 logger.warning("Observability buffer full, event dropped.")
+     except TruncationError as err:
+         logger.warning("Observability event dropped. %s", err, extra=err.extra)
+-    except Exception:
+-        logger.error("Observability event dropped.", exc_info=True)
++    except (OSError, RuntimeError) as err:
++        logger.error("Observability event dropped: %s", err, exc_info=True)
+ 
+ 
+ def pop_events_with_remaining_size() -> tuple[list[Any], int]:
+@@ -108,8 +108,8 @@ def pop_events_with_remaining_size() -> tuple[list[Any], int]:
+             buffer = get_buffer(get_buffer_name())
+             events, remaining = buffer.pop_events_get_size()
+             batch_count = buffer.in_batches(remaining)
+-        except Exception:
+-            logger.error("Could not pop observability events batch.", exc_info=True)
++        except (OSError, RuntimeError, ValueError) as err:
++            logger.error("Could not pop observability events batch: %s", err, exc_info=True)
+             events, batch_count = [], 0
+     return events, batch_count
+ 
