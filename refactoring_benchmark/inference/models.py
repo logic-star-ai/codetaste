@@ -41,6 +41,7 @@ class InferenceConfig(BaseModel):
     timeout: int = Field(gt=0)
     instances_limit: int = Field(gt=0)
     force: bool
+    force_unsuccessful: bool
     agent_config: AgentConfig
     sanitized_agent_id: str
     env_vars: Dict[str, str] = Field(default_factory=dict)
@@ -72,3 +73,10 @@ class InferenceMetadata(BaseModel):
         with open(json_path, "r", encoding="utf-8") as f:
             data = json.load(f)
         return InferenceMetadata.model_validate(data)
+    
+    def save_to_json(self, json_path: Path) -> None:
+        """Save InferenceMetadata to a JSON file."""
+        import json
+
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(self.model_dump(by_alias=True), f, indent=2)

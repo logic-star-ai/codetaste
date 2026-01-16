@@ -79,35 +79,6 @@ def create_fallback_inference_metadata(
         json.dump(metadata_dict, f, indent=2)
 
 
-def ensure_inference_metadata_exists(output_dir: Path, description_type: Optional[str] = None) -> None:
-    """
-    Check if inference_metadata.json exists, create fallback if missing.
-
-    This handles cases where the agent produced prediction.diff but failed
-    to create the metadata file.
-
-    Args:
-        output_dir: Output directory to check
-        description_type: Optional description type to include in fallback metadata
-    """
-    metadata_path = output_dir / "inference_metadata.json"
-    prediction_path = output_dir / "prediction.diff"
-
-    # If metadata already exists, nothing to do
-    if metadata_path.exists():
-        return
-
-    # If prediction exists but metadata doesn't, create fallback
-    if prediction_path.exists():
-        create_fallback_inference_metadata(
-            output_dir,
-            finish_reason="unknown",
-            cost_usd=-1.0,
-            additional={"note": "Metadata file was missing, created as fallback"},
-            description_type=description_type,
-        )
-
-
 def output_exists(output_dir: Path) -> bool:
     """
     Check if inference output already exists for this instance.
@@ -121,24 +92,3 @@ def output_exists(output_dir: Path) -> bool:
     prediction_path = output_dir / "prediction.diff"
     return prediction_path.exists() and prediction_path.stat().st_size > 3
 
-
-def augment_inference_metadata_with_description_type(output_dir: Path, description_type: str) -> None:
-    """
-    Augment inference_metadata.json with description_type field if it exists and is valid JSON.
-
-    Args:
-        output_dir: Output directory containing inference_metadata.json
-        description_type: Type of description used ("standard", "minimal", "nano", "open", "files", or "problem")
-    """
-    metadata_path = output_dir / "inference_metadata.json"
-    if not metadata_path.exists():
-        return
-
-    try:
-        with open(metadata_path, "r") as f:
-            metadata = json.load(f)
-        metadata["description_type"] = description_type
-        with open(metadata_path, "w") as f:
-            json.dump(metadata, f, indent=2)
-    except (json.JSONDecodeError, Exception):
-        raise ValueError(f"Failed to augment inference metadata with description_type in {metadata_path}")

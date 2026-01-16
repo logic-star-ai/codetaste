@@ -32,7 +32,7 @@ def is_image_existing(client: podman.PodmanClient, setup_image: str) -> bool:
     try:
         client.images.get(setup_image)
         return True
-    except:
+    except Exception as e:
         return False
 
 
@@ -46,7 +46,7 @@ def safe_container_run(client: podman.PodmanClient, image, **kwargs) -> PodmanCo
             return container
         except Exception as e:
             if i == 4:
-                raise
+                raise e
             utils_logger.warning(f"Podman containers.run on {image} failed ({e}), retrying in {2**i}s...")
             time.sleep(2**i)
 
