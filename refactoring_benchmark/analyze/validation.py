@@ -32,7 +32,7 @@ def check_test_validity(result: EvaluationResult) -> ValidityStatus:
         if result.inference_metadata.finish_reason != "success":
             i = result.instance_metadata
             a = result.agent_config
-            print(f"WARNING: `run_tests` for the agent {a.id} on instance {i.owner}/{i.repo}/{i.base_hash[:8]} did not produce test results. However the agent also didn't finish successfully. finish_reason={result.inference_metadata.finish_reason}")
+            print(f"WARNING: `run_tests` for the agent {a.id} on instance {i.owner}/{i.repo}/{i.base_hash[:8]} [{result.inference_metadata.description_type}] did not produce test results. However the agent also didn't finish successfully. finish_reason={result.inference_metadata.finish_reason}")
         return ValidityStatus.NO_TEST_RESULTS
 
     agent_passed = result.agent_test_metrics.passed
