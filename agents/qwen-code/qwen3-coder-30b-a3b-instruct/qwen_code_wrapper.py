@@ -121,6 +121,12 @@ def main():
             subtype = last_data.get('subtype', 'unknown')
             if last_data.get('is_error'):
                 finish_reason = "error" if subtype == "success" else subtype
+            elif last_data.get('num_turns', 1) == 1:
+                finish_reason = "error"
+                additional_info["error_message"] = "Process returned on first turn."
+            elif "[API Error:" in last_data.get('result', "")[:20] + last_data.get('result', "")[-60:]: # can crash with [API Error: Network connection lost.]
+                finish_reason = "error"
+                additional_info["error_message"] = last_data.get('result', "")
             else:
                 finish_reason = subtype
 
