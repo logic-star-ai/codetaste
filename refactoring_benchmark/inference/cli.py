@@ -65,6 +65,12 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument(
+        "--force-unsuccessful",
+        action="store_true",
+        help="Force re-run inference for instances that were not successful (finish_reason != 'success')",
+    )
+
+    parser.add_argument(
         "--env",
         action="append",
         default=[],
