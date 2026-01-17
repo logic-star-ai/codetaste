@@ -194,9 +194,7 @@ Examples:
         return
 
     # Prepare filters
-    default_filters = [filter_no_timeouts()]
-    print("Applying default filter: Exclude timed-out inference runs (finish_reason='timeout')")
-    filters = default_filters + []
+    filters = []
     if args.successful_only:
         filters.append(filter_successful_only())
         print("Filtering: Only successful inference runs (finish_reason='success')")
