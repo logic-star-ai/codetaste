@@ -56,7 +56,7 @@ def create_fallback_inference_metadata(
 
     Args:
         output_dir: Output directory where metadata should be saved
-        finish_reason: Reason for inference ending (e.g., "crashed", "unknown", "timeout")
+        finish_reason: Reason for inference ending (e.g., "timeout")
         cost_usd: Cost in USD (default: -1.0 for unknown)
         additional: Optional additional metadata
         description_type: Optional description type to include in metadata

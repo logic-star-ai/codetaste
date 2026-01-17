@@ -1,7 +1,7 @@
 """Pydantic models for inference configuration and validation."""
 
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -50,12 +50,13 @@ class InferenceConfig(BaseModel):
     class Config:
         arbitrary_types_allowed = True
 
+FinishReason = Literal["success", "timeout", "execution_error", "unknown", "budget_exceeded"]
 
 class InferenceMetadata(BaseModel):
     """Metadata for inference results (created by agent or as fallback)."""
 
     cost_usd: float = Field(alias="cost_usd", default=-1.0)
-    finish_reason: str
+    finish_reason: FinishReason
     finish_time: Optional[str] = None
     start_time: Optional[str] = None
     additional: Optional[Dict[str, Any]] = None
