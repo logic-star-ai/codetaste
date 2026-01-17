@@ -1,0 +1,527 @@
+diff --git a/pkg/sentry/kernel/kernel.go b/pkg/sentry/kernel/kernel.go
+index c6afae2..ce61724 100644
+--- a/pkg/sentry/kernel/kernel.go
++++ b/pkg/sentry/kernel/kernel.go
+@@ -90,11 +90,14 @@ type Kernel struct {
+ 	// All of the following fields are immutable unless otherwise specified.
+ 
+ 	// Platform is the platform that is used to execute tasks in the
+-	// created Kernel. It is embedded so that Kernel can directly serve as
+-	// Platform in mm logic and also serve as platform.MemoryProvider in
+-	// filemem S/R logic.
++	// created Kernel.
+ 	platform.Platform `state:"nosave"`
+ 
++	// mf is the memory provider for the sentry. It is separated from
++	// Platform to allow decoupling of memory allocation from platform
++	// abstractions.
++	mf platform.Memory `state:"nosave"`
++
+ 	// See InitKernelArgs for the meaning of these fields.
+ 	featureSet                  *cpuid.FeatureSet
+ 	timekeeper                  *Timekeeper
+@@ -229,8 +232,11 @@ type InitKernelArgs struct {
+ 
+ // Init initialize the Kernel with no tasks.
+ //
+-// Callers must manually set Kernel.Platform before caling Init.
++// Callers must manually set Kernel.Platform and Kernel.mf before calling Init.
+ func (k *Kernel) Init(args InitKernelArgs) error {
++	if k.mf == nil {
++		return fmt.Errorf("Kernel.mf must be set before Init")
++	}
+ 	if args.FeatureSet == nil {
+ 		return fmt.Errorf("FeatureSet is nil")
+ 	}
+@@ -333,14 +339,8 @@ func (k *Kernel) SaveTo(w io.Writer) error {
+ 	log.Infof("Kernel save took [%s].", time.Since(kernelStart))
+ 
+ 	// Save the memory state.
+-	//
+-	// FIXME: In the future, this should not be dispatched via
+-	// an abstract memory type. This should be dispatched to a single
+-	// memory implementation that belongs to the kernel. (There is
+-	// currently a single implementation anyways, it just needs to be
+-	// "unabstracted" and reparented appropriately.)
+ 	memoryStart := time.Now()
+-	if err := k.Platform.Memory().SaveTo(w); err != nil {
++	if err := k.mf.SaveTo(w); err != nil {
+ 		return err
+ 	}
+ 	log.Infof("Memory save took [%s].", time.Since(memoryStart))
+@@ -418,13 +418,17 @@ func (ts *TaskSet) unregisterEpollWaiters() {
+ }
+ 
+ // LoadFrom returns a new Kernel loaded from args.
+-func (k *Kernel) LoadFrom(r io.Reader, p platform.Platform, net inet.Stack) error {
++func (k *Kernel) LoadFrom(r io.Reader, p platform.Platform, mf platform.Memory, net inet.Stack) error {
+ 	loadStart := time.Now()
+ 	if p == nil {
+ 		return fmt.Errorf("Platform is nil")
+ 	}
++	if mf == nil {
++		return fmt.Errorf("Memory is nil")
++	}
+ 
+ 	k.Platform = p
++	k.mf = mf
+ 	k.networkStack = net
+ 
+ 	initAppCores := k.applicationCores
+@@ -439,10 +443,8 @@ func (k *Kernel) LoadFrom(r io.Reader, p platform.Platform, net inet.Stack) erro
+ 	log.Infof("Kernel load took [%s].", time.Since(kernelStart))
+ 
+ 	// Load the memory state.
+-	//
+-	// See the note in SaveTo.
+ 	memoryStart := time.Now()
+-	if err := k.Platform.Memory().LoadFrom(r); err != nil {
++	if err := k.mf.LoadFrom(r); err != nil {
+ 		return err
+ 	}
+ 	log.Infof("Memory load took [%s].", time.Since(memoryStart))
+diff --git a/pkg/sentry/kernel/task_context.go b/pkg/sentry/kernel/task_context.go
+index ee3e49d..32361ed 100644
+--- a/pkg/sentry/kernel/task_context.go
++++ b/pkg/sentry/kernel/task_context.go
+@@ -144,7 +144,7 @@ func (t *Task) Stack() *arch.Stack {
+ //  * fs: Binary FeatureSet
+ func (k *Kernel) LoadTaskImage(ctx context.Context, mounts *fs.MountNamespace, root, wd *fs.Dirent, maxTraversals *uint, filename string, argv, envv []string, fs *cpuid.FeatureSet) (*TaskContext, *syserr.Error) {
+ 	// Prepare a new user address space to load into.
+-	m := mm.NewMemoryManager(k)
++	m := mm.NewMemoryManager(k, k.mf)
+ 	defer m.DecUsers(ctx)
+ 
+ 	os, ac, name, err := loader.Load(ctx, m, mounts, root, wd, maxTraversals, fs, filename, argv, envv, k.extraAuxv, k.vdso)
+diff --git a/pkg/sentry/loader/vdso.go b/pkg/sentry/loader/vdso.go
+index c070c73..adbe80c 100644
+--- a/pkg/sentry/loader/vdso.go
++++ b/pkg/sentry/loader/vdso.go
+@@ -217,7 +217,7 @@ type VDSO struct {
+ 
+ // PrepareVDSO validates the system VDSO and returns a VDSO, containing the
+ // param page for updating by the kernel.
+-func PrepareVDSO(p platform.Platform) (*VDSO, error) {
++func PrepareVDSO(mf platform.Memory) (*VDSO, error) {
+ 	vdsoFile := newByteReaderFile(vdsoBin)
+ 
+ 	// First make sure the VDSO is valid. vdsoFile does not use ctx, so a
+@@ -234,35 +234,35 @@ func PrepareVDSO(p platform.Platform) (*VDSO, error) {
+ 		return nil, fmt.Errorf("VDSO size overflows? %#x", len(vdsoBin))
+ 	}
+ 
+-	vdso, err := p.Memory().Allocate(uint64(size), usage.System)
++	vdso, err := mf.Allocate(uint64(size), usage.System)
+ 	if err != nil {
+ 		return nil, fmt.Errorf("unable to allocate VDSO memory: %v", err)
+ 	}
+ 
+-	ims, err := p.Memory().MapInternal(vdso, usermem.ReadWrite)
++	ims, err := mf.MapInternal(vdso, usermem.ReadWrite)
+ 	if err != nil {
+-		p.Memory().DecRef(vdso)
++		mf.DecRef(vdso)
+ 		return nil, fmt.Errorf("unable to map VDSO memory: %v", err)
+ 	}
+ 
+ 	_, err = safemem.CopySeq(ims, safemem.BlockSeqOf(safemem.BlockFromSafeSlice(vdsoBin)))
+ 	if err != nil {
+-		p.Memory().DecRef(vdso)
++		mf.DecRef(vdso)
+ 		return nil, fmt.Errorf("unable to copy VDSO into memory: %v", err)
+ 	}
+ 
+ 	// Finally, allocate a param page for this VDSO.
+-	paramPage, err := p.Memory().Allocate(usermem.PageSize, usage.System)
++	paramPage, err := mf.Allocate(usermem.PageSize, usage.System)
+ 	if err != nil {
+-		p.Memory().DecRef(vdso)
++		mf.DecRef(vdso)
+ 		return nil, fmt.Errorf("unable to allocate VDSO param page: %v", err)
+ 	}
+ 
+ 	return &VDSO{
+-		ParamPage: mm.NewSpecialMappable("[vvar]", p, paramPage),
++		ParamPage: mm.NewSpecialMappable("[vvar]", mf, paramPage),
+ 		// TODO: Don't advertise the VDSO, as some applications may
+ 		// not be able to handle multiple [vdso] hints.
+-		vdso:  mm.NewSpecialMappable("", p, vdso),
++		vdso:  mm.NewSpecialMappable("", mf, vdso),
+ 		phdrs: info.phdrs,
+ 	}, nil
+ }
+diff --git a/pkg/sentry/mm/aio_context.go b/pkg/sentry/mm/aio_context.go
+index 5e86d3b..ce5ce20 100644
+--- a/pkg/sentry/mm/aio_context.go
++++ b/pkg/sentry/mm/aio_context.go
+@@ -201,24 +201,24 @@ func (ctx *AIOContext) WaitChannel() (chan struct{}, bool) {
+ type aioMappable struct {
+ 	refs.AtomicRefCount
+ 
+-	p  platform.Platform
++	mf platform.Memory
+ 	fr platform.FileRange
+ }
+ 
+ var aioRingBufferSize = uint64(usermem.Addr(linux.AIORingSize).MustRoundUp())
+ 
+-func newAIOMappable(p platform.Platform) (*aioMappable, error) {
+-	fr, err := p.Memory().Allocate(aioRingBufferSize, usage.Anonymous)
++func newAIOMappable(mf platform.Memory) (*aioMappable, error) {
++	fr, err := mf.Allocate(aioRingBufferSize, usage.Anonymous)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	return &aioMappable{p: p, fr: fr}, nil
++	return &aioMappable{mf: mf, fr: fr}, nil
+ }
+ 
+ // DecRef implements refs.RefCounter.DecRef.
+ func (m *aioMappable) DecRef() {
+ 	m.AtomicRefCount.DecRefWithDestructor(func() {
+-		m.p.Memory().DecRef(m.fr)
++		m.mf.DecRef(m.fr)
+ 	})
+ }
+ 
+@@ -299,7 +299,7 @@ func (m *aioMappable) Translate(ctx context.Context, required, optional memmap.M
+ 		return []memmap.Translation{
+ 			{
+ 				Source: source,
+-				File:   m.p.Memory(),
++				File:   m.mf,
+ 				Offset: m.fr.Start + source.Start,
+ 			},
+ 		}, err
+@@ -320,7 +320,7 @@ func (mm *MemoryManager) NewAIOContext(ctx context.Context, events uint32) (uint
+ 	// libaio peeks inside looking for a magic number. This function allocates
+ 	// a page per context and keeps it set to zeroes to ensure it will not
+ 	// match AIO_RING_MAGIC and make libaio happy.
+-	m, err := newAIOMappable(mm.p)
++	m, err := newAIOMappable(mm.mf)
+ 	if err != nil {
+ 		return 0, err
+ 	}
+diff --git a/pkg/sentry/mm/lifecycle.go b/pkg/sentry/mm/lifecycle.go
+index 1ee8ae7..6233538 100644
+--- a/pkg/sentry/mm/lifecycle.go
++++ b/pkg/sentry/mm/lifecycle.go
+@@ -28,9 +28,10 @@ import (
+ )
+ 
+ // NewMemoryManager returns a new MemoryManager with no mappings and 1 user.
+-func NewMemoryManager(p platform.Platform) *MemoryManager {
++func NewMemoryManager(p platform.Platform, mf platform.Memory) *MemoryManager {
+ 	return &MemoryManager{
+ 		p:           p,
++		mf:          mf,
+ 		haveASIO:    p.SupportsAddressSpaceIO(),
+ 		privateRefs: &privateRefs{},
+ 		users:       1,
+@@ -60,6 +61,7 @@ func (mm *MemoryManager) Fork(ctx context.Context) (*MemoryManager, error) {
+ 	defer mm.mappingMu.RUnlock()
+ 	mm2 := &MemoryManager{
+ 		p:           mm.p,
++		mf:          mm.mf,
+ 		haveASIO:    mm.haveASIO,
+ 		layout:      mm.layout,
+ 		privateRefs: mm.privateRefs,
+diff --git a/pkg/sentry/mm/mm.go b/pkg/sentry/mm/mm.go
+index e2c636f..301bc8e 100644
+--- a/pkg/sentry/mm/mm.go
++++ b/pkg/sentry/mm/mm.go
+@@ -55,6 +55,11 @@ type MemoryManager struct {
+ 	// p is immutable.
+ 	p platform.Platform
+ 
++	// mf is the memory allocator.
++	//
++	// mf is immutable.
++	mf platform.Memory
++
+ 	// haveASIO is the cached result of p.SupportsAddressSpaceIO(). Aside from
+ 	// eliminating an indirect call in the hot I/O path, this makes
+ 	// MemoryManager.asioEnabled() a leaf function, allowing it to be inlined.
+diff --git a/pkg/sentry/mm/mm_test.go b/pkg/sentry/mm/mm_test.go
+index f2db431..b0ee64d 100644
+--- a/pkg/sentry/mm/mm_test.go
++++ b/pkg/sentry/mm/mm_test.go
+@@ -29,7 +29,8 @@ import (
+ 
+ func testMemoryManager(ctx context.Context) *MemoryManager {
+ 	p := platform.FromContext(ctx)
+-	mm := NewMemoryManager(p)
++	mf := platform.MemoryFromContext(ctx)
++	mm := NewMemoryManager(p, mf)
+ 	mm.layout = arch.MmapLayout{
+ 		MinAddr:      p.MinUserAddress(),
+ 		MaxAddr:      p.MaxUserAddress(),
+diff --git a/pkg/sentry/mm/pma.go b/pkg/sentry/mm/pma.go
+index d102035..710210f 100644
+--- a/pkg/sentry/mm/pma.go
++++ b/pkg/sentry/mm/pma.go
+@@ -328,8 +328,7 @@ func (mm *MemoryManager) insertPMAsLocked(ctx context.Context, vseg vmaIterator,
+ 		// Limit the range we allocate to ar, aligned to privateAllocUnit.
+ 		maskAR := privateAligned(ar)
+ 		allocAR := optAR.Intersect(maskAR)
+-		mem := mm.p.Memory()
+-		fr, err := mem.Allocate(uint64(allocAR.Length()), usage.Anonymous)
++		fr, err := mm.mf.Allocate(uint64(allocAR.Length()), usage.Anonymous)
+ 		if err != nil {
+ 			return pgap, err
+ 		}
+@@ -426,7 +425,6 @@ func (mm *MemoryManager) breakCopyOnWriteLocked(pseg pmaIterator, ar usermem.Add
+ 	// Limit the range we copy to ar, aligned to privateAllocUnit.
+ 	maskAR := privateAligned(ar)
+ 	var invalidatedIterators, didUnmapAS bool
+-	mem := mm.p.Memory()
+ 	for {
+ 		if mm.isPMACopyOnWriteLocked(pseg) {
+ 			// Determine the range to copy.
+@@ -438,7 +436,7 @@ func (mm *MemoryManager) breakCopyOnWriteLocked(pseg pmaIterator, ar usermem.Add
+ 			}
+ 
+ 			// Copy contents.
+-			fr, err := platform.AllocateAndFill(mem, uint64(copyAR.Length()), usage.Anonymous, &safemem.BlockSeqReader{mm.internalMappingsLocked(pseg, copyAR)})
++			fr, err := platform.AllocateAndFill(mm.mf, uint64(copyAR.Length()), usage.Anonymous, &safemem.BlockSeqReader{mm.internalMappingsLocked(pseg, copyAR)})
+ 			if _, ok := err.(safecopy.BusError); ok {
+ 				// If we got SIGBUS during the copy, deliver SIGBUS to
+ 				// userspace (instead of SIGSEGV) if we're breaking
+@@ -449,7 +447,7 @@ func (mm *MemoryManager) breakCopyOnWriteLocked(pseg pmaIterator, ar usermem.Add
+ 				return pseg.PrevGap(), invalidatedIterators, err
+ 			}
+ 			mm.incPrivateRef(fr)
+-			mem.IncRef(fr)
++			mm.mf.IncRef(fr)
+ 
+ 			// Unmap all of maskAR, not just copyAR, to minimize host syscalls.
+ 			// AddressSpace mappings must be removed before mm.decPrivateRef().
+@@ -881,9 +879,8 @@ func (mm *MemoryManager) decPrivateRef(fr platform.FileRange) {
+ 	refSet.MergeAdjacent(fr)
+ 	mm.privateRefs.mu.Unlock()
+ 
+-	mem := mm.p.Memory()
+ 	for _, fr := range freed {
+-		mem.DecRef(fr)
++		mm.mf.DecRef(fr)
+ 	}
+ }
+ 
+diff --git a/pkg/sentry/mm/save_restore.go b/pkg/sentry/mm/save_restore.go
+index 6e7080a..3ff3143 100644
+--- a/pkg/sentry/mm/save_restore.go
++++ b/pkg/sentry/mm/save_restore.go
+@@ -37,9 +37,8 @@ func (mm *MemoryManager) InvalidateUnsavable(ctx context.Context) error {
+ 
+ // beforeSave is invoked by stateify.
+ func (mm *MemoryManager) beforeSave() {
+-	mem := mm.p.Memory()
+ 	for pseg := mm.pmas.FirstSegment(); pseg.Ok(); pseg = pseg.NextSegment() {
+-		if pma := pseg.ValuePtr(); pma.file != mem {
++		if pma := pseg.ValuePtr(); pma.file != mm.mf {
+ 			// InvalidateUnsavable should have caused all such pmas to be
+ 			// invalidated.
+ 			panic(fmt.Sprintf("Can't save pma %#v with non-Memory file of type %T:\n%s", pseg.Range(), pma.file, mm))
+@@ -50,8 +49,7 @@ func (mm *MemoryManager) beforeSave() {
+ // afterLoad is invoked by stateify.
+ func (mm *MemoryManager) afterLoad() {
+ 	mm.haveASIO = mm.p.SupportsAddressSpaceIO()
+-	mem := mm.p.Memory()
+ 	for pseg := mm.pmas.FirstSegment(); pseg.Ok(); pseg = pseg.NextSegment() {
+-		pseg.ValuePtr().file = mem
++		pseg.ValuePtr().file = mm.mf
+ 	}
+ }
+diff --git a/pkg/sentry/mm/special_mappable.go b/pkg/sentry/mm/special_mappable.go
+index 64d0dd3..f89163e 100644
+--- a/pkg/sentry/mm/special_mappable.go
++++ b/pkg/sentry/mm/special_mappable.go
+@@ -33,24 +33,24 @@ import (
+ type SpecialMappable struct {
+ 	refs.AtomicRefCount
+ 
+-	p    platform.Platform
++	mf   platform.Memory
+ 	fr   platform.FileRange
+ 	name string
+ }
+ 
+ // NewSpecialMappable returns a SpecialMappable that owns fr, which represents
+-// offsets in p.Memory() that contain the SpecialMappable's data. The
++// offsets in mf that contain the SpecialMappable's data. The
+ // SpecialMappable will use the given name in /proc/[pid]/maps.
+ //
+ // Preconditions: fr.Length() != 0.
+-func NewSpecialMappable(name string, p platform.Platform, fr platform.FileRange) *SpecialMappable {
+-	return &SpecialMappable{p: p, fr: fr, name: name}
++func NewSpecialMappable(name string, mf platform.Memory, fr platform.FileRange) *SpecialMappable {
++	return &SpecialMappable{mf: mf, fr: fr, name: name}
+ }
+ 
+ // DecRef implements refs.RefCounter.DecRef.
+ func (m *SpecialMappable) DecRef() {
+ 	m.AtomicRefCount.DecRefWithDestructor(func() {
+-		m.p.Memory().DecRef(m.fr)
++		m.mf.DecRef(m.fr)
+ 	})
+ }
+ 
+@@ -99,7 +99,7 @@ func (m *SpecialMappable) Translate(ctx context.Context, required, optional memm
+ 		return []memmap.Translation{
+ 			{
+ 				Source: source,
+-				File:   m.p.Memory(),
++				File:   m.mf,
+ 				Offset: m.fr.Start + source.Start,
+ 			},
+ 		}, err
+@@ -109,15 +109,14 @@ func (m *SpecialMappable) Translate(ctx context.Context, required, optional memm
+ 
+ // InvalidateUnsavable implements memmap.Mappable.InvalidateUnsavable.
+ func (m *SpecialMappable) InvalidateUnsavable(ctx context.Context) error {
+-	// Since data is stored in platform.Platform.Memory(), the contents of
++	// Since data is stored in platform.Memory, the contents of
+ 	// which are preserved across save/restore, we don't need to do anything.
+ 	return nil
+ }
+ 
+-// Platform returns the Platform whose Memory stores the SpecialMappable's
+-// contents.
+-func (m *SpecialMappable) Platform() platform.Platform {
+-	return m.p
++// Memory returns the Memory that stores the SpecialMappable's contents.
++func (m *SpecialMappable) Memory() platform.Memory {
++	return m.mf
+ }
+ 
+ // FileRange returns the offsets into Platform().Memory() that store the
+@@ -137,7 +136,7 @@ func (m *SpecialMappable) Length() uint64 {
+ // TODO: The use of SpecialMappable is a lazy code reuse hack. Linux
+ // uses an ephemeral file created by mm/shmem.c:shmem_zero_setup(); we should
+ // do the same to get non-zero device and inode IDs.
+-func NewSharedAnonMappable(length uint64, p platform.Platform) (*SpecialMappable, error) {
++func NewSharedAnonMappable(length uint64, mf platform.Memory) (*SpecialMappable, error) {
+ 	if length == 0 {
+ 		return nil, syserror.EINVAL
+ 	}
+@@ -146,9 +145,9 @@ func NewSharedAnonMappable(length uint64, p platform.Platform) (*SpecialMappable
+ 		return nil, syserror.EINVAL
+ 	}
+ 
+-	fr, err := p.Memory().Allocate(uint64(alignedLen), usage.Anonymous)
++	fr, err := mf.Allocate(uint64(alignedLen), usage.Anonymous)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	return NewSpecialMappable("/dev/zero (deleted)", p, fr), nil
++	return NewSpecialMappable("/dev/zero (deleted)", mf, fr), nil
+ }
+diff --git a/pkg/sentry/mm/syscalls.go b/pkg/sentry/mm/syscalls.go
+index fd6929e..91c8592 100644
+--- a/pkg/sentry/mm/syscalls.go
++++ b/pkg/sentry/mm/syscalls.go
+@@ -99,7 +99,7 @@ func (mm *MemoryManager) MMap(ctx context.Context, opts memmap.MMapOpts) (userme
+ 			if opts.MappingIdentity != nil {
+ 				return 0, syserror.EINVAL
+ 			}
+-			m, err := NewSharedAnonMappable(opts.Length, platform.FromContext(ctx))
++			m, err := NewSharedAnonMappable(opts.Length, mm.mf)
+ 			if err != nil {
+ 				return 0, err
+ 			}
+@@ -965,7 +965,6 @@ func (mm *MemoryManager) Decommit(addr usermem.Addr, length uint64) error {
+ 	// ensures that Decommit immediately reduces host memory usage.
+ 	var didUnmapAS bool
+ 	pseg := mm.pmas.LowerBoundSegment(ar.Start)
+-	mem := mm.p.Memory()
+ 	for vseg := mm.vmas.LowerBoundSegment(ar.Start); vseg.Ok() && vseg.Start() < ar.End; vseg = vseg.NextSegment() {
+ 		vma := vseg.ValuePtr()
+ 		if vma.mlockMode != memmap.MLockNone {
+@@ -984,7 +983,7 @@ func (mm *MemoryManager) Decommit(addr usermem.Addr, length uint64) error {
+ 			if pma.private && !mm.isPMACopyOnWriteLocked(pseg) {
+ 				psegAR := pseg.Range().Intersect(ar)
+ 				if vsegAR.IsSupersetOf(psegAR) && vma.mappable == nil {
+-					if err := mem.Decommit(pseg.fileRangeOf(psegAR)); err == nil {
++					if err := mm.mf.Decommit(pseg.fileRangeOf(psegAR)); err == nil {
+ 						pseg = pseg.NextSegment()
+ 						continue
+ 					}
+diff --git a/pkg/sentry/platform/context.go b/pkg/sentry/platform/context.go
+index cca21a2..85f0c12 100644
+--- a/pkg/sentry/platform/context.go
++++ b/pkg/sentry/platform/context.go
+@@ -24,6 +24,9 @@ type contextID int
+ const (
+ 	// CtxPlatform is a Context.Value key for a Platform.
+ 	CtxPlatform contextID = iota
++
++	// CtxMemory is a Context.Value key for a Memory.
++	CtxMemory
+ )
+ 
+ // FromContext returns the Platform that is used to execute ctx's application
+@@ -34,3 +37,12 @@ func FromContext(ctx context.Context) Platform {
+ 	}
+ 	return nil
+ }
++
++// MemoryFromContext returns the Memory that is used to allocate memory for
++// ctx's application code, or nil if no such Memory exists.
++func MemoryFromContext(ctx context.Context) Memory {
++	if v := ctx.Value(CtxMemory); v != nil {
++		return v.(Memory)
++	}
++	return nil
++}
+diff --git a/pkg/sentry/platform/kvm/kvm.go b/pkg/sentry/platform/kvm/kvm.go
+index d4f5002..242d934 100644
+--- a/pkg/sentry/platform/kvm/kvm.go
++++ b/pkg/sentry/platform/kvm/kvm.go
+@@ -154,7 +154,3 @@ func (k *KVM) NewContext() platform.Context {
+ 	}
+ }
+ 
+-// Memory returns the platform memory used to do allocations.
+-func (k *KVM) Memory() platform.Memory {
+-	return k.FileMem
+-}
+diff --git a/pkg/sentry/platform/platform.go b/pkg/sentry/platform/platform.go
+index b2ce851..6754a8c 100644
+--- a/pkg/sentry/platform/platform.go
++++ b/pkg/sentry/platform/platform.go
+@@ -28,8 +28,11 @@ import (
+ 	"gvisor.googlesource.com/gvisor/pkg/sentry/usermem"
+ )
+ 
+-// Platform provides abstractions for execution contexts (Context) and memory
+-// management (Memory, AddressSpace).
++// Platform provides abstractions for execution contexts (Context) and address
++// space management (AddressSpace).
++//
++// Note: Memory allocation has been decoupled from Platform and is now provided
++// separately via the Memory interface.
+ type Platform interface {
+ 	// SupportsAddressSpaceIO returns true if AddressSpaces returned by this
+ 	// Platform support AddressSpaceIO methods.
+@@ -87,9 +90,6 @@ type Platform interface {
+ 	// NewContext returns a new execution context.
+ 	NewContext() Context
+ 
+-	// Memory returns memory for allocations.
+-	Memory() Memory
+-
+ 	// PreemptAllCPUs causes all concurrent calls to Context.Switch(), as well
+ 	// as the first following call to Context.Switch() for each Context, to
+ 	// return ErrContextCPUPreempted.
+diff --git a/pkg/sentry/platform/ptrace/ptrace.go b/pkg/sentry/platform/ptrace/ptrace.go
+index 8d3f6ac..fa42b6e 100644
+--- a/pkg/sentry/platform/ptrace/ptrace.go
++++ b/pkg/sentry/platform/ptrace/ptrace.go
+@@ -244,7 +244,3 @@ func (*PTrace) NewContext() platform.Context {
+ 	return &context{}
+ }
+ 
+-// Memory returns the platform memory used to do allocations.
+-func (p *PTrace) Memory() platform.Memory {
+-	return p.FileMem
+-}

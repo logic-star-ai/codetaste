@@ -1,0 +1,4930 @@
+diff --git a/codec-dns/src/main/java/io/netty/handler/codec/dns/AbstractDnsMessage.java b/codec-dns/src/main/java/io/netty/handler/codec/dns/AbstractDnsMessage.java
+new file mode 100644
+index 0000000..f84c49c
+--- /dev/null
++++ b/codec-dns/src/main/java/io/netty/handler/codec/dns/AbstractDnsMessage.java
+@@ -0,0 +1,264 @@
++/*
++ * Copyright 2016 The Netty Project
++ *
++ * The Netty Project licenses this file to you under the Apache License,
++ * version 2.0 (the "License"); you may not use this file except in compliance
++ * with the License. You may obtain a copy of the License at:
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++ * License for the specific language governing permissions and limitations
++ * under the License.
++ */
++package io.netty.handler.codec.dns;
++
++import io.netty.util.AbstractReferenceCounted;
++import io.netty.util.ReferenceCountUtil;
++import io.netty.util.ResourceLeak;
++import io.netty.util.ResourceLeakDetector;
++
++import java.util.ArrayList;
++import java.util.List;
++
++import static io.netty.util.internal.ObjectUtil.checkNotNull;
++
++/**
++ * Default base implementation of {@link DnsMessage}.
++ */
++public abstract class AbstractDnsMessage extends AbstractReferenceCounted implements DnsMessage {
++
++    private static final ResourceLeakDetector<DnsMessage> LEAK_DETECTOR = new ResourceLeakDetector<DnsMessage>(
++            DnsMessage.class);
++
++    private final ResourceLeak leak;
++
++    private int id;
++    private DnsOpCode opCode = DnsOpCode.QUERY;
++    private boolean recursionDesired;
++    private int z;
++
++    private List<DnsRecord> questions;
++    private List<DnsRecord> answers;
++    private List<DnsRecord> authorities;
++    private List<DnsRecord> additionals;
++
++    protected AbstractDnsMessage(int id) {
++        setId(id);
++        leak = LEAK_DETECTOR.open(this);
++    }
++
++    @Override
++    public int id() {
++        return id;
++    }
++
++    @Override
++    public DnsMessage setId(int id) {
++        if ((id & 0xffff) != id) {
++            throw new IllegalArgumentException("id: " + id + " (expected: 0 ~ 65535)");
++        }
++        this.id = id;
++        return this;
++    }
++
++    @Override
++    public DnsOpCode opCode() {
++        return opCode;
++    }
++
++    @Override
++    public DnsMessage setOpCode(DnsOpCode opCode) {
++        this.opCode = checkNotNull(opCode, "opCode");
++        return this;
++    }
++
++    @Override
++    public boolean isRecursionDesired() {
++        return recursionDesired;
++    }
++
++    @Override
++    public DnsMessage setRecursionDesired(boolean recursionDesired) {
++        this.recursionDesired = recursionDesired;
++        return this;
++    }
++
++    @Override
++    public int z() {
++        return z;
++    }
++
++    @Override
++    public DnsMessage setZ(int z) {
++        if ((z & 0x7) != z) {
++            throw new IllegalArgumentException("z: " + z + " (expected: 0 ~ 7)");
++        }
++        this.z = z;
++        return this;
++    }
++
++    @Override
++    public int count(DnsSection section) {
++        List<DnsRecord> records = sectionRecords(section);
++        return records == null ? 0 : records.size();
++    }
++
++    @SuppressWarnings("unchecked")
++    @Override
++    public <T extends DnsRecord> T recordAt(DnsSection section) {
++        return recordAt(section, 0);
++    }
++
++    @SuppressWarnings("unchecked")
++    @Override
++    public <T extends DnsRecord> T recordAt(DnsSection section, int index) {
++        List<DnsRecord> records = sectionRecords(section);
++        if (records == null) {
++            throw new IndexOutOfBoundsException();
++        }
++        return (T) records.get(index);
++    }
++
++    @Override
++    public DnsMessage setRecord(DnsSection section, DnsRecord record) {
++        clear(section);
++        return addRecord(section, record);
++    }
++
++    @Override
++    public DnsMessage setRecord(DnsSection section, int index, DnsRecord record) {
++        checkNotNull(record, "record");
++        List<DnsRecord> records = sectionRecordsOrCreate(section);
++        DnsRecord old = records.set(index, record);
++        ReferenceCountUtil.release(old);
++        return this;
++    }
++
++    @Override
++    public DnsMessage addRecord(DnsSection section, DnsRecord record) {
++        checkNotNull(record, "record");
++        sectionRecordsOrCreate(section).add(record);
++        return this;
++    }
++
++    @Override
++    public DnsMessage addRecord(DnsSection section, int index, DnsRecord record) {
++        checkNotNull(record, "record");
++        sectionRecordsOrCreate(section).add(index, record);
++        return this;
++    }
++
++    @SuppressWarnings("unchecked")
++    @Override
++    public <T extends DnsRecord> T removeRecord(DnsSection section, int index) {
++        List<DnsRecord> records = sectionRecords(section);
++        if (records == null) {
++            throw new IndexOutOfBoundsException();
++        }
++        return (T) records.remove(index);
++    }
++
++    @Override
++    public DnsMessage clear(DnsSection section) {
++        List<DnsRecord> records = sectionRecords(section);
++        if (records != null) {
++            for (DnsRecord record : records) {
++                ReferenceCountUtil.release(record);
++            }
++            records.clear();
++        }
++        return this;
++    }
++
++    @Override
++    protected void deallocate() {
++        clear(DnsSection.QUESTION);
++        clear(DnsSection.ANSWER);
++        clear(DnsSection.AUTHORITY);
++        clear(DnsSection.ADDITIONAL);
++        if (leak != null) {
++            leak.close();
++        }
++    }
++
++    @Override
++    public DnsMessage touch(Object hint) {
++        if (leak != null) {
++            leak.record(hint);
++        }
++        touchSection(DnsSection.QUESTION, hint);
++        touchSection(DnsSection.ANSWER, hint);
++        touchSection(DnsSection.AUTHORITY, hint);
++        touchSection(DnsSection.ADDITIONAL, hint);
++        return this;
++    }
++
++    private void touchSection(DnsSection section, Object hint) {
++        List<DnsRecord> records = sectionRecords(section);
++        if (records == null) {
++            return;
++        }
++        for (DnsRecord record : records) {
++            ReferenceCountUtil.touch(record, hint);
++        }
++    }
++
++    @Override
++    public DnsMessage retain() {
++        super.retain();
++        return this;
++    }
++
++    @Override
++    public DnsMessage retain(int increment) {
++        super.retain(increment);
++        return this;
++    }
++
++    @Override
++    public DnsMessage touch() {
++        return touch(null);
++    }
++
++    private List<DnsRecord> sectionRecords(DnsSection section) {
++        switch (section) {
++        case QUESTION:
++            return questions;
++        case ANSWER:
++            return answers;
++        case AUTHORITY:
++            return authorities;
++        case ADDITIONAL:
++            return additionals;
++        default:
++            throw new Error();
++        }
++    }
++
++    private List<DnsRecord> sectionRecordsOrCreate(DnsSection section) {
++        List<DnsRecord> records = sectionRecords(section);
++        if (records == null) {
++            records = new ArrayList<DnsRecord>(2);
++            switch (section) {
++            case QUESTION:
++                questions = records;
++                break;
++            case ANSWER:
++                answers = records;
++                break;
++            case AUTHORITY:
++                authorities = records;
++                break;
++            case ADDITIONAL:
++                additionals = records;
++                break;
++            default:
++                throw new Error();
++            }
++        }
++        return records;
++    }
++}
+diff --git a/codec-dns/src/main/java/io/netty/handler/codec/dns/AbstractDnsRecord.java b/codec-dns/src/main/java/io/netty/handler/codec/dns/AbstractDnsRecord.java
+new file mode 100644
+index 0000000..563c96b
+--- /dev/null
++++ b/codec-dns/src/main/java/io/netty/handler/codec/dns/AbstractDnsRecord.java
+@@ -0,0 +1,100 @@
++/*
++ * Copyright 2016 The Netty Project
++ *
++ * The Netty Project licenses this file to you under the Apache License,
++ * version 2.0 (the "License"); you may not use this file except in compliance
++ * with the License. You may obtain a copy of the License at:
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++ * License for the specific language governing permissions and limitations
++ * under the License.
++ */
++package io.netty.handler.codec.dns;
++
++import io.netty.util.internal.StringUtil;
++
++import static io.netty.util.internal.ObjectUtil.checkNotNull;
++
++/**
++ * Default base implementation for {@link DnsRecord}.
++ */
++public class AbstractDnsRecord implements DnsRecord {
++
++    private final String name;
++    private final DnsRecordType type;
++    private final int dnsClass;
++    private final long timeToLive;
++
++    protected AbstractDnsRecord(String name, DnsRecordType type, int dnsClass, long timeToLive) {
++        this.name = checkNotNull(name, "name");
++        this.type = checkNotNull(type, "type");
++
++        if ((dnsClass & 0xffff) != dnsClass) {
++            throw new IllegalArgumentException("dnsClass: " + dnsClass + " (expected: 0 ~ 65535)");
++        }
++        if ((timeToLive & 0xffffffffL) != timeToLive) {
++            throw new IllegalArgumentException("timeToLive: " + timeToLive + " (expected: 0 ~ 4294967295)");
++        }
++
++        this.dnsClass = dnsClass;
++        this.timeToLive = timeToLive;
++    }
++
++    @Override
++    public String name() {
++        return name;
++    }
++
++    @Override
++    public DnsRecordType type() {
++        return type;
++    }
++
++    @Override
++    public int dnsClass() {
++        return dnsClass;
++    }
++
++    @Override
++    public long timeToLive() {
++        return timeToLive;
++    }
++
++    @Override
++    public int hashCode() {
++        final int nameHash = name.hashCode();
++        final int typeHash = type.hashCode();
++        final int ttlHash = (int) timeToLive;
++        return ((nameHash * 31 + typeHash) * 31 + dnsClass) * 31 + ttlHash;
++    }
++
++    @Override
++    public boolean equals(Object o) {
++        if (!(o instanceof DnsRecord)) {
++            return false;
++        }
++        if (this == o) {
++            return true;
++        }
++
++        DnsRecord that = (DnsRecord) o;
++        return type().intValue() == that.type().intValue() &&
++               dnsClass() == that.dnsClass() &&
++               timeToLive() == that.timeToLive() &&
++               name().equals(that.name());
++    }
++
++    @Override
++    public String toString() {
++        return new StringBuilder(128).append(StringUtil.simpleClassName(this))
++                .append("(name: ").append(name)
++                .append(", type: ").append(type)
++                .append(", dnsClass: ").append(dnsClass)
++                .append(", timeToLive: ").append(timeToLive)
++                .append(')').toString();
++    }
++}
+diff --git a/codec-dns/src/main/java/io/netty/handler/codec/dns/DatagramDnsQuery.java b/codec-dns/src/main/java/io/netty/handler/codec/dns/DatagramDnsQuery.java
+new file mode 100644
+index 0000000..ce788cb
+--- /dev/null
++++ b/codec-dns/src/main/java/io/netty/handler/codec/dns/DatagramDnsQuery.java
+@@ -0,0 +1,131 @@
++/*
++ * Copyright 2016 The Netty Project
++ *
++ * The Netty Project licenses this file to you under the Apache License,
++ * version 2.0 (the "License"); you may not use this file except in compliance
++ * with the License. You may obtain a copy of the License at:
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++ * License for the specific language governing permissions and limitations
++ * under the License.
++ */
++package io.netty.handler.codec.dns;
++
++import io.netty.channel.AddressedEnvelope;
++
++import java.net.InetSocketAddress;
++
++import static io.netty.util.internal.ObjectUtil.checkNotNull;
++
++/**
++ * A DNS query carried by UDP. This message implements {@link AddressedEnvelope}
++ * so it can be written directly to a {@link io.netty.channel.socket.DatagramChannel}.
++ */
++public final class DatagramDnsQuery extends DefaultDnsQuery implements AddressedEnvelope<DnsQuery, InetSocketAddress> {
++
++    private final InetSocketAddress sender;
++    private final InetSocketAddress recipient;
++
++    public DatagramDnsQuery(InetSocketAddress sender, InetSocketAddress recipient, int id) {
++        super(id);
++        this.sender = sender;
++        this.recipient = checkNotNull(recipient, "recipient");
++    }
++
++    @Override
++    public DnsQuery content() {
++        return this;
++    }
++
++    @Override
++    public InetSocketAddress sender() {
++        return sender;
++    }
++
++    @Override
++    public InetSocketAddress recipient() {
++        return recipient;
++    }
++
++    @Override
++    public DatagramDnsQuery retain() {
++        super.retain();
++        return this;
++    }
++
++    @Override
++    public DatagramDnsQuery retain(int increment) {
++        super.retain(increment);
++        return this;
++    }
++
++    @Override
++    public DatagramDnsQuery touch() {
++        super.touch();
++        return this;
++    }
++
++    @Override
++    public DatagramDnsQuery touch(Object hint) {
++        super.touch(hint);
++        return this;
++    }
++
++    @Override
++    public DatagramDnsQuery setId(int id) {
++        super.setId(id);
++        return this;
++    }
++
++    @Override
++    public DatagramDnsQuery setOpCode(DnsOpCode opCode) {
++        super.setOpCode(opCode);
++        return this;
++    }
++
++    @Override
++    public DatagramDnsQuery setRecursionDesired(boolean recursionDesired) {
++        super.setRecursionDesired(recursionDesired);
++        return this;
++    }
++
++    @Override
++    public DatagramDnsQuery setZ(int z) {
++        super.setZ(z);
++        return this;
++    }
++
++    @Override
++    public DatagramDnsQuery setRecord(DnsSection section, DnsRecord record) {
++        super.setRecord(section, record);
++        return this;
++    }
++
++    @Override
++    public DatagramDnsQuery setRecord(DnsSection section, int index, DnsRecord record) {
++        super.setRecord(section, index, record);
++        return this;
++    }
++
++    @Override
++    public DatagramDnsQuery addRecord(DnsSection section, DnsRecord record) {
++        super.addRecord(section, record);
++        return this;
++    }
++
++    @Override
++    public DatagramDnsQuery addRecord(DnsSection section, int index, DnsRecord record) {
++        super.addRecord(section, index, record);
++        return this;
++    }
++
++    @Override
++    public DatagramDnsQuery clear(DnsSection section) {
++        super.clear(section);
++        return this;
++    }
++}
+diff --git a/codec-dns/src/main/java/io/netty/handler/codec/dns/DatagramDnsQueryEncoder.java b/codec-dns/src/main/java/io/netty/handler/codec/dns/DatagramDnsQueryEncoder.java
+new file mode 100644
+index 0000000..452d12f
+--- /dev/null
++++ b/codec-dns/src/main/java/io/netty/handler/codec/dns/DatagramDnsQueryEncoder.java
+@@ -0,0 +1,98 @@
++/*
++ * Copyright 2016 The Netty Project
++ *
++ * The Netty Project licenses this file to you under the Apache License,
++ * version 2.0 (the "License"); you may not use this file except in compliance
++ * with the License. You may obtain a copy of the License at:
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++ * License for the specific language governing permissions and limitations
++ * under the License.
++ */
++package io.netty.handler.codec.dns;
++
++import io.netty.buffer.ByteBuf;
++import io.netty.channel.AddressedEnvelope;
++import io.netty.channel.ChannelHandler;
++import io.netty.channel.ChannelHandlerContext;
++import io.netty.channel.socket.DatagramPacket;
++import io.netty.handler.codec.MessageToMessageEncoder;
++
++import java.net.InetSocketAddress;
++import java.util.List;
++
++import static io.netty.util.internal.ObjectUtil.checkNotNull;
++
++/**
++ * Encodes {@link DnsQuery} into {@link DatagramPacket}.
++ */
++@ChannelHandler.Sharable
++public class DatagramDnsQueryEncoder extends MessageToMessageEncoder<AddressedEnvelope<DnsQuery, InetSocketAddress>> {
++
++    private final DnsRecordEncoder recordEncoder;
++
++    public DatagramDnsQueryEncoder() {
++        this(new DefaultDnsRecordEncoder());
++    }
++
++    public DatagramDnsQueryEncoder(DnsRecordEncoder recordEncoder) {
++        this.recordEncoder = checkNotNull(recordEncoder, "recordEncoder");
++    }
++
++    @Override
++    protected void encode(ChannelHandlerContext ctx, AddressedEnvelope<DnsQuery, InetSocketAddress> in,
++                          List<Object> out) throws Exception {
++        DnsQuery query = in.content();
++        ByteBuf buf = ctx.alloc().buffer();
++        boolean success = false;
++        try {
++            encodeHeader(query, buf);
++            encodeQuestions(query, buf);
++            encodeRecords(query, DnsSection.ADDITIONAL, buf);
++            out.add(new DatagramPacket(buf, in.recipient(), in.sender()));
++            success = true;
++        } finally {
++            if (!success) {
++                buf.release();
++            }
++        }
++    }
++
++    private void encodeHeader(DnsQuery query, ByteBuf out) {
++        out.writeShort(query.id());
++
++        int flags = 0;
++        flags |= (query.opCode().intValue() & 0xf) << 11;
++        if (query.isRecursionDesired()) {
++            flags |= 1 << 8;
++        }
++        flags |= (query.z() & 0x7) << 4;
++        out.writeShort(flags);
++
++        out.writeShort(query.count(DnsSection.QUESTION));
++        out.writeShort(0);
++        out.writeShort(0);
++        out.writeShort(query.count(DnsSection.ADDITIONAL));
++    }
++
++    private void encodeQuestions(DnsQuery query, ByteBuf out) throws Exception {
++        int count = query.count(DnsSection.QUESTION);
++        for (int i = 0; i < count; i++) {
++            DnsQuestion question = query.recordAt(DnsSection.QUESTION, i);
++            recordEncoder.encodeQuestion(question, out);
++        }
++    }
++
++    private void encodeRecords(DnsMessage message, DnsSection section, ByteBuf out) throws Exception {
++        int count = message.count(section);
++        for (int i = 0; i < count; i++) {
++            DnsRecord record = message.recordAt(section, i);
++            recordEncoder.encodeRecord(record, out);
++        }
++    }
++}
++
+diff --git a/codec-dns/src/main/java/io/netty/handler/codec/dns/DatagramDnsResponse.java b/codec-dns/src/main/java/io/netty/handler/codec/dns/DatagramDnsResponse.java
+new file mode 100644
+index 0000000..02a8701
+--- /dev/null
++++ b/codec-dns/src/main/java/io/netty/handler/codec/dns/DatagramDnsResponse.java
+@@ -0,0 +1,131 @@
++/*
++ * Copyright 2016 The Netty Project
++ *
++ * The Netty Project licenses this file to you under the Apache License,
++ * version 2.0 (the "License"); you may not use this file except in compliance
++ * with the License. You may obtain a copy of the License at:
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++ * License for the specific language governing permissions and limitations
++ * under the License.
++ */
++package io.netty.handler.codec.dns;
++
++import io.netty.channel.AddressedEnvelope;
++
++import java.net.InetSocketAddress;
++
++import static io.netty.util.internal.ObjectUtil.checkNotNull;
++
++/**
++ * A DNS response carried by UDP.
++ */
++public final class DatagramDnsResponse extends DefaultDnsResponse
++        implements AddressedEnvelope<DnsResponse, InetSocketAddress> {
++
++    private final InetSocketAddress sender;
++    private final InetSocketAddress recipient;
++
++    public DatagramDnsResponse(InetSocketAddress sender, InetSocketAddress recipient, int id) {
++        super(id);
++        this.sender = checkNotNull(sender, "sender");
++        this.recipient = recipient;
++    }
++
++    @Override
++    public DnsResponse content() {
++        return this;
++    }
++
++    @Override
++    public InetSocketAddress sender() {
++        return sender;
++    }
++
++    @Override
++    public InetSocketAddress recipient() {
++        return recipient;
++    }
++
++    @Override
++    public DatagramDnsResponse retain() {
++        super.retain();
++        return this;
++    }
++
++    @Override
++    public DatagramDnsResponse retain(int increment) {
++        super.retain(increment);
++        return this;
++    }
++
++    @Override
++    public DatagramDnsResponse touch() {
++        super.touch();
++        return this;
++    }
++
++    @Override
++    public DatagramDnsResponse touch(Object hint) {
++        super.touch(hint);
++        return this;
++    }
++
++    @Override
++    public DatagramDnsResponse setId(int id) {
++        super.setId(id);
++        return this;
++    }
++
++    @Override
++    public DatagramDnsResponse setOpCode(DnsOpCode opCode) {
++        super.setOpCode(opCode);
++        return this;
++    }
++
++    @Override
++    public DatagramDnsResponse setRecursionDesired(boolean recursionDesired) {
++        super.setRecursionDesired(recursionDesired);
++        return this;
++    }
++
++    @Override
++    public DatagramDnsResponse setZ(int z) {
++        super.setZ(z);
++        return this;
++    }
++
++    @Override
++    public DatagramDnsResponse setRecord(DnsSection section, DnsRecord record) {
++        super.setRecord(section, record);
++        return this;
++    }
++
++    @Override
++    public DatagramDnsResponse setRecord(DnsSection section, int index, DnsRecord record) {
++        super.setRecord(section, index, record);
++        return this;
++    }
++
++    @Override
++    public DatagramDnsResponse addRecord(DnsSection section, DnsRecord record) {
++        super.addRecord(section, record);
++        return this;
++    }
++
++    @Override
++    public DatagramDnsResponse addRecord(DnsSection section, int index, DnsRecord record) {
++        super.addRecord(section, index, record);
++        return this;
++    }
++
++    @Override
++    public DatagramDnsResponse clear(DnsSection section) {
++        super.clear(section);
++        return this;
++    }
++}
+diff --git a/codec-dns/src/main/java/io/netty/handler/codec/dns/DatagramDnsResponseDecoder.java b/codec-dns/src/main/java/io/netty/handler/codec/dns/DatagramDnsResponseDecoder.java
+new file mode 100644
+index 0000000..098f131
+--- /dev/null
++++ b/codec-dns/src/main/java/io/netty/handler/codec/dns/DatagramDnsResponseDecoder.java
+@@ -0,0 +1,90 @@
++/*
++ * Copyright 2016 The Netty Project
++ *
++ * The Netty Project licenses this file to you under the Apache License,
++ * version 2.0 (the "License"); you may not use this file except in compliance
++ * with the License. You may obtain a copy of the License at:
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++ * License for the specific language governing permissions and limitations
++ * under the License.
++ */
++package io.netty.handler.codec.dns;
++
++import io.netty.buffer.ByteBuf;
++import io.netty.channel.ChannelHandler;
++import io.netty.channel.ChannelHandlerContext;
++import io.netty.channel.socket.DatagramPacket;
++import io.netty.handler.codec.MessageToMessageDecoder;
++
++import java.util.List;
++
++import static io.netty.util.internal.ObjectUtil.checkNotNull;
++
++/**
++ * Decodes {@link DatagramPacket} into {@link DatagramDnsResponse}.
++ */
++@ChannelHandler.Sharable
++public class DatagramDnsResponseDecoder extends MessageToMessageDecoder<DatagramPacket> {
++
++    private final DnsRecordDecoder recordDecoder;
++
++    public DatagramDnsResponseDecoder() {
++        this(new DefaultDnsRecordDecoder());
++    }
++
++    public DatagramDnsResponseDecoder(DnsRecordDecoder recordDecoder) {
++        this.recordDecoder = checkNotNull(recordDecoder, "recordDecoder");
++    }
++
++    @Override
++    protected void decode(ChannelHandlerContext ctx, DatagramPacket packet, List<Object> out) throws Exception {
++        ByteBuf buf = packet.content();
++
++        int id = buf.readUnsignedShort();
++        DatagramDnsResponse response = new DatagramDnsResponse(packet.sender(), packet.recipient(), id);
++
++        boolean success = false;
++        try {
++            int flags = buf.readUnsignedShort();
++            response.setOpCode(DnsOpCode.valueOf((flags >> 11) & 0xf));
++            response.setRecursionDesired(((flags >> 8) & 1) == 1);
++            response.setAuthoritativeAnswer(((flags >> 10) & 1) == 1);
++            response.setTruncated(((flags >> 9) & 1) == 1);
++            response.setRecursionAvailable(((flags >> 7) & 1) == 1);
++            response.setZ((flags >> 4) & 0x7);
++            response.setCode(DnsResponseCode.valueOf(flags & 0xf));
++
++            int questions = buf.readUnsignedShort();
++            int answers = buf.readUnsignedShort();
++            int authorities = buf.readUnsignedShort();
++            int additionals = buf.readUnsignedShort();
++
++            for (int i = 0; i < questions; i++) {
++                response.addRecord(DnsSection.QUESTION, recordDecoder.decodeQuestion(buf));
++            }
++
++            for (int i = 0; i < answers; i++) {
++                response.addRecord(DnsSection.ANSWER, recordDecoder.decodeRecord(buf));
++            }
++            for (int i = 0; i < authorities; i++) {
++                response.addRecord(DnsSection.AUTHORITY, recordDecoder.decodeRecord(buf));
++            }
++            for (int i = 0; i < additionals; i++) {
++                response.addRecord(DnsSection.ADDITIONAL, recordDecoder.decodeRecord(buf));
++            }
++
++            out.add(response);
++            success = true;
++        } finally {
++            if (!success) {
++                response.release();
++            }
++        }
++    }
++}
++
+diff --git a/codec-dns/src/main/java/io/netty/handler/codec/dns/DefaultDnsQuery.java b/codec-dns/src/main/java/io/netty/handler/codec/dns/DefaultDnsQuery.java
+new file mode 100644
+index 0000000..dd2f0b1
+--- /dev/null
++++ b/codec-dns/src/main/java/io/netty/handler/codec/dns/DefaultDnsQuery.java
+@@ -0,0 +1,105 @@
++/*
++ * Copyright 2016 The Netty Project
++ *
++ * The Netty Project licenses this file to you under the Apache License,
++ * version 2.0 (the "License"); you may not use this file except in compliance
++ * with the License. You may obtain a copy of the License at:
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++ * License for the specific language governing permissions and limitations
++ * under the License.
++ */
++package io.netty.handler.codec.dns;
++
++/**
++ * Default implementation of {@link DnsQuery}.
++ */
++public class DefaultDnsQuery extends AbstractDnsMessage implements DnsQuery {
++
++    public DefaultDnsQuery(int id) {
++        super(id);
++        setRecursionDesired(true);
++    }
++
++    @Override
++    public DefaultDnsQuery setId(int id) {
++        super.setId(id);
++        return this;
++    }
++
++    @Override
++    public DefaultDnsQuery setOpCode(DnsOpCode opCode) {
++        super.setOpCode(opCode);
++        return this;
++    }
++
++    @Override
++    public DefaultDnsQuery setRecursionDesired(boolean recursionDesired) {
++        super.setRecursionDesired(recursionDesired);
++        return this;
++    }
++
++    @Override
++    public DefaultDnsQuery setZ(int z) {
++        super.setZ(z);
++        return this;
++    }
++
++    @Override
++    public DefaultDnsQuery setRecord(DnsSection section, DnsRecord record) {
++        super.setRecord(section, record);
++        return this;
++    }
++
++    @Override
++    public DefaultDnsQuery setRecord(DnsSection section, int index, DnsRecord record) {
++        super.setRecord(section, index, record);
++        return this;
++    }
++
++    @Override
++    public DefaultDnsQuery addRecord(DnsSection section, DnsRecord record) {
++        super.addRecord(section, record);
++        return this;
++    }
++
++    @Override
++    public DefaultDnsQuery addRecord(DnsSection section, int index, DnsRecord record) {
++        super.addRecord(section, index, record);
++        return this;
++    }
++
++    @Override
++    public DefaultDnsQuery clear(DnsSection section) {
++        super.clear(section);
++        return this;
++    }
++
++    @Override
++    public DefaultDnsQuery retain() {
++        super.retain();
++        return this;
++    }
++
++    @Override
++    public DefaultDnsQuery retain(int increment) {
++        super.retain(increment);
++        return this;
++    }
++
++    @Override
++    public DefaultDnsQuery touch() {
++        super.touch();
++        return this;
++    }
++
++    @Override
++    public DefaultDnsQuery touch(Object hint) {
++        super.touch(hint);
++        return this;
++    }
++}
+diff --git a/codec-dns/src/main/java/io/netty/handler/codec/dns/DefaultDnsQuestion.java b/codec-dns/src/main/java/io/netty/handler/codec/dns/DefaultDnsQuestion.java
+new file mode 100644
+index 0000000..3c1b354
+--- /dev/null
++++ b/codec-dns/src/main/java/io/netty/handler/codec/dns/DefaultDnsQuestion.java
+@@ -0,0 +1,39 @@
++/*
++ * Copyright 2016 The Netty Project
++ *
++ * The Netty Project licenses this file to you under the Apache License,
++ * version 2.0 (the "License"); you may not use this file except in compliance
++ * with the License. You may obtain a copy of the License at:
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++ * License for the specific language governing permissions and limitations
++ * under the License.
++ */
++package io.netty.handler.codec.dns;
++
++/**
++ * Default implementation of {@link DnsQuestion}.
++ */
++public class DefaultDnsQuestion extends AbstractDnsRecord implements DnsQuestion {
++
++    /**
++     * The default DNS class as defined in RFC 1035.
++     */
++    public static final int CLASS_IN = 0x0001;
++
++    public DefaultDnsQuestion(String name, DnsRecordType type) {
++        this(name, type, CLASS_IN);
++    }
++
++    public DefaultDnsQuestion(String name, DnsRecordType type, int dnsClass) {
++        super(name, type, dnsClass, 0);
++        if (name.isEmpty()) {
++            throw new IllegalArgumentException("name must not be empty");
++        }
++    }
++}
++
+diff --git a/codec-dns/src/main/java/io/netty/handler/codec/dns/DefaultDnsRawRecord.java b/codec-dns/src/main/java/io/netty/handler/codec/dns/DefaultDnsRawRecord.java
+new file mode 100644
+index 0000000..043bb19
+--- /dev/null
++++ b/codec-dns/src/main/java/io/netty/handler/codec/dns/DefaultDnsRawRecord.java
+@@ -0,0 +1,88 @@
++/*
++ * Copyright 2016 The Netty Project
++ *
++ * The Netty Project licenses this file to you under the Apache License,
++ * version 2.0 (the "License"); you may not use this file except in compliance
++ * with the License. You may obtain a copy of the License at:
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++ * License for the specific language governing permissions and limitations
++ * under the License.
++ */
++package io.netty.handler.codec.dns;
++
++import io.netty.buffer.ByteBuf;
++
++import static io.netty.util.internal.ObjectUtil.checkNotNull;
++
++/**
++ * Default implementation of {@link DnsRawRecord}.
++ */
++public class DefaultDnsRawRecord extends AbstractDnsRecord implements DnsRawRecord {
++
++    private final ByteBuf content;
++
++    public DefaultDnsRawRecord(String name, DnsRecordType type, int dnsClass, long timeToLive, ByteBuf content) {
++        super(name, type, dnsClass, timeToLive);
++        this.content = checkNotNull(content, "content");
++    }
++
++    @Override
++    public ByteBuf content() {
++        return content;
++    }
++
++    @Override
++    public DefaultDnsRawRecord copy() {
++        return new DefaultDnsRawRecord(name(), type(), dnsClass(), timeToLive(), content.copy());
++    }
++
++    @Override
++    public DefaultDnsRawRecord duplicate() {
++        return new DefaultDnsRawRecord(name(), type(), dnsClass(), timeToLive(), content.duplicate());
++    }
++
++    @Override
++    public int refCnt() {
++        return content.refCnt();
++    }
++
++    @Override
++    public DefaultDnsRawRecord retain() {
++        content.retain();
++        return this;
++    }
++
++    @Override
++    public DefaultDnsRawRecord retain(int increment) {
++        content.retain(increment);
++        return this;
++    }
++
++    @Override
++    public boolean release() {
++        return content.release();
++    }
++
++    @Override
++    public boolean release(int decrement) {
++        return content.release(decrement);
++    }
++
++    @Override
++    public DefaultDnsRawRecord touch() {
++        content.touch();
++        return this;
++    }
++
++    @Override
++    public DefaultDnsRawRecord touch(Object hint) {
++        content.touch(hint);
++        return this;
++    }
++}
++
+diff --git a/codec-dns/src/main/java/io/netty/handler/codec/dns/DefaultDnsRecordDecoder.java b/codec-dns/src/main/java/io/netty/handler/codec/dns/DefaultDnsRecordDecoder.java
+new file mode 100644
+index 0000000..e22c933
+--- /dev/null
++++ b/codec-dns/src/main/java/io/netty/handler/codec/dns/DefaultDnsRecordDecoder.java
+@@ -0,0 +1,48 @@
++/*
++ * Copyright 2016 The Netty Project
++ *
++ * The Netty Project licenses this file to you under the Apache License,
++ * version 2.0 (the "License"); you may not use this file except in compliance
++ * with the License. You may obtain a copy of the License at:
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++ * License for the specific language governing permissions and limitations
++ * under the License.
++ */
++package io.netty.handler.codec.dns;
++
++import io.netty.buffer.ByteBuf;
++
++/**
++ * Default {@link DnsRecordDecoder} implementation which decodes resource records as {@link DnsRawRecord}s.
++ */
++public class DefaultDnsRecordDecoder implements DnsRecordDecoder {
++
++    @Override
++    public DnsQuestion decodeQuestion(ByteBuf in) throws Exception {
++        String name = DnsCodecUtil.decodeDomainName(in);
++        DnsRecordType type = DnsRecordType.valueOf(in.readUnsignedShort());
++        int dnsClass = in.readUnsignedShort();
++        return new DefaultDnsQuestion(name, type, dnsClass);
++    }
++
++    @Override
++    public DnsRecord decodeRecord(ByteBuf in) throws Exception {
++        String name = DnsCodecUtil.decodeDomainName(in);
++        DnsRecordType type = DnsRecordType.valueOf(in.readUnsignedShort());
++        int dnsClass = in.readUnsignedShort();
++        long ttl = in.readUnsignedInt();
++        int len = in.readUnsignedShort();
++
++        int readerIndex = in.readerIndex();
++        ByteBuf payload = in.duplicate().setIndex(readerIndex, readerIndex + len).retain();
++        in.readerIndex(readerIndex + len);
++
++        return new DefaultDnsRawRecord(name, type, dnsClass, ttl, payload);
++    }
++}
++
+diff --git a/codec-dns/src/main/java/io/netty/handler/codec/dns/DefaultDnsRecordEncoder.java b/codec-dns/src/main/java/io/netty/handler/codec/dns/DefaultDnsRecordEncoder.java
+new file mode 100644
+index 0000000..c7e5bad
+--- /dev/null
++++ b/codec-dns/src/main/java/io/netty/handler/codec/dns/DefaultDnsRecordEncoder.java
+@@ -0,0 +1,52 @@
++/*
++ * Copyright 2016 The Netty Project
++ *
++ * The Netty Project licenses this file to you under the Apache License,
++ * version 2.0 (the "License"); you may not use this file except in compliance
++ * with the License. You may obtain a copy of the License at:
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++ * License for the specific language governing permissions and limitations
++ * under the License.
++ */
++package io.netty.handler.codec.dns;
++
++import io.netty.buffer.ByteBuf;
++import io.netty.handler.codec.UnsupportedMessageTypeException;
++import io.netty.util.CharsetUtil;
++
++/**
++ * Default {@link DnsRecordEncoder} implementation.
++ */
++public class DefaultDnsRecordEncoder implements DnsRecordEncoder {
++
++    @Override
++    public void encodeQuestion(DnsQuestion question, ByteBuf out) throws Exception {
++        DnsCodecUtil.encodeDomainName(question.name(), CharsetUtil.US_ASCII, out);
++        out.writeShort(question.type().intValue());
++        out.writeShort(question.dnsClass());
++    }
++
++    @Override
++    public void encodeRecord(DnsRecord record, ByteBuf out) throws Exception {
++        if (!(record instanceof DnsRawRecord)) {
++            throw new UnsupportedMessageTypeException(record, DnsRawRecord.class);
++        }
++
++        DnsRawRecord rawRecord = (DnsRawRecord) record;
++        DnsCodecUtil.encodeDomainName(rawRecord.name(), CharsetUtil.US_ASCII, out);
++        out.writeShort(rawRecord.type().intValue());
++        out.writeShort(rawRecord.dnsClass());
++        out.writeInt((int) rawRecord.timeToLive());
++
++        ByteBuf content = rawRecord.content();
++        int contentLen = content.readableBytes();
++        out.writeShort(contentLen);
++        out.writeBytes(content, content.readerIndex(), contentLen);
++    }
++}
++
+diff --git a/codec-dns/src/main/java/io/netty/handler/codec/dns/DefaultDnsResponse.java b/codec-dns/src/main/java/io/netty/handler/codec/dns/DefaultDnsResponse.java
+new file mode 100644
+index 0000000..7da615c
+--- /dev/null
++++ b/codec-dns/src/main/java/io/netty/handler/codec/dns/DefaultDnsResponse.java
+@@ -0,0 +1,155 @@
++/*
++ * Copyright 2016 The Netty Project
++ *
++ * The Netty Project licenses this file to you under the Apache License,
++ * version 2.0 (the "License"); you may not use this file except in compliance
++ * with the License. You may obtain a copy of the License at:
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++ * License for the specific language governing permissions and limitations
++ * under the License.
++ */
++package io.netty.handler.codec.dns;
++
++import static io.netty.util.internal.ObjectUtil.checkNotNull;
++
++/**
++ * Default implementation of {@link DnsResponse}.
++ */
++public class DefaultDnsResponse extends AbstractDnsMessage implements DnsResponse {
++
++    private boolean authoritativeAnswer;
++    private boolean truncated;
++    private boolean recursionAvailable;
++    private DnsResponseCode code = DnsResponseCode.NOERROR;
++
++    public DefaultDnsResponse(int id) {
++        super(id);
++    }
++
++    @Override
++    public DefaultDnsResponse setId(int id) {
++        super.setId(id);
++        return this;
++    }
++
++    @Override
++    public DefaultDnsResponse setOpCode(DnsOpCode opCode) {
++        super.setOpCode(opCode);
++        return this;
++    }
++
++    @Override
++    public DefaultDnsResponse setRecursionDesired(boolean recursionDesired) {
++        super.setRecursionDesired(recursionDesired);
++        return this;
++    }
++
++    @Override
++    public DefaultDnsResponse setZ(int z) {
++        super.setZ(z);
++        return this;
++    }
++
++    @Override
++    public DefaultDnsResponse setRecord(DnsSection section, DnsRecord record) {
++        super.setRecord(section, record);
++        return this;
++    }
++
++    @Override
++    public DefaultDnsResponse setRecord(DnsSection section, int index, DnsRecord record) {
++        super.setRecord(section, index, record);
++        return this;
++    }
++
++    @Override
++    public DefaultDnsResponse addRecord(DnsSection section, DnsRecord record) {
++        super.addRecord(section, record);
++        return this;
++    }
++
++    @Override
++    public DefaultDnsResponse addRecord(DnsSection section, int index, DnsRecord record) {
++        super.addRecord(section, index, record);
++        return this;
++    }
++
++    @Override
++    public DefaultDnsResponse clear(DnsSection section) {
++        super.clear(section);
++        return this;
++    }
++
++    @Override
++    public DefaultDnsResponse retain() {
++        super.retain();
++        return this;
++    }
++
++    @Override
++    public DefaultDnsResponse retain(int increment) {
++        super.retain(increment);
++        return this;
++    }
++
++    @Override
++    public DefaultDnsResponse touch() {
++        super.touch();
++        return this;
++    }
++
++    @Override
++    public DefaultDnsResponse touch(Object hint) {
++        super.touch(hint);
++        return this;
++    }
++
++    @Override
++    public boolean isAuthoritativeAnswer() {
++        return authoritativeAnswer;
++    }
++
++    @Override
++    public DnsResponse setAuthoritativeAnswer(boolean authoritativeAnswer) {
++        this.authoritativeAnswer = authoritativeAnswer;
++        return this;
++    }
++
++    @Override
++    public boolean isTruncated() {
++        return truncated;
++    }
++
++    @Override
++    public DnsResponse setTruncated(boolean truncated) {
++        this.truncated = truncated;
++        return this;
++    }
++
++    @Override
++    public boolean isRecursionAvailable() {
++        return recursionAvailable;
++    }
++
++    @Override
++    public DnsResponse setRecursionAvailable(boolean recursionAvailable) {
++        this.recursionAvailable = recursionAvailable;
++        return this;
++    }
++
++    @Override
++    public DnsResponseCode code() {
++        return code;
++    }
++
++    @Override
++    public DnsResponse setCode(DnsResponseCode code) {
++        this.code = checkNotNull(code, "code");
++        return this;
++    }
++}
+diff --git a/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsClass.java b/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsClass.java
+deleted file mode 100644
+index 296c9ee..0000000
+--- a/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsClass.java
++++ /dev/null
+@@ -1,146 +0,0 @@
+-/*
+- * Copyright 2014 The Netty Project
+- *
+- * The Netty Project licenses this file to you under the Apache License,
+- * version 2.0 (the "License"); you may not use this file except in compliance
+- * with the License. You may obtain a copy of the License at:
+- *
+- *   http://www.apache.org/licenses/LICENSE-2.0
+- *
+- * Unless required by applicable law or agreed to in writing, software
+- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+- * License for the specific language governing permissions and limitations
+- * under the License.
+- */
+-package io.netty.handler.codec.dns;
+-
+-/**
+- * Represents a class field in DNS protocol
+- */
+-public final class DnsClass implements Comparable<DnsClass> {
+-
+-    /**
+-     * Default class for DNS entries.
+-     */
+-    public static final DnsClass IN = new DnsClass(0x0001, "IN");
+-    public static final DnsClass CSNET = new DnsClass(0x0002, "CSNET");
+-    public static final DnsClass CHAOS = new DnsClass(0x0003, "CHAOS");
+-    public static final DnsClass HESIOD = new DnsClass(0x0004, "HESIOD");
+-    public static final DnsClass NONE = new DnsClass(0x00fe, "NONE");
+-    public static final DnsClass ANY = new DnsClass(0x00ff, "ANY");
+-
+-    private static final String EXPECTED =
+-            " (expected: " +
+-            IN + '(' + IN.intValue() + "), " +
+-            CSNET + '(' + CSNET.intValue() + "), " +
+-            CHAOS + '(' + CHAOS.intValue() + "), " +
+-            HESIOD + '(' + HESIOD.intValue() + "), " +
+-            NONE + '(' + NONE.intValue() + "), " +
+-            ANY + '(' + ANY.intValue() + "))";
+-
+-    public static DnsClass valueOf(String name) {
+-        if (IN.name().equals(name)) {
+-            return IN;
+-        }
+-        if (NONE.name().equals(name)) {
+-            return NONE;
+-        }
+-        if (ANY.name().equals(name)) {
+-            return ANY;
+-        }
+-        if (CSNET.name().equals(name)) {
+-            return CSNET;
+-        }
+-        if (CHAOS.name().equals(name)) {
+-            return CHAOS;
+-        }
+-        if (HESIOD.name().equals(name)) {
+-            return HESIOD;
+-        }
+-
+-        throw new IllegalArgumentException("name: " + name + EXPECTED);
+-    }
+-
+-    public static DnsClass valueOf(int intValue) {
+-        switch (intValue) {
+-        case 0x0001:
+-            return IN;
+-        case 0x0002:
+-            return CSNET;
+-        case 0x0003:
+-            return CHAOS;
+-        case 0x0004:
+-            return HESIOD;
+-        case 0x00fe:
+-            return NONE;
+-        case 0x00ff:
+-            return ANY;
+-        default:
+-            return new DnsClass(intValue, "UNKNOWN");
+-        }
+-    }
+-
+-    /**
+-     * Returns an instance of DnsClass for a custom type.
+-     *
+-     * @param clazz The class
+-     * @param name The name
+-     */
+-    public static DnsClass valueOf(int clazz, String name) {
+-        return new DnsClass(clazz, name);
+-    }
+-
+-    /**
+-     * The protocol value of this DNS class
+-     */
+-    private final int intValue;
+-
+-    /**
+-     * The name of this DNS class
+-     */
+-    private final String name;
+-
+-    private DnsClass(int intValue, String name) {
+-        if ((intValue & 0xffff) != intValue) {
+-            throw new IllegalArgumentException("intValue: " + intValue + " (expected: 0 ~ 65535)");
+-        }
+-
+-        this.intValue = intValue;
+-        this.name = name;
+-    }
+-
+-    /**
+-     * Returns the name of this class as used in bind config files
+-     */
+-    public String name() {
+-        return name;
+-    }
+-
+-    /**
+-     * Returns the protocol value represented by this class
+-     */
+-    public int intValue() {
+-        return intValue;
+-    }
+-
+-    @Override
+-    public int hashCode() {
+-        return intValue;
+-    }
+-
+-    @Override
+-    public boolean equals(Object o) {
+-        return o instanceof DnsClass && ((DnsClass) o).intValue == intValue;
+-    }
+-
+-    @Override
+-    public int compareTo(DnsClass o) {
+-        return intValue() - o.intValue();
+-    }
+-
+-    @Override
+-    public String toString() {
+-        return name;
+-    }
+-}
+diff --git a/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsCodecUtil.java b/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsCodecUtil.java
+new file mode 100644
+index 0000000..b907b4d
+--- /dev/null
++++ b/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsCodecUtil.java
+@@ -0,0 +1,75 @@
++/*
++ * Copyright 2016 The Netty Project
++ *
++ * The Netty Project licenses this file to you under the Apache License,
++ * version 2.0 (the "License"); you may not use this file except in compliance
++ * with the License. You may obtain a copy of the License at:
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++ * License for the specific language governing permissions and limitations
++ * under the License.
++ */
++package io.netty.handler.codec.dns;
++
++import io.netty.buffer.ByteBuf;
++import io.netty.handler.codec.CorruptedFrameException;
++import io.netty.util.CharsetUtil;
++import io.netty.util.internal.StringUtil;
++
++import java.nio.charset.Charset;
++
++final class DnsCodecUtil {
++
++    private DnsCodecUtil() { }
++
++    static void encodeDomainName(String name, Charset charset, ByteBuf out) {
++        String[] parts = StringUtil.split(name, '.');
++        for (String part: parts) {
++            final int partLen = part.length();
++            if (partLen == 0) {
++                continue;
++            }
++            out.writeByte(partLen);
++            out.writeBytes(part.getBytes(charset));
++        }
++        out.writeByte(0);
++    }
++
++    static String decodeDomainName(ByteBuf in) {
++        int position = -1;
++        int checked = 0;
++        int length = in.writerIndex();
++        StringBuilder name = new StringBuilder(64);
++
++        for (int len = in.readUnsignedByte(); in.isReadable() && len != 0; len = in.readUnsignedByte()) {
++            boolean pointer = (len & 0xc0) == 0xc0;
++            if (pointer) {
++                if (position == -1) {
++                    position = in.readerIndex() + 1;
++                }
++                in.readerIndex((len & 0x3f) << 8 | in.readUnsignedByte());
++                checked += 2;
++                if (checked >= length) {
++                    throw new CorruptedFrameException("name contains a loop.");
++                }
++            } else {
++                name.append(in.toString(in.readerIndex(), len, CharsetUtil.UTF_8)).append('.');
++                in.skipBytes(len);
++            }
++        }
++
++        if (position != -1) {
++            in.readerIndex(position);
++        }
++
++        if (name.length() == 0) {
++            return "";
++        }
++        return name.substring(0, name.length() - 1);
++    }
++}
++
+diff --git a/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsEntry.java b/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsEntry.java
+deleted file mode 100644
+index 7be10af..0000000
+--- a/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsEntry.java
++++ /dev/null
+@@ -1,96 +0,0 @@
+-/*
+- * Copyright 2013 The Netty Project
+- *
+- * The Netty Project licenses this file to you under the Apache License,
+- * version 2.0 (the "License"); you may not use this file except in compliance
+- * with the License. You may obtain a copy of the License at:
+- *
+- *   http://www.apache.org/licenses/LICENSE-2.0
+- *
+- * Unless required by applicable law or agreed to in writing, software
+- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+- * License for the specific language governing permissions and limitations
+- * under the License.
+- */
+-package io.netty.handler.codec.dns;
+-
+-import io.netty.util.internal.StringUtil;
+-
+-/**
+- * A class representing entries in a DNS packet (questions, and all resource
+- * records). Contains data shared by entries such as name, type, and class.
+- */
+-public class DnsEntry {
+-
+-    private final String name;
+-    private final DnsType type;
+-    private final DnsClass dnsClass;
+-
+-    // only allow to extend from same package
+-    DnsEntry(String name, DnsType type, DnsClass dnsClass) {
+-        if (name == null) {
+-            throw new NullPointerException("name");
+-        }
+-        if (type == null) {
+-            throw new NullPointerException("type");
+-        }
+-        if (dnsClass == null) {
+-            throw new NullPointerException("dnsClass");
+-        }
+-
+-        this.name = name;
+-        this.type = type;
+-        this.dnsClass = dnsClass;
+-    }
+-
+-    /**
+-     * Returns the name of this entry (the domain).
+-     */
+-    public String name() {
+-        return name;
+-    }
+-
+-    /**
+-     * Returns the type of resource record to be received.
+-     */
+-    public DnsType type() {
+-        return type;
+-    }
+-
+-    /**
+-     * Returns the class for this entry. Default is IN (Internet).
+-     */
+-    public DnsClass dnsClass() {
+-        return dnsClass;
+-    }
+-
+-    @Override
+-    public int hashCode() {
+-        return (name.hashCode() * 31 + type.hashCode()) * 31 + dnsClass.hashCode();
+-    }
+-
+-    @Override
+-    public String toString() {
+-        return new StringBuilder(128).append(StringUtil.simpleClassName(this))
+-                                     .append("(name: ").append(name)
+-                                     .append(", type: ").append(type)
+-                                     .append(", class: ").append(dnsClass)
+-                                     .append(')').toString();
+-    }
+-
+-    @Override
+-    public boolean equals(Object o) {
+-        if (this == o) {
+-            return true;
+-        }
+-        if (!(o instanceof DnsEntry)) {
+-            return false;
+-        }
+-
+-        DnsEntry that = (DnsEntry) o;
+-        return type().intValue() == that.type().intValue() &&
+-               dnsClass().intValue() == that.dnsClass().intValue() &&
+-               name().equals(that.name());
+-    }
+-}
+diff --git a/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsHeader.java b/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsHeader.java
+deleted file mode 100644
+index b824e79..0000000
+--- a/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsHeader.java
++++ /dev/null
+@@ -1,194 +0,0 @@
+-/*
+- * Copyright 2013 The Netty Project
+- *
+- * The Netty Project licenses this file to you under the Apache License,
+- * version 2.0 (the "License"); you may not use this file except in compliance
+- * with the License. You may obtain a copy of the License at:
+- *
+- *   http://www.apache.org/licenses/LICENSE-2.0
+- *
+- * Unless required by applicable law or agreed to in writing, software
+- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+- * License for the specific language governing permissions and limitations
+- * under the License.
+- */
+-package io.netty.handler.codec.dns;
+-
+-/**
+- * The header super-class which includes information shared by DNS query and
+- * response packet headers such as the ID, opcode, and type. The only flag
+- * shared by both classes is the flag for desiring recursion.
+- */
+-public class DnsHeader {
+-
+-    /**
+-     * Message type is query.
+-     */
+-    public static final int TYPE_QUERY = 0;
+-
+-    /**
+-     * Message type is response.
+-     */
+-    public static final int TYPE_RESPONSE = 1;
+-
+-    /**
+-     * Message is for a standard query.
+-     */
+-    public static final int OPCODE_QUERY = 0;
+-
+-    /**
+-     * Message is for an inverse query. <strong>Note: inverse queries have been
+-     * obsoleted since RFC 3425, and are not necessarily supported.</strong>
+-     */
+-    @Deprecated
+-    public static final int OPCODE_IQUERY = 1;
+-
+-    private final DnsMessage parent;
+-
+-    private boolean recursionDesired;
+-    private int opcode;
+-    private int id;
+-    private int type;
+-    private int z;
+-
+-    // only allow to extend from within the same package
+-    DnsHeader(DnsMessage parent) {
+-        if (parent == null) {
+-            throw new NullPointerException("parent");
+-        }
+-        this.parent = parent;
+-    }
+-
+-    /**
+-     * Returns the number of questions in the {@link DnsMessage}.
+-     */
+-    public int questionCount() {
+-        return parent.questions().size();
+-    }
+-
+-    /**
+-     * Returns the number of answer resource records in the {@link DnsMessage}.
+-     */
+-    public int answerCount() {
+-        return parent.answers().size();
+-    }
+-
+-    /**
+-     * Returns the number of authority resource records in the
+-     * {@link DnsMessage}.
+-     */
+-    public int authorityResourceCount() {
+-        return parent.authorityResources().size();
+-    }
+-
+-    /**
+-     * Returns the number of additional resource records in the
+-     * {@link DnsMessage}.
+-     */
+-    public int additionalResourceCount() {
+-        return parent.additionalResources().size();
+-    }
+-
+-    /**
+-     * Returns {@code true} if a query is to be pursued recursively.
+-     */
+-    public boolean isRecursionDesired() {
+-        return recursionDesired;
+-    }
+-
+-    /**
+-     * Returns the 4 bit opcode used for the {@link DnsMessage}.
+-     *
+-     * @see #OPCODE_QUERY
+-     * @see #OPCODE_IQUERY
+-     */
+-    public int opcode() {
+-        return opcode;
+-    }
+-
+-    /**
+-     * Returns the type of {@link DnsMessage}.
+-     *
+-     * @see #TYPE_QUERY
+-     */
+-    public int type() {
+-        return type;
+-    }
+-
+-    /**
+-     * Returns the 2 byte unsigned identifier number used for the
+-     * {@link DnsMessage}.
+-     */
+-    public int id() {
+-        return id;
+-    }
+-
+-    /**
+-     * Sets the opcode for this {@link DnsMessage}.
+-     *
+-     * @param opcode
+-     *            opcode to set
+-     * @return the header to allow method chaining
+-     */
+-    public DnsHeader setOpcode(int opcode) {
+-        this.opcode = opcode;
+-        return this;
+-    }
+-
+-    /**
+-     * Sets whether a name server is directed to pursue a query recursively or
+-     * not.
+-     *
+-     * @param recursionDesired
+-     *            if set to {@code true}, pursues query recursively
+-     * @return the header to allow method chaining
+-     */
+-    public DnsHeader setRecursionDesired(boolean recursionDesired) {
+-        this.recursionDesired = recursionDesired;
+-        return this;
+-    }
+-
+-    /**
+-     * Sets the {@link DnsMessage} type.
+-     *
+-     * @param type
+-     *            message type
+-     * @return the header to allow method chaining
+-     */
+-    public DnsHeader setType(int type) {
+-        this.type = type;
+-        return this;
+-    }
+-
+-    /**
+-     * Sets the id for this {@link DnsMessage}.
+-     *
+-     * @param id
+-     *            a unique 2 byte unsigned identifier
+-     * @return the header to allow method chaining
+-     */
+-    public DnsHeader setId(int id) {
+-        this.id = id;
+-        return this;
+-    }
+-
+-    /**
+-     * Returns the 3 bit reserved field 'Z'.
+-     */
+-    public int z() {
+-        return z;
+-    }
+-
+-    /**
+-     * Sets the field Z. This field is reserved and should remain as 0 if the
+-     * DNS server does not make usage of this field.
+-     *
+-     * @param z
+-     *            the value for the reserved field Z
+-     */
+-    public DnsHeader setZ(int z) {
+-        this.z = z;
+-        return this;
+-    }
+-}
+diff --git a/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsMessage.java b/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsMessage.java
+index c307222..a505b04 100644
+--- a/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsMessage.java
++++ b/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsMessage.java
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright 2013 The Netty Project
++ * Copyright 2016 The Netty Project
+  *
+  * The Netty Project licenses this file to you under the Apache License,
+  * version 2.0 (the "License"); you may not use this file except in compliance
+@@ -15,225 +15,63 @@
+  */
+ package io.netty.handler.codec.dns;
+ 
+-import io.netty.util.AbstractReferenceCounted;
+-import io.netty.util.ReferenceCountUtil;
+-
+-import java.util.Collections;
+-import java.util.LinkedList;
+-import java.util.List;
++import io.netty.util.ReferenceCounted;
+ 
+ /**
+- * The message super-class which contains core information concerning DNS
+- * packets, both outgoing and incoming.
++ * A DNS message as defined in RFC 1035.
+  */
+-public abstract class DnsMessage extends AbstractReferenceCounted {
++public interface DnsMessage extends ReferenceCounted {
+ 
+-    private List<DnsQuestion> questions;
+-    private List<DnsResource> answers;
+-    private List<DnsResource> authority;
+-    private List<DnsResource> additional;
++    int id();
+ 
+-    private final DnsHeader header;
++    DnsMessage setId(int id);
+ 
+-    // Only allow to extend from same package
+-    DnsMessage(int id) {
+-        header = newHeader(id);
+-    }
++    DnsOpCode opCode();
+ 
+-    /**
+-     * Returns the header belonging to this message.
+-     */
+-    public DnsHeader header() {
+-        return header;
+-    }
++    DnsMessage setOpCode(DnsOpCode opCode);
+ 
+-    /**
+-     * Returns a list of all the questions in this message.
+-     */
+-    public List<DnsQuestion> questions() {
+-        if (questions == null) {
+-            return Collections.emptyList();
+-        }
+-        return Collections.unmodifiableList(questions);
+-    }
++    boolean isRecursionDesired();
+ 
+-    /**
+-     * Returns a list of all the answer resource records in this message.
+-     */
+-    public List<DnsResource> answers() {
+-        if (answers == null) {
+-            return Collections.emptyList();
+-        }
+-        return Collections.unmodifiableList(answers);
+-    }
++    DnsMessage setRecursionDesired(boolean recursionDesired);
+ 
+     /**
+-     * Returns a list of all the authority resource records in this message.
++     * Returns the 3-bit Z field.
+      */
+-    public List<DnsResource> authorityResources() {
+-        if (authority == null) {
+-            return Collections.emptyList();
+-        }
+-        return Collections.unmodifiableList(authority);
+-    }
++    int z();
+ 
+     /**
+-     * Returns a list of all the additional resource records in this message.
++     * Sets the 3-bit Z field.
+      */
+-    public List<DnsResource> additionalResources() {
+-        if (additional == null) {
+-            return Collections.emptyList();
+-        }
+-        return Collections.unmodifiableList(additional);
+-    }
++    DnsMessage setZ(int z);
+ 
+-    /**
+-     * Adds an answer resource record to this message.
+-     *
+-     * @param answer
+-     *            the answer resource record to be added
+-     * @return the message to allow method chaining
+-     */
+-    public DnsMessage addAnswer(DnsResource answer) {
+-        if (answers == null) {
+-            answers = new LinkedList<DnsResource>();
+-        }
+-        answers.add(answer);
+-        return this;
+-    }
++    int count(DnsSection section);
+ 
+-    /**
+-     * Adds a question to this message.
+-     *
+-     * @param question
+-     *            the question to be added
+-     * @return the message to allow method chaining
+-     */
+-    public DnsMessage addQuestion(DnsQuestion question) {
+-        if (questions == null) {
+-            questions = new LinkedList<DnsQuestion>();
+-        }
+-        questions.add(question);
+-        return this;
+-    }
++    <T extends DnsRecord> T recordAt(DnsSection section);
+ 
+-    /**
+-     * Adds an authority resource record to this message.
+-     *
+-     * @param resource
+-     *            the authority resource record to be added
+-     * @return the message to allow method chaining
+-     */
+-    public DnsMessage addAuthorityResource(DnsResource resource) {
+-        if (authority == null) {
+-            authority = new LinkedList<DnsResource>();
+-        }
+-        authority.add(resource);
+-        return this;
+-    }
++    <T extends DnsRecord> T recordAt(DnsSection section, int index);
+ 
+-    /**
+-     * Adds an additional resource record to this message.
+-     *
+-     * @param resource
+-     *            the additional resource record to be added
+-     * @return the message to allow method chaining
+-     */
+-    public DnsMessage addAdditionalResource(DnsResource resource) {
+-        if (additional == null) {
+-            additional = new LinkedList<DnsResource>();
+-        }
+-        additional.add(resource);
+-        return this;
+-    }
++    DnsMessage setRecord(DnsSection section, DnsRecord record);
+ 
+-    @Override
+-    protected void deallocate() {
+-        // NOOP
+-    }
++    DnsMessage setRecord(DnsSection section, int index, DnsRecord record);
+ 
+-    @Override
+-    public boolean release() {
+-        release(questions());
+-        release(answers());
+-        release(additionalResources());
+-        release(authorityResources());
+-        return super.release();
+-    }
+-
+-    private static void release(List<?> resources) {
+-        for (Object resource: resources) {
+-            ReferenceCountUtil.release(resource);
+-        }
+-    }
++    DnsMessage addRecord(DnsSection section, DnsRecord record);
+ 
+-    @Override
+-    public boolean release(int decrement) {
+-        release(questions(), decrement);
+-        release(answers(), decrement);
+-        release(additionalResources(), decrement);
+-        release(authorityResources(), decrement);
+-        return super.release(decrement);
+-    }
+-
+-    private static void release(List<?> resources, int decrement) {
+-        for (Object resource: resources) {
+-            ReferenceCountUtil.release(resource, decrement);
+-        }
+-    }
++    DnsMessage addRecord(DnsSection section, int index, DnsRecord record);
+ 
+-    @Override
+-    public DnsMessage touch(Object hint) {
+-        touch(questions(), hint);
+-        touch(answers(), hint);
+-        touch(additionalResources(), hint);
+-        touch(authorityResources(), hint);
+-        return this;
+-    }
+-
+-    private static void touch(List<?> resources, Object hint) {
+-        for (Object resource: resources) {
+-            ReferenceCountUtil.touch(resource, hint);
+-        }
+-    }
++    <T extends DnsRecord> T removeRecord(DnsSection section, int index);
++
++    DnsMessage clear(DnsSection section);
+ 
+     @Override
+-    public DnsMessage retain() {
+-        retain(questions());
+-        retain(answers());
+-        retain(additionalResources());
+-        retain(authorityResources());
+-        super.retain();
+-        return this;
+-    }
+-
+-    private static void retain(List<?> resources) {
+-        for (Object resource: resources) {
+-            ReferenceCountUtil.retain(resource);
+-        }
+-    }
++    DnsMessage retain();
+ 
+     @Override
+-    public DnsMessage retain(int increment) {
+-        retain(questions(), increment);
+-        retain(answers(), increment);
+-        retain(additionalResources(), increment);
+-        retain(authorityResources(), increment);
+-        super.retain(increment);
+-        return this;
+-    }
+-
+-    private static void retain(List<?> resources, int increment) {
+-        for (Object resource: resources) {
+-            ReferenceCountUtil.retain(resource, increment);
+-        }
+-    }
++    DnsMessage retain(int increment);
+ 
+     @Override
+-    public DnsMessage touch() {
+-        super.touch();
+-        return this;
+-    }
++    DnsMessage touch();
+ 
+-    protected abstract DnsHeader newHeader(int id);
++    @Override
++    DnsMessage touch(Object hint);
+ }
++
+diff --git a/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsOpCode.java b/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsOpCode.java
+new file mode 100644
+index 0000000..32c4daa
+--- /dev/null
++++ b/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsOpCode.java
+@@ -0,0 +1,94 @@
++/*
++ * Copyright 2016 The Netty Project
++ *
++ * The Netty Project licenses this file to you under the Apache License,
++ * version 2.0 (the "License"); you may not use this file except in compliance
++ * with the License. You may obtain a copy of the License at:
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++ * License for the specific language governing permissions and limitations
++ * under the License.
++ */
++package io.netty.handler.codec.dns;
++
++import io.netty.util.collection.IntObjectHashMap;
++
++/**
++ * Represents the 4 bit opCode field in the DNS header.
++ */
++public final class DnsOpCode implements Comparable<DnsOpCode> {
++
++    public static final DnsOpCode QUERY = new DnsOpCode(0, "QUERY");
++
++    /**
++     * Inverse queries were obsoleted by RFC 3425.
++     */
++    @Deprecated
++    public static final DnsOpCode IQUERY = new DnsOpCode(1, "IQUERY");
++
++    public static final DnsOpCode STATUS = new DnsOpCode(2, "STATUS");
++
++    private static final IntObjectHashMap<DnsOpCode> BY_CODE = new IntObjectHashMap<DnsOpCode>();
++
++    static {
++        BY_CODE.put(QUERY.intValue(), QUERY);
++        BY_CODE.put(IQUERY.intValue(), IQUERY);
++        BY_CODE.put(STATUS.intValue(), STATUS);
++    }
++
++    public static DnsOpCode valueOf(int intValue) {
++        DnsOpCode result = BY_CODE.get(intValue);
++        if (result == null) {
++            return new DnsOpCode(intValue, "UNKNOWN");
++        }
++        return result;
++    }
++
++    public static DnsOpCode valueOf(int intValue, String name) {
++        return new DnsOpCode(intValue, name);
++    }
++
++    private final int intValue;
++    private final String name;
++
++    private DnsOpCode(int intValue, String name) {
++        if ((intValue & 0xf) != intValue) {
++            throw new IllegalArgumentException("intValue: " + intValue + " (expected: 0 ~ 15)");
++        }
++        this.intValue = intValue;
++        this.name = name;
++    }
++
++    public int intValue() {
++        return intValue;
++    }
++
++    public String name() {
++        return name;
++    }
++
++    @Override
++    public int compareTo(DnsOpCode o) {
++        return intValue() - o.intValue();
++    }
++
++    @Override
++    public int hashCode() {
++        return intValue;
++    }
++
++    @Override
++    public boolean equals(Object o) {
++        return o instanceof DnsOpCode && ((DnsOpCode) o).intValue == intValue;
++    }
++
++    @Override
++    public String toString() {
++        return name;
++    }
++}
++
+diff --git a/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsQuery.java b/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsQuery.java
+index c212c03..4938db4 100644
+--- a/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsQuery.java
++++ b/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsQuery.java
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright 2013 The Netty Project
++ * Copyright 2016 The Netty Project
+  *
+  * The Netty Project licenses this file to you under the Apache License,
+  * version 2.0 (the "License"); you may not use this file except in compliance
+@@ -15,89 +15,47 @@
+  */
+ package io.netty.handler.codec.dns;
+ 
+-import java.net.InetSocketAddress;
+-
+ /**
+- * A DNS query packet which is sent to a server to receive a DNS response packet
+- * with information answering a DnsQuery's questions.
++ * A DNS query message.
+  */
+-public class DnsQuery extends DnsMessage {
++public interface DnsQuery extends DnsMessage {
+ 
+-    private final InetSocketAddress recipient;
++    @Override
++    DnsQuery setId(int id);
+ 
+-    /**
+-     * Constructs a DNS query. By default recursion will be toggled on.
+-     */
+-    public DnsQuery(int id, InetSocketAddress recipient) {
+-        super(id);
+-        if (recipient == null) {
+-            throw new NullPointerException("recipient");
+-        }
+-        this.recipient = recipient;
+-    }
++    @Override
++    DnsQuery setOpCode(DnsOpCode opCode);
+ 
+-    /**
+-     * Return the {@link InetSocketAddress} of the recipient of the {@link DnsQuery}
+-     */
+-    public InetSocketAddress recipient() {
+-        return recipient;
+-    }
++    @Override
++    DnsQuery setRecursionDesired(boolean recursionDesired);
+ 
+     @Override
+-    public DnsQuery addAnswer(DnsResource answer) {
+-        super.addAnswer(answer);
+-        return this;
+-    }
++    DnsQuery setZ(int z);
+ 
+     @Override
+-    public DnsQuery addQuestion(DnsQuestion question) {
+-        super.addQuestion(question);
+-        return this;
+-    }
++    DnsQuery setRecord(DnsSection section, DnsRecord record);
+ 
+     @Override
+-    public DnsQuery addAuthorityResource(DnsResource resource) {
+-        super.addAuthorityResource(resource);
+-        return this;
+-    }
++    DnsQuery setRecord(DnsSection section, int index, DnsRecord record);
+ 
+     @Override
+-    public DnsQuery addAdditionalResource(DnsResource resource) {
+-        super.addAdditionalResource(resource);
+-        return this;
+-    }
++    DnsQuery addRecord(DnsSection section, DnsRecord record);
+ 
+     @Override
+-    public DnsQuery touch(Object hint) {
+-        super.touch(hint);
+-        return this;
+-    }
++    DnsQuery addRecord(DnsSection section, int index, DnsRecord record);
+ 
+     @Override
+-    public DnsQuery retain() {
+-        super.retain();
+-        return this;
+-    }
++    DnsQuery clear(DnsSection section);
+ 
+     @Override
+-    public DnsQuery retain(int increment) {
+-        super.retain(increment);
+-        return this;
+-    }
++    DnsQuery retain();
+ 
+     @Override
+-    public DnsQuery touch() {
+-        super.touch();
+-        return this;
+-    }
++    DnsQuery retain(int increment);
+ 
+     @Override
+-    public DnsQueryHeader header() {
+-        return (DnsQueryHeader) super.header();
+-    }
++    DnsQuery touch();
+ 
+     @Override
+-    protected DnsQueryHeader newHeader(int id) {
+-        return new DnsQueryHeader(this, id);
+-    }
++    DnsQuery touch(Object hint);
+ }
+diff --git a/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsQueryEncoder.java b/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsQueryEncoder.java
+deleted file mode 100644
+index 2cdc562..0000000
+--- a/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsQueryEncoder.java
++++ /dev/null
+@@ -1,116 +0,0 @@
+-/*
+- * Copyright 2013 The Netty Project
+- *
+- * The Netty Project licenses this file to you under the Apache License,
+- * version 2.0 (the "License"); you may not use this file except in compliance
+- * with the License. You may obtain a copy of the License at:
+- *
+- *   http://www.apache.org/licenses/LICENSE-2.0
+- *
+- * Unless required by applicable law or agreed to in writing, software
+- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+- * License for the specific language governing permissions and limitations
+- * under the License.
+- */
+-package io.netty.handler.codec.dns;
+-
+-import io.netty.buffer.ByteBuf;
+-import io.netty.channel.ChannelHandler;
+-import io.netty.channel.ChannelHandlerContext;
+-import io.netty.channel.socket.DatagramPacket;
+-import io.netty.handler.codec.MessageToMessageEncoder;
+-import io.netty.util.CharsetUtil;
+-import io.netty.util.internal.StringUtil;
+-
+-import java.nio.charset.Charset;
+-import java.util.List;
+-
+-/**
+- * DnsQueryEncoder accepts {@link DnsQuery} and encodes to {@link ByteBuf}. This
+- * class also contains methods for encoding parts of DnsQuery's such as the
+- * header and questions.
+- */
+-@ChannelHandler.Sharable
+-public class DnsQueryEncoder extends MessageToMessageEncoder<DnsQuery> {
+-
+-    @Override
+-    protected void encode(ChannelHandlerContext ctx, DnsQuery query, List<Object> out) throws Exception {
+-        ByteBuf buf = ctx.alloc().buffer();
+-        encodeHeader(query.header(), buf);
+-        List<DnsQuestion> questions = query.questions();
+-        for (DnsQuestion question : questions) {
+-            encodeQuestion(question, CharsetUtil.US_ASCII, buf);
+-        }
+-        for (DnsResource resource: query.additionalResources()) {
+-            encodeResource(resource, CharsetUtil.US_ASCII, buf);
+-        }
+-        out.add(new DatagramPacket(buf, query.recipient(), null));
+-    }
+-
+-    /**
+-     * Encodes the information in a {@link DnsHeader} and writes it to the
+-     * specified {@link ByteBuf}. The header is always 12 bytes long.
+-     *
+-     * @param header
+-     *            the query header being encoded
+-     * @param buf
+-     *            the buffer the encoded data should be written to
+-     */
+-    private static void encodeHeader(DnsHeader header, ByteBuf buf) {
+-        buf.writeShort(header.id());
+-        int flags = 0;
+-        flags |= header.type() << 15;
+-        flags |= header.opcode() << 14;
+-        flags |= header.isRecursionDesired() ? 1 << 8 : 0;
+-        buf.writeShort(flags);
+-        buf.writeShort(header.questionCount());
+-        buf.writeShort(0); // answerCount
+-        buf.writeShort(0); // authorityResourceCount
+-        buf.writeShort(header.additionalResourceCount());
+-    }
+-
+-    /**
+-     * Encodes the information in a {@link DnsQuestion} and writes it to the
+-     * specified {@link ByteBuf}.
+-     *
+-     * @param question
+-     *            the question being encoded
+-     * @param charset
+-     *            charset names are encoded in
+-     * @param buf
+-     *            the buffer the encoded data should be written to
+-     */
+-    private static void encodeQuestion(DnsQuestion question, Charset charset, ByteBuf buf) {
+-        encodeName(question.name(), charset, buf);
+-        buf.writeShort(question.type().intValue());
+-        buf.writeShort(question.dnsClass().intValue());
+-    }
+-
+-    private static void encodeResource(DnsResource resource, Charset charset, ByteBuf buf) {
+-        encodeName(resource.name(), charset, buf);
+-
+-        buf.writeShort(resource.type().intValue());
+-        buf.writeShort(resource.dnsClass().intValue());
+-        buf.writeInt((int) resource.timeToLive());
+-
+-        ByteBuf content = resource.content();
+-        int contentLen = content.readableBytes();
+-
+-        buf.writeShort(contentLen);
+-        buf.writeBytes(content, content.readerIndex(), contentLen);
+-    }
+-
+-    private static void encodeName(String name, Charset charset, ByteBuf buf) {
+-        String[] parts = StringUtil.split(name, '.');
+-        for (String part: parts) {
+-            final int partLen = part.length();
+-            if (partLen == 0) {
+-                continue;
+-            }
+-            buf.writeByte(partLen);
+-            buf.writeBytes(part.getBytes(charset));
+-        }
+-        buf.writeByte(0); // marks end of name field
+-    }
+-}
+diff --git a/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsQueryHeader.java b/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsQueryHeader.java
+deleted file mode 100644
+index 65d60e9..0000000
+--- a/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsQueryHeader.java
++++ /dev/null
+@@ -1,84 +0,0 @@
+-/*
+- * Copyright 2013 The Netty Project
+- *
+- * The Netty Project licenses this file to you under the Apache License,
+- * version 2.0 (the "License"); you may not use this file except in compliance
+- * with the License. You may obtain a copy of the License at:
+- *
+- *   http://www.apache.org/licenses/LICENSE-2.0
+- *
+- * Unless required by applicable law or agreed to in writing, software
+- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+- * License for the specific language governing permissions and limitations
+- * under the License.
+- */
+-package io.netty.handler.codec.dns;
+-
+-/**
+- * The DNS query header class which is used to represent the 12 byte header in a
+- * {@link DnsQuery}.
+- */
+-public final class DnsQueryHeader extends DnsHeader {
+-
+-    /**
+-     * Constructor for a DNS packet query header. The id is user generated and
+-     * will be replicated in the response packet by the server.
+-     *
+-     * @param parent the {@link DnsMessage} this header belongs to
+-     * @param id     a 2 bit unsigned identification number for this query
+-     */
+-    public DnsQueryHeader(DnsMessage parent, int id) {
+-        super(parent);
+-        setId(id);
+-        setRecursionDesired(true);
+-    }
+-
+-    /**
+-     * Returns the {@link DnsMessage} type. This will always return
+-     * {@code TYPE_QUERY}.
+-     */
+-    @Override
+-    public int type() {
+-        return TYPE_QUERY;
+-    }
+-
+-    /**
+-     * Sets the {@link DnsHeader} type. Must be {@code TYPE_RESPONSE}.
+-     *
+-     * @param type message type
+-     * @return the header to allow method chaining
+-     */
+-    @Override
+-    public DnsQueryHeader setType(int type) {
+-        if (type != TYPE_QUERY) {
+-            throw new IllegalArgumentException("type cannot be anything but TYPE_QUERY (0) for a query header.");
+-        }
+-        super.setType(type);
+-        return this;
+-    }
+-
+-    @Override
+-    public DnsQueryHeader setId(int id) {
+-        super.setId(id);
+-        return this;
+-    }
+-
+-    @Override
+-    public DnsQueryHeader setRecursionDesired(boolean recursionDesired) {
+-        super.setRecursionDesired(recursionDesired);
+-        return this;
+-    }
+-
+-    @Override
+-    public DnsQueryHeader setOpcode(int opcode) {
+-        super.setOpcode(opcode);
+-        return this;
+-    }
+-
+-    @Override
+-    public DnsQueryHeader setZ(int z) {
+-        super.setZ(z);
+-        return this;
+-    }
+-}
+diff --git a/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsQuestion.java b/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsQuestion.java
+index 4b7df6b..a2f6401 100644
+--- a/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsQuestion.java
++++ b/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsQuestion.java
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright 2013 The Netty Project
++ * Copyright 2016 The Netty Project
+  *
+  * The Netty Project licenses this file to you under the Apache License,
+  * version 2.0 (the "License"); you may not use this file except in compliance
+@@ -15,58 +15,9 @@
+  */
+ package io.netty.handler.codec.dns;
+ 
+-import static io.netty.handler.codec.dns.DnsClass.IN;
+-
+ /**
+- * The DNS question class which represents a question being sent to a server via
+- * a query, or the question being duplicated and sent back in a response.
+- * Usually a message contains a single question, and DNS servers often don't
+- * support multiple questions in a single query.
++ * The DNS question record.
+  */
+-public final class DnsQuestion extends DnsEntry {
+-
+-    /**
+-     * Constructs a question with the default class IN (Internet).
+-     *
+-     * @param name
+-     *            the domain name being queried i.e. "www.example.com"
+-     * @param type
+-     *            the question type, which represents the type of
+-     *            {@link DnsResource} record that should be returned
+-     */
+-    public DnsQuestion(String name, DnsType type) {
+-        this(name, type, IN);
+-    }
+-
+-    /**
+-     * Constructs a question with the given class.
+-     *
+-     * @param name
+-     *            the domain name being queried i.e. "www.example.com"
+-     * @param type
+-     *            the question type, which represents the type of
+-     *            {@link DnsResource} record that should be returned
+-     * @param qClass
+-     *            the class of a DNS record
+-     */
+-    public DnsQuestion(String name, DnsType type, DnsClass qClass) {
+-        super(name, type, qClass);
+-
+-        if (name.isEmpty()) {
+-            throw new IllegalArgumentException("name must not be left blank.");
+-        }
+-    }
+-
+-    @Override
+-    public boolean equals(Object other) {
+-        if (!(other instanceof DnsQuestion)) {
+-            return false;
+-        }
+-        return super.equals(other);
+-    }
+-
+-    @Override
+-    public int hashCode() {
+-        return super.hashCode();
+-    }
++public interface DnsQuestion extends DnsRecord {
+ }
++
+diff --git a/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsRawRecord.java b/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsRawRecord.java
+new file mode 100644
+index 0000000..8866e29
+--- /dev/null
++++ b/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsRawRecord.java
+@@ -0,0 +1,25 @@
++/*
++ * Copyright 2016 The Netty Project
++ *
++ * The Netty Project licenses this file to you under the Apache License,
++ * version 2.0 (the "License"); you may not use this file except in compliance
++ * with the License. You may obtain a copy of the License at:
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++ * License for the specific language governing permissions and limitations
++ * under the License.
++ */
++package io.netty.handler.codec.dns;
++
++import io.netty.buffer.ByteBufHolder;
++
++/**
++ * A raw DNS record whose RDATA is stored as a {@link io.netty.buffer.ByteBuf}.
++ */
++public interface DnsRawRecord extends DnsRecord, ByteBufHolder {
++}
++
+diff --git a/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsRecord.java b/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsRecord.java
+new file mode 100644
+index 0000000..e9b17a2
+--- /dev/null
++++ b/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsRecord.java
+@@ -0,0 +1,45 @@
++/*
++ * Copyright 2016 The Netty Project
++ *
++ * The Netty Project licenses this file to you under the Apache License,
++ * version 2.0 (the "License"); you may not use this file except in compliance
++ * with the License. You may obtain a copy of the License at:
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++ * License for the specific language governing permissions and limitations
++ * under the License.
++ */
++package io.netty.handler.codec.dns;
++
++/**
++ * A DNS record as defined in RFC 1035.
++ */
++public interface DnsRecord {
++
++    /**
++     * Returns the domain name of this record.
++     */
++    String name();
++
++    /**
++     * Returns the {@link DnsRecordType} of this record.
++     */
++    DnsRecordType type();
++
++    /**
++     * Returns the class of this record. This is an unsigned 16-bit integer.
++     */
++    int dnsClass();
++
++    /**
++     * Returns the time to live value of this record.
++     * <p>
++     * For questions this value should be 0.
++     */
++    long timeToLive();
++}
++
+diff --git a/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsRecordDecoder.java b/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsRecordDecoder.java
+new file mode 100644
+index 0000000..3f27238
+--- /dev/null
++++ b/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsRecordDecoder.java
+@@ -0,0 +1,29 @@
++/*
++ * Copyright 2016 The Netty Project
++ *
++ * The Netty Project licenses this file to you under the Apache License,
++ * version 2.0 (the "License"); you may not use this file except in compliance
++ * with the License. You may obtain a copy of the License at:
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++ * License for the specific language governing permissions and limitations
++ * under the License.
++ */
++package io.netty.handler.codec.dns;
++
++import io.netty.buffer.ByteBuf;
++
++/**
++ * Decodes {@link DnsRecord}s from a DNS message.
++ */
++public interface DnsRecordDecoder {
++
++    DnsQuestion decodeQuestion(ByteBuf in) throws Exception;
++
++    DnsRecord decodeRecord(ByteBuf in) throws Exception;
++}
++
+diff --git a/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsRecordEncoder.java b/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsRecordEncoder.java
+new file mode 100644
+index 0000000..899fe23
+--- /dev/null
++++ b/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsRecordEncoder.java
+@@ -0,0 +1,29 @@
++/*
++ * Copyright 2016 The Netty Project
++ *
++ * The Netty Project licenses this file to you under the Apache License,
++ * version 2.0 (the "License"); you may not use this file except in compliance
++ * with the License. You may obtain a copy of the License at:
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++ * License for the specific language governing permissions and limitations
++ * under the License.
++ */
++package io.netty.handler.codec.dns;
++
++import io.netty.buffer.ByteBuf;
++
++/**
++ * Encodes {@link DnsRecord}s into a DNS message.
++ */
++public interface DnsRecordEncoder {
++
++    void encodeQuestion(DnsQuestion question, ByteBuf out) throws Exception;
++
++    void encodeRecord(DnsRecord record, ByteBuf out) throws Exception;
++}
++
+diff --git a/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsRecordType.java b/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsRecordType.java
+new file mode 100644
+index 0000000..59174d2
+--- /dev/null
++++ b/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsRecordType.java
+@@ -0,0 +1,198 @@
++/*
++ * Copyright 2014 The Netty Project
++ *
++ * The Netty Project licenses this file to you under the Apache License,
++ * version 2.0 (the "License"); you may not use this file except in compliance
++ * with the License. You may obtain a copy of the License at:
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++ * License for the specific language governing permissions and limitations
++ * under the License.
++ */
++package io.netty.handler.codec.dns;
++
++import io.netty.util.collection.IntObjectHashMap;
++
++import java.util.HashMap;
++import java.util.Map;
++
++/**
++ * Represents a DNS record type.
++ */
++public final class DnsRecordType implements Comparable<DnsRecordType> {
++
++    /**
++     * Address record RFC 1035 Returns a 32-bit IPv4 address, most commonly used
++     * to map hostnames to an IP address of the host, but also used for DNSBLs,
++     * storing subnet masks in RFC 1101, etc.
++     */
++    public static final DnsRecordType A = new DnsRecordType(0x0001, "A");
++
++    /**
++     * Name server record RFC 1035 Delegates a DNS zone to use the given
++     * authoritative name servers
++     */
++    public static final DnsRecordType NS = new DnsRecordType(0x0002, "NS");
++
++    /**
++     * Canonical name record RFC 1035 Alias of one name to another: the DNS
++     * lookup will continue by retrying the lookup with the new name.
++     */
++    public static final DnsRecordType CNAME = new DnsRecordType(0x0005, "CNAME");
++
++    /**
++     * Start of [a zone of] authority record RFC 1035 and RFC 2308 Specifies
++     * authoritative information about a DNS zone, including the primary name
++     * server, the email of the domain administrator, the domain serial number,
++     * and several timers relating to refreshing the zone.
++     */
++    public static final DnsRecordType SOA = new DnsRecordType(0x0006, "SOA");
++
++    /**
++     * Pointer record RFC 1035 Pointer to a canonical name.
++     */
++    public static final DnsRecordType PTR = new DnsRecordType(0x000c, "PTR");
++
++    /**
++     * Mail exchange record RFC 1035 Maps a domain name to a list of message
++     * transfer agents for that domain.
++     */
++    public static final DnsRecordType MX = new DnsRecordType(0x000f, "MX");
++
++    /**
++     * Text record RFC 1035.
++     */
++    public static final DnsRecordType TXT = new DnsRecordType(0x0010, "TXT");
++
++    public static final DnsRecordType RP = new DnsRecordType(0x0011, "RP");
++    public static final DnsRecordType AFSDB = new DnsRecordType(0x0012, "AFSDB");
++    public static final DnsRecordType SIG = new DnsRecordType(0x0018, "SIG");
++    public static final DnsRecordType KEY = new DnsRecordType(0x0019, "KEY");
++    public static final DnsRecordType AAAA = new DnsRecordType(0x001c, "AAAA");
++    public static final DnsRecordType LOC = new DnsRecordType(0x001d, "LOC");
++    public static final DnsRecordType SRV = new DnsRecordType(0x0021, "SRV");
++    public static final DnsRecordType NAPTR = new DnsRecordType(0x0023, "NAPTR");
++    public static final DnsRecordType KX = new DnsRecordType(0x0024, "KX");
++    public static final DnsRecordType CERT = new DnsRecordType(0x0025, "CERT");
++    public static final DnsRecordType DNAME = new DnsRecordType(0x0027, "DNAME");
++
++    /**
++     * Option record RFC 2671 This is a pseudo DNS record type needed to support
++     * EDNS.
++     */
++    public static final DnsRecordType OPT = new DnsRecordType(0x0029, "OPT");
++
++    public static final DnsRecordType APL = new DnsRecordType(0x002a, "APL");
++    public static final DnsRecordType DS = new DnsRecordType(0x002b, "DS");
++    public static final DnsRecordType SSHFP = new DnsRecordType(0x002c, "SSHFP");
++    public static final DnsRecordType IPSECKEY = new DnsRecordType(0x002d, "IPSECKEY");
++    public static final DnsRecordType RRSIG = new DnsRecordType(0x002e, "RRSIG");
++    public static final DnsRecordType NSEC = new DnsRecordType(0x002f, "NSEC");
++    public static final DnsRecordType DNSKEY = new DnsRecordType(0x0030, "DNSKEY");
++    public static final DnsRecordType DHCID = new DnsRecordType(0x0031, "DHCID");
++    public static final DnsRecordType NSEC3 = new DnsRecordType(0x0032, "NSEC3");
++    public static final DnsRecordType NSEC3PARAM = new DnsRecordType(0x0033, "NSEC3PARAM");
++    public static final DnsRecordType TLSA = new DnsRecordType(0x0034, "TLSA");
++    public static final DnsRecordType HIP = new DnsRecordType(0x0037, "HIP");
++    public static final DnsRecordType SPF = new DnsRecordType(0x0063, "SPF");
++    public static final DnsRecordType TKEY = new DnsRecordType(0x00f9, "TKEY");
++    public static final DnsRecordType TSIG = new DnsRecordType(0x00fa, "TSIG");
++    public static final DnsRecordType IXFR = new DnsRecordType(0x00fb, "IXFR");
++    public static final DnsRecordType AXFR = new DnsRecordType(0x00fc, "AXFR");
++    public static final DnsRecordType ANY = new DnsRecordType(0x00ff, "ANY");
++    public static final DnsRecordType CAA = new DnsRecordType(0x0101, "CAA");
++    public static final DnsRecordType TA = new DnsRecordType(0x8000, "TA");
++    public static final DnsRecordType DLV = new DnsRecordType(0x8001, "DLV");
++
++    private static final Map<String, DnsRecordType> BY_NAME = new HashMap<String, DnsRecordType>();
++    private static final IntObjectHashMap<DnsRecordType> BY_TYPE = new IntObjectHashMap<DnsRecordType>();
++    private static final String EXPECTED;
++
++    static {
++        DnsRecordType[] all = {
++                A, NS, CNAME, SOA, PTR, MX, TXT, RP, AFSDB, SIG, KEY, AAAA, LOC, SRV, NAPTR, KX, CERT, DNAME, OPT, APL,
++                DS, SSHFP, IPSECKEY, RRSIG, NSEC, DNSKEY, DHCID, NSEC3, NSEC3PARAM, TLSA, HIP, SPF, TKEY, TSIG, IXFR,
++                AXFR, ANY, CAA, TA, DLV
++        };
++
++        StringBuilder expected = new StringBuilder(512);
++        expected.append(" (expected: ");
++
++        for (DnsRecordType type: all) {
++            BY_NAME.put(type.name(), type);
++            BY_TYPE.put(type.intValue(), type);
++            expected.append(type.name());
++            expected.append('(');
++            expected.append(type.intValue());
++            expected.append("), ");
++        }
++
++        expected.setLength(expected.length() - 2);
++        expected.append(')');
++        EXPECTED = expected.toString();
++    }
++
++    public static DnsRecordType valueOf(int intValue) {
++        DnsRecordType result = BY_TYPE.get(intValue);
++        if (result == null) {
++            return new DnsRecordType(intValue, "UNKNOWN");
++        }
++        return result;
++    }
++
++    public static DnsRecordType valueOf(String name) {
++        DnsRecordType result = BY_NAME.get(name);
++        if (result == null) {
++            throw new IllegalArgumentException("name: " + name + EXPECTED);
++        }
++        return result;
++    }
++
++    public static DnsRecordType valueOf(int intValue, String name) {
++        return new DnsRecordType(intValue, name);
++    }
++
++    private final int intValue;
++    private final String name;
++
++    private DnsRecordType(int intValue, String name) {
++        if ((intValue & 0xffff) != intValue) {
++            throw new IllegalArgumentException("intValue: " + intValue + " (expected: 0 ~ 65535)");
++        }
++        this.intValue = intValue;
++        this.name = name;
++    }
++
++    public String name() {
++        return name;
++    }
++
++    public int intValue() {
++        return intValue;
++    }
++
++    @Override
++    public int hashCode() {
++        return intValue;
++    }
++
++    @Override
++    public boolean equals(Object o) {
++        return o instanceof DnsRecordType && ((DnsRecordType) o).intValue == intValue;
++    }
++
++    @Override
++    public int compareTo(DnsRecordType o) {
++        return intValue() - o.intValue();
++    }
++
++    @Override
++    public String toString() {
++        return name;
++    }
++}
++
+diff --git a/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsResource.java b/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsResource.java
+deleted file mode 100644
+index 968a149..0000000
+--- a/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsResource.java
++++ /dev/null
+@@ -1,119 +0,0 @@
+-/*
+- * Copyright 2013 The Netty Project
+- *
+- * The Netty Project licenses this file to you under the Apache License,
+- * version 2.0 (the "License"); you may not use this file except in compliance
+- * with the License. You may obtain a copy of the License at:
+- *
+- *   http://www.apache.org/licenses/LICENSE-2.0
+- *
+- * Unless required by applicable law or agreed to in writing, software
+- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+- * License for the specific language governing permissions and limitations
+- * under the License.
+- */
+-package io.netty.handler.codec.dns;
+-
+-import io.netty.buffer.ByteBuf;
+-import io.netty.buffer.ByteBufHolder;
+-
+-/**
+- * Represents any resource record (answer, authority, or additional resource
+- * records).
+- */
+-public final class DnsResource extends DnsEntry implements ByteBufHolder {
+-
+-    private final long ttl;
+-    private final ByteBuf content;
+-
+-    /**
+-     * Constructs a resource record.
+-     *
+-     * @param name
+-     *            the domain name
+-     * @param type
+-     *            the type of record being returned
+-     * @param aClass
+-     *            the class for this resource record
+-     * @param ttl
+-     *            the time to live after reading
+-     * @param content
+-     *            the data contained in this record
+-     */
+-    public DnsResource(String name, DnsType type, DnsClass aClass, long ttl, ByteBuf content) {
+-        super(name, type, aClass);
+-        this.ttl = ttl;
+-        this.content = content;
+-    }
+-
+-    /**
+-     * Returns the time to live after reading for this resource record.
+-     */
+-    public long timeToLive() {
+-        return ttl;
+-    }
+-
+-    /**
+-     * Returns the data contained in this resource record.
+-     */
+-    @Override
+-    public ByteBuf content() {
+-        return content;
+-    }
+-
+-    /**
+-     * Returns a deep copy of this resource record.
+-     */
+-    @Override
+-    public DnsResource copy() {
+-        return new DnsResource(name(), type(), dnsClass(), ttl, content.copy());
+-    }
+-
+-    /**
+-     * Returns a duplicate of this resource record.
+-     */
+-    @Override
+-    public DnsResource duplicate() {
+-        return new DnsResource(name(), type(), dnsClass(), ttl, content.duplicate());
+-    }
+-
+-    @Override
+-    public int refCnt() {
+-        return content.refCnt();
+-    }
+-
+-    @Override
+-    public DnsResource retain() {
+-        content.retain();
+-        return this;
+-    }
+-
+-    @Override
+-    public DnsResource retain(int increment) {
+-        content.retain(increment);
+-        return this;
+-    }
+-
+-    @Override
+-    public boolean release() {
+-        return content.release();
+-    }
+-
+-    @Override
+-    public boolean release(int decrement) {
+-        return content.release(decrement);
+-    }
+-
+-    @Override
+-    public DnsResource touch() {
+-        content.touch();
+-        return this;
+-    }
+-
+-    @Override
+-    public DnsResource touch(Object hint) {
+-        content.touch(hint);
+-        return this;
+-    }
+-}
+diff --git a/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsResponse.java b/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsResponse.java
+index b733614..58a90c6 100644
+--- a/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsResponse.java
++++ b/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsResponse.java
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright 2013 The Netty Project
++ * Copyright 2016 The Netty Project
+  *
+  * The Netty Project licenses this file to you under the Apache License,
+  * version 2.0 (the "License"); you may not use this file except in compliance
+@@ -15,86 +15,63 @@
+  */
+ package io.netty.handler.codec.dns;
+ 
+-import java.net.InetSocketAddress;
+-
+ /**
+- * A DNS response packet which is sent to a client after a server receives a
+- * query.
++ * A DNS response message.
+  */
+-public final class DnsResponse extends DnsMessage {
++public interface DnsResponse extends DnsMessage {
++
++    boolean isAuthoritativeAnswer();
++
++    DnsResponse setAuthoritativeAnswer(boolean authoritativeAnswer);
++
++    boolean isTruncated();
++
++    DnsResponse setTruncated(boolean truncated);
++
++    boolean isRecursionAvailable();
+ 
+-    private final InetSocketAddress sender;
++    DnsResponse setRecursionAvailable(boolean recursionAvailable);
+ 
+-    public DnsResponse(int id, InetSocketAddress sender) {
+-        super(id);
+-        if (sender == null) {
+-            throw new NullPointerException("sender");
+-        }
+-        this.sender = sender;
+-    }
++    DnsResponseCode code();
+ 
+-    /**
+-     * The {@link InetSocketAddress} of the sender of this {@link DnsResponse}
+-     */
+-    public InetSocketAddress sender() {
+-        return sender;
+-    }
++    DnsResponse setCode(DnsResponseCode code);
++
++    @Override
++    DnsResponse setId(int id);
++
++    @Override
++    DnsResponse setOpCode(DnsOpCode opCode);
++
++    @Override
++    DnsResponse setRecursionDesired(boolean recursionDesired);
+ 
+     @Override
+-    public DnsResponse addAnswer(DnsResource answer) {
+-        super.addAnswer(answer);
+-        return this;
+-    }
++    DnsResponse setZ(int z);
+ 
+     @Override
+-    public DnsResponse addQuestion(DnsQuestion question) {
+-        super.addQuestion(question);
+-        return this;
+-    }
++    DnsResponse setRecord(DnsSection section, DnsRecord record);
+ 
+     @Override
+-    public DnsResponse addAuthorityResource(DnsResource resource) {
+-        super.addAuthorityResource(resource);
+-        return this;
+-    }
++    DnsResponse setRecord(DnsSection section, int index, DnsRecord record);
+ 
+     @Override
+-    public DnsResponse addAdditionalResource(DnsResource resource) {
+-        super.addAdditionalResource(resource);
+-        return this;
+-    }
++    DnsResponse addRecord(DnsSection section, DnsRecord record);
+ 
+     @Override
+-    public DnsResponse touch(Object hint) {
+-        super.touch(hint);
+-        return this;
+-    }
++    DnsResponse addRecord(DnsSection section, int index, DnsRecord record);
+ 
+     @Override
+-    public DnsResponse retain() {
+-        super.retain();
+-        return this;
+-    }
++    DnsResponse clear(DnsSection section);
+ 
+     @Override
+-    public DnsResponse retain(int increment) {
+-        super.retain(increment);
+-        return this;
+-    }
++    DnsResponse retain();
+ 
+     @Override
+-    public DnsResponse touch() {
+-        super.touch();
+-        return this;
+-    }
++    DnsResponse retain(int increment);
+ 
+     @Override
+-    public DnsResponseHeader header() {
+-        return (DnsResponseHeader) super.header();
+-    }
++    DnsResponse touch();
+ 
+     @Override
+-    protected DnsResponseHeader newHeader(int id) {
+-        return new DnsResponseHeader(this, id);
+-    }
++    DnsResponse touch(Object hint);
+ }
+diff --git a/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsResponseCode.java b/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsResponseCode.java
+index c2a7b4b..8089740 100644
+--- a/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsResponseCode.java
++++ b/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsResponseCode.java
+@@ -96,8 +96,8 @@ public final class DnsResponseCode implements Comparable<DnsResponseCode> {
+      */
+     public static final DnsResponseCode BADTIME = new DnsResponseCode(14, "bad timestamp");
+ 
+-    private final int errorCode;
+-    private final String message;
++    private final int intValue;
++    private final String name;
+ 
+     /**
+      * Returns the {@link DnsResponseCode} that corresponds with the given
+@@ -140,20 +140,30 @@ public final class DnsResponseCode implements Comparable<DnsResponseCode> {
+             case 14:
+                 return BADTIME;
+             default:
+-                return new DnsResponseCode(responseCode, null);
++                return new DnsResponseCode(responseCode, "UNKNOWN");
+         }
+     }
+ 
+     public DnsResponseCode(int errorCode, String message) {
+-        this.errorCode = errorCode;
+-        this.message = message;
++        if ((errorCode & 0xf) != errorCode) {
++            throw new IllegalArgumentException("errorCode: " + errorCode + " (expected: 0 ~ 15)");
++        }
++        intValue = errorCode;
++        name = message;
+     }
+ 
+     /**
+      * Returns the error code for this {@link DnsResponseCode}.
+      */
+     public int code() {
+-        return errorCode;
++        return intValue;
++    }
++
++    /**
++     * Returns the string representation of this response code.
++     */
++    public String name() {
++        return name;
+     }
+ 
+     @Override
+@@ -163,7 +173,7 @@ public final class DnsResponseCode implements Comparable<DnsResponseCode> {
+ 
+     @Override
+     public int hashCode() {
+-        return code();
++        return intValue;
+     }
+ 
+     /**
+@@ -183,9 +193,6 @@ public final class DnsResponseCode implements Comparable<DnsResponseCode> {
+      */
+     @Override
+     public String toString() {
+-        if (message == null) {
+-            return "DnsResponseCode(" + errorCode + ')';
+-        }
+-        return "DnsResponseCode(" + errorCode + ", " + message + ')';
++        return name;
+     }
+ }
+diff --git a/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsResponseDecoder.java b/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsResponseDecoder.java
+deleted file mode 100644
+index 957055a..0000000
+--- a/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsResponseDecoder.java
++++ /dev/null
+@@ -1,172 +0,0 @@
+-/*
+- * Copyright 2013 The Netty Project
+- *
+- * The Netty Project licenses this file to you under the Apache License,
+- * version 2.0 (the "License"); you may not use this file except in compliance
+- * with the License. You may obtain a copy of the License at:
+- *
+- *   http://www.apache.org/licenses/LICENSE-2.0
+- *
+- * Unless required by applicable law or agreed to in writing, software
+- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+- * License for the specific language governing permissions and limitations
+- * under the License.
+- */
+-package io.netty.handler.codec.dns;
+-
+-import io.netty.buffer.ByteBuf;
+-import io.netty.channel.ChannelHandler;
+-import io.netty.channel.ChannelHandlerContext;
+-import io.netty.channel.socket.DatagramPacket;
+-import io.netty.handler.codec.CorruptedFrameException;
+-import io.netty.handler.codec.MessageToMessageDecoder;
+-import io.netty.util.CharsetUtil;
+-
+-import java.util.List;
+-
+-/**
+- * DnsResponseDecoder accepts {@link io.netty.channel.socket.DatagramPacket} and encodes to
+- * {@link DnsResponse}. This class also contains methods for decoding parts of
+- * DnsResponses such as questions and resource records.
+- */
+-@ChannelHandler.Sharable
+-public class DnsResponseDecoder extends MessageToMessageDecoder<DatagramPacket> {
+-
+-    @Override
+-    protected void decode(ChannelHandlerContext ctx, DatagramPacket packet, List<Object> out) throws Exception {
+-        ByteBuf buf = packet.content();
+-
+-        int id = buf.readUnsignedShort();
+-
+-        DnsResponse response = new DnsResponse(id, packet.sender());
+-        DnsResponseHeader header = response.header();
+-        int flags = buf.readUnsignedShort();
+-        header.setType(flags >> 15);
+-        header.setOpcode(flags >> 11 & 0xf);
+-        header.setRecursionDesired((flags >> 8 & 1) == 1);
+-        header.setAuthoritativeAnswer((flags >> 10 & 1) == 1);
+-        header.setTruncated((flags >> 9 & 1) == 1);
+-        header.setRecursionAvailable((flags >> 7 & 1) == 1);
+-        header.setZ(flags >> 4 & 0x7);
+-        header.setResponseCode(DnsResponseCode.valueOf(flags & 0xf));
+-
+-        int questions = buf.readUnsignedShort();
+-        int answers = buf.readUnsignedShort();
+-        int authorities = buf.readUnsignedShort();
+-        int additionals = buf.readUnsignedShort();
+-
+-        for (int i = 0; i < questions; i++) {
+-            response.addQuestion(decodeQuestion(buf));
+-        }
+-        if (header.responseCode() != DnsResponseCode.NOERROR) {
+-            // response code for error
+-            out.add(response);
+-            return;
+-        }
+-        boolean release = true;
+-        try {
+-            for (int i = 0; i < answers; i++) {
+-                response.addAnswer(decodeResource(buf));
+-            }
+-            for (int i = 0; i < authorities; i++) {
+-                response.addAuthorityResource(decodeResource(buf));
+-            }
+-            for (int i = 0; i < additionals; i++) {
+-                response.addAdditionalResource(decodeResource(buf));
+-            }
+-            out.add(response);
+-            release = false;
+-        } finally {
+-            if (release) {
+-                // We need to release te DnsResources in case of an Exception as we called retain() on the buffer.
+-                releaseDnsResources(response.answers());
+-                releaseDnsResources(response.authorityResources());
+-                releaseDnsResources(response.additionalResources());
+-            }
+-        }
+-    }
+-
+-    private static void releaseDnsResources(List<DnsResource> resources) {
+-        int size = resources.size();
+-        for (int i = 0; i < size; i++) {
+-            DnsResource resource = resources.get(i);
+-            resource.release();
+-        }
+-    }
+-
+-    /**
+-     * Retrieves a domain name given a buffer containing a DNS packet. If the
+-     * name contains a pointer, the position of the buffer will be set to
+-     * directly after the pointer's index after the name has been read.
+-     *
+-     * @param buf
+-     *            the byte buffer containing the DNS packet
+-     * @return the domain name for an entry
+-     */
+-    private static String readName(ByteBuf buf) {
+-        int position = -1;
+-        int checked = 0;
+-        int length = buf.writerIndex();
+-        StringBuilder name = new StringBuilder();
+-        for (int len = buf.readUnsignedByte(); buf.isReadable() && len != 0; len = buf.readUnsignedByte()) {
+-            boolean pointer = (len & 0xc0) == 0xc0;
+-            if (pointer) {
+-                if (position == -1) {
+-                    position = buf.readerIndex() + 1;
+-                }
+-                buf.readerIndex((len & 0x3f) << 8 | buf.readUnsignedByte());
+-                // check for loops
+-                checked += 2;
+-                if (checked >= length) {
+-                    throw new CorruptedFrameException("name contains a loop.");
+-                }
+-            } else {
+-                name.append(buf.toString(buf.readerIndex(), len, CharsetUtil.UTF_8)).append('.');
+-                buf.skipBytes(len);
+-            }
+-        }
+-        if (position != -1) {
+-            buf.readerIndex(position);
+-        }
+-        if (name.length() == 0) {
+-            return "";
+-        }
+-
+-        return name.substring(0, name.length() - 1);
+-    }
+-
+-    /**
+-     * Decodes a question, given a DNS packet in a byte buffer.
+-     *
+-     * @param buf
+-     *            the byte buffer containing the DNS packet
+-     * @return a decoded {@link DnsQuestion}
+-     */
+-    private static DnsQuestion decodeQuestion(ByteBuf buf) {
+-        String name = readName(buf);
+-        DnsType type = DnsType.valueOf(buf.readUnsignedShort());
+-        DnsClass qClass = DnsClass.valueOf(buf.readUnsignedShort());
+-        return new DnsQuestion(name, type, qClass);
+-    }
+-
+-    /**
+-     * Decodes a resource record, given a DNS packet in a byte buffer.
+-     *
+-     * @param buf
+-     *            the byte buffer containing the DNS packet
+-     * @return a {@link DnsResource} record containing response data
+-     */
+-    private static DnsResource decodeResource(ByteBuf buf) {
+-        String name = readName(buf);
+-        DnsType type = DnsType.valueOf(buf.readUnsignedShort());
+-        DnsClass aClass = DnsClass.valueOf(buf.readUnsignedShort());
+-        long ttl = buf.readUnsignedInt();
+-        int len = buf.readUnsignedShort();
+-
+-        int readerIndex = buf.readerIndex();
+-        ByteBuf payload = buf.duplicate().setIndex(readerIndex, readerIndex + len).retain();
+-        buf.readerIndex(readerIndex + len);
+-        return new DnsResource(name, type, aClass, ttl, payload);
+-    }
+-}
+diff --git a/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsResponseHeader.java b/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsResponseHeader.java
+deleted file mode 100644
+index 7d828ef..0000000
+--- a/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsResponseHeader.java
++++ /dev/null
+@@ -1,168 +0,0 @@
+-/*
+- * Copyright 2013 The Netty Project
+- *
+- * The Netty Project licenses this file to you under the Apache License,
+- * version 2.0 (the "License"); you may not use this file except in compliance
+- * with the License. You may obtain a copy of the License at:
+- *
+- *   http://www.apache.org/licenses/LICENSE-2.0
+- *
+- * Unless required by applicable law or agreed to in writing, software
+- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+- * License for the specific language governing permissions and limitations
+- * under the License.
+- */
+-package io.netty.handler.codec.dns;
+-
+-/**
+- * The DNS response header class which is used when receiving data from a DNS
+- * server. Contains information contained in a DNS response header, such as
+- * recursion availability, and response codes.
+- */
+-public final class DnsResponseHeader extends DnsHeader {
+-
+-    private boolean authoritativeAnswer;
+-    private boolean truncated;
+-    private boolean recursionAvailable;
+-
+-    private DnsResponseCode responseCode;
+-
+-    /**
+-     * Constructor for a DNS packet response header. The id is received by
+-     * reading a {@link DnsQuery} and is sent back to the client.
+-     *
+-     * @param parent
+-     *            the {@link DnsMessage} this header belongs to
+-     * @param id
+-     *            a 2 bit unsigned identification number received from client
+-     */
+-    public DnsResponseHeader(DnsMessage parent, int id) {
+-        super(parent);
+-        setId(id);
+-    }
+-
+-    /**
+-     * Returns {@code true} if responding server is authoritative for the domain
+-     * name in the query message.
+-     */
+-    public boolean isAuthoritativeAnswer() {
+-        return authoritativeAnswer;
+-    }
+-
+-    /**
+-     * Returns {@code true} if response has been truncated, usually if it is
+-     * over 512 bytes.
+-     */
+-    public boolean isTruncated() {
+-        return truncated;
+-    }
+-
+-    /**
+-     * Returns {@code true} if DNS server can handle recursive queries.
+-     */
+-    public boolean isRecursionAvailable() {
+-        return recursionAvailable;
+-    }
+-
+-    /**
+-     * Returns the 4 bit return code.
+-     */
+-    public DnsResponseCode responseCode() {
+-        return responseCode;
+-    }
+-
+-    /**
+-     * Returns the {@link DnsMessage} type. This will always return
+-     * {@code TYPE_RESPONSE}.
+-     */
+-    @Override
+-    public int type() {
+-        return TYPE_RESPONSE;
+-    }
+-
+-    /**
+-     * Set to {@code true} if responding server is authoritative for the domain
+-     * name in the query message.
+-     *
+-     * @param authoritativeAnswer
+-     *            flag for authoritative answer
+-     */
+-    public DnsResponseHeader setAuthoritativeAnswer(boolean authoritativeAnswer) {
+-        this.authoritativeAnswer = authoritativeAnswer;
+-        return this;
+-    }
+-
+-    /**
+-     * Set to {@code true} if response has been truncated (usually happens for
+-     * responses over 512 bytes).
+-     *
+-     * @param truncated
+-     *            flag for truncation
+-     */
+-    public DnsResponseHeader setTruncated(boolean truncated) {
+-        this.truncated = truncated;
+-        return this;
+-    }
+-
+-    /**
+-     * Set to {@code true} if DNS server can handle recursive queries.
+-     *
+-     * @param recursionAvailable
+-     *            flag for recursion availability
+-     */
+-    public DnsResponseHeader setRecursionAvailable(boolean recursionAvailable) {
+-        this.recursionAvailable = recursionAvailable;
+-        return this;
+-    }
+-
+-    /**
+-     * Sets the response code for this message.
+-     *
+-     * @param responseCode
+-     *            the response code
+-     */
+-    public DnsResponseHeader setResponseCode(DnsResponseCode responseCode) {
+-        this.responseCode = responseCode;
+-        return this;
+-    }
+-
+-    /**
+-     * Sets the {@link DnsHeader} type. Must be {@code TYPE_RESPONSE}.
+-     *
+-     * @param type
+-     *            message type
+-     * @return the header to allow method chaining
+-     */
+-    @Override
+-    public DnsResponseHeader setType(int type) {
+-        if (type != TYPE_RESPONSE) {
+-            throw new IllegalArgumentException("type cannot be anything but TYPE_RESPONSE (1) for a response header.");
+-        }
+-        super.setType(type);
+-        return this;
+-    }
+-
+-    @Override
+-    public DnsResponseHeader setId(int id) {
+-        super.setId(id);
+-        return this;
+-    }
+-
+-    @Override
+-    public DnsHeader setRecursionDesired(boolean recursionDesired) {
+-        return super.setRecursionDesired(recursionDesired);
+-    }
+-
+-    @Override
+-    public DnsResponseHeader setOpcode(int opcode) {
+-        super.setOpcode(opcode);
+-        return this;
+-    }
+-
+-    @Override
+-    public DnsResponseHeader setZ(int z) {
+-        super.setZ(z);
+-        return this;
+-    }
+-}
+diff --git a/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsSection.java b/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsSection.java
+new file mode 100644
+index 0000000..e653ae6
+--- /dev/null
++++ b/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsSection.java
+@@ -0,0 +1,27 @@
++/*
++ * Copyright 2016 The Netty Project
++ *
++ * The Netty Project licenses this file to you under the Apache License,
++ * version 2.0 (the "License"); you may not use this file except in compliance
++ * with the License. You may obtain a copy of the License at:
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++ * License for the specific language governing permissions and limitations
++ * under the License.
++ */
++package io.netty.handler.codec.dns;
++
++/**
++ * The DNS message section as defined in RFC 1035.
++ */
++public enum DnsSection {
++    QUESTION,
++    ANSWER,
++    AUTHORITY,
++    ADDITIONAL
++}
++
+diff --git a/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsType.java b/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsType.java
+deleted file mode 100644
+index a0059ff..0000000
+--- a/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsType.java
++++ /dev/null
+@@ -1,398 +0,0 @@
+-/*
+- * Copyright 2014 The Netty Project
+- *
+- * The Netty Project licenses this file to you under the Apache License,
+- * version 2.0 (the "License"); you may not use this file except in compliance
+- * with the License. You may obtain a copy of the License at:
+- *
+- *   http://www.apache.org/licenses/LICENSE-2.0
+- *
+- * Unless required by applicable law or agreed to in writing, software
+- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+- * License for the specific language governing permissions and limitations
+- * under the License.
+- */
+-package io.netty.handler.codec.dns;
+-
+-import io.netty.util.collection.IntObjectHashMap;
+-import java.util.HashMap;
+-import java.util.Map;
+-
+-/**
+- * Represents a DNS record type.
+- */
+-public final class DnsType implements Comparable<DnsType> {
+-
+-    /**
+-     * Address record RFC 1035 Returns a 32-bit IPv4 address, most commonly used
+-     * to map hostnames to an IP address of the host, but also used for DNSBLs,
+-     * storing subnet masks in RFC 1101, etc.
+-     */
+-    public static final DnsType A = new DnsType(0x0001, "A");
+-
+-    /**
+-     * Name server record RFC 1035 Delegates a DNS zone to use the given
+-     * authoritative name servers
+-     */
+-    public static final DnsType NS = new DnsType(0x0002, "NS");
+-
+-    /**
+-     * Canonical name record RFC 1035 Alias of one name to another: the DNS
+-     * lookup will continue by retrying the lookup with the new name.
+-     */
+-    public static final DnsType CNAME = new DnsType(0x0005, "CNAME");
+-
+-    /**
+-     * Start of [a zone of] authority record RFC 1035 and RFC 2308 Specifies
+-     * authoritative information about a DNS zone, including the primary name
+-     * server, the email of the domain administrator, the domain serial number,
+-     * and several timers relating to refreshing the zone.
+-     */
+-    public static final DnsType SOA = new DnsType(0x0006, "SOA");
+-
+-    /**
+-     * Pointer record RFC 1035 Pointer to a canonical name. Unlike a CNAME, DNS
+-     * processing does NOT proceed, just the name is returned. The most common
+-     * use is for implementing reverse DNS lookups, but other uses include such
+-     * things as DNS-SD.
+-     */
+-    public static final DnsType PTR = new DnsType(0x000c, "PTR");
+-
+-    /**
+-     * Mail exchange record RFC 1035 Maps a domain name to a list of message
+-     * transfer agents for that domain.
+-     */
+-    public static final DnsType MX = new DnsType(0x000f, "MX");
+-
+-    /**
+-     * Text record RFC 1035 Originally for arbitrary human-readable text in a
+-     * DNS record. Since the early 1990s, however, this record more often
+-     * carries machine-readable data, such as specified by RFC 1464,
+-     * opportunistic encryption, Sender Policy Framework, DKIM, DMARC DNS-SD,
+-     * etc.
+-     */
+-    public static final DnsType TXT = new DnsType(0x0010, "TXT");
+-
+-    /**
+-     * Responsible person record RFC 1183 Information about the responsible
+-     * person(s) for the domain. Usually an email address with the @ replaced by
+-     * a .
+-     */
+-    public static final DnsType RP = new DnsType(0x0011, "RP");
+-
+-    /**
+-     * AFS database record RFC 1183 Location of database servers of an AFS cell.
+-     * This record is commonly used by AFS clients to contact AFS cells outside
+-     * their local domain. A subtype of this record is used by the obsolete
+-     * DCE/DFS file system.
+-     */
+-    public static final DnsType AFSDB = new DnsType(0x0012, "AFSDB");
+-
+-    /**
+-     * Signature record RFC 2535 Signature record used in SIG(0) (RFC 2931) and
+-     * TKEY (RFC 2930). RFC 3755 designated RRSIG as the replacement for SIG for
+-     * use within DNSSEC.
+-     */
+-    public static final DnsType SIG = new DnsType(0x0018, "SIG");
+-
+-    /**
+-     * key record RFC 2535 and RFC 2930 Used only for SIG(0) (RFC 2931) and TKEY
+-     * (RFC 2930). RFC 3445 eliminated their use for application keys and
+-     * limited their use to DNSSEC. RFC 3755 designates DNSKEY as the
+-     * replacement within DNSSEC. RFC 4025 designates IPSECKEY as the
+-     * replacement for use with IPsec.
+-     */
+-    public static final DnsType KEY = new DnsType(0x0019, "KEY");
+-
+-    /**
+-     * IPv6 address record RFC 3596 Returns a 128-bit IPv6 address, most
+-     * commonly used to map hostnames to an IP address of the host.
+-     */
+-    public static final DnsType AAAA = new DnsType(0x001c, "AAAA");
+-
+-    /**
+-     * Location record RFC 1876 Specifies a geographical location associated
+-     * with a domain name.
+-     */
+-    public static final DnsType LOC = new DnsType(0x001d, "LOC");
+-
+-    /**
+-     * Service locator RFC 2782 Generalized service location record, used for
+-     * newer protocols instead of creating protocol-specific records such as MX.
+-     */
+-    public static final DnsType SRV = new DnsType(0x0021, "SRV");
+-
+-    /**
+-     * Naming Authority Pointer record RFC 3403 Allows regular expression based
+-     * rewriting of domain names which can then be used as URIs, further domain
+-     * names to lookups, etc.
+-     */
+-    public static final DnsType NAPTR = new DnsType(0x0023, "NAPTR");
+-
+-    /**
+-     * Key eXchanger record RFC 2230 Used with some cryptographic systems (not
+-     * including DNSSEC) to identify a key management agent for the associated
+-     * domain-name. Note that this has nothing to do with DNS Security. It is
+-     * Informational status, rather than being on the IETF standards-track. It
+-     * has always had limited deployment, but is still in use.
+-     */
+-    public static final DnsType KX = new DnsType(0x0024, "KX");
+-
+-    /**
+-     * Certificate record RFC 4398 Stores PKIX, SPKI, PGP, etc.
+-     */
+-    public static final DnsType CERT = new DnsType(0x0025, "CERT");
+-
+-    /**
+-     * Delegation name record RFC 2672 DNAME creates an alias for a name and all
+-     * its subnames, unlike CNAME, which aliases only the exact name in its
+-     * label. Like the CNAME record, the DNS lookup will continue by retrying
+-     * the lookup with the new name.
+-     */
+-    public static final DnsType DNAME = new DnsType(0x0027, "DNAME");
+-
+-    /**
+-     * Option record RFC 2671 This is a pseudo DNS record type needed to support
+-     * EDNS.
+-     */
+-    public static final DnsType OPT = new DnsType(0x0029, "OPT");
+-
+-    /**
+-     * Address Prefix List record RFC 3123 Specify lists of address ranges, e.g.
+-     * in CIDR format, for various address families. Experimental.
+-     */
+-    public static final DnsType APL = new DnsType(0x002a, "APL");
+-
+-    /**
+-     * Delegation signer record RFC 4034 The record used to identify the DNSSEC
+-     * signing key of a delegated zone.
+-     */
+-    public static final DnsType DS = new DnsType(0x002b, "DS");
+-
+-    /**
+-     * SSH Public Key Fingerprint record RFC 4255 Resource record for publishing
+-     * SSH public host key fingerprints in the DNS System, in order to aid in
+-     * verifying the authenticity of the host. RFC 6594 defines ECC SSH keys and
+-     * SHA-256 hashes. See the IANA SSHFP RR parameters registry for details.
+-     */
+-    public static final DnsType SSHFP = new DnsType(0x002c, "SSHFP");
+-
+-    /**
+-     * IPsec Key record RFC 4025 Key record that can be used with IPsec.
+-     */
+-    public static final DnsType IPSECKEY = new DnsType(0x002d, "IPSECKEY");
+-
+-    /**
+-     * DNSSEC signature record RFC 4034 Signature for a DNSSEC-secured record
+-     * set. Uses the same format as the SIG record.
+-     */
+-    public static final DnsType RRSIG = new DnsType(0x002e, "RRSIG");
+-
+-    /**
+-     * Next-Secure record RFC 4034 Part of DNSSEC, used to prove a name does not
+-     * exist. Uses the same format as the (obsolete) NXT record.
+-     */
+-    public static final DnsType NSEC = new DnsType(0x002f, "NSEC");
+-
+-    /**
+-     * DNS Key record RFC 4034 The key record used in DNSSEC. Uses the same
+-     * format as the KEY record.
+-     */
+-    public static final DnsType DNSKEY = new DnsType(0x0030, "DNSKEY");
+-
+-    /**
+-     * DHCP identifier record RFC 4701 Used in conjunction with the FQDN option
+-     * to DHCP.
+-     */
+-    public static final DnsType DHCID = new DnsType(0x0031, "DHCID");
+-
+-    /**
+-     * NSEC record version 3 RFC 5155 An extension to DNSSEC that allows proof
+-     * of nonexistence for a name without permitting zonewalking.
+-     */
+-    public static final DnsType NSEC3 = new DnsType(0x0032, "NSEC3");
+-
+-    /**
+-     * NSEC3 parameters record RFC 5155 Parameter record for use with NSEC3.
+-     */
+-    public static final DnsType NSEC3PARAM = new DnsType(0x0033, "NSEC3PARAM");
+-
+-    /**
+-     * TLSA certificate association record RFC 6698 A record for DNS-based
+-     * Authentication of Named Entities (DANE). RFC 6698 defines The TLSA DNS
+-     * resource record is used to associate a TLS server certificate or public
+-     * key with the domain name where the record is found, thus forming a 'TLSA
+-     * certificate association'.
+-     */
+-    public static final DnsType TLSA = new DnsType(0x0034, "TLSA");
+-
+-    /**
+-     * Host Identity Protocol record RFC 5205 Method of separating the end-point
+-     * identifier and locator roles of IP addresses.
+-     */
+-    public static final DnsType HIP = new DnsType(0x0037, "HIP");
+-
+-    /**
+-     * Sender Policy Framework record RFC 4408 Specified as part of the SPF
+-     * protocol as an alternative to of storing SPF data in TXT records. Uses
+-     * the same format as the earlier TXT record.
+-     */
+-    public static final DnsType SPF = new DnsType(0x0063, "SPF");
+-
+-    /**
+-     * Secret key record RFC 2930 A method of providing keying material to be
+-     * used with TSIG that is encrypted under the public key in an accompanying
+-     * KEY RR..
+-     */
+-    public static final DnsType TKEY = new DnsType(0x00f9, "TKEY");
+-
+-    /**
+-     * Transaction Signature record RFC 2845 Can be used to authenticate dynamic
+-     * updates as coming from an approved client, or to authenticate responses
+-     * as coming from an approved recursive name server similar to DNSSEC.
+-     */
+-    public static final DnsType TSIG = new DnsType(0x00fa, "TSIG");
+-
+-    /**
+-     * Incremental Zone Transfer record RFC 1996 Requests a zone transfer of the
+-     * given zone but only differences from a previous serial number. This
+-     * request may be ignored and a full (AXFR) sent in response if the
+-     * authoritative server is unable to fulfill the request due to
+-     * configuration or lack of required deltas.
+-     */
+-    public static final DnsType IXFR = new DnsType(0x00fb, "IXFR");
+-
+-    /**
+-     * Authoritative Zone Transfer record RFC 1035 Transfer entire zone file
+-     * from the master name server to secondary name servers.
+-     */
+-    public static final DnsType AXFR = new DnsType(0x00fc, "AXFR");
+-
+-    /**
+-     * All cached records RFC 1035 Returns all records of all types known to the
+-     * name server. If the name server does not have any information on the
+-     * name, the request will be forwarded on. The records returned may not be
+-     * complete. For example, if there is both an A and an MX for a name, but
+-     * the name server has only the A record cached, only the A record will be
+-     * returned. Sometimes referred to as ANY, for example in Windows nslookup
+-     * and Wireshark.
+-     */
+-    public static final DnsType ANY = new DnsType(0x00ff, "ANY");
+-
+-    /**
+-     * Certification Authority Authorization record RFC 6844 CA pinning,
+-     * constraining acceptable CAs for a host/domain.
+-     */
+-    public static final DnsType CAA = new DnsType(0x0101, "CAA");
+-
+-    /**
+-     * DNSSEC Trust Authorities record N/A Part of a deployment proposal for
+-     * DNSSEC without a signed DNS root. See the IANA database and Weiler Spec
+-     * for details. Uses the same format as the DS record.
+-     */
+-    public static final DnsType TA = new DnsType(0x8000, "TA");
+-
+-    /**
+-     * DNSSEC Lookaside Validation record RFC 4431 For publishing DNSSEC trust
+-     * anchors outside of the DNS delegation chain. Uses the same format as the
+-     * DS record. RFC 5074 describes a way of using these records.
+-     */
+-    public static final DnsType DLV = new DnsType(0x8001, "DLV");
+-
+-    private static final Map<String, DnsType> BY_NAME = new HashMap<String, DnsType>();
+-    private static final IntObjectHashMap<DnsType> BY_TYPE = new IntObjectHashMap<DnsType>();
+-    private static final String EXPECTED;
+-
+-    static {
+-        DnsType[] all = {
+-                A, NS, CNAME, SOA, PTR, MX, TXT, RP, AFSDB, SIG, KEY, AAAA, LOC, SRV, NAPTR, KX, CERT, DNAME, OPT, APL,
+-                DS, SSHFP, IPSECKEY, RRSIG, NSEC, DNSKEY, DHCID, NSEC3, NSEC3PARAM, TLSA, HIP, SPF, TKEY, TSIG, IXFR,
+-                AXFR, ANY, CAA, TA, DLV
+-        };
+-
+-        StringBuilder expected = new StringBuilder(512);
+-        expected.append(" (expected: ");
+-
+-        for (DnsType type: all) {
+-            BY_NAME.put(type.name(), type);
+-            BY_TYPE.put(type.intValue(), type);
+-            expected.append(type.name());
+-            expected.append('(');
+-            expected.append(type.intValue());
+-            expected.append("), ");
+-        }
+-
+-        expected.setLength(expected.length() - 2);
+-        expected.append(')');
+-        EXPECTED = expected.toString();
+-    }
+-
+-    public static DnsType valueOf(int intValue) {
+-        DnsType result = BY_TYPE.get(intValue);
+-        if (result == null) {
+-            return new DnsType(intValue, "UNKNOWN");
+-        }
+-        return result;
+-    }
+-
+-    public static DnsType valueOf(String name) {
+-        DnsType result = BY_NAME.get(name);
+-        if (result == null) {
+-            throw new IllegalArgumentException("name: " + name + EXPECTED);
+-        }
+-        return result;
+-    }
+-
+-    /**
+-     * Returns a new instance.
+-     */
+-    public static DnsType valueOf(int intValue, String name) {
+-        return new DnsType(intValue, name);
+-    }
+-
+-    private final int intValue;
+-    private final String name;
+-
+-    private DnsType(int intValue, String name) {
+-        if ((intValue & 0xffff) != intValue) {
+-            throw new IllegalArgumentException("intValue: " + intValue + " (expected: 0 ~ 65535)");
+-        }
+-        this.intValue = intValue;
+-        this.name = name;
+-    }
+-
+-    /**
+-     * Returns the name of this type, as seen in bind config files
+-     */
+-    public String name() {
+-        return name;
+-    }
+-
+-    /**
+-     * Returns the value of this DnsType as it appears in DNS protocol
+-     */
+-    public int intValue() {
+-        return intValue;
+-    }
+-
+-    @Override
+-    public int hashCode() {
+-        return intValue;
+-    }
+-
+-    @Override
+-    public boolean equals(Object o) {
+-        return o instanceof DnsType && ((DnsType) o).intValue == intValue;
+-    }
+-
+-    @Override
+-    public int compareTo(DnsType o) {
+-        return intValue() - o.intValue();
+-    }
+-
+-    @Override
+-    public String toString() {
+-        return name;
+-    }
+-}
+diff --git a/codec-dns/src/main/java/io/netty/handler/codec/dns/package-info.java b/codec-dns/src/main/java/io/netty/handler/codec/dns/package-info.java
+index 7dab11b..671d509 100644
+--- a/codec-dns/src/main/java/io/netty/handler/codec/dns/package-info.java
++++ b/codec-dns/src/main/java/io/netty/handler/codec/dns/package-info.java
+@@ -16,6 +16,6 @@
+ 
+ /**
+  * DNS codec information for writing to and reading from a DNS server.
+- * Includes decoders and classes for representing messages and resources.
++ * Includes decoders and classes for representing messages and records.
+  */
+ package io.netty.handler.codec.dns;
+diff --git a/codec-dns/src/test/java/io/netty/handler/codec/dns/DnsQueryTest.java b/codec-dns/src/test/java/io/netty/handler/codec/dns/DnsQueryTest.java
+index fd9be0d..90828bc 100644
+--- a/codec-dns/src/test/java/io/netty/handler/codec/dns/DnsQueryTest.java
++++ b/codec-dns/src/test/java/io/netty/handler/codec/dns/DnsQueryTest.java
+@@ -30,23 +30,24 @@ public class DnsQueryTest {
+     @Test
+     public void writeQueryTest() throws Exception {
+         InetSocketAddress addr = new InetSocketAddress(0);
+-        EmbeddedChannel embedder = new EmbeddedChannel(new DnsQueryEncoder());
+-        List<DnsQuery> queries = new ArrayList<DnsQuery>(5);
+-        queries.add(new DnsQuery(1, addr).addQuestion(new DnsQuestion("1.0.0.127.in-addr.arpa", DnsType.PTR)));
+-        queries.add(new DnsQuery(1, addr).addQuestion(new DnsQuestion("www.example.com", DnsType.A)));
+-        queries.add(new DnsQuery(1, addr).addQuestion(new DnsQuestion("example.com", DnsType.AAAA)));
+-        queries.add(new DnsQuery(1, addr).addQuestion(new DnsQuestion("example.com", DnsType.MX)));
+-        queries.add(new DnsQuery(1, addr).addQuestion(new DnsQuestion("example.com", DnsType.CNAME)));
++        EmbeddedChannel embedder = new EmbeddedChannel(new DatagramDnsQueryEncoder());
++        List<DatagramDnsQuery> queries = new ArrayList<DatagramDnsQuery>(5);
++        queries.add(new DatagramDnsQuery(null, addr, 1)
++                .addRecord(DnsSection.QUESTION, new DefaultDnsQuestion("1.0.0.127.in-addr.arpa", DnsRecordType.PTR)));
++        queries.add(new DatagramDnsQuery(null, addr, 1)
++                .addRecord(DnsSection.QUESTION, new DefaultDnsQuestion("www.example.com", DnsRecordType.A)));
++        queries.add(new DatagramDnsQuery(null, addr, 1)
++                .addRecord(DnsSection.QUESTION, new DefaultDnsQuestion("example.com", DnsRecordType.AAAA)));
++        queries.add(new DatagramDnsQuery(null, addr, 1)
++                .addRecord(DnsSection.QUESTION, new DefaultDnsQuestion("example.com", DnsRecordType.MX)));
++        queries.add(new DatagramDnsQuery(null, addr, 1)
++                .addRecord(DnsSection.QUESTION, new DefaultDnsQuestion("example.com", DnsRecordType.CNAME)));
+ 
+         for (DnsQuery query: queries) {
+-            Assert.assertEquals("Invalid question count, expected 1.", 1, query.header().questionCount());
+-            Assert.assertEquals("Invalid answer count, expected 0.", 0, query.header().answerCount());
+-            Assert.assertEquals("Invalid authority resource record count, expected 0.", 0, query.header()
+-                    .authorityResourceCount());
+-            Assert.assertEquals("Invalid additional resource record count, expected 0.", 0, query.header()
+-                    .additionalResourceCount());
+-            Assert.assertEquals("Invalid type, should be TYPE_QUERY (0)", DnsHeader.TYPE_QUERY, query.header()
+-                    .type());
++            Assert.assertEquals("Invalid question count, expected 1.", 1, query.count(DnsSection.QUESTION));
++            Assert.assertEquals("Invalid answer count, expected 0.", 0, query.count(DnsSection.ANSWER));
++            Assert.assertEquals("Invalid authority record count, expected 0.", 0, query.count(DnsSection.AUTHORITY));
++            Assert.assertEquals("Invalid additional record count, expected 0.", 0, query.count(DnsSection.ADDITIONAL));
+             embedder.writeOutbound(query);
+             DatagramPacket packet = embedder.readOutbound();
+             Assert.assertTrue(packet.content().isReadable());
+diff --git a/codec-dns/src/test/java/io/netty/handler/codec/dns/DnsClassTest.java b/codec-dns/src/test/java/io/netty/handler/codec/dns/DnsRecordTypeTest.java
+similarity index 63%
+rename from codec-dns/src/test/java/io/netty/handler/codec/dns/DnsClassTest.java
+rename to codec-dns/src/test/java/io/netty/handler/codec/dns/DnsRecordTypeTest.java
+index fc03b8a..3da5c81 100644
+--- a/codec-dns/src/test/java/io/netty/handler/codec/dns/DnsClassTest.java
++++ b/codec-dns/src/test/java/io/netty/handler/codec/dns/DnsRecordTypeTest.java
+@@ -23,15 +23,18 @@ import java.util.ArrayList;
+ import java.util.HashSet;
+ import java.util.List;
+ 
+-import static org.junit.Assert.*;
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertFalse;
++import static org.junit.Assert.assertNotEquals;
++import static org.junit.Assert.assertSame;
+ 
+-public class DnsClassTest {
++public class DnsRecordTypeTest {
+ 
+-    private static List<DnsClass> allTypes() throws Exception {
+-        List<DnsClass> result = new ArrayList<DnsClass>();
+-        for (Field field : DnsClass.class.getDeclaredFields()) {
+-            if ((field.getModifiers() & Modifier.STATIC) != 0 && field.getType() == DnsClass.class) {
+-                result.add((DnsClass) field.get(null));
++    private static List<DnsRecordType> allTypes() throws Exception {
++        List<DnsRecordType> result = new ArrayList<DnsRecordType>();
++        for (Field field : DnsRecordType.class.getFields()) {
++            if ((field.getModifiers() & Modifier.STATIC) != 0 && field.getType() == DnsRecordType.class) {
++                result.add((DnsRecordType) field.get(null));
+             }
+         }
+         assertFalse(result.isEmpty());
+@@ -41,26 +44,20 @@ public class DnsClassTest {
+     @Test
+     public void testSanity() throws Exception {
+         assertEquals("More than one type has the same int value",
+-                allTypes().size(), new HashSet<DnsClass>(allTypes()).size());
++                allTypes().size(), new HashSet<DnsRecordType>(allTypes()).size());
+     }
+ 
+-    /**
+-     * Test of hashCode method, of class DnsClass.
+-     */
+     @Test
+     public void testHashCode() throws Exception {
+-        for (DnsClass t : allTypes()) {
++        for (DnsRecordType t : allTypes()) {
+             assertEquals(t.intValue(), t.hashCode());
+         }
+     }
+ 
+-    /**
+-     * Test of equals method, of class DnsClass.
+-     */
+     @Test
+     public void testEquals() throws Exception {
+-        for (DnsClass t1 : allTypes()) {
+-            for (DnsClass t2 : allTypes()) {
++        for (DnsRecordType t1 : allTypes()) {
++            for (DnsRecordType t2 : allTypes()) {
+                 if (t1 != t2) {
+                     assertNotEquals(t1, t2);
+                 }
+@@ -68,16 +65,14 @@ public class DnsClassTest {
+         }
+     }
+ 
+-    /**
+-     * Test of find method, of class DnsClass.
+-     */
+     @Test
+     public void testFind() throws Exception {
+-        for (DnsClass t : allTypes()) {
+-            DnsClass found = DnsClass.valueOf(t.intValue());
++        for (DnsRecordType t : allTypes()) {
++            DnsRecordType found = DnsRecordType.valueOf(t.intValue());
+             assertSame(t, found);
+-            found = DnsClass.valueOf(t.toString());
++            found = DnsRecordType.valueOf(t.toString());
+             assertSame(t.toString(), t, found);
+         }
+     }
+ }
++
+diff --git a/codec-dns/src/test/java/io/netty/handler/codec/dns/DnsResponseTest.java b/codec-dns/src/test/java/io/netty/handler/codec/dns/DnsResponseTest.java
+index 7d860fe..e2f164a 100644
+--- a/codec-dns/src/test/java/io/netty/handler/codec/dns/DnsResponseTest.java
++++ b/codec-dns/src/test/java/io/netty/handler/codec/dns/DnsResponseTest.java
+@@ -69,24 +69,26 @@ public class DnsResponseTest {
+ 
+     @Test
+     public void readResponseTest() throws Exception {
+-        EmbeddedChannel embedder = new EmbeddedChannel(new DnsResponseDecoder());
++        EmbeddedChannel embedder = new EmbeddedChannel(new DatagramDnsResponseDecoder());
+         for (byte[] p: packets) {
+             ByteBuf packet = embedder.alloc().buffer(512).writeBytes(p);
+             embedder.writeInbound(new DatagramPacket(packet, null, new InetSocketAddress(0)));
+             DnsResponse decoded = embedder.readInbound();
+             ByteBuf raw = Unpooled.wrappedBuffer(p);
+             Assert.assertEquals("Invalid id, expected: " + raw.getUnsignedShort(0) + ", actual: "
+-                    + decoded.header().id(), raw.getUnsignedShort(0), decoded.header().id());
++                    + decoded.id(), raw.getUnsignedShort(0), decoded.id());
+             Assert.assertEquals("Invalid resource count,  expected: " + raw.getUnsignedShort(4) + ", actual: "
+-                    + decoded.questions().size(), raw.getUnsignedShort(4), decoded.questions().size());
++                    + decoded.count(DnsSection.QUESTION),
++                    raw.getUnsignedShort(4), decoded.count(DnsSection.QUESTION));
+             Assert.assertEquals("Invalid resource count,  expected: " + raw.getUnsignedShort(6) + ", actual: "
+-                    + decoded.answers().size(), raw.getUnsignedShort(6), decoded.answers().size());
++                    + decoded.count(DnsSection.ANSWER),
++                    raw.getUnsignedShort(6), decoded.count(DnsSection.ANSWER));
+             Assert.assertEquals("Invalid resource count,  expected: " + raw.getUnsignedShort(8) + ", actual: "
+-                    + decoded.authorityResources().size(), raw.getUnsignedShort(8), decoded.authorityResources()
+-                    .size());
++                    + decoded.count(DnsSection.AUTHORITY),
++                    raw.getUnsignedShort(8), decoded.count(DnsSection.AUTHORITY));
+             Assert.assertEquals("Invalid resource count,  expected: " + raw.getUnsignedShort(10) + ", actual: "
+-                    + decoded.additionalResources().size(), raw.getUnsignedShort(10),
+-                    decoded.additionalResources().size());
++                    + decoded.count(DnsSection.ADDITIONAL),
++                    raw.getUnsignedShort(10), decoded.count(DnsSection.ADDITIONAL));
+             decoded.release();
+         }
+     }
+@@ -96,7 +98,7 @@ public class DnsResponseTest {
+ 
+     @Test
+     public void readMalormedResponseTest() throws Exception {
+-        EmbeddedChannel embedder = new EmbeddedChannel(new DnsResponseDecoder());
++        EmbeddedChannel embedder = new EmbeddedChannel(new DatagramDnsResponseDecoder());
+         ByteBuf packet = embedder.alloc().buffer(512).writeBytes(malformedLoopPacket);
+         exception.expect(CorruptedFrameException.class);
+         embedder.writeInbound(new DatagramPacket(packet, null, new InetSocketAddress(0)));
+diff --git a/codec-dns/src/test/java/io/netty/handler/codec/dns/DnsTypeTest.java b/codec-dns/src/test/java/io/netty/handler/codec/dns/DnsTypeTest.java
+deleted file mode 100644
+index 7cce75b..0000000
+--- a/codec-dns/src/test/java/io/netty/handler/codec/dns/DnsTypeTest.java
++++ /dev/null
+@@ -1,83 +0,0 @@
+-/*
+- * Copyright 2014 The Netty Project
+- *
+- * The Netty Project licenses this file to you under the Apache License,
+- * version 2.0 (the "License"); you may not use this file except in compliance
+- * with the License. You may obtain a copy of the License at:
+- *
+- *   http://www.apache.org/licenses/LICENSE-2.0
+- *
+- * Unless required by applicable law or agreed to in writing, software
+- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+- * License for the specific language governing permissions and limitations
+- * under the License.
+- */
+-package io.netty.handler.codec.dns;
+-
+-import org.junit.Test;
+-
+-import java.lang.reflect.Field;
+-import java.lang.reflect.Modifier;
+-import java.util.ArrayList;
+-import java.util.HashSet;
+-import java.util.List;
+-
+-import static org.junit.Assert.*;
+-
+-public class DnsTypeTest {
+-
+-    private static List<DnsType> allTypes() throws Exception {
+-        List<DnsType> result = new ArrayList<DnsType>();
+-        for (Field field : DnsType.class.getFields()) {
+-            if ((field.getModifiers() & Modifier.STATIC) != 0 && field.getType() == DnsType.class) {
+-                result.add((DnsType) field.get(null));
+-            }
+-        }
+-        assertFalse(result.isEmpty());
+-        return result;
+-    }
+-
+-    @Test
+-    public void testSanity() throws Exception {
+-        assertEquals("More than one type has the same int value",
+-                allTypes().size(), new HashSet<DnsType>(allTypes()).size());
+-    }
+-
+-    /**
+-     * Test of hashCode method, of class DnsType.
+-     */
+-    @Test
+-    public void testHashCode() throws Exception {
+-        for (DnsType t : allTypes()) {
+-            assertEquals(t.intValue(), t.hashCode());
+-        }
+-    }
+-
+-    /**
+-     * Test of equals method, of class DnsType.
+-     */
+-    @Test
+-    public void testEquals() throws Exception {
+-        for (DnsType t1 : allTypes()) {
+-            for (DnsType t2 : allTypes()) {
+-                if (t1 != t2) {
+-                    assertNotEquals(t1, t2);
+-                }
+-            }
+-        }
+-    }
+-
+-    /**
+-     * Test of find method, of class DnsType.
+-     */
+-    @Test
+-    public void testFind() throws Exception {
+-        for (DnsType t : allTypes()) {
+-            DnsType found = DnsType.valueOf(t.intValue());
+-            assertSame(t, found);
+-            found = DnsType.valueOf(t.toString());
+-            assertSame(t.toString(), t, found);
+-        }
+-    }
+-}
+diff --git a/common/src/main/java/io/netty/util/internal/StringUtil.java b/common/src/main/java/io/netty/util/internal/StringUtil.java
+index adbfeca..f71da07 100644
+--- a/common/src/main/java/io/netty/util/internal/StringUtil.java
++++ b/common/src/main/java/io/netty/util/internal/StringUtil.java
+@@ -29,6 +29,7 @@ import static io.netty.util.internal.ObjectUtil.checkNotNull;
+ public final class StringUtil {
+ 
+     public static final String NEWLINE;
++    public static final String TAB = "\t";
+     public static final char DOUBLE_QUOTE = '\"';
+     public static final char COMMA = ',';
+     public static final char LINE_FEED = '\n';
+diff --git a/resolver-dns/src/main/java/io/netty/resolver/dns/DnsNameResolver.java b/resolver-dns/src/main/java/io/netty/resolver/dns/DnsNameResolver.java
+index 6c51291..5d3d491 100644
+--- a/resolver-dns/src/main/java/io/netty/resolver/dns/DnsNameResolver.java
++++ b/resolver-dns/src/main/java/io/netty/resolver/dns/DnsNameResolver.java
+@@ -27,13 +27,14 @@ import io.netty.channel.FixedRecvByteBufAllocator;
+ import io.netty.channel.ReflectiveChannelFactory;
+ import io.netty.channel.socket.DatagramChannel;
+ import io.netty.channel.socket.InternetProtocolFamily;
+-import io.netty.handler.codec.dns.DnsClass;
+-import io.netty.handler.codec.dns.DnsQueryEncoder;
+ import io.netty.handler.codec.dns.DnsQuestion;
+-import io.netty.handler.codec.dns.DnsResource;
+ import io.netty.handler.codec.dns.DnsResponse;
+ import io.netty.handler.codec.dns.DnsResponseCode;
+-import io.netty.handler.codec.dns.DnsResponseDecoder;
++import io.netty.handler.codec.dns.DatagramDnsQueryEncoder;
++import io.netty.handler.codec.dns.DatagramDnsResponse;
++import io.netty.handler.codec.dns.DatagramDnsResponseDecoder;
++import io.netty.handler.codec.dns.DnsRecord;
++import io.netty.handler.codec.dns.DnsSection;
+ import io.netty.resolver.NameResolver;
+ import io.netty.resolver.SimpleNameResolver;
+ import io.netty.util.ReferenceCountUtil;
+@@ -83,8 +84,8 @@ public class DnsNameResolver extends SimpleNameResolver<InetSocketAddress> {
+         }
+     }
+ 
+-    private static final DnsResponseDecoder DECODER = new DnsResponseDecoder();
+-    private static final DnsQueryEncoder ENCODER = new DnsQueryEncoder();
++    private static final DatagramDnsResponseDecoder DECODER = new DatagramDnsResponseDecoder();
++    private static final DatagramDnsQueryEncoder ENCODER = new DatagramDnsQueryEncoder();
+ 
+     final Iterable<InetSocketAddress> nameServerAddresses;
+     final ChannelFuture bindFuture;
+@@ -117,7 +118,6 @@ public class DnsNameResolver extends SimpleNameResolver<InetSocketAddress> {
+     private volatile int maxQueriesPerResolve = 8;
+ 
+     private volatile int maxPayloadSize;
+-    private volatile DnsClass maxPayloadSizeClass; // EDNS uses the CLASS field as the payload size field.
+ 
+     /**
+      * Creates a new DNS-based name resolver that communicates with a single DNS server.
+@@ -575,21 +575,15 @@ public class DnsNameResolver extends SimpleNameResolver<InetSocketAddress> {
+         }
+ 
+         if (this.maxPayloadSize == maxPayloadSize) {
+-            // Same value; no need to instantiate DnsClass and RecvByteBufAllocator again.
+             return this;
+         }
+ 
+         this.maxPayloadSize = maxPayloadSize;
+-        maxPayloadSizeClass = DnsClass.valueOf(maxPayloadSize);
+         ch.config().setRecvByteBufAllocator(new FixedRecvByteBufAllocator(maxPayloadSize));
+ 
+         return this;
+     }
+ 
+-    DnsClass maxPayloadSizeClass() {
+-        return maxPayloadSizeClass;
+-    }
+-
+     /**
+      * Clears all the DNS resource records cached by this resolver.
+      *
+@@ -767,10 +761,10 @@ public class DnsNameResolver extends SimpleNameResolver<InetSocketAddress> {
+         public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
+             try {
+                 final DnsResponse res = (DnsResponse) msg;
+-                final int queryId = res.header().id();
++                final int queryId = res.id();
+ 
+                 if (logger.isDebugEnabled()) {
+-                    logger.debug("{} RECEIVED: [{}: {}], {}", ch, queryId, res.sender(), res);
++                    logger.debug("{} RECEIVED: [{}: {}], {}", ch, queryId, ((DatagramDnsResponse) res).sender(), res);
+                 }
+ 
+                 final DnsQueryContext qCtx = promises.get(queryId);
+@@ -782,14 +776,13 @@ public class DnsNameResolver extends SimpleNameResolver<InetSocketAddress> {
+                     return;
+                 }
+ 
+-                final List<DnsQuestion> questions = res.questions();
+-                if (questions.size() != 1) {
++                if (res.count(DnsSection.QUESTION) != 1) {
+                     logger.warn("Received a DNS response with invalid number of questions: {}", res);
+                     return;
+                 }
+ 
+                 final DnsQuestion q = qCtx.question();
+-                if (!q.equals(questions.get(0))) {
++                if (!q.equals(res.<DnsQuestion>recordAt(DnsSection.QUESTION))) {
+                     logger.warn("Received a mismatching DNS response: {}", res);
+                     return;
+                 }
+@@ -800,7 +793,7 @@ public class DnsNameResolver extends SimpleNameResolver<InetSocketAddress> {
+                     timeoutFuture.cancel(false);
+                 }
+ 
+-                if (res.header().responseCode() == DnsResponseCode.NOERROR) {
++                if (res.code() == DnsResponseCode.NOERROR) {
+                     cache(q, res);
+                     promises.set(queryId, null);
+ 
+@@ -809,10 +802,10 @@ public class DnsNameResolver extends SimpleNameResolver<InetSocketAddress> {
+                         qPromise.setSuccess(res.retain());
+                     }
+                 } else {
+-                    qCtx.retry(res.sender(),
+-                               "response code: " + res.header().responseCode() +
+-                               " with " + res.answers().size() + " answer(s) and " +
+-                               res.authorityResources().size() + " authority resource(s)");
++                    qCtx.retry(((DatagramDnsResponse) res).sender(),
++                               "response code: " + res.code() +
++                               " with " + res.count(DnsSection.ANSWER) + " answer(s) and " +
++                               res.count(DnsSection.AUTHORITY) + " authority record(s)");
+                 }
+             } finally {
+                 ReferenceCountUtil.safeRelease(msg);
+@@ -827,7 +820,9 @@ public class DnsNameResolver extends SimpleNameResolver<InetSocketAddress> {
+ 
+             long ttl = Long.MAX_VALUE;
+             // Find the smallest TTL value returned by the server.
+-            for (DnsResource r: res.answers()) {
++            int count = res.count(DnsSection.ANSWER);
++            for (int i = 0; i < count; i++) {
++                DnsRecord r = res.recordAt(DnsSection.ANSWER, i);
+                 long rTtl = r.timeToLive();
+                 if (ttl > rTtl) {
+                     ttl = rTtl;
+diff --git a/resolver-dns/src/main/java/io/netty/resolver/dns/DnsNameResolverContext.java b/resolver-dns/src/main/java/io/netty/resolver/dns/DnsNameResolverContext.java
+index 538e2c9..889553e 100644
+--- a/resolver-dns/src/main/java/io/netty/resolver/dns/DnsNameResolverContext.java
++++ b/resolver-dns/src/main/java/io/netty/resolver/dns/DnsNameResolverContext.java
+@@ -18,12 +18,14 @@ package io.netty.resolver.dns;
+ 
+ import io.netty.buffer.ByteBuf;
+ import io.netty.channel.socket.InternetProtocolFamily;
+-import io.netty.handler.codec.dns.DnsClass;
+ import io.netty.handler.codec.dns.DnsQuestion;
+-import io.netty.handler.codec.dns.DnsResource;
++import io.netty.handler.codec.dns.DnsRawRecord;
++import io.netty.handler.codec.dns.DnsRecord;
++import io.netty.handler.codec.dns.DnsRecordType;
+ import io.netty.handler.codec.dns.DnsResponse;
+-import io.netty.handler.codec.dns.DnsResponseDecoder;
+-import io.netty.handler.codec.dns.DnsType;
++import io.netty.handler.codec.dns.DnsSection;
++import io.netty.handler.codec.dns.DatagramDnsResponse;
++import io.netty.handler.codec.dns.DefaultDnsQuestion;
+ import io.netty.util.CharsetUtil;
+ import io.netty.util.ReferenceCountUtil;
+ import io.netty.util.concurrent.Future;
+@@ -87,19 +89,19 @@ final class DnsNameResolverContext {
+ 
+     void resolve() {
+         for (InternetProtocolFamily f: resolveAddressTypes) {
+-            final DnsType type;
++            final DnsRecordType type;
+             switch (f) {
+             case IPv4:
+-                type = DnsType.A;
++                type = DnsRecordType.A;
+                 break;
+             case IPv6:
+-                type = DnsType.AAAA;
++                type = DnsRecordType.AAAA;
+                 break;
+             default:
+                 throw new Error();
+             }
+ 
+-            query(parent.nameServerAddresses, new DnsQuestion(hostname, type));
++            query(parent.nameServerAddresses, new DefaultDnsQuestion(hostname, type));
+         }
+     }
+ 
+@@ -136,11 +138,11 @@ final class DnsNameResolverContext {
+     }
+ 
+     void onResponse(final DnsQuestion question, final DnsResponse response) {
+-        final DnsType type = question.type();
++        final DnsRecordType type = question.type();
+         try {
+-            if (type == DnsType.A || type == DnsType.AAAA) {
++            if (type == DnsRecordType.A || type == DnsRecordType.AAAA) {
+                 onResponseAorAAAA(type, question, response);
+-            } else if (type == DnsType.CNAME) {
++            } else if (type == DnsRecordType.CNAME) {
+                 onResponseCNAME(question, response);
+             }
+         } finally {
+@@ -148,14 +150,16 @@ final class DnsNameResolverContext {
+         }
+     }
+ 
+-    private void onResponseAorAAAA(DnsType qType, DnsQuestion question, DnsResponse response) {
++    private void onResponseAorAAAA(DnsRecordType qType, DnsQuestion question, DnsResponse response) {
+         // We often get a bunch of CNAMES as well when we asked for A/AAAA.
+         final Map<String, String> cnames = buildAliasMap(response);
+ 
+         boolean found = false;
+-        for (DnsResource r: response.answers()) {
+-            final DnsType type = r.type();
+-            if (type != DnsType.A && type != DnsType.AAAA) {
++        int answerCount = response.count(DnsSection.ANSWER);
++        for (int i = 0; i < answerCount; i++) {
++            final DnsRecord r = response.recordAt(DnsSection.ANSWER, i);
++            final DnsRecordType type = r.type();
++            if (type != DnsRecordType.A && type != DnsRecordType.AAAA) {
+                 continue;
+             }
+ 
+@@ -178,7 +182,11 @@ final class DnsNameResolverContext {
+                 }
+             }
+ 
+-            final ByteBuf content = r.content();
++            if (!(r instanceof DnsRawRecord)) {
++                continue;
++            }
++
++            final ByteBuf content = ((DnsRawRecord) r).content();
+             final int contentLen = content.readableBytes();
+             if (contentLen != INADDRSZ4 && contentLen != INADDRSZ6) {
+                 continue;
+@@ -204,7 +212,7 @@ final class DnsNameResolverContext {
+             return;
+         }
+ 
+-        addTrace(response.sender(), "no matching " + qType + " record found");
++        addTrace(((DatagramDnsResponse) response).sender(), "no matching " + qType + " record found");
+ 
+         // We aked for A/AAAA but we got only CNAME.
+         if (!cnames.isEmpty()) {
+@@ -234,21 +242,27 @@ final class DnsNameResolverContext {
+         }
+ 
+         if (found) {
+-            followCname(response.sender(), name, resolved);
++            followCname(((DatagramDnsResponse) response).sender(), name, resolved);
+         } else if (trace) {
+-            addTrace(response.sender(), "no matching CNAME record found");
++            addTrace(((DatagramDnsResponse) response).sender(), "no matching CNAME record found");
+         }
+     }
+ 
+     private static Map<String, String> buildAliasMap(DnsResponse response) {
+         Map<String, String> cnames = null;
+-        for (DnsResource r: response.answers()) {
+-            final DnsType type = r.type();
+-            if (type != DnsType.CNAME) {
++        int answerCount = response.count(DnsSection.ANSWER);
++        for (int i = 0; i < answerCount; i++) {
++            final DnsRecord r = response.recordAt(DnsSection.ANSWER, i);
++            final DnsRecordType type = r.type();
++            if (type != DnsRecordType.CNAME) {
++                continue;
++            }
++
++            if (!(r instanceof DnsRawRecord)) {
+                 continue;
+             }
+ 
+-            String content = decodeDomainName(r.content());
++            String content = decodeDomainName(((DnsRawRecord) r).content());
+             if (content == null) {
+                 continue;
+             }
+@@ -281,7 +295,7 @@ final class DnsNameResolverContext {
+             if (!triedCNAME) {
+                 // As the last resort, try to query CNAME, just in case the name server has it.
+                 triedCNAME = true;
+-                query(parent.nameServerAddresses, new DnsQuestion(hostname, DnsType.CNAME, DnsClass.IN));
++                query(parent.nameServerAddresses, new DefaultDnsQuestion(hostname, DnsRecordType.CNAME));
+                 return;
+             }
+         }
+@@ -392,7 +406,7 @@ final class DnsNameResolverContext {
+     }
+ 
+     /**
+-     * Adapted from {@link DnsResponseDecoder#readName(ByteBuf)}.
++     * Decodes a domain name from a DNS message buffer.
+      */
+     static String decodeDomainName(ByteBuf buf) {
+         buf.markReaderIndex();
+@@ -449,8 +463,8 @@ final class DnsNameResolverContext {
+         trace.append(" CNAME ");
+         trace.append(cname);
+ 
+-        query(parent.nameServerAddresses, new DnsQuestion(cname, DnsType.A, DnsClass.IN));
+-        query(parent.nameServerAddresses, new DnsQuestion(cname, DnsType.AAAA, DnsClass.IN));
++        query(parent.nameServerAddresses, new DefaultDnsQuestion(cname, DnsRecordType.A));
++        query(parent.nameServerAddresses, new DefaultDnsQuestion(cname, DnsRecordType.AAAA));
+     }
+ 
+     private void addTrace(InetSocketAddress nameServerAddr, String msg) {
+diff --git a/resolver-dns/src/main/java/io/netty/resolver/dns/DnsQueryContext.java b/resolver-dns/src/main/java/io/netty/resolver/dns/DnsQueryContext.java
+index 88c0451..7681abe 100644
+--- a/resolver-dns/src/main/java/io/netty/resolver/dns/DnsQueryContext.java
++++ b/resolver-dns/src/main/java/io/netty/resolver/dns/DnsQueryContext.java
+@@ -19,11 +19,13 @@ package io.netty.resolver.dns;
+ import io.netty.buffer.Unpooled;
+ import io.netty.channel.ChannelFuture;
+ import io.netty.channel.ChannelFutureListener;
+-import io.netty.handler.codec.dns.DnsQuery;
+ import io.netty.handler.codec.dns.DnsQuestion;
+-import io.netty.handler.codec.dns.DnsResource;
+ import io.netty.handler.codec.dns.DnsResponse;
+-import io.netty.handler.codec.dns.DnsType;
++import io.netty.handler.codec.dns.DnsRawRecord;
++import io.netty.handler.codec.dns.DnsRecordType;
++import io.netty.handler.codec.dns.DnsSection;
++import io.netty.handler.codec.dns.DatagramDnsQuery;
++import io.netty.handler.codec.dns.DefaultDnsRawRecord;
+ import io.netty.resolver.dns.DnsNameResolver.DnsCacheEntry;
+ import io.netty.util.concurrent.Promise;
+ import io.netty.util.concurrent.ScheduledFuture;
+@@ -46,7 +48,7 @@ final class DnsQueryContext {
+     private final Promise<DnsResponse> promise;
+     private final int id;
+     private final DnsQuestion question;
+-    private final DnsResource optResource;
++    private final DnsRawRecord optResource;
+     private final Iterator<InetSocketAddress> nameServerAddresses;
+ 
+     private final boolean recursionDesired;
+@@ -67,7 +69,12 @@ final class DnsQueryContext {
+         recursionDesired = parent.isRecursionDesired();
+         maxTries = parent.maxTriesPerQuery();
+         remainingTries = maxTries;
+-        optResource = new DnsResource("", DnsType.OPT, parent.maxPayloadSizeClass(), 0, Unpooled.EMPTY_BUFFER);
++        optResource = new DefaultDnsRawRecord(
++                "",
++                DnsRecordType.OPT,
++                parent.maxPayloadSize(),
++                0,
++                Unpooled.EMPTY_BUFFER);
+ 
+         this.nameServerAddresses = nameServerAddresses.iterator();
+     }
+@@ -125,10 +132,10 @@ final class DnsQueryContext {
+         remainingTries --;
+ 
+         final InetSocketAddress nameServerAddr = nameServerAddresses.next();
+-        final DnsQuery query = new DnsQuery(id, nameServerAddr);
+-        query.addQuestion(question);
+-        query.header().setRecursionDesired(recursionDesired);
+-        query.addAdditionalResource(optResource);
++        final DatagramDnsQuery query = new DatagramDnsQuery(null, nameServerAddr, id);
++        query.addRecord(DnsSection.QUESTION, question);
++        query.setRecursionDesired(recursionDesired);
++        query.addRecord(DnsSection.ADDITIONAL, optResource);
+ 
+         if (logger.isDebugEnabled()) {
+             logger.debug("{} WRITE: [{}: {}], {}", parent.ch, id, nameServerAddr, question);
+@@ -137,7 +144,7 @@ final class DnsQueryContext {
+         sendQuery(query, nameServerAddr);
+     }
+ 
+-    private void sendQuery(final DnsQuery query, final InetSocketAddress nameServerAddr) {
++    private void sendQuery(final DatagramDnsQuery query, final InetSocketAddress nameServerAddr) {
+         if (parent.bindFuture.isDone()) {
+             writeQuery(query, nameServerAddr);
+         } else {
+@@ -154,7 +161,7 @@ final class DnsQueryContext {
+         }
+     }
+ 
+-    private void writeQuery(final DnsQuery query, final InetSocketAddress nameServerAddr) {
++    private void writeQuery(final DatagramDnsQuery query, final InetSocketAddress nameServerAddr) {
+         final ChannelFuture writeFuture = parent.ch.writeAndFlush(query);
+         if (writeFuture.isDone()) {
+             onQueryWriteCompletion(writeFuture, nameServerAddr);
+diff --git a/resolver-dns/src/test/java/io/netty/resolver/dns/DnsNameResolverTest.java b/resolver-dns/src/test/java/io/netty/resolver/dns/DnsNameResolverTest.java
+index ac7a1d1..2cee18c 100644
+--- a/resolver-dns/src/test/java/io/netty/resolver/dns/DnsNameResolverTest.java
++++ b/resolver-dns/src/test/java/io/netty/resolver/dns/DnsNameResolverTest.java
+@@ -21,10 +21,13 @@ import io.netty.channel.nio.NioEventLoopGroup;
+ import io.netty.channel.socket.InternetProtocolFamily;
+ import io.netty.channel.socket.nio.NioDatagramChannel;
+ import io.netty.handler.codec.dns.DnsQuestion;
+-import io.netty.handler.codec.dns.DnsResource;
++import io.netty.handler.codec.dns.DnsRawRecord;
++import io.netty.handler.codec.dns.DnsRecord;
++import io.netty.handler.codec.dns.DnsRecordType;
+ import io.netty.handler.codec.dns.DnsResponse;
+ import io.netty.handler.codec.dns.DnsResponseCode;
+-import io.netty.handler.codec.dns.DnsType;
++import io.netty.handler.codec.dns.DnsSection;
++import io.netty.handler.codec.dns.DefaultDnsQuestion;
+ import io.netty.util.concurrent.Future;
+ import io.netty.util.internal.StringUtil;
+ import io.netty.util.internal.ThreadLocalRandom;
+@@ -196,29 +199,7 @@ public class DnsNameResolverTest {
+                 "google.com",
+                 "facebook.com",
+                 "youtube.com",
+-                "wikipedia.org",
+-                "google.co.in",
+-                "blogspot.com",
+-                "vk.com",
+-                "google.de",
+-                "google.co.jp",
+-                "google.co.uk",
+-                "google.fr",
+-                "google.com.br",
+-                "google.ru",
+-                "google.it",
+-                "google.es",
+-                "google.com.mx",
+-                "xhamster.com",
+-                "google.ca",
+-                "google.co.id",
+-                "blogger.com",
+-                "flipkart.com",
+-                "google.com.tr",
+-                "google.com.au",
+-                "google.pl",
+-                "google.com.hk",
+-                "blogspot.in"
++                "wikipedia.org"
+         ));
+     }
+ 
+@@ -378,35 +359,46 @@ public class DnsNameResolverTest {
+             queryMx(futures, name);
+         }
+ 
++        int foundMxRecords = 0;
+         for (Entry<String, Future<DnsResponse>> e: futures.entrySet()) {
+             String hostname = e.getKey();
+             DnsResponse response = e.getValue().sync().getNow();
+ 
+-            assertThat(response.header().responseCode(), is(DnsResponseCode.NOERROR));
+-            List<DnsResource> mxList = new ArrayList<DnsResource>();
+-            for (DnsResource r: response.answers()) {
+-                if (r.type() == DnsType.MX) {
+-                    mxList.add(r);
++            assertThat(response.code(), is(DnsResponseCode.NOERROR));
++            List<DnsRawRecord> mxList = new ArrayList<DnsRawRecord>();
++            int count = response.count(DnsSection.ANSWER);
++            for (int i = 0; i < count; i++) {
++                DnsRecord r = response.recordAt(DnsSection.ANSWER, i);
++                if (r.type() == DnsRecordType.MX) {
++                    mxList.add((DnsRawRecord) r);
+                 }
+             }
+ 
+-            assertThat(mxList.size(), is(greaterThan(0)));
++            if (mxList.isEmpty()) {
++                logger.info("{} has no MX records.", hostname);
++                response.release();
++                continue;
++            }
++            foundMxRecords++;
++
+             StringBuilder buf = new StringBuilder();
+-            for (DnsResource r: mxList) {
++            for (DnsRawRecord r: mxList) {
+                 buf.append(StringUtil.NEWLINE);
+-                buf.append('\t');
++                buf.append(StringUtil.TAB);
+                 buf.append(r.name());
+                 buf.append(' ');
+                 buf.append(r.type());
+                 buf.append(' ');
+-                buf.append(r.content().readUnsignedShort());
++                buf.append(r.content().duplicate().readUnsignedShort());
+                 buf.append(' ');
+-                buf.append(DnsNameResolverContext.decodeDomainName(r.content()));
++                buf.append(DnsNameResolverContext.decodeDomainName(r.content().duplicate().skipBytes(2)));
+             }
+ 
+             logger.info("{} has the following MX records:{}", hostname, buf);
+             response.release();
+         }
++
++        assertThat(foundMxRecords, is(greaterThan(0)));
+     }
+ 
+     private static void resolve(Map<InetSocketAddress, Future<InetSocketAddress>> futures, String hostname) {
+@@ -417,6 +409,6 @@ public class DnsNameResolverTest {
+     }
+ 
+     private static void queryMx(Map<String, Future<DnsResponse>> futures, String hostname) throws Exception {
+-        futures.put(hostname, resolver.query(new DnsQuestion(hostname, DnsType.MX)));
++        futures.put(hostname, resolver.query(new DefaultDnsQuestion(hostname, DnsRecordType.MX)));
+     }
+ }

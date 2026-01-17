@@ -1,0 +1,831 @@
+diff --git a/pkg/sentry/context/context.go b/pkg/sentry/context/context.go
+index 7ed6a5e..a2ce93c 100644
+--- a/pkg/sentry/context/context.go
++++ b/pkg/sentry/context/context.go
+@@ -29,6 +29,15 @@ const (
+ 	// CtxThreadGroupID is the current thread group ID when a context represents
+ 	// a task context. The value is represented as an int32.
+ 	CtxThreadGroupID contextID = iota
++
++	// CtxMemoryFileProvider is the memory file provider associated with a
++	// context. This is provided by the kernel in contexts which represent
++	// tasks.
++	CtxMemoryFileProvider
++
++	// CtxMemoryFile is the memory file associated with a context. This is
++	// provided by the kernel in contexts which represent tasks.
++	CtxMemoryFile
+ )
+ 
+ // ThreadGroupIDFromContext returns the current thread group ID when ctx
+@@ -40,6 +49,23 @@ func ThreadGroupIDFromContext(ctx Context) (tgid int32, ok bool) {
+ 	return 0, false
+ }
+ 
++// MemoryFileProviderFromContext returns the memory file provider associated
++// with context ctx.
++func MemoryFileProviderFromContext(ctx Context) (platform.MemoryFileProvider, bool) {
++	if mfp := ctx.Value(CtxMemoryFileProvider); mfp != nil {
++		return mfp.(platform.MemoryFileProvider), true
++	}
++	return nil, false
++}
++
++// MemoryFileFromContext returns the memory file associated with context ctx.
++func MemoryFileFromContext(ctx Context) (platform.MemoryFileProvider, bool) {
++	if mf := ctx.Value(CtxMemoryFile); mf != nil {
++		return mf.(platform.MemoryFileProvider), true
++	}
++	return nil, false
++}
++
+ // A Context represents a thread of execution (hereafter "goroutine" to reflect
+ // Go idiosyncrasy). It carries state associated with the goroutine across API
+ // boundaries.
+diff --git a/pkg/sentry/fs/binder/binder.go b/pkg/sentry/fs/binder/binder.go
+index 19cd55e..43cc179 100644
+--- a/pkg/sentry/fs/binder/binder.go
++++ b/pkg/sentry/fs/binder/binder.go
+@@ -104,7 +104,8 @@ func (bp *Proc) Release() {
+ 	bp.mu.Lock()
+ 	defer bp.mu.Unlock()
+ 	if bp.mapped.Length() != 0 {
+-		bp.platform.Memory().DecRef(bp.mapped)
++		mfp, _ := context.MemoryFileProviderFromContext(ctx)
++		mfp.DecRef(bp.mapped)
+ 	}
+ }
+ 
+@@ -204,7 +205,12 @@ func (bp *Proc) AddMapping(ctx context.Context, ms memmap.MappingSpace, ar userm
+ 	}
+ 	// Binder only allocates and maps a single page up-front
+ 	// (drivers/android/binder.c:binder_mmap() => binder_update_page_range()).
+-	fr, err := bp.platform.Memory().Allocate(usermem.PageSize, usage.Anonymous)
++	k := kernel.KernelFromContext(ctx)
++	mfp, ok := context.MemoryFileProviderFromContext(ctx)
++	if !ok {
++		return syserror.EINVAL
++	}
++	fr, err := mfp.Allocate(usermem.PageSize, usage.Anonymous)
+ 	if err != nil {
+ 		return err
+ 	}
+@@ -241,7 +247,7 @@ func (bp *Proc) Translate(ctx context.Context, required, optional memmap.Mappabl
+ 		return []memmap.Translation{
+ 			{
+ 				Source: memmap.MappableRange{0, usermem.PageSize},
+-				File:   bp.platform.Memory(),
++				File:   mfp,
+ 				Offset: bp.mapped.Start,
+ 			},
+ 		}, err
+diff --git a/pkg/sentry/fs/fsutil/README.md b/pkg/sentry/fs/fsutil/README.md
+index 6e67789..f15603a 100644
+--- a/pkg/sentry/fs/fsutil/README.md
++++ b/pkg/sentry/fs/fsutil/README.md
+@@ -112,7 +112,7 @@ finds the file that was mapped and its `CachingInodeOperations`. It then calls
+ It may choose to allocate more memory (i.e. do "readahead") to minimize
+ subsequent faults.
+ 
+-Memory that is allocated comes from a host tmpfs file (see `filemem.FileMem`).
++Memory that is allocated comes from a host tmpfs file (see `pgalloc.MemoryFile`).
+ The host tmpfs file memory is brought up to date with the contents of the mapped
+ file on its filesystem. The region of the host tmpfs file that reflects the
+ mapped file is then mapped into the host address space of the application so
+diff --git a/pkg/sentry/fs/fsutil/inode_cached.go b/pkg/sentry/fs/fsutil/inode_cached.go
+index ef11676..58aa874 100644
+--- a/pkg/sentry/fs/fsutil/inode_cached.go
++++ b/pkg/sentry/fs/fsutil/inode_cached.go
+@@ -311,7 +311,8 @@ func (c *CachingInodeOperations) Truncate(ctx context.Context, inode *fs.Inode,
+ 	// written back.
+ 	c.dataMu.Lock()
+ 	defer c.dataMu.Unlock()
+-	c.cache.Truncate(uint64(size), c.platform.Memory())
++		mfp, _ := context.MemoryFileProviderFromContext(ctx)
++	c.cache.Truncate(uint64(size), mfp)
+ 	c.dirty.KeepClean(memmap.MappableRange{uint64(size), oldpgend})
+ 
+ 	return nil
+diff --git a/pkg/sentry/kernel/kernel.go b/pkg/sentry/kernel/kernel.go
+index c6afae2..876a13d 100644
+--- a/pkg/sentry/kernel/kernel.go
++++ b/pkg/sentry/kernel/kernel.go
+@@ -95,6 +95,12 @@ type Kernel struct {
+ 	// filemem S/R logic.
+ 	platform.Platform `state:"nosave"`
+ 
++	// mfp is a memory file provider. This is distinct from the platform's
++	// memory because the platform abstraction is supposed to be independent
++	// of memory management, while we require tighter integration between
++	// page cache and page allocator.
++	mfp platform.MemoryFileProvider `state:"nosave"`
++
+ 	// See InitKernelArgs for the meaning of these fields.
+ 	featureSet                  *cpuid.FeatureSet
+ 	timekeeper                  *Timekeeper
+@@ -490,6 +496,16 @@ func (k *Kernel) UniqueID() uint64 {
+ 	return id
+ }
+ 
++// SetMemoryFile sets the memory file provider for this kernel.
++func (k *Kernel) SetMemoryFile(mfp platform.MemoryFileProvider) {
++	k.mfp = mfp
++}
++
++// MemoryFile returns the memory file provider for this kernel.
++func (k *Kernel) MemoryFile() platform.MemoryFileProvider {
++	return k.mfp
++}
++
+ // CreateProcessArgs holds arguments to kernel.CreateProcess.
+ type CreateProcessArgs struct {
+ 	// Filename is the filename to load.
+diff --git a/pkg/sentry/mm/README.md b/pkg/sentry/mm/README.md
+index e485a5c..f1223bc 100644
+--- a/pkg/sentry/mm/README.md
++++ b/pkg/sentry/mm/README.md
+@@ -153,7 +153,7 @@ manner, and the sentry handles the fault:
+     represented by a host file descriptor and offset, since (as noted in
+     "Background") this is the memory mapping primitive provided by the host
+     kernel. In general, memory is allocated from a temporary host file using the
+-    `filemem` package. Supposing that the sentry allocates offset 0x3000 from
++    `pgalloc` package. Supposing that the sentry allocates offset 0x3000 from
+     host file "memory-file", the resulting state is:
+ 
+         Sentry VMA:     VA:0x400000 -> /tmp/foo:0x0
+@@ -274,7 +274,7 @@ In the sentry:
+     methods
+     [`platform.AddressSpace.MapFile` and `platform.AddressSpace.Unmap`][platform].
+ 
+-[filemem]: https://gvisor.googlesource.com/gvisor/+/master/pkg/sentry/platform/filemem/filemem.go
++[filemem]: https://gvisor.googlesource.com/gvisor/+/master/pkg/sentry/platform/pgalloc/filemem.go
+ [memmap]: https://gvisor.googlesource.com/gvisor/+/master/pkg/sentry/memmap/memmap.go
+ [mm]: https://gvisor.googlesource.com/gvisor/+/master/pkg/sentry/mm/mm.go
+ [platform]: https://gvisor.googlesource.com/gvisor/+/master/pkg/sentry/platform/platform.go
+diff --git a/pkg/sentry/platform/filemem/BUILD b/pkg/sentry/pgalloc/BUILD
+similarity index 91%
+rename from pkg/sentry/platform/filemem/BUILD
+rename to pkg/sentry/pgalloc/BUILD
+index 1a61cfa..35c1dc7 100644
+--- a/pkg/sentry/platform/filemem/BUILD
++++ b/pkg/sentry/pgalloc/BUILD
+@@ -12,7 +12,7 @@ go_template_instance(
+     imports = {
+         "platform": "gvisor.googlesource.com/gvisor/pkg/sentry/platform",
+     },
+-    package = "filemem",
++    package = "pgalloc",
+     prefix = "usage",
+     template = "//pkg/segment:generic_set",
+     types = {
+@@ -24,14 +24,14 @@ go_template_instance(
+ )
+ 
+ go_library(
+-    name = "filemem",
++    name = "pgalloc",
+     srcs = [
+         "filemem.go",
+         "filemem_state.go",
+         "filemem_unsafe.go",
+         "usage_set.go",
+     ],
+-    importpath = "gvisor.googlesource.com/gvisor/pkg/sentry/platform/filemem",
++    importpath = "gvisor.googlesource.com/gvisor/pkg/sentry/platform/pgalloc",
+     visibility = ["//pkg/sentry:internal"],
+     deps = [
+         "//pkg/log",
+@@ -48,9 +48,9 @@ go_library(
+ )
+ 
+ go_test(
+-    name = "filemem_test",
++    name = "pgalloc_test",
+     size = "small",
+     srcs = ["filemem_test.go"],
+-    embed = [":filemem"],
++    embed = [":pgalloc"],
+     deps = ["//pkg/sentry/usermem"],
+ )
+diff --git a/pkg/sentry/platform/filemem/filemem.go b/pkg/sentry/pgalloc/filemem.go
+similarity index 92%
+rename from pkg/sentry/platform/filemem/filemem.go
+rename to pkg/sentry/pgalloc/filemem.go
+index f41c70b..4e59159 100644
+--- a/pkg/sentry/platform/filemem/filemem.go
++++ b/pkg/sentry/pgalloc/filemem.go
+@@ -12,15 +12,15 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
+-// Package filemem provides a reusable implementation of platform.Memory.
++// Package pgalloc provides a reusable implementation of platform.Memory.
+ //
+ // It enables memory to be sourced from a memfd file.
+ //
+ // Lock order:
+ //
+-// filemem.FileMem.mu
+-//   filemem.FileMem.mappingsMu
+-package filemem
++// pgalloc.MemoryFile.mu
++//   pgalloc.MemoryFile.mappingsMu
++package pgalloc
+ 
+ import (
+ 	"fmt"
+@@ -40,8 +40,8 @@ import (
+ 	"gvisor.googlesource.com/gvisor/pkg/syserror"
+ )
+ 
+-// FileMem is a platform.Memory that allocates from a host file that it owns.
+-type FileMem struct {
++// MemoryFile is a platform.Memory that allocates from a host file that it owns.
++type MemoryFile struct {
+ 	// Filemem models the backing file as follows:
+ 	//
+ 	// Each page in the file can be committed or uncommitted. A page is
+@@ -56,7 +56,7 @@ type FileMem struct {
+ 	// committed. This is the only event that can cause a uncommitted page to
+ 	// be committed.
+ 	//
+-	// fallocate(FALLOC_FL_PUNCH_HOLE) (FileMem.Decommit) causes committed
++	// fallocate(FALLOC_FL_PUNCH_HOLE) (MemoryFile.Decommit) causes committed
+ 	// pages to be uncommitted. This is the only event that can cause a
+ 	// committed page to be uncommitted.
+ 	//
+@@ -146,7 +146,7 @@ type FileMem struct {
+ 	// mutation of the slice's contents is the assignment of a mapping to a
+ 	// chunk that was previously unmapped.) Reading the slice or its contents
+ 	// only requires *either* holding mappingsMu or using atomic memory
+-	// operations. This allows FileMem.AccessPhysical to avoid locking in the
++	// operations. This allows MemoryFile.AccessPhysical to avoid locking in the
+ 	// common case where chunk mappings already exist.
+ 
+ 	mappingsMu sync.Mutex
+@@ -180,12 +180,12 @@ const (
+ 	maxPage = math.MaxUint64 &^ (usermem.PageSize - 1)
+ )
+ 
+-// newFromFile creates a FileMem backed by the given file.
+-func newFromFile(file *os.File) (*FileMem, error) {
++// newFromFile creates a MemoryFile backed by the given file.
++func newFromFile(file *os.File) (*MemoryFile, error) {
+ 	if err := file.Truncate(initialSize); err != nil {
+ 		return nil, err
+ 	}
+-	f := &FileMem{
++	f := &MemoryFile{
+ 		fileSize: initialSize,
+ 		file:     file,
+ 		// No pages are reclaimable. DecRef will always be able to
+@@ -199,12 +199,12 @@ func newFromFile(file *os.File) (*FileMem, error) {
+ 	// The Linux kernel contains an optional feature called "Integrity
+ 	// Measurement Architecture" (IMA). If IMA is enabled, it will checksum
+ 	// binaries the first time they are mapped PROT_EXEC. This is bad news for
+-	// executable pages mapped from FileMem, which can grow to terabytes in
++	// executable pages mapped from MemoryFile, which can grow to terabytes in
+ 	// (sparse) size. If IMA attempts to checksum a file that large, it will
+ 	// allocate all of the sparse pages and quickly exhaust all memory.
+ 	//
+ 	// Work around IMA by immediately creating a temporary PROT_EXEC mapping,
+-	// while FileMem is still small. IMA will ignore any future mappings.
++	// while MemoryFile is still small. IMA will ignore any future mappings.
+ 	m, _, errno := syscall.Syscall6(
+ 		syscall.SYS_MMAP,
+ 		0,
+@@ -216,7 +216,7 @@ func newFromFile(file *os.File) (*FileMem, error) {
+ 	if errno != 0 {
+ 		// This isn't fatal to filemem (IMA may not even be in use). Log the
+ 		// error, but don't return it.
+-		log.Warningf("Failed to pre-map FileMem PROT_EXEC: %v", errno)
++		log.Warningf("Failed to pre-map MemoryFile PROT_EXEC: %v", errno)
+ 	} else {
+ 		syscall.Syscall(
+ 			syscall.SYS_MUNMAP,
+@@ -228,8 +228,8 @@ func newFromFile(file *os.File) (*FileMem, error) {
+ 	return f, nil
+ }
+ 
+-// New creates a FileMem backed by a memfd file.
+-func New(name string) (*FileMem, error) {
++// New creates a MemoryFile backed by a memfd file.
++func New(name string) (*MemoryFile, error) {
+ 	fd, err := memutil.CreateMemFD(name, 0)
+ 	if err != nil {
+ 		if e, ok := err.(syscall.Errno); ok && e == syscall.ENOSYS {
+@@ -241,7 +241,7 @@ func New(name string) (*FileMem, error) {
+ }
+ 
+ // Destroy implements platform.Memory.Destroy.
+-func (f *FileMem) Destroy() {
++func (f *MemoryFile) Destroy() {
+ 	f.mu.Lock()
+ 	defer f.mu.Unlock()
+ 	f.destroyed = true
+@@ -249,7 +249,7 @@ func (f *FileMem) Destroy() {
+ }
+ 
+ // Allocate implements platform.Memory.Allocate.
+-func (f *FileMem) Allocate(length uint64, kind usage.MemoryKind) (platform.FileRange, error) {
++func (f *MemoryFile) Allocate(length uint64, kind usage.MemoryKind) (platform.FileRange, error) {
+ 	if length == 0 || length%usermem.PageSize != 0 {
+ 		panic(fmt.Sprintf("invalid allocation length: %#x", length))
+ 	}
+@@ -356,7 +356,7 @@ const (
+ )
+ 
+ // Decommit implements platform.Memory.Decommit.
+-func (f *FileMem) Decommit(fr platform.FileRange) error {
++func (f *MemoryFile) Decommit(fr platform.FileRange) error {
+ 	if !fr.WellFormed() || fr.Length() == 0 || fr.Start%usermem.PageSize != 0 || fr.End%usermem.PageSize != 0 {
+ 		panic(fmt.Sprintf("invalid range: %v", fr))
+ 	}
+@@ -376,7 +376,7 @@ func (f *FileMem) Decommit(fr platform.FileRange) error {
+ 	return nil
+ }
+ 
+-func (f *FileMem) markDecommitted(fr platform.FileRange) {
++func (f *MemoryFile) markDecommitted(fr platform.FileRange) {
+ 	f.mu.Lock()
+ 	defer f.mu.Unlock()
+ 	// Since we're changing the knownCommitted attribute, we need to merge
+@@ -399,7 +399,7 @@ func (f *FileMem) markDecommitted(fr platform.FileRange) {
+ 
+ // runReclaim implements the reclaimer goroutine, which continuously decommits
+ // reclaimable frames in order to reduce memory usage.
+-func (f *FileMem) runReclaim() {
++func (f *MemoryFile) runReclaim() {
+ 	for {
+ 		fr, ok := f.findReclaimable()
+ 		if !ok {
+@@ -446,7 +446,7 @@ func (f *FileMem) runReclaim() {
+ 	f.mappings.Store([]uintptr{})
+ }
+ 
+-func (f *FileMem) findReclaimable() (platform.FileRange, bool) {
++func (f *MemoryFile) findReclaimable() (platform.FileRange, bool) {
+ 	f.mu.Lock()
+ 	defer f.mu.Unlock()
+ 	for {
+@@ -474,7 +474,7 @@ func (f *FileMem) findReclaimable() (platform.FileRange, bool) {
+ 	}
+ }
+ 
+-func (f *FileMem) markReclaimed(fr platform.FileRange) {
++func (f *MemoryFile) markReclaimed(fr platform.FileRange) {
+ 	f.mu.Lock()
+ 	defer f.mu.Unlock()
+ 	seg := f.usage.FindSegment(fr.Start)
+@@ -504,7 +504,7 @@ func (f *FileMem) markReclaimed(fr platform.FileRange) {
+ }
+ 
+ // IncRef implements platform.File.IncRef.
+-func (f *FileMem) IncRef(fr platform.FileRange) {
++func (f *MemoryFile) IncRef(fr platform.FileRange) {
+ 	if !fr.WellFormed() || fr.Length() == 0 || fr.Start%usermem.PageSize != 0 || fr.End%usermem.PageSize != 0 {
+ 		panic(fmt.Sprintf("invalid range: %v", fr))
+ 	}
+@@ -523,7 +523,7 @@ func (f *FileMem) IncRef(fr platform.FileRange) {
+ }
+ 
+ // DecRef implements platform.File.DecRef.
+-func (f *FileMem) DecRef(fr platform.FileRange) {
++func (f *MemoryFile) DecRef(fr platform.FileRange) {
+ 	if !fr.WellFormed() || fr.Length() == 0 || fr.Start%usermem.PageSize != 0 || fr.End%usermem.PageSize != 0 {
+ 		panic(fmt.Sprintf("invalid range: %v", fr))
+ 	}
+@@ -563,7 +563,7 @@ func (f *FileMem) DecRef(fr platform.FileRange) {
+ }
+ 
+ // MapInternal implements platform.File.MapInternal.
+-func (f *FileMem) MapInternal(fr platform.FileRange, at usermem.AccessType) (safemem.BlockSeq, error) {
++func (f *MemoryFile) MapInternal(fr platform.FileRange, at usermem.AccessType) (safemem.BlockSeq, error) {
+ 	if !fr.WellFormed() || fr.Length() == 0 {
+ 		panic(fmt.Sprintf("invalid range: %v", fr))
+ 	}
+@@ -589,7 +589,7 @@ func (f *FileMem) MapInternal(fr platform.FileRange, at usermem.AccessType) (saf
+ 
+ // forEachMappingSlice invokes fn on a sequence of byte slices that
+ // collectively map all bytes in fr.
+-func (f *FileMem) forEachMappingSlice(fr platform.FileRange, fn func([]byte)) error {
++func (f *MemoryFile) forEachMappingSlice(fr platform.FileRange, fn func([]byte)) error {
+ 	mappings := f.mappings.Load().([]uintptr)
+ 	for chunkStart := fr.Start &^ chunkMask; chunkStart < fr.End; chunkStart += chunkSize {
+ 		chunk := int(chunkStart >> chunkShift)
+@@ -614,7 +614,7 @@ func (f *FileMem) forEachMappingSlice(fr platform.FileRange, fn func([]byte)) er
+ 	return nil
+ }
+ 
+-func (f *FileMem) getChunkMapping(chunk int) ([]uintptr, uintptr, error) {
++func (f *MemoryFile) getChunkMapping(chunk int) ([]uintptr, uintptr, error) {
+ 	f.mappingsMu.Lock()
+ 	defer f.mappingsMu.Unlock()
+ 	// Another thread may have replaced f.mappings altogether due to file
+@@ -640,12 +640,12 @@ func (f *FileMem) getChunkMapping(chunk int) ([]uintptr, uintptr, error) {
+ }
+ 
+ // FD implements platform.File.FD.
+-func (f *FileMem) FD() int {
++func (f *MemoryFile) FD() int {
+ 	return int(f.file.Fd())
+ }
+ 
+ // UpdateUsage implements platform.Memory.UpdateUsage.
+-func (f *FileMem) UpdateUsage() error {
++func (f *MemoryFile) UpdateUsage() error {
+ 	f.mu.Lock()
+ 	defer f.mu.Unlock()
+ 
+@@ -681,7 +681,7 @@ func (f *FileMem) UpdateUsage() error {
+ // in bs, sets committed[i] to 1 if the page is committed and 0 otherwise.
+ //
+ // Precondition: f.mu must be held.
+-func (f *FileMem) updateUsageLocked(currentUsage uint64, checkCommitted func(bs []byte, committed []byte) error) error {
++func (f *MemoryFile) updateUsageLocked(currentUsage uint64, checkCommitted func(bs []byte, committed []byte) error) error {
+ 	// Track if anything changed to elide the merge. In the common case, we
+ 	// expect all segments to be committed and no merge to occur.
+ 	changedAny := false
+@@ -823,7 +823,7 @@ func (f *FileMem) updateUsageLocked(currentUsage uint64, checkCommitted func(bs
+ }
+ 
+ // TotalUsage implements platform.Memory.TotalUsage.
+-func (f *FileMem) TotalUsage() (uint64, error) {
++func (f *MemoryFile) TotalUsage() (uint64, error) {
+ 	// Stat the underlying file to discover the underlying usage. stat(2)
+ 	// always reports the allocated block count in units of 512 bytes. This
+ 	// includes pages in the page cache and swapped pages.
+@@ -835,14 +835,14 @@ func (f *FileMem) TotalUsage() (uint64, error) {
+ }
+ 
+ // TotalSize implements platform.Memory.TotalSize.
+-func (f *FileMem) TotalSize() uint64 {
++func (f *MemoryFile) TotalSize() uint64 {
+ 	f.mu.Lock()
+ 	defer f.mu.Unlock()
+ 	return uint64(f.fileSize)
+ }
+ 
+ // File returns the memory file used by f.
+-func (f *FileMem) File() *os.File {
++func (f *MemoryFile) File() *os.File {
+ 	return f.file
+ }
+ 
+@@ -851,7 +851,7 @@ func (f *FileMem) File() *os.File {
+ // Note that because f.String locks f.mu, calling f.String internally
+ // (including indirectly through the fmt package) risks recursive locking.
+ // Within the filemem package, use f.usage directly instead.
+-func (f *FileMem) String() string {
++func (f *MemoryFile) String() string {
+ 	f.mu.Lock()
+ 	defer f.mu.Unlock()
+ 	return f.usage.String()
+diff --git a/pkg/sentry/platform/filemem/filemem_state.go b/pkg/sentry/pgalloc/filemem_state.go
+similarity index 97%
+rename from pkg/sentry/platform/filemem/filemem_state.go
+rename to pkg/sentry/pgalloc/filemem_state.go
+index 964e2aa..f9b9a7b 100644
+--- a/pkg/sentry/platform/filemem/filemem_state.go
++++ b/pkg/sentry/pgalloc/filemem_state.go
+@@ -12,7 +12,7 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
+-package filemem
++package pgalloc
+ 
+ import (
+ 	"bytes"
+@@ -29,7 +29,7 @@ import (
+ )
+ 
+ // SaveTo implements platform.Memory.SaveTo.
+-func (f *FileMem) SaveTo(w io.Writer) error {
++func (f *MemoryFile) SaveTo(w io.Writer) error {
+ 	// Wait for reclaim.
+ 	f.mu.Lock()
+ 	defer f.mu.Unlock()
+@@ -114,7 +114,7 @@ func (f *FileMem) SaveTo(w io.Writer) error {
+ }
+ 
+ // LoadFrom implements platform.Memory.LoadFrom.
+-func (f *FileMem) LoadFrom(r io.Reader) error {
++func (f *MemoryFile) LoadFrom(r io.Reader) error {
+ 	// Load metadata.
+ 	if err := state.Load(r, &f.fileSize, nil); err != nil {
+ 		return err
+diff --git a/pkg/sentry/platform/filemem/filemem_test.go b/pkg/sentry/pgalloc/filemem_test.go
+similarity index 99%
+rename from pkg/sentry/platform/filemem/filemem_test.go
+rename to pkg/sentry/pgalloc/filemem_test.go
+index 9becec2..726623c 100644
+--- a/pkg/sentry/platform/filemem/filemem_test.go
++++ b/pkg/sentry/pgalloc/filemem_test.go
+@@ -12,7 +12,7 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
+-package filemem
++package pgalloc
+ 
+ import (
+ 	"testing"
+diff --git a/pkg/sentry/platform/filemem/filemem_unsafe.go b/pkg/sentry/pgalloc/filemem_unsafe.go
+similarity index 98%
+rename from pkg/sentry/platform/filemem/filemem_unsafe.go
+rename to pkg/sentry/pgalloc/filemem_unsafe.go
+index 776aed7..33b0a68 100644
+--- a/pkg/sentry/platform/filemem/filemem_unsafe.go
++++ b/pkg/sentry/pgalloc/filemem_unsafe.go
+@@ -12,7 +12,7 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
+-package filemem
++package pgalloc
+ 
+ import (
+ 	"reflect"
+diff --git a/pkg/sentry/platform/kvm/BUILD b/pkg/sentry/platform/kvm/BUILD
+index b7bf882..afa4025 100644
+--- a/pkg/sentry/platform/kvm/BUILD
++++ b/pkg/sentry/platform/kvm/BUILD
+@@ -34,7 +34,7 @@ go_library(
+         "//pkg/log",
+         "//pkg/sentry/arch",
+         "//pkg/sentry/platform",
+-        "//pkg/sentry/platform/filemem",
++        "//pkg/sentry/platform/pgalloc",
+         "//pkg/sentry/platform/interrupt",
+         "//pkg/sentry/platform/procid",
+         "//pkg/sentry/platform/ring0",
+diff --git a/pkg/sentry/platform/kvm/address_space.go b/pkg/sentry/platform/kvm/address_space.go
+index 6d8d8e6..1cd68c3 100644
+--- a/pkg/sentry/platform/kvm/address_space.go
++++ b/pkg/sentry/platform/kvm/address_space.go
+@@ -20,7 +20,7 @@ import (
+ 
+ 	"gvisor.googlesource.com/gvisor/pkg/atomicbitops"
+ 	"gvisor.googlesource.com/gvisor/pkg/sentry/platform"
+-	"gvisor.googlesource.com/gvisor/pkg/sentry/platform/filemem"
++	"gvisor.googlesource.com/gvisor/pkg/sentry/platform/pgalloc"
+ 	"gvisor.googlesource.com/gvisor/pkg/sentry/platform/ring0/pagetables"
+ 	"gvisor.googlesource.com/gvisor/pkg/sentry/usermem"
+ )
+@@ -77,7 +77,7 @@ type addressSpace struct {
+ 	mu sync.Mutex
+ 
+ 	// filemem is the memory instance.
+-	filemem *filemem.FileMem
++	filemem *pgalloc.MemoryFile
+ 
+ 	// machine is the underlying machine.
+ 	machine *machine
+diff --git a/pkg/sentry/platform/kvm/kvm.go b/pkg/sentry/platform/kvm/kvm.go
+index d4f5002..21c5b5f 100644
+--- a/pkg/sentry/platform/kvm/kvm.go
++++ b/pkg/sentry/platform/kvm/kvm.go
+@@ -23,7 +23,7 @@ import (
+ 
+ 	"gvisor.googlesource.com/gvisor/pkg/cpuid"
+ 	"gvisor.googlesource.com/gvisor/pkg/sentry/platform"
+-	"gvisor.googlesource.com/gvisor/pkg/sentry/platform/filemem"
++	"gvisor.googlesource.com/gvisor/pkg/sentry/platform/pgalloc"
+ 	"gvisor.googlesource.com/gvisor/pkg/sentry/platform/ring0"
+ 	"gvisor.googlesource.com/gvisor/pkg/sentry/platform/ring0/pagetables"
+ 	"gvisor.googlesource.com/gvisor/pkg/sentry/usermem"
+@@ -34,7 +34,7 @@ type KVM struct {
+ 	platform.NoCPUPreemptionDetection
+ 
+ 	// filemem is our memory source.
+-	*filemem.FileMem
++	*pgalloc.MemoryFile
+ 
+ 	// machine is the backing VM.
+ 	machine *machine
+@@ -57,7 +57,7 @@ func OpenDevice() (*os.File, error) {
+ // New returns a new KVM-based implementation of the platform interface.
+ func New(deviceFile *os.File) (*KVM, error) {
+ 	// Allocate physical memory for the vCPUs.
+-	fm, err := filemem.New("kvm-memory")
++	fm, err := pgalloc.New("kvm-memory")
+ 	if err != nil {
+ 		return nil, err
+ 	}
+diff --git a/pkg/sentry/platform/platform.go b/pkg/sentry/platform/platform.go
+index b2ce851..deda7ae 100644
+--- a/pkg/sentry/platform/platform.go
++++ b/pkg/sentry/platform/platform.go
+@@ -29,7 +29,7 @@ import (
+ )
+ 
+ // Platform provides abstractions for execution contexts (Context) and memory
+-// management (Memory, AddressSpace).
++// management (AddressSpace).
+ type Platform interface {
+ 	// SupportsAddressSpaceIO returns true if AddressSpaces returned by this
+ 	// Platform support AddressSpaceIO methods.
+@@ -87,9 +87,6 @@ type Platform interface {
+ 	// NewContext returns a new execution context.
+ 	NewContext() Context
+ 
+-	// Memory returns memory for allocations.
+-	Memory() Memory
+-
+ 	// PreemptAllCPUs causes all concurrent calls to Context.Switch(), as well
+ 	// as the first following call to Context.Switch() for each Context, to
+ 	// return ErrContextCPUPreempted.
+@@ -344,24 +341,14 @@ type File interface {
+ 	FD() int
+ }
+ 
+-// FileRange represents a range of uint64 offsets into a File.
+-//
+-// type FileRange <generated using go_generics>
+-
+-// String implements fmt.Stringer.String.
+-func (fr FileRange) String() string {
+-	return fmt.Sprintf("[%#x, %#x)", fr.Start, fr.End)
+-}
+-
+-// Memory represents an allocatable File that may be mapped into any
+-// AddressSpace associated with the same Platform.
+-type Memory interface {
++// MemoryFileProvider provides access to memory backed by a file.
++type MemoryFileProvider interface {
+ 	File
+ 
+ 	// Allocate returns a range of initially-zeroed pages of the given length
+ 	// with the given accounting kind and a single reference held by the
+ 	// caller. When the last reference on an allocated page is released,
+-	// ownership of the page is returned to the Memory, allowing it to be
++	// ownership of the page is returned to the MemoryFile, allowing it to be
+ 	// returned by a future call to Allocate.
+ 	//
+ 	// Preconditions: length must be page-aligned and non-zero.
+@@ -385,16 +372,17 @@ type Memory interface {
+ 	// fine-grained breakdown.
+ 	TotalUsage() (uint64, error)
+ 
+-	// TotalSize returns the current maximum size of the Memory in bytes. The
+-	// value returned by TotalSize is permitted to change.
++	// TotalSize returns the current maximum size of the MemoryFile in bytes.
++	// The value returned by TotalSize is permitted to change.
+ 	TotalSize() uint64
+ 
+-	// Destroy releases all resources associated with the Memory.
++	// Destroy releases all resources associated with the MemoryFile.
+ 	//
+ 	// Preconditions: There are no remaining uses of any of the freed memory's
+ 	// frames.
+ 	//
+-	// Postconditions: None of the Memory's methods may be called after Destroy.
++	// Postconditions: None of the MemoryFile's methods may be called after
++	// Destroy.
+ 	Destroy()
+ 
+ 	// SaveTo saves the memory state to the given stream, which will
+@@ -413,7 +401,7 @@ type Memory interface {
+ // returned by r.ReadToBlocks(), it returns that error.
+ //
+ // Preconditions: length > 0. length must be page-aligned.
+-func AllocateAndFill(mem Memory, length uint64, kind usage.MemoryKind, r safemem.Reader) (FileRange, error) {
++func AllocateAndFill(mem MemoryFileProvider, length uint64, kind usage.MemoryKind, r safemem.Reader) (FileRange, error) {
+ 	fr, err := mem.Allocate(length, kind)
+ 	if err != nil {
+ 		return FileRange{}, err
+@@ -433,3 +421,13 @@ func AllocateAndFill(mem Memory, length uint64, kind usage.MemoryKind, r safemem
+ 	}
+ 	return fr, err
+ }
++
++// FileRange represents a range of uint64 offsets into a File.
++//
++// type FileRange <generated using go_generics>
++
++// String implements fmt.Stringer.String.
++func (fr FileRange) String() string {
++	return fmt.Sprintf("[%#x, %#x)", fr.Start, fr.End)
++}
++
+diff --git a/pkg/sentry/platform/ptrace/BUILD b/pkg/sentry/platform/ptrace/BUILD
+index f867909..a759183 100644
+--- a/pkg/sentry/platform/ptrace/BUILD
++++ b/pkg/sentry/platform/ptrace/BUILD
+@@ -23,7 +23,7 @@ go_library(
+         "//pkg/seccomp",
+         "//pkg/sentry/arch",
+         "//pkg/sentry/platform",
+-        "//pkg/sentry/platform/filemem",
++        "//pkg/sentry/platform/pgalloc",
+         "//pkg/sentry/platform/interrupt",
+         "//pkg/sentry/platform/procid",
+         "//pkg/sentry/platform/safecopy",
+diff --git a/pkg/sentry/platform/ptrace/ptrace.go b/pkg/sentry/platform/ptrace/ptrace.go
+index 8d3f6ac..6f8b799 100644
+--- a/pkg/sentry/platform/ptrace/ptrace.go
++++ b/pkg/sentry/platform/ptrace/ptrace.go
+@@ -50,7 +50,7 @@ import (
+ 	"gvisor.googlesource.com/gvisor/pkg/abi/linux"
+ 	"gvisor.googlesource.com/gvisor/pkg/sentry/arch"
+ 	"gvisor.googlesource.com/gvisor/pkg/sentry/platform"
+-	"gvisor.googlesource.com/gvisor/pkg/sentry/platform/filemem"
++	"gvisor.googlesource.com/gvisor/pkg/sentry/platform/pgalloc"
+ 	"gvisor.googlesource.com/gvisor/pkg/sentry/platform/interrupt"
+ 	"gvisor.googlesource.com/gvisor/pkg/sentry/usermem"
+ )
+@@ -181,7 +181,7 @@ func (c *context) Interrupt() {
+ type PTrace struct {
+ 	platform.MMapMinAddr
+ 	platform.NoCPUPreemptionDetection
+-	*filemem.FileMem
++	*pgalloc.MemoryFile
+ }
+ 
+ // New returns a new ptrace-based implementation of the platform interface.
+@@ -202,12 +202,12 @@ func New() (*PTrace, error) {
+ 		globalPool.master = master
+ 	})
+ 
+-	fm, err := filemem.New("ptrace-memory")
++	fm, err := pgalloc.New("ptrace-memory")
+ 	if err != nil {
+ 		return nil, err
+ 	}
+ 
+-	return &PTrace{FileMem: fm}, nil
++	return &PTrace{MemoryFile: fm}, nil
+ }
+ 
+ // SupportsAddressSpaceIO implements platform.Platform.SupportsAddressSpaceIO.
+@@ -246,5 +246,5 @@ func (*PTrace) NewContext() platform.Context {
+ 
+ // Memory returns the platform memory used to do allocations.
+ func (p *PTrace) Memory() platform.Memory {
+-	return p.FileMem
++	return p.MemoryFile
+ }
+diff --git a/replace_filemem.py b/replace_filemem.py
+new file mode 100755
+index 0000000..e5bdd49
+--- /dev/null
++++ b/replace_filemem.py
+@@ -0,0 +1,56 @@
++#!/usr/bin/env python3
++
++import os
++import re
++
++def replace_filemem_with_memoryfile(file_path):
++    """Replace all FileMem occurrences with MemoryFile in a file"""
++    with open(file_path, 'r') as f:
++        content = f.read()
++    
++    # Replace most patterns
++    content = content.replace('FileMem', 'MemoryFile')
++    
++    # Fix the package comment that mentions FileMem
++    content = re.sub(r'filemem\.FileMem', 'pgalloc.MemoryFile', content)
++    
++    # Ensure package comment is updated to reflect package name
++    content = re.sub(r'Package filemem provides', 'Package pgalloc provides', content)
++    
++    # Fix the lock order comments
++    content = content.replace('filemem.FileMem.mu', 'pgalloc.MemoryFile.mu')
++    content = content.replace('filemem.FileMem.mappingsMu', 'pgalloc.MemoryFile.mappingsMu')
++    
++    # Save the file
++    with open(file_path, 'w') as f:
++        f.write(content)
++
++def replace_package(file_path, old_pkg, new_pkg):
++    """Replace package declarations"""
++    with open(file_path, 'r') as f:
++        content = f.read()
++    
++    # Replace package declaration
++    content = re.sub(r'package\s+' + old_pkg, f'package {new_pkg}', content)
++    
++    # Save the file
++    with open(file_path, 'w') as f:
++        f.write(content)
++
++if __name__ == "__main__":
++    # List all files in the filemem directory
++    files = [
++        '/testbed/pkg/sentry/pgalloc/filemem.go',
++        '/testbed/pkg/sentry/pgalloc/filemem_state.go',
++        '/testbed/pkg/sentry/pgalloc/filemem_unsafe.go',
++        '/testbed/pkg/sentry/pgalloc/filemem_test.go',
++        '/testbed/pkg/sentry/pgalloc/BUILD'
++    ]
++    
++    for file_path in files:
++        try:
++            replace_filemem_with_memoryfile(file_path)
++            replace_package(file_path, 'filemem', 'pgalloc')
++        except Exception as e:
++            print(f"Error processing {file_path}: {e}")
++    print("All replacements completed.")
+\ No newline at end of file
