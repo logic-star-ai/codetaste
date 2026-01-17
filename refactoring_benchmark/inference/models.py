@@ -50,7 +50,7 @@ class InferenceConfig(BaseModel):
     class Config:
         arbitrary_types_allowed = True
 
-FinishReason = Literal["success", "timeout", "execution_error", "unknown", "budget_exceeded"]
+FinishReason = Literal["success", "timeout", "execution_error", "error", "unknown", "budget_exceeded"]
 
 class InferenceMetadata(BaseModel):
     """Metadata for inference results (created by agent or as fallback)."""

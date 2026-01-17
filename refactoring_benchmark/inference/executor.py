@@ -9,6 +9,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import List, Optional
+import secrets
 
 import podman
 from podman.domain.containers import Container as PodmanContainer
@@ -48,9 +49,8 @@ def _prepare_temp_description(instance: InstanceRow, instance_logger: logging.Lo
     project_root = Path(__file__).parent.parent.parent
     source_dir = project_root / instance.asset_dir("descriptions")
     # don't use tempfile because of sticky bit
-    path = "./.tmp_descriptions/" + instance.id
+    path = "./.tmp_descriptions/" + instance.id + "-" + secrets.token_hex(8)
     temp_dir = Path(path)
-    _cleanup_temp_dir(temp_dir, instance_logger)
     if source_dir.exists():
         shutil.copytree(source_dir, temp_dir, dirs_exist_ok=True)
     os.chmod(temp_dir, 0o777)
@@ -120,7 +120,7 @@ def run_single_instance(instance: InstanceRow, config: InferenceConfig) -> bool:
             create_fallback_inference_metadata(
                 output_dir, 
                 "timeout", 
-                config.description_type, 
+                description_type=config.description_type, 
                 additional={"error": f"Container timed out: {str(e)}"}
                 )
         
