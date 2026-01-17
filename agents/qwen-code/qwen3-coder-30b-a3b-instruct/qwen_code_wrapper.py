@@ -61,7 +61,7 @@ def main():
     total_input_tokens = 0
     total_output_tokens = 0
     budget_was_exceeded = False
-
+    additional_info = {}
     try:
         process = subprocess.Popen(
             cmd,
@@ -76,7 +76,9 @@ def main():
         for line in process.stdout:
             # Pass through the raw line to stdout
             print(line, end='', flush=True)
-
+            if "This request requires more credits" in line:
+                budget_was_exceeded = True
+                additional_info["error_message"] = "Not enough credits for the request. Terminating."
             try:
                 data = json.loads(line.strip())
                 last_data = data
@@ -112,14 +114,15 @@ def main():
 
         return_code = process.wait()
 
-        # Handle Final Summary
-        finish_reason = "budget_exceeded" if budget_was_exceeded else "unknown"
-        
-        # If we finished naturally, try to get specific finish reason from the last JSON chunk
-        if not budget_was_exceeded and last_data and last_data.get('type') == 'result':
+        finish_reason = "unknown"
+        if budget_was_exceeded:
+            finish_reason = "budget_exceeded"
+        elif last_data and last_data.get('type') == 'result':
             subtype = last_data.get('subtype', 'unknown')
-            is_error = last_data.get('is_error', False)
-            finish_reason = subtype if not is_error else ("error" if subtype == "success" else subtype)
+            if last_data.get('is_error'):
+                finish_reason = "error" if subtype == "success" else subtype
+            else:
+                finish_reason = subtype
 
         result = {
             "finish_reason": finish_reason,
@@ -133,7 +136,8 @@ def main():
                     "output_tokens": total_output_tokens,
                     "total_tokens": total_input_tokens + total_output_tokens
                 },
-                "model": model
+                "model": model,
+                **additional_info
             }
         }
         
