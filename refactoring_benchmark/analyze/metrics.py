@@ -25,7 +25,7 @@ def metric_ifr_removed(result: EvaluationResult) -> float:
     """IFR for removed lines only (0-1 range)."""
     return result.agent_rule_metrics.negative_ifr
 
-def metric_test_success(result: EvaluationResult) -> float | None:
+def metric_test_success(result: EvaluationResult) -> float:
     """Test success metric (1.0 if valid, 0.0 otherwise, None if no test data)."""
     if check_test_validity(result) == ValidityStatus.VALID:
         return 1.0
