@@ -99,9 +99,10 @@ async def run_limited_task_async(prompt: str, unknown_args: list) -> bool:
         *cmd,
         stdout=sys.stdout.fileno(),
         stderr=asyncio.subprocess.PIPE,
-        start_new_session=True
+        start_new_session=True,
+        limit=2*1024*1024,
     )
-
+    additional_info = {}
     reason = "success"
     current_cost = 0.0
 
@@ -138,14 +139,14 @@ async def run_limited_task_async(prompt: str, unknown_args: list) -> bool:
 
             # 3. Read Stderr (Non-blocking)
             try:
-                # We wait 1 second for output. If none, the loop restarts to re-check time/budget.
-                line_task = asyncio.create_task(proc.stderr.readline())
-                line = await asyncio.wait_for(line_task, timeout=1.0)
-                if line:
-                    print(line.decode(errors="replace"), file=sys.stderr, flush=True, end="")
+                chunk_task = asyncio.create_task(proc.stderr.read(4096))
+                chunk = await asyncio.wait_for(chunk_task, timeout=0.2)
+                
+                if chunk:
+                    sys.stderr.buffer.write(chunk)
+                    sys.stderr.buffer.flush()
                     last_read_dt = datetime.now(timezone.utc)
-                else:
-                    # EOF reached on stderr
+                elif proc.stderr.at_eof():
                     break
             except asyncio.TimeoutError:
                 continue
@@ -178,12 +179,13 @@ async def run_limited_task_async(prompt: str, unknown_args: list) -> bool:
     except Exception as e:
         print(f"Execution Error: {e}")
         reason = "execution_error"
+        additional_info["exception"] = str(e)
         exit_code = 1
 
-    _finalize_output(reason, monitor.tokens, monitor.model, start_time_str, exit_code, last_read_dt)
+    _finalize_output(reason, monitor.tokens, monitor.model, start_time_str, exit_code, last_read_dt, additional_info)
     return True
 
-def _finalize_output(reason: str, tokens: dict, model: str, start_time: str, exit_code: int, last_read_dt: datetime):
+def _finalize_output(reason: str, tokens: dict, model: str, start_time: str, exit_code: int, last_read_dt: datetime, additional_info: Dict[str, str] = {}) -> None:
     result = {
         "finish_reason": reason,
         "finish_time": get_timestamp(),
@@ -193,7 +195,8 @@ def _finalize_output(reason: str, tokens: dict, model: str, start_time: str, exi
             "exit_code": exit_code,
             "tokens": tokens,
             "model": model,
-            "seconds_since_last_read": (datetime.now(timezone.utc) - last_read_dt).total_seconds()
+            "seconds_since_last_read": (datetime.now(timezone.utc) - last_read_dt).total_seconds(),
+            **additional_info
         }
     }
     print("\n--- FINAL RESULT ---")
