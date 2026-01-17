@@ -1,16 +1,12 @@
 """Load and organize evaluation results."""
 
-import csv
 from pathlib import Path
 from typing import List, Sequence
 
-from pydantic import ValidationError
-
 from refactoring_benchmark.evaluation.models import EvaluationResult
-from refactoring_benchmark.analyze.models import AnalysisData, InstanceData, AgentInstanceStats
+from refactoring_benchmark.analyze_instance.models import AnalysisData, InstanceData, AgentInstanceStats
 from refactoring_benchmark.analyze.validation import check_test_validity
 from refactoring_benchmark.analyze.filters import ResultFilter
-from refactoring_benchmark.coverage.precision import calculate_precision_instance_agent
 from refactoring_benchmark.utils.models import InstanceRow, ReducedInstanceRow
 
 
@@ -108,37 +104,3 @@ def organize_data(results: List[EvaluationResult], filters: Sequence[ResultFilte
         analysis_data.instances[instance.display_path].agents[agent_id] = agent_data
 
     return analysis_data
-
-
-def load_and_merge_precision_data(
-    analysis_data: AnalysisData,
-    output_dir: Path,
-    debug: bool = False,
-) -> None:
-    """
-    Load precision metrics and merge them into existing analysis data.
-
-    Modifies analysis_data in-place by adding precision metrics to AgentIFRData
-    where they can be calculated.
-
-    Args:
-        analysis_data: Analysis data to merge precision into (modified in-place)
-        output_dir: Base output directory containing agent results
-        debug: Whether to print debug information
-    """
-    # Calculate precision for each instance-agent pair in analysis_data
-    for instance_data in analysis_data.instances.values():
-        # Calculate precision for each agent
-        for agent_id, agent_data in instance_data.agents.items():
-            precision_result = calculate_precision_instance_agent(
-                instance_data.instance,
-                agent_id,
-                output_dir,
-                debug=debug,
-            )
-
-            if precision_result:
-                # Merge precision metrics into agent_data (convert from 0-1 to 0-100 scale)
-                agent_data.precision_added = precision_result.metrics.precision_added * 100
-                agent_data.precision_removed = precision_result.metrics.precision_removed * 100
-                agent_data.precision_overall = precision_result.metrics.precision_overall * 100

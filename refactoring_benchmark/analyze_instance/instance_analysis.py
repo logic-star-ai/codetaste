@@ -206,6 +206,10 @@ def create_instance_plot(
         raise ValueError(f"Unknown plot type: {plot_type}")
 
 
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.cm as cm
+
 def _plot_instance_heatmap(
     data: InstanceAnalysisData,
     metric_name: str,
@@ -215,22 +219,29 @@ def _plot_instance_heatmap(
     config: PlotConfig,
 ) -> plt.Figure:
     """Create a heatmap showing metric values for each (instance, agent) pair."""
-    # Create matrix: rows = agents, columns = instances
-    matrix = np.zeros((len(agents), len(instance_keys)))
+    
+    # 1. Initialize matrix with NaNs instead of zeros
+    matrix = np.full((len(agents), len(instance_keys)), np.nan)
 
     for i, agent_id in enumerate(agents):
         for j, instance_key in enumerate(instance_keys):
             instance_data = data.instances[instance_key]
             value = instance_data.get_agent_value(agent_id)
-            matrix[i, j] = value if value is not None else 0.0
+            # 2. Keep value as None/NaN if it's missing
+            if value is not None:
+                matrix[i, j] = value
 
     # Create figure with appropriate size
     fig_width = max(10, len(instance_keys) * 0.4)
     fig_height = max(6, len(agents) * 0.5)
     fig, ax = plt.subplots(figsize=(fig_width, fig_height))
 
-    # Create heatmap
-    im = ax.imshow(matrix, cmap="RdYlGn", aspect="auto", vmin=0, vmax=1)
+    # 3. Configure the colormap to show NaNs as black
+    current_cmap = cm.get_cmap("RdYlGn").copy()
+    current_cmap.set_bad(color='black')
+
+    # 4. Use the modified colormap
+    im = ax.imshow(matrix, cmap=current_cmap, aspect="auto", vmin=0, vmax=1)
 
     # Set ticks and labels
     ax.set_xticks(np.arange(len(instance_keys)))

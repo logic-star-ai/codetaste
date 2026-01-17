@@ -5,7 +5,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 
-from refactoring_benchmark.analyze.models import AnalysisData
+from refactoring_benchmark.analyze_instance.models import AnalysisData
 from refactoring_benchmark.analyze.config import IFRPlotConfig, IFRMetricType, IFR_PLOT_DEFINITIONS
 from refactoring_benchmark.analyze.validation import ValidityStatus
 
