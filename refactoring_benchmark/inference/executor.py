@@ -3,6 +3,7 @@
 import logging
 import os
 import shutil
+import subprocess
 import signal
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -32,6 +33,30 @@ def _output_container_logs(container: PodmanContainer, output_path: Path, instan
     instance_logger.error(stdout)
     output_path.write_text(stdout, encoding="utf-8")
 
+def _cleanup_temp_dir(temp_description_dir: Path, instance_logger: logging.Logger) -> None:
+    """Helper to cleanup temporary description directory."""
+    if temp_description_dir and temp_description_dir.exists():
+        try:
+            shutil.rmtree(temp_description_dir)
+        except Exception as e:
+            try:
+                subprocess.run(["podman", "unshare", "rm", "-rf", str(temp_description_dir)], check=False)
+            except Exception as e2:
+                instance_logger.error(f"Failed to remove temporary description directory: {e}, {e2}")
+
+def _prepare_temp_description(instance: InstanceRow, instance_logger: logging.Logger) -> Path:
+    project_root = Path(__file__).parent.parent.parent
+    source_dir = project_root / instance.asset_dir("descriptions")
+    # don't use tempfile because of sticky bit
+    path = "./.tmp_descriptions/" + instance.id
+    temp_dir = Path(path)
+    _cleanup_temp_dir(temp_dir, instance_logger)
+    if source_dir.exists():
+        shutil.copytree(source_dir, temp_dir, dirs_exist_ok=True)
+    os.chmod(temp_dir, 0o777)
+    for path in temp_dir.rglob('*'):
+        os.chmod(path, 0o777)
+    return temp_dir
 
 def run_single_instance(instance: InstanceRow, config: InferenceConfig) -> bool:
     """Run inference on a single benchmark instance with streamlined checks."""
@@ -63,6 +88,7 @@ def run_single_instance(instance: InstanceRow, config: InferenceConfig) -> bool:
         return False
 
     container: Optional[PodmanContainer] = None
+    temp_description_dir: Path = _prepare_temp_description(instance, instance_logger).resolve()
     try:
         # 3. Execute Container
         instance_logger.info(f"Starting inference for {instance.display_path}")
@@ -70,7 +96,6 @@ def run_single_instance(instance: InstanceRow, config: InferenceConfig) -> bool:
         instance_logger.info(f"  Output: {output_dir}")
         env = {**config.env_vars, "DESCRIPTION_TYPE": config.description_type}
         instance_logger.debug(f"  Environment Variables: {[(k, v[:10] if isinstance(v, str) else v) for k, v in env.items()]}")
-        
         # The run_agent provided is responsible for catching errors and adjusting finish_reason in inference_metadata.json
         container = podman_utils.safe_container_run(
             client,
@@ -81,6 +106,7 @@ def run_single_instance(instance: InstanceRow, config: InferenceConfig) -> bool:
             volumes={
                 str(config.agent_dir): {"bind": "/agent", "mode": "rw"},
                 str(output_dir): {"bind": "/output", "mode": "rw"},
+                str(temp_description_dir): {"bind": "/task_description", "mode": "rw", "extended_mode": ["U", "z"]},
             },
             working_dir="/testbed",
             remove=False,
@@ -137,6 +163,7 @@ def run_single_instance(instance: InstanceRow, config: InferenceConfig) -> bool:
                 container.remove(force=True)
             except Exception as e:
                 instance_logger.warning(f"Failed to remove container [{instance.id}]. Probably already removed. Error: {e}")
+        _cleanup_temp_dir(temp_description_dir, instance_logger)
         client.close()
 
 

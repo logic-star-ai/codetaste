@@ -95,6 +95,7 @@ def main():
         sanitized_agent_id=sanitized_agent_id,
         env_vars=args.env_vars,
         description_type=args.description_type,
+        force_unsuccessful=args.force_unsuccessful,
     )
 
     # Create and run orchestrator
