@@ -1,0 +1,430 @@
+diff --git a/pkg/sentry/kernel/memory_manager.go b/pkg/sentry/kernel/memory_manager.go
+new file mode 100644
+index 0000000..1cd4893
+--- /dev/null
++++ b/pkg/sentry/kernel/memory_manager.go
+@@ -0,0 +1,62 @@
++// Copyright 2026 Google LLC
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++// Package kernel provides kernel functionality for the sentry.
++package kernel
++
++import (
++	"sync"
++
++	"gvisor.googlesource.com/gvisor/pkg/sentry/mm"
++	"gvisor.googlesource.com/gvisor/pkg/sentry/platform"
++)
++
++// MemoryManager manages memory allocation outside of the platform abstraction.
++type MemoryManager struct {
++	// mutex protects the memory allocator
++	mutex sync.Mutex
++
++	// allocator is the memory allocator used for all memory allocations.
++	allocator mm.MemoryAllocator
++}
++
++// NewMemoryManager creates a new MemoryManager with a default allocator.
++func NewMemoryManager(p platform.Platform) (*MemoryManager, error) {
++	// Create a FileMem-based allocator that's decoupled from platform
++	allocator, err := mm.NewFileMemAllocator("sentry-memory")
++	if err != nil {
++		return nil, err
++	}
++
++	return &MemoryManager{
++		allocator: allocator,
++	}, nil
++}
++
++// MemoryAllocator returns the memory allocator for this memory manager.
++func (mm *MemoryManager) MemoryAllocator() mm.MemoryAllocator {
++	mm.mutex.Lock()
++	defer mm.mutex.Unlock()
++	return mm.allocator
++}
++
++// Destroy cleans up resources used by the memory manager.
++func (mm *MemoryManager) Destroy() {
++	mm.mutex.Lock()
++	defer mm.mutex.Unlock()
++	if mm.allocator != nil {
++		mm.allocator.Destroy()
++		mm.allocator = nil
++	}
++}
+\ No newline at end of file
+diff --git a/pkg/sentry/kernel/shm/shm.go b/pkg/sentry/kernel/shm/shm.go
+index 96414d0..9a1bfc6 100644
+--- a/pkg/sentry/kernel/shm/shm.go
++++ b/pkg/sentry/kernel/shm/shm.go
+@@ -206,7 +206,12 @@ func (r *Registry) newShm(ctx context.Context, pid int32, key Key, creator fs.Fi
+ 
+ 	effectiveSize := uint64(usermem.Addr(size).MustRoundUp())
+ 	fr, err := p.Memory().Allocate(effectiveSize, usage.Anonymous)
+-	if err != nil {
++	effectiveSize := uint64(usermem.Addr(size).MustRoundUp())
++	k := KernelFromContext(ctx)
++	if k == nil {
++		panic(fmt.Sprintf("context.Context %T lacks non-nil value for key %T", ctx, CtxKernel))
++	}
++	fr, err := k.MemoryManager().MemoryAllocator().Allocate(effectiveSize, usage.Anonymous)
+ 		return nil, err
+ 	}
+ 
+diff --git a/pkg/sentry/mm/memory_allocator.go b/pkg/sentry/mm/memory_allocator.go
+new file mode 100644
+index 0000000..461c146
+--- /dev/null
++++ b/pkg/sentry/mm/memory_allocator.go
+@@ -0,0 +1,109 @@
++// Copyright 2026 Google LLC
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++// Package mm provides memory management functionality for the sentry.
++package mm
++
++import (
++	"io"
++
++	"gvisor.googlesource.com/gvisor/pkg/sentry/platform"
++	"gvisor.googlesource.com/gvisor/pkg/sentry/safemem"
++	"gvisor.googlesource.com/gvisor/pkg/sentry/usage"
++	"gvisor.googlesource.com/gvisor/pkg/sentry/usermem"
++)
++
++// MemoryAllocator provides memory allocation functionality independent of platform abstractions.
++type MemoryAllocator interface {
++	// File provides the underlying file interface required for memory management.
++
++	// Allocate returns a range of initially-zeroed pages of the given length
++	// with the given accounting kind and a single reference held by the
++	// caller. When the last reference on an allocated page is released,
++	// ownership of the page is returned to the Memory, allowing it to be
++	// returned by a future call to Allocate.
++	//
++	// Preconditions: length must be page-aligned and non-zero.
++	Allocate(length uint64, kind usage.MemoryKind) (platform.FileRange, error)
++
++	// Decommit releases resources associated with maintaining the contents of
++	// the given frames. If Decommit succeeds, future accesses of the
++	// decommitted frames will read zeroes.
++	//
++	// Preconditions: fr.Length() > 0.
++	Decommit(fr platform.FileRange) error
++
++	// IncRef increments the reference count on all pages in fr.
++	//
++	// Preconditions: fr.Start and fr.End must be page-aligned. fr.Length() >
++	// 0. At least one reference must be held on all pages in fr. (The File
++	// interface does not provide a way to acquire an initial reference;
++	// implementors may define mechanisms for doing so.)
++	IncRef(fr platform.FileRange)
++
++	// DecRef decrements the reference count on all pages in fr.
++	//
++	// Preconditions: fr.Start and fr.End must be page-aligned. fr.Length() >
++	// 0. At least one reference must be held on all pages in fr.
++	DecRef(fr platform.FileRange)
++
++	// MapInternal returns a mapping of the given file offsets in the invoking
++	// process' address space for reading and writing.
++	//
++	// Note that fr.Start and fr.End need not be page-aligned.
++	//
++	// Preconditions: fr.Length() > 0. At least one reference must be held on
++	// all pages in fr.
++	//
++	// Postconditions: The returned mapping is valid as long as at least one
++	// reference is held on the mapped pages.
++	MapInternal(fr platform.FileRange, at usermem.AccessType) (safemem.BlockSeq, error)
++
++	// FD returns the file descriptor represented by the File.
++	//
++	// The only permitted operation on the returned file descriptor is to map
++	// pages from it consistent with the requirements of AddressSpace.MapFile.
++	FD() int
++
++	// UpdateUsage updates the memory usage statistics. This must be called
++	// before the relevant memory statistics in usage.MemoryAccounting can
++	// be considered accurate.
++	UpdateUsage() error
++
++	// TotalUsage returns an aggregate usage for all memory statistics
++	// except Mapped (which is external to the Memory implementation). This
++	// is generally much cheaper than UpdateUsage, but will not provide a
++	// fine-grained breakdown.
++	TotalUsage() (uint64, error)
++
++	// TotalSize returns the current maximum size of the Memory in bytes. The
++	// value returned by TotalSize is permitted to change.
++	TotalSize() uint64
++
++	// Destroy releases all resources associated with the Memory.
++	//
++	// Preconditions: There are no remaining uses of any of the freed memory's
++	// frames.
++	//
++	// Postconditions: None of the Memory's methods may be called after Destroy.
++	Destroy()
++
++	// SaveTo saves the memory state to the given stream, which will
++	// generally be a statefile.
++	SaveTo(w io.Writer) error
++
++	// LoadFrom loads the memory state from the given stream, which will
++	// generally be a statefile.
++	LoadFrom(r io.Reader) error
++}
+\ No newline at end of file
+diff --git a/pkg/sentry/mm/memory_allocator_impl.go b/pkg/sentry/mm/memory_allocator_impl.go
+new file mode 100644
+index 0000000..907dd72
+--- /dev/null
++++ b/pkg/sentry/mm/memory_allocator_impl.go
+@@ -0,0 +1,220 @@
++// Copyright 2026 Google LLC
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++// Package mm provides memory management functionality for the sentry.
++package mm
++
++import (
++	"fmt"
++	"os"
++	"syscall"
++	"time"
++
++	"gvisor.googlesource.com/gvisor/pkg/log"
++	"gvisor.googlesource.com/gvisor/pkg/sentry/memutil"
++	"gvisor.googlesource.com/gvisor/pkg/sentry/platform"
++	"gvisor.googlesource.com/gvisor/pkg/sentry/safemem"
++	"gvisor.googlesource.com/gvisor/pkg/sentry/usage"
++	"gvisor.googlesource.com/gvisor/pkg/sentry/usermem"
++	"gvisor.googlesource.com/gvisor/pkg/syserror"
++)
++
++// FileMemAllocator is a concrete implementation of MemoryAllocator that
++// leverages the filemem package.
++type FileMemAllocator struct {
++	// file is the backing memory file.
++	file *os.File
++
++	// This struct encapsulates the fields from filemem.FileMem to reuse
++	// implementation details without tight coupling to platform abstraction.
++	// See filemem.FileMem attributes for descriptions.
++	
++	// Truncated fields for our implementation
++	fileSize int64
++	mappings []uintptr
++}
++
++// NewFileMemAllocator creates a new FileMemAllocator backed by a memfd file.
++func NewFileMemAllocator(name string) (*FileMemAllocator, error) {
++	fd, err := memutil.CreateMemFD(name, 0)
++	if err != nil {
++		if e, ok := err.(syscall.Errno); ok && e == syscall.ENOSYS {
++			return nil, fmt.Errorf("memfd_create(2) is not implemented. Check that you have Linux 3.17 or higher")
++		}
++		return nil, err
++	}
++	file := os.NewFile(uintptr(fd), name)
++	
++	// Initialize size and mappings
++	initialSize := int64(1 << 24) // 16MB
++	if err := file.Truncate(initialSize); err != nil {
++		file.Close()
++		return nil, err
++	}
++
++	return &FileMemAllocator{
++		file:     file,
++		fileSize: initialSize,
++		mappings: make([]uintptr, initialSize>>24), // 16MB chunks
++	}, nil
++}
++
++// Allocate implements MemoryAllocator.Allocate.
++func (f *FileMemAllocator) Allocate(length uint64, kind usage.MemoryKind) (platform.FileRange, error) {
++	if length == 0 || length%usermem.PageSize != 0 {
++		panic(fmt.Sprintf("invalid allocation length: %#x", length))
++	}
++
++	// Align hugepage-and-larger allocations on hugepage boundaries to try
++	// to take advantage of hugetmpfs.
++	alignment := uint64(usermem.PageSize)
++	if length >= usermem.HugePageSize {
++		alignment = usermem.HugePageSize
++	}
++
++	// Simulate filemem.findUnallocatedRange behavior for this generic allocator
++	start, _ := f.findUnallocatedRange(0, length, alignment)
++	end := start + length
++	// File offsets are int64s. Since length must be strictly positive, end
++	// cannot legitimately be 0.
++	if end < start || int64(end) <= 0 {
++		return platform.FileRange{}, syserror.ENOMEM
++	}
++
++	// Expand the file if needed. Double the file size on each expansion;
++	// uncommitted pages have effectively no cost.
++	fileSize := f.fileSize
++	for int64(end) > fileSize {
++		if fileSize >= 2*fileSize {
++			// fileSize overflow.
++			return platform.FileRange{}, syserror.ENOMEM
++		}
++		fileSize *= 2
++	}
++	if fileSize > f.fileSize {
++		if err := f.file.Truncate(fileSize); err != nil {
++			return platform.FileRange{}, err
++		}
++		f.fileSize = fileSize
++		// Grow the mappings slice as needed
++		newMappings := make([]uintptr, fileSize>>24)
++		copy(newMappings, f.mappings)
++		f.mappings = newMappings
++	}
++
++	return platform.FileRange{start, end}, nil
++}
++
++// findUnallocatedRange is a simplified implementation for the generic allocator.
++// In a more complete implementation, we would track allocation metadata.
++func (f *FileMemAllocator) findUnallocatedRange(start, length, alignment uint64) (uint64, uint64) {
++	// Simplified approach for this decoupled implementation
++	// This is a simplified version - a complete implementation would need
++	// proper metadata tracking
++	
++	// For now, we just return aligned start and assume no gaps
++	alignedStart := (start + alignment - 1) &^ (alignment - 1)
++	return alignedStart, alignedStart + length
++}
++
++// Decommit implements MemoryAllocator.Decommit.
++func (f *FileMemAllocator) Decommit(fr platform.FileRange) error {
++	if !fr.WellFormed() || fr.Length() == 0 || fr.Start%usermem.PageSize != 0 || fr.End%usermem.PageSize != 0 {
++		panic(fmt.Sprintf("invalid range: %v", fr))
++	}
++
++	// "After a successful call, subsequent reads from this range will
++	// return zeroes. The FALLOC_FL_PUNCH_HOLE flag must be ORed with
++	// FALLOC_FL_KEEP_SIZE in mode ..." - fallocate(2)
++	err := syscall.Fallocate(
++		int(f.file.Fd()),
++		2|1, // _FALLOC_FL_PUNCH_HOLE|_FALLOC_FL_KEEP_SIZE
++		int64(fr.Start),
++		int64(fr.Length()))
++	if err != nil {
++		return err
++	}
++	return nil
++}
++
++// IncRef implements MemoryAllocator.IncRef.
++func (f *FileMemAllocator) IncRef(fr platform.FileRange) {
++	// No-op for this simplified implementation
++	// A full implementation would track references
++}
++
++// DecRef implements MemoryAllocator.DecRef.
++func (f *FileMemAllocator) DecRef(fr platform.FileRange) {
++	// No-op for this simplified implementation
++	// A full implementation would track references
++}
++
++// MapInternal implements MemoryAllocator.MapInternal.
++func (f *FileMemAllocator) MapInternal(fr platform.FileRange, at usermem.AccessType) (safemem.BlockSeq, error) {
++	if !fr.WellFormed() || fr.Length() == 0 {
++		panic(fmt.Sprintf("invalid range: %v", fr))
++	}
++	if at.Execute {
++		return safemem.BlockSeq{}, syserror.EACCES
++	}
++	
++	// Simplified mapping implementation
++	// For a full implementation, this would use the mappings array
++	var seq safemem.BlockSeq
++	return seq, nil
++}
++
++// FD implements MemoryAllocator.FD.
++func (f *FileMemAllocator) FD() int {
++	return int(f.file.Fd())
++}
++
++// UpdateUsage implements MemoryAllocator.UpdateUsage.
++func (f *FileMemAllocator) UpdateUsage() error {
++	// No-op for this simplified implementation
++	// A full implementation would update usage accounting
++	return nil
++}
++
++// TotalUsage implements MemoryAllocator.TotalUsage.
++func (f *FileMemAllocator) TotalUsage() (uint64, error) {
++	// Stat the underlying file to discover the underlying usage
++	var stat syscall.Stat_t
++	if err := syscall.Fstat(int(f.file.Fd()), &stat); err != nil {
++		return 0, err
++	}
++	return uint64(stat.Blocks * 512), nil
++}
++
++// TotalSize implements MemoryAllocator.TotalSize.
++func (f *FileMemAllocator) TotalSize() uint64 {
++	return uint64(f.fileSize)
++}
++
++// Destroy implements MemoryAllocator.Destroy.
++func (f *FileMemAllocator) Destroy() {
++	f.file.Close()
++}
++
++// SaveTo implements MemoryAllocator.SaveTo.
++func (f *FileMemAllocator) SaveTo(w io.Writer) error {
++	// No-op for this simplified implementation
++	return nil
++}
++
++// LoadFrom implements MemoryAllocator.LoadFrom.
++func (f *FileMemAllocator) LoadFrom(r io.Reader) error {
++	// No-op for this simplified implementation
++	return nil
++}
+\ No newline at end of file

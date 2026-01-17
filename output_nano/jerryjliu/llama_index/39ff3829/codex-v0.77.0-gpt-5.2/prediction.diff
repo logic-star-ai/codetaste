@@ -1,0 +1,716 @@
+diff --git a/llama_index/llm_predictor/vellum/prompt_registry.py b/llama_index/llm_predictor/vellum/prompt_registry.py
+index 4421c75..8e98654 100644
+--- a/llama_index/llm_predictor/vellum/prompt_registry.py
++++ b/llama_index/llm_predictor/vellum/prompt_registry.py
+@@ -179,7 +179,7 @@ class VellumPromptRegistry:
+         import vellum
+ 
+         prompt_template = prompt.original_template
+-        for input_variable in prompt.get_langchain_prompt().input_variables:
++        for input_variable in prompt.get_template().input_variables:
+             prompt_template = prompt_template.replace(
+                 input_variable, f"{{ {input_variable} }}"
+             )
+@@ -191,7 +191,7 @@ class VellumPromptRegistry:
+             properties=vellum.PromptTemplateBlockPropertiesRequest(
+                 template=self._prepare_prompt_jinja_template(
+                     prompt.original_template,
+-                    prompt.get_langchain_prompt().input_variables,
++                    prompt.get_template().input_variables,
+                 ),
+             ),
+         )
+@@ -215,7 +215,7 @@ class VellumPromptRegistry:
+             ),
+             input_variables=[
+                 {"key": input_var}
+-                for input_var in prompt.get_langchain_prompt().input_variables
++                for input_var in prompt.get_template().input_variables
+             ],
+         )
+ 
+diff --git a/llama_index/prompts/base.py b/llama_index/prompts/base.py
+index 3911404..0b13f7e 100644
+--- a/llama_index/prompts/base.py
++++ b/llama_index/prompts/base.py
+@@ -2,11 +2,13 @@
+ from copy import deepcopy
+ from typing import Any, Dict, List, Optional
+ 
+-from llama_index.bridge.langchain import BasePromptTemplate as BaseLangchainPrompt
+-from llama_index.bridge.langchain import PromptTemplate as LangchainPrompt
+-from llama_index.llms.base import LLM, ChatMessage
+-from llama_index.llms.langchain_utils import from_lc_messages
++from llama_index.llms.base import LLM, ChatMessage, MessageRole
+ from llama_index.prompts.prompt_selector import PromptSelector
++from llama_index.prompts.template import (
++    BasePromptTemplate,
++    ChatPromptTemplate,
++    PromptTemplate,
++)
+ from llama_index.prompts.prompt_type import PromptType
+ from llama_index.types import BaseOutputParser
+ 
+@@ -14,46 +16,40 @@ from llama_index.types import BaseOutputParser
+ class Prompt:
+     """Prompt class for LlamaIndex.
+ 
+-    Wrapper around langchain's prompt class. Adds ability to:
+-        - enforce certain prompt types
+-        - partially fill values
++    Wraps a template (string or chat messages) and supports partial formatting.
+     """
+ 
+     def __init__(
+         self,
+         template: Optional[str] = None,
+-        langchain_prompt: Optional[BaseLangchainPrompt] = None,
+-        langchain_prompt_selector: Optional[PromptSelector] = None,
++        prompt_template: Optional[BasePromptTemplate] = None,
++        prompt_selector: Optional[PromptSelector] = None,
+         output_parser: Optional[BaseOutputParser] = None,
+         prompt_type: str = PromptType.CUSTOM,
+         metadata: Optional[Dict[str, Any]] = None,
+         **prompt_kwargs: Any,
+     ) -> None:
+         """Init params."""
+-        # first check if langchain_prompt_selector is provided
+-        # TODO: self.prompt is deprecated, switch to prompt_selector under the hood
+-        if langchain_prompt_selector is not None:
+-            self.prompt_selector = langchain_prompt_selector
+-            self.prompt: BaseLangchainPrompt = self.prompt_selector.default_prompt
+-        # then check if template is provided
+-        elif langchain_prompt is None:
+-            if template is None:
++        # Backwards compatibility: accept old keyword names without importing LangChain.
++        if "langchain_prompt" in prompt_kwargs and prompt_template is None:
++            prompt_template = prompt_kwargs.pop("langchain_prompt")
++        if "langchain_prompt_selector" in prompt_kwargs and prompt_selector is None:
++            prompt_selector = prompt_kwargs.pop("langchain_prompt_selector")
++
++        if prompt_selector is not None:
++            self.prompt_selector = prompt_selector
++            self.prompt: BasePromptTemplate = self.prompt_selector.default_prompt
++        elif prompt_template is not None:
++            if template is not None:
+                 raise ValueError(
+-                    "`template` must be specified if `langchain_prompt` is None"
++                    "Only one of `template` or `prompt_template` should be provided."
+                 )
+-
+-            self.prompt = LangchainPrompt.from_template(
+-                template=template, **prompt_kwargs
+-            )
++            self.prompt = prompt_template
+             self.prompt_selector = PromptSelector(default_prompt=self.prompt)
+-        # finally, check if langchain_prompt is provided
+         else:
+-            if template:
+-                raise ValueError(
+-                    f"Both template ({template}) and langchain_prompt "
+-                    f"({langchain_prompt}) are provided, only one should be."
+-                )
+-            self.prompt = langchain_prompt
++            if template is None:
++                raise ValueError("`template` must be specified.")
++            self.prompt = PromptTemplate(template=template)
+             self.prompt_selector = PromptSelector(default_prompt=self.prompt)
+ 
+         self.partial_dict: Dict[str, Any] = {}
+@@ -80,18 +76,23 @@ class Prompt:
+         return self._original_template
+ 
+     @classmethod
+-    def from_langchain_prompt(
+-        cls, prompt: BaseLangchainPrompt, **kwargs: Any
++    def from_prompt_template(
++        cls, prompt_template: BasePromptTemplate, **kwargs: Any
+     ) -> "Prompt":
+-        """Load prompt from LangChain prompt."""
+-        return cls(langchain_prompt=prompt, **kwargs)
++        return cls(prompt_template=prompt_template, **kwargs)
+ 
+     @classmethod
+-    def from_langchain_prompt_selector(
+-        cls, prompt_selector: PromptSelector, **kwargs: Any
+-    ) -> "Prompt":
+-        """Load prompt from LangChain prompt."""
+-        return cls(langchain_prompt_selector=prompt_selector, **kwargs)
++    def from_prompt_selector(cls, prompt_selector: PromptSelector, **kwargs: Any) -> "Prompt":
++        return cls(prompt_selector=prompt_selector, **kwargs)
++
++    # Deprecated aliases (kept for compatibility; does not import LangChain).
++    @classmethod
++    def from_langchain_prompt(cls, prompt: Any, **kwargs: Any) -> "Prompt":
++        return cls(prompt_template=prompt, **kwargs)
++
++    @classmethod
++    def from_langchain_prompt_selector(cls, prompt_selector: Any, **kwargs: Any) -> "Prompt":
++        return cls(prompt_selector=prompt_selector, **kwargs)
+ 
+     def partial_format(self, **kwargs: Any) -> "Prompt":
+         """Format the prompt partially.
+@@ -128,8 +129,10 @@ class Prompt:
+         partially filled prompt.
+ 
+         """
+-        lc_prompt = prompt.get_langchain_prompt(llm=llm)
+-        tmpl_vars = lc_prompt.input_variables
++        tmpl = prompt.get_template(llm=llm)
++        if isinstance(tmpl, ChatPromptTemplate):
++            raise ValueError("Prompt.from_prompt does not support chat prompt templates.")
++        tmpl_vars = tmpl.input_variables
+         format_dict = {}
+         for var in tmpl_vars:
+             if var not in prompt.partial_dict:
+@@ -143,30 +146,33 @@ class Prompt:
+         )
+         return cls_obj
+ 
+-    def get_langchain_prompt(self, llm: Optional[LLM] = None) -> BaseLangchainPrompt:
+-        """Get langchain prompt."""
++    def get_template(self, llm: Optional[LLM] = None) -> BasePromptTemplate:
+         return self.prompt_selector.select(llm=llm)
+ 
++    # Deprecated alias.
++    def get_langchain_prompt(self, llm: Optional[LLM] = None) -> BasePromptTemplate:
++        return self.get_template(llm=llm)
++
+     def format(self, llm: Optional[LLM] = None, **kwargs: Any) -> str:
+         """Format the prompt into a string."""
+         kwargs.update(self.partial_dict)
+-        lc_prompt = self.get_langchain_prompt(llm=llm)
+-        return lc_prompt.format(**kwargs)
++        tmpl = self.get_template(llm=llm)
++        return tmpl.format(**kwargs)
+ 
+     def format_messages(
+         self, llm: Optional[LLM] = None, **kwargs: Any
+     ) -> List[ChatMessage]:
+         """Format the prompt into a list of chat messages."""
+         kwargs.update(self.partial_dict)
+-        lc_template = self.get_langchain_prompt(llm=llm)
+-        lc_value = lc_template.format_prompt(**kwargs)
+-        lc_messages = lc_value.to_messages()
+-        return from_lc_messages(lc_messages)
++        tmpl = self.get_template(llm=llm)
++        if isinstance(tmpl, ChatPromptTemplate):
++            return tmpl.format_messages(**kwargs)
++        return [ChatMessage(role=MessageRole.USER, content=tmpl.format(**kwargs))]
+ 
+     def get_full_format_args(self, kwargs: Dict) -> Dict[str, Any]:
+         """Get dict of all format args.
+ 
+-        Hack to pass into Langchain to pass validation.
++        Get dict of all args (including partials).
+ 
+         """
+         kwargs.update(self.partial_dict)
+diff --git a/llama_index/prompts/chat_prompts.py b/llama_index/prompts/chat_prompts.py
+index 51a3c0c..610feed 100644
+--- a/llama_index/prompts/chat_prompts.py
++++ b/llama_index/prompts/chat_prompts.py
+@@ -1,11 +1,7 @@
+ """Prompts for ChatGPT."""
+ 
+-from llama_index.bridge.langchain import (
+-    AIMessagePromptTemplate,
+-    ChatPromptTemplate,
+-    HumanMessagePromptTemplate,
+-    SystemMessagePromptTemplate,
+-)
++from llama_index.llms.base import MessageRole
++from llama_index.prompts.template import ChatMessageTemplate, ChatPromptTemplate
+ 
+ from llama_index.prompts.prompts import (
+     QuestionAnswerPrompt,
+@@ -15,100 +11,110 @@ from llama_index.prompts.prompts import (
+ )
+ 
+ # text qa prompt
+-TEXT_QA_SYSTEM_PROMPT = SystemMessagePromptTemplate.from_template(
+-    "You are an expert Q&A system that is trusted around the world.\n"
+-    "Always answer the query using the provided context information, "
+-    "and not prior knowledge.\n"
+-    "Some rules to follow:\n"
+-    "1. Never directly reference the given context in your answer.\n"
+-    "2. Avoid statements like 'Based on the context, ...' or "
+-    "'The context information ...' or anything along "
+-    "those lines."
++TEXT_QA_SYSTEM_PROMPT = ChatMessageTemplate(
++    role=MessageRole.SYSTEM,
++    template=(
++        "You are an expert Q&A system that is trusted around the world.\n"
++        "Always answer the query using the provided context information, "
++        "and not prior knowledge.\n"
++        "Some rules to follow:\n"
++        "1. Never directly reference the given context in your answer.\n"
++        "2. Avoid statements like 'Based on the context, ...' or "
++        "'The context information ...' or anything along "
++        "those lines."
++    ),
+ )
+ 
+ TEXT_QA_PROMPT_TMPL_MSGS = [
+     TEXT_QA_SYSTEM_PROMPT,
+-    HumanMessagePromptTemplate.from_template(
+-        "Context information is below.\n"
+-        "---------------------\n"
+-        "{context_str}\n"
+-        "---------------------\n"
+-        "Given the context information and not prior knowledge, "
+-        "answer the query.\n"
+-        "Query: {query_str}\n"
+-        "Answer: "
++    ChatMessageTemplate(
++        role=MessageRole.USER,
++        template=(
++            "Context information is below.\n"
++            "---------------------\n"
++            "{context_str}\n"
++            "---------------------\n"
++            "Given the context information and not prior knowledge, "
++            "answer the query.\n"
++            "Query: {query_str}\n"
++            "Answer: "
++        ),
+     ),
+ ]
+ 
+-CHAT_TEXT_QA_PROMPT_LC = ChatPromptTemplate.from_messages(TEXT_QA_PROMPT_TMPL_MSGS)
+-CHAT_TEXT_QA_PROMPT = QuestionAnswerPrompt.from_langchain_prompt(CHAT_TEXT_QA_PROMPT_LC)
++CHAT_TEXT_QA_PROMPT_TMPL = ChatPromptTemplate(TEXT_QA_PROMPT_TMPL_MSGS)
++CHAT_TEXT_QA_PROMPT = QuestionAnswerPrompt.from_prompt_template(CHAT_TEXT_QA_PROMPT_TMPL)
+ 
+ 
+ # Tree Summarize
+ TREE_SUMMARIZE_PROMPT_TMPL_MSGS = [
+     TEXT_QA_SYSTEM_PROMPT,
+-    HumanMessagePromptTemplate.from_template(
+-        "Context information from multiple sources is below.\n"
+-        "---------------------\n"
+-        "{context_str}\n"
+-        "---------------------\n"
+-        "Given the information from multiple sources and not prior knowledge, "
+-        "answer the query.\n"
+-        "Query: {query_str}\n"
+-        "Answer: "
++    ChatMessageTemplate(
++        role=MessageRole.USER,
++        template=(
++            "Context information from multiple sources is below.\n"
++            "---------------------\n"
++            "{context_str}\n"
++            "---------------------\n"
++            "Given the information from multiple sources and not prior knowledge, "
++            "answer the query.\n"
++            "Query: {query_str}\n"
++            "Answer: "
++        ),
+     ),
+ ]
+ 
+-CHAT_TREE_SUMMARIZE_PROMPT_LC = ChatPromptTemplate.from_messages(
+-    TREE_SUMMARIZE_PROMPT_TMPL_MSGS
+-)
+-CHAT_TREE_SUMMARIZE_PROMPT = SummaryPrompt.from_langchain_prompt(
+-    CHAT_TREE_SUMMARIZE_PROMPT_LC
+-)
++CHAT_TREE_SUMMARIZE_PROMPT_TMPL = ChatPromptTemplate(TREE_SUMMARIZE_PROMPT_TMPL_MSGS)
++CHAT_TREE_SUMMARIZE_PROMPT = SummaryPrompt.from_prompt_template(CHAT_TREE_SUMMARIZE_PROMPT_TMPL)
+ 
+ 
+ # Refine Prompt
+ CHAT_REFINE_PROMPT_TMPL_MSGS = [
+-    HumanMessagePromptTemplate.from_template(
+-        "You are an expert Q&A system that stricly operates in two modes"
+-        "when refining existing answers:\n"
+-        "1. **Rewrite** an original answer using the new context.\n"
+-        "2. **Repeat** the original answer if the new context isn't useful.\n"
+-        "Never reference the original answer or context directly in your answer.\n"
+-        "When in doubt, just repeat the original answer."
+-        "New Context: {context_msg}\n"
+-        "Query: {query_str}\n"
+-        "Original Answer: {existing_answer}\n"
+-        "New Answer: "
++    ChatMessageTemplate(
++        role=MessageRole.USER,
++        template=(
++            "You are an expert Q&A system that stricly operates in two modes"
++            "when refining existing answers:\n"
++            "1. **Rewrite** an original answer using the new context.\n"
++            "2. **Repeat** the original answer if the new context isn't useful.\n"
++            "Never reference the original answer or context directly in your answer.\n"
++            "When in doubt, just repeat the original answer."
++            "New Context: {context_msg}\n"
++            "Query: {query_str}\n"
++            "Original Answer: {existing_answer}\n"
++            "New Answer: "
++        ),
+     ),
+ ]
+ 
+-
+-CHAT_REFINE_PROMPT_LC = ChatPromptTemplate.from_messages(CHAT_REFINE_PROMPT_TMPL_MSGS)
+-CHAT_REFINE_PROMPT = RefinePrompt.from_langchain_prompt(CHAT_REFINE_PROMPT_LC)
++CHAT_REFINE_PROMPT_TMPL = ChatPromptTemplate(CHAT_REFINE_PROMPT_TMPL_MSGS)
++CHAT_REFINE_PROMPT = RefinePrompt.from_prompt_template(CHAT_REFINE_PROMPT_TMPL)
+ 
+ 
+ # Table Context Refine Prompt
+ CHAT_REFINE_TABLE_CONTEXT_TMPL_MSGS = [
+-    HumanMessagePromptTemplate.from_template("{query_str}"),
+-    AIMessagePromptTemplate.from_template("{existing_answer}"),
+-    HumanMessagePromptTemplate.from_template(
+-        "We have provided a table schema below. "
+-        "---------------------\n"
+-        "{schema}\n"
+-        "---------------------\n"
+-        "We have also provided some context information below. "
+-        "{context_msg}\n"
+-        "---------------------\n"
+-        "Given the context information and the table schema, "
+-        "refine the original answer to better "
+-        "answer the question. "
+-        "If the context isn't useful, return the original answer."
++    ChatMessageTemplate(role=MessageRole.USER, template="{query_str}"),
++    ChatMessageTemplate(role=MessageRole.ASSISTANT, template="{existing_answer}"),
++    ChatMessageTemplate(
++        role=MessageRole.USER,
++        template=(
++            "We have provided a table schema below. "
++            "---------------------\n"
++            "{schema}\n"
++            "---------------------\n"
++            "We have also provided some context information below. "
++            "{context_msg}\n"
++            "---------------------\n"
++            "Given the context information and the table schema, "
++            "refine the original answer to better "
++            "answer the question. "
++            "If the context isn't useful, return the original answer."
++        ),
+     ),
+ ]
+-CHAT_REFINE_TABLE_CONTEXT_PROMPT_LC = ChatPromptTemplate.from_messages(
++CHAT_REFINE_TABLE_CONTEXT_PROMPT_TMPL = ChatPromptTemplate(
+     CHAT_REFINE_TABLE_CONTEXT_TMPL_MSGS
+ )
+-CHAT_REFINE_TABLE_CONTEXT_PROMPT = RefineTableContextPrompt.from_langchain_prompt(
+-    CHAT_REFINE_TABLE_CONTEXT_PROMPT_LC
++CHAT_REFINE_TABLE_CONTEXT_PROMPT = RefineTableContextPrompt.from_prompt_template(
++    CHAT_REFINE_TABLE_CONTEXT_PROMPT_TMPL
+ )
+diff --git a/llama_index/prompts/default_prompt_selectors.py b/llama_index/prompts/default_prompt_selectors.py
+index 17c0307..054fc75 100644
+--- a/llama_index/prompts/default_prompt_selectors.py
++++ b/llama_index/prompts/default_prompt_selectors.py
+@@ -19,41 +19,41 @@ from llama_index.prompts.prompts import (
+     RefineTableContextPrompt,
+ )
+ 
+-DEFAULT_TEXT_QA_PROMPT_SEL_LC = PromptSelector(
+-    default_prompt=DEFAULT_TEXT_QA_PROMPT.get_langchain_prompt(),
+-    conditionals=[(is_chat_model, CHAT_TEXT_QA_PROMPT.get_langchain_prompt())],
++DEFAULT_TEXT_QA_PROMPT_SELECTOR = PromptSelector(
++    default_prompt=DEFAULT_TEXT_QA_PROMPT.get_template(),
++    conditionals=[(is_chat_model, CHAT_TEXT_QA_PROMPT.get_template())],
+ )
+ DEFAULT_TEXT_QA_PROMPT_SEL = QuestionAnswerPrompt(
+-    langchain_prompt_selector=DEFAULT_TEXT_QA_PROMPT_SEL_LC,
++    prompt_selector=DEFAULT_TEXT_QA_PROMPT_SELECTOR,
+     prompt_type=PromptType.QUESTION_ANSWER,
+ )
+ 
+-DEFAULT_TREE_SUMMARIZE_PROMPT_SEL_LC = PromptSelector(
+-    default_prompt=DEFAULT_TREE_SUMMARIZE_PROMPT.get_langchain_prompt(),
+-    conditionals=[(is_chat_model, CHAT_TREE_SUMMARIZE_PROMPT.get_langchain_prompt())],
++DEFAULT_TREE_SUMMARIZE_PROMPT_SELECTOR = PromptSelector(
++    default_prompt=DEFAULT_TREE_SUMMARIZE_PROMPT.get_template(),
++    conditionals=[(is_chat_model, CHAT_TREE_SUMMARIZE_PROMPT.get_template())],
+ )
+ DEFAULT_TREE_SUMMARIZE_PROMPT_SEL = QuestionAnswerPrompt(
+-    langchain_prompt_selector=DEFAULT_TREE_SUMMARIZE_PROMPT_SEL_LC,
++    prompt_selector=DEFAULT_TREE_SUMMARIZE_PROMPT_SELECTOR,
+     prompt_type=PromptType.SUMMARY,
+ )
+ 
+-DEFAULT_REFINE_PROMPT_SEL_LC = PromptSelector(
+-    default_prompt=DEFAULT_REFINE_PROMPT.get_langchain_prompt(),
+-    conditionals=[(is_chat_model, CHAT_REFINE_PROMPT.get_langchain_prompt())],
++DEFAULT_REFINE_PROMPT_SELECTOR = PromptSelector(
++    default_prompt=DEFAULT_REFINE_PROMPT.get_template(),
++    conditionals=[(is_chat_model, CHAT_REFINE_PROMPT.get_template())],
+ )
+ DEFAULT_REFINE_PROMPT_SEL = RefinePrompt(
+-    langchain_prompt_selector=DEFAULT_REFINE_PROMPT_SEL_LC,
++    prompt_selector=DEFAULT_REFINE_PROMPT_SELECTOR,
+     prompt_type=PromptType.REFINE,
+ )
+ 
+-DEFAULT_REFINE_TABLE_CONTEXT_PROMPT_SEL_LC = PromptSelector(
+-    default_prompt=DEFAULT_REFINE_TABLE_CONTEXT_PROMPT.get_langchain_prompt(),
++DEFAULT_REFINE_TABLE_CONTEXT_PROMPT_SELECTOR = PromptSelector(
++    default_prompt=DEFAULT_REFINE_TABLE_CONTEXT_PROMPT.get_template(),
+     conditionals=[
+-        (is_chat_model, CHAT_REFINE_TABLE_CONTEXT_PROMPT.get_langchain_prompt())
++        (is_chat_model, CHAT_REFINE_TABLE_CONTEXT_PROMPT.get_template())
+     ],
+ )
+ 
+ DEFAULT_REFINE_TABLE_CONTEXT_PROMPT_SEL = RefineTableContextPrompt(
+-    langchain_prompt_selector=DEFAULT_REFINE_TABLE_CONTEXT_PROMPT_SEL_LC,
++    prompt_selector=DEFAULT_REFINE_TABLE_CONTEXT_PROMPT_SELECTOR,
+     prompt_type=PromptType.TABLE_CONTEXT,
+ )
+diff --git a/llama_index/prompts/prompt_selector.py b/llama_index/prompts/prompt_selector.py
+index 36b02fe..9edea63 100644
+--- a/llama_index/prompts/prompt_selector.py
++++ b/llama_index/prompts/prompt_selector.py
+@@ -2,11 +2,14 @@ from typing import Callable, List, Optional, Tuple
+ 
+ from pydantic import BaseModel, Field
+ 
+-from llama_index.bridge.langchain import BasePromptTemplate
+ from llama_index.llms.base import LLM
++from llama_index.prompts.template import BasePromptTemplate
+ 
+ 
+ class PromptSelector(BaseModel):
++    class Config:
++        arbitrary_types_allowed = True
++
+     default_prompt: BasePromptTemplate
+     conditionals: List[Tuple[Callable[[LLM], bool], BasePromptTemplate]] = Field(
+         default_factory=list
+diff --git a/llama_index/prompts/template.py b/llama_index/prompts/template.py
+new file mode 100644
+index 0000000..a92b7fb
+--- /dev/null
++++ b/llama_index/prompts/template.py
+@@ -0,0 +1,104 @@
++"""Prompt templates used by LlamaIndex.
++
++This module intentionally avoids importing LangChain. Templates here provide a small
++subset of the functionality needed by the rest of the codebase:
++- extracting input variables from `{var}` placeholders
++- formatting into a string
++- (optionally) formatting into a list of chat messages
++"""
++
++from __future__ import annotations
++
++import re
++import string
++from abc import ABC, abstractmethod
++from dataclasses import dataclass
++from typing import Any, List, Optional, Sequence, Set
++
++from llama_index.llms.base import ChatMessage, MessageRole
++
++
++_FIELD_RE = re.compile(r"^([a-zA-Z_][a-zA-Z0-9_]*)")
++
++
++def _extract_input_variables(template: str) -> List[str]:
++    """Extract top-level `{var}` placeholders from a format string."""
++    formatter = string.Formatter()
++    variables: Set[str] = set()
++    for _literal_text, field_name, _format_spec, _conversion in formatter.parse(
++        template
++    ):
++        if not field_name:
++            continue
++        # Support format strings like `{foo.bar}` or `{foo[0]}` by extracting
++        # the top-level identifier (`foo`).
++        match = _FIELD_RE.match(field_name)
++        if match:
++            variables.add(match.group(1))
++    return sorted(variables)
++
++
++class BasePromptTemplate(ABC):
++    """Minimal prompt template interface used throughout the codebase."""
++
++    @property
++    @abstractmethod
++    def input_variables(self) -> List[str]:
++        raise NotImplementedError
++
++    @abstractmethod
++    def format(self, **kwargs: Any) -> str:
++        raise NotImplementedError
++
++
++class PromptTemplate(BasePromptTemplate):
++    """A simple `str.format`-based prompt template."""
++
++    def __init__(
++        self, template: str, input_variables: Optional[Sequence[str]] = None
++    ) -> None:
++        self.template = template
++        self._input_variables = list(input_variables or _extract_input_variables(template))
++
++    @property
++    def input_variables(self) -> List[str]:
++        return list(self._input_variables)
++
++    def format(self, **kwargs: Any) -> str:
++        return self.template.format(**kwargs)
++
++
++@dataclass
++class ChatMessageTemplate:
++    role: MessageRole
++    template: str
++
++    @property
++    def input_variables(self) -> List[str]:
++        return _extract_input_variables(self.template)
++
++    def format_message(self, **kwargs: Any) -> ChatMessage:
++        return ChatMessage(role=self.role, content=self.template.format(**kwargs))
++
++
++class ChatPromptTemplate(BasePromptTemplate):
++    """A prompt made of multiple templated chat messages."""
++
++    def __init__(self, messages: Sequence[ChatMessageTemplate]) -> None:
++        self.messages = list(messages)
++        variables: Set[str] = set()
++        for msg in self.messages:
++            variables.update(msg.input_variables)
++        self._input_variables = sorted(variables)
++
++    @property
++    def input_variables(self) -> List[str]:
++        return list(self._input_variables)
++
++    def format_messages(self, **kwargs: Any) -> List[ChatMessage]:
++        return [msg.format_message(**kwargs) for msg in self.messages]
++
++    def format(self, **kwargs: Any) -> str:
++        # Best-effort string representation for token counting/debugging.
++        formatted = self.format_messages(**kwargs)
++        return "\n".join([(m.content or "") for m in formatted])
+diff --git a/llama_index/prompts/utils.py b/llama_index/prompts/utils.py
+index 90d4a8a..6f8fdce 100644
+--- a/llama_index/prompts/utils.py
++++ b/llama_index/prompts/utils.py
+@@ -13,7 +13,7 @@ def get_empty_prompt_txt(prompt: Prompt) -> str:
+     """
+     fmt_dict = {
+         v: ""
+-        for v in prompt.get_langchain_prompt().input_variables
++        for v in prompt.get_template().input_variables
+         if v not in prompt.partial_dict
+     }
+     # TODO: change later from llm=None
+diff --git a/tests/indices/test_prompt_helper.py b/tests/indices/test_prompt_helper.py
+index 2946ee2..703aa62 100644
+--- a/tests/indices/test_prompt_helper.py
++++ b/tests/indices/test_prompt_helper.py
+@@ -1,10 +1,10 @@
+ """Test PromptHelper."""
+ from typing import cast
+ 
+-from llama_index.bridge.langchain import PromptTemplate as LangchainPrompt
+ from llama_index.indices.prompt_helper import PromptHelper
+ from llama_index.indices.tree.utils import get_numbered_text_from_nodes
+ from llama_index.prompts.base import Prompt
++from llama_index.prompts.template import PromptTemplate
+ from llama_index.prompts.utils import get_biggest_prompt, get_empty_prompt_txt
+ from llama_index.schema import TextNode
+ from llama_index.text_splitter.utils import truncate_text
+@@ -179,6 +179,6 @@ def test_get_biggest_prompt() -> None:
+     prompt3 = Prompt("This is the {text}")
+     biggest_prompt = get_biggest_prompt([prompt1, prompt2, prompt3])
+ 
+-    lc_biggest_template = cast(LangchainPrompt, biggest_prompt.prompt).template
+-    prompt2_template = cast(LangchainPrompt, prompt2.prompt).template
+-    assert lc_biggest_template == prompt2_template
++    biggest_template = cast(PromptTemplate, biggest_prompt.prompt).template
++    prompt2_template = cast(PromptTemplate, prompt2.prompt).template
++    assert biggest_template == prompt2_template
+diff --git a/tests/prompts/test_base.py b/tests/prompts/test_base.py
+index aa15074..3b6f4a9 100644
+--- a/tests/prompts/test_base.py
++++ b/tests/prompts/test_base.py
+@@ -4,11 +4,11 @@ from unittest.mock import MagicMock
+ 
+ import pytest
+ 
+-from llama_index.bridge.langchain import PromptTemplate
+ from llama_index.llms.base import LLM
+ from llama_index.llms.openai import OpenAI
+ from llama_index.prompts.base import Prompt
+ from llama_index.prompts.prompt_selector import PromptSelector
++from llama_index.prompts.template import PromptTemplate
+ 
+ 
+ def is_openai(llm: LLM) -> bool:
+@@ -40,24 +40,24 @@ def test_from_prompt() -> None:
+ 
+ 
+ def test_from_langchain_prompt() -> None:
+-    """Test from langchain prompt."""
++    """Test from prompt template."""
+     prompt_txt = "hello {text} {foo}"
+     prompt = PromptTemplate(input_variables=["text", "foo"], template=prompt_txt)
+-    prompt_new = Prompt.from_langchain_prompt(prompt)
++    prompt_new = Prompt.from_prompt_template(prompt)
+ 
+     assert isinstance(prompt_new, Prompt)
+     assert prompt_new.prompt == prompt
+     assert prompt_new.format(text="world2", foo="bar") == "hello world2 bar"
+ 
+-    # test errors if we specify both template and langchain prompt
++    # test errors if we specify both template and prompt template
+     with pytest.raises(ValueError):
+         prompt_txt = "hello {text} {foo}"
+         prompt = PromptTemplate(input_variables=["text", "foo"], template=prompt_txt)
+-        Prompt(template=prompt_txt, langchain_prompt=prompt)
++        Prompt(template=prompt_txt, prompt_template=prompt)
+ 
+ 
+ def test_from_langchain_prompt_selector() -> None:
+-    """Test from langchain prompt selector."""
++    """Test from prompt selector."""
+     prompt_txt = "hello {text} {foo}"
+     prompt_txt_2 = "world {text} {foo}"
+     prompt = PromptTemplate(input_variables=["text", "foo"], template=prompt_txt)
+@@ -69,7 +69,7 @@ def test_from_langchain_prompt_selector() -> None:
+ 
+     test_llm = MagicMock(spec=OpenAI)
+ 
+-    prompt_new = Prompt.from_langchain_prompt_selector(test_prompt_selector)
++    prompt_new = Prompt.from_prompt_selector(test_prompt_selector)
+     assert isinstance(prompt_new, Prompt)
+     assert prompt_new.prompt == prompt
+     assert prompt_new.format(text="world2", foo="bar") == "hello world2 bar"
+@@ -77,21 +77,7 @@ def test_from_langchain_prompt_selector() -> None:
+         prompt_new.format(llm=test_llm, text="world2", foo="bar") == "world world2 bar"
+     )
+ 
+-    test_lc_prompt = prompt_new.get_langchain_prompt(llm=test_llm)
+-    assert test_lc_prompt == prompt_2
+-    test_lc_prompt = prompt_new.get_langchain_prompt(llm=None)
+-    assert test_lc_prompt == prompt
+-
+-    # test errors if langchain prompt input var doesn't match
+-    with pytest.raises(ValueError):
+-        prompt_txt = "hello {text} {foo}"
+-        prompt_txt_2 = "world {text} {foo} {tmp}"
+-        prompt = PromptTemplate(input_variables=["text", "foo"], template=prompt_txt)
+-        prompt_2 = PromptTemplate(
+-            input_variables=["text", "foo", "tmp"], template=prompt_txt_2
+-        )
+-
+-        test_prompt_selector = PromptSelector(
+-            prompt=prompt, conditionals=([is_openai], [prompt_2])
+-        )
+-        prompt_new = Prompt.from_langchain_prompt_selector(test_prompt_selector)
++    selected = prompt_new.get_template(llm=test_llm)
++    assert selected == prompt_2
++    selected = prompt_new.get_template(llm=None)
++    assert selected == prompt
