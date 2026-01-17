@@ -29,6 +29,9 @@ from .models import (
 from .plotting import create_plot, save_plot
 from .config import PlotConfig, PlotType
 
+# Statistics
+from .statistics import print_finish_reason_table, print_statistics_table
+
 # Filters (keeping existing filter functionality)
 from .filters import (
     ResultFilter,
@@ -72,6 +75,9 @@ __all__ = [
     "save_plot",
     "PlotConfig",
     "PlotType",
+    # Statistics
+    "print_finish_reason_table",
+    "print_statistics_table",
     # Filters
     "ResultFilter",
     "combine_filters",
