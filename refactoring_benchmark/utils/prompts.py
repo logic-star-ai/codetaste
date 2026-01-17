@@ -51,7 +51,7 @@ Configure the development environment and validation scripts for the repository 
 5. **OUTPUT:** The `/scripts/run_tests` script must output exactly one JSON line as its final `stdout` message:
 `{"passed": int, "failed": int, "skipped": int, "total": int}`. 
 Where the int value corresponds to the number of tests that passed, failed, were skipped, and the total number of representative tests run.
-You may need to write a wrapper or use a custom test reporter to ensure this exact format is captured.
+You may need to write a wrapper or use a custom test reporter to ensure this exact format is captured. Test results must be **deterministic** and reflect actual test outcomes.
 6. **VERIFICATION:** Always execute `source /scripts/setup_shell.sh && /scripts/run_tests` in a single shell command (in an environment that is clean -> `git clean -xdff` and has system services running `/scripts/setup_system.sh`) on both the current commit and `HEAD~1`. Confirm the JSON outputs accurately reflect the test results.
 Your shell doesn't persist environment across shell commands.
 
