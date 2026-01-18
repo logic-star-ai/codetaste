@@ -246,12 +246,19 @@ Examples:
         # Generate plot
         print(f"  Generating {args.plot_type} plot with {args.aggregation} aggregation...")
         try:
+            if metric_name in ["cost"]:
+                max_mean = max([v.mean for k, v in data.data.items()])
+                max_ci = max([v.standard_error for k, v in data.data.items()])
+                print(f"    Setting y-axis limit to {max_mean:.4f} for better visibility")
+                config = plot_config.model_copy(update={"ylim_max": max_mean + max_ci })
+            else:
+                config = plot_config
             fig = create_plot(
                 data,
                 metric_name,
                 plot_type=args.plot_type,
                 aggregation=args.aggregation,
-                config=plot_config if metric_name != "cost" else PlotConfig(show_error_bars=False, ylim_max=10)
+                config=config
             )
 
             # Print statistics table if requested

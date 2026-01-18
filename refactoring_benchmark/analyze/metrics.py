@@ -25,6 +25,15 @@ def metric_ifr_removed(result: EvaluationResult) -> float:
     """IFR for removed lines only (0-1 range)."""
     return result.agent_rule_metrics.negative_ifr
 
+def metric_ifr_ratio(result: EvaluationResult) -> float | None:
+    """Ratio of removed IFR to total IFR (0-1 range, None if no rules)."""
+    added_ifr = metric_ifr_added(result)
+    removed_ifr = metric_ifr_removed(result)
+    total = added_ifr + removed_ifr
+    if total == 0:
+        return 0.0
+    return removed_ifr / total
+
 def metric_test_success(result: EvaluationResult) -> float:
     """Test success metric (1.0 if valid, 0.0 otherwise, None if no test data)."""
     if check_test_validity(result) == ValidityStatus.VALID:
@@ -82,6 +91,7 @@ METRICS: dict[str, MetricFunction] = {
     "ifr_x_test_success": metric_ifr_x_test_success,
     "ifr_added": metric_ifr_added,
     "ifr_removed": metric_ifr_removed,
+    "ifr_ratio": metric_ifr_ratio,
     "test_success": metric_test_success,
     "precision_added": metric_precision_added,
     "precision_removed": metric_precision_removed,
