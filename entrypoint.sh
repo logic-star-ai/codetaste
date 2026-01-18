@@ -77,40 +77,25 @@ case "$1" in
             echo "Error: Agent script not found at $AGENT_SCRIPT"
             exit 1
         fi
-
-        if [ "$DESCRIPTION_TYPE" = "open" ]; then
-            echo "Using open description"
-            mv "$TASK_DESC_DIR/open_description.md" "$TASK_DESC_DIR/description.md"
-        elif [ "$DESCRIPTION_TYPE" = "files" ]; then
-            echo "Using files description"
-            mv "$TASK_DESC_DIR/files_description.md" "$TASK_DESC_DIR/description.md"
-        elif [ "$DESCRIPTION_TYPE" = "problem" ]; then
-            echo "Using problem description"
-            mv "$TASK_DESC_DIR/problem_description.md" "$TASK_DESC_DIR/description.md"
-        else
-            case "$DESCRIPTION_TYPE" in
-                "nano")
-                    echo "Using nano description"
-                    SRC_FILE="$TASK_DESC_DIR/nano_description.md"
-                    ;;
-                "minimal")
-                    echo "Using minimal description"
-                    SRC_FILE="$TASK_DESC_DIR/minimal_description.md"
-                    ;;
-                *)
-                    echo "Using standard description"
-                    # Ensure this path is correct (Absolute vs Relative)
-                    SRC_FILE="/task_description/description.md"
-                    cat "$SRC_FILE" > "$TASK_DESC_DIR/tmp_description.md"
-                    SRC_FILE="$TASK_DESC_DIR/tmp_description.md"
-                    ;;
-            esac
-            HEADER="Perform the task described below. You are required to implement **all** the required changes, without user feedback. The changes must be performed directly on the codebase."
-            echo "$HEADER" > "$TASK_DESC_DIR/description.md"
-            cat "$SRC_FILE" >> "$TASK_DESC_DIR/description.md"
+        SRC_FILE="$TASK_DESC_DIR/${DESCRIPTION_TYPE}_description.md"
+        DEST_FILE="$TASK_DESC_DIR/description.md"
+        if [[ ! -f "$SRC_FILE" ]]; then
+            echo "Error: Description file for type '${DESCRIPTION_TYPE}' not found: $SRC_FILE"
+            exit 1
         fi
-        rm -f "$TASK_DESC_DIR/nano_description.md" "$TASK_DESC_DIR/minimal_description.md" "$TASK_DESC_DIR/open_description.md" "$TASK_DESC_DIR/files_description.md" "$TASK_DESC_DIR/problem_description.md" "$TASK_DESC_DIR/tmp_description.md"
+        case "$DESCRIPTION_TYPE" in
+            standard|minimal|nano)
+                echo "Using ${DESCRIPTION_TYPE} description with header"
+                echo "Perform the task described below. You are required to implement **all** the required changes, without user feedback. The changes must be performed directly on the codebase." > "$DEST_FILE"
+                cat "$SRC_FILE" >> "$DEST_FILE"
+                ;;
+            *)
+                echo "Using ${DESCRIPTION_TYPE} description without header"
+                mv "$SRC_FILE" "$DEST_FILE"
+                ;;
+        esac
 
+        rm -f "$TASK_DESC_DIR"/*_description.md
         create_restricted_user
         # Agent System Setup Script Can Still Use Github
         if [ -f "$AGENT_SYSTEM_SETUP_SCRIPT" ]; then
