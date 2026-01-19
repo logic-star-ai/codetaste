@@ -108,6 +108,7 @@ def run_single_instance(instance: InstanceRow, config: InferenceConfig) -> bool:
                 str(output_dir): {"bind": "/output", "mode": "rw"},
                 str(temp_description_dir): {"bind": "/task_description", "mode": "rw", "extended_mode": ["U", "z"]},
             },
+            network_mode="host",
             working_dir="/testbed",
             remove=False,
             nano_cpus=int(8e9)
