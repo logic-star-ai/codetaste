@@ -62,6 +62,7 @@ def main():
     total_output_tokens = 0
     budget_was_exceeded = False
     additional_info = {}
+    turns_till_tool_use = 5
     try:
         process = subprocess.Popen(
             cmd,
