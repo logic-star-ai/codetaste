@@ -1,0 +1,1 @@
+Simplify shape configuration

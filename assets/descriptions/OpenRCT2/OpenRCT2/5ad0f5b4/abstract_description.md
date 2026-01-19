@@ -1,0 +1,1 @@
+Modernize enum naming conventions

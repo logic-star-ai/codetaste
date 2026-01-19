@@ -1,0 +1,1 @@
+Simplify linter constructors.

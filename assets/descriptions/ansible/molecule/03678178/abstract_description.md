@@ -1,0 +1,1 @@
+Consolidate utility module structure

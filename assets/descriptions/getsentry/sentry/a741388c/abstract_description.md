@@ -1,0 +1,1 @@
+Consolidate hybrid cloud modules

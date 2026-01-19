@@ -1,1 +1,1 @@
-Restructure the plotting system into modular TypeScript components with clear separation of concerns.
+Refactor plot grid and model architecture.
