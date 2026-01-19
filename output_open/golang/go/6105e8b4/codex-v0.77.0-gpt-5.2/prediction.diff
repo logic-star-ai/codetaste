@@ -1,0 +1,230 @@
+diff --git a/src/cmd/go/internal/get/vcs.go b/src/cmd/go/internal/get/vcs.go
+index c6516c8..cd8e827 100644
+--- a/src/cmd/go/internal/get/vcs.go
++++ b/src/cmd/go/internal/get/vcs.go
+@@ -177,7 +177,7 @@ func gitRemoteRepo(vcsGit *vcsCmd, rootDir string) (remoteRepo string, err error
+ 	cmd := "config remote.origin.url"
+ 	errParse := errors.New("unable to parse output of git " + cmd)
+ 	errRemoteOriginNotFound := errors.New("remote origin not found")
+-	outb, err := vcsGit.run1(rootDir, cmd, nil, false)
++	outb, err := vcsGit.runOutputWithReporter(rootDir, cmd, nil, verboseOnlyVcsErrorReporter{})
+ 	if err != nil {
+ 		// if it doesn't output any message, it means the config argument is correct,
+ 		// but the config value itself doesn't exist
+@@ -357,6 +357,33 @@ func (v *vcsCmd) String() string {
+ 	return v.name
+ }
+ 
++type vcsErrorReporter interface {
++	reportCommandError(dir string, v *vcsCmd, args []string, err error)
++}
++
++type alwaysVcsErrorReporter struct{}
++
++func (alwaysVcsErrorReporter) reportCommandError(dir string, v *vcsCmd, args []string, err error) {
++	writeVcsCommandError(dir, v, args, err)
++}
++
++type verboseOnlyVcsErrorReporter struct{}
++
++func (verboseOnlyVcsErrorReporter) reportCommandError(dir string, v *vcsCmd, args []string, err error) {
++	if cfg.BuildV {
++		writeVcsCommandError(dir, v, args, err)
++	}
++}
++
++func writeVcsCommandError(dir string, v *vcsCmd, args []string, err error) {
++	fmt.Fprintf(os.Stderr, "# cd %s; %s %s\n", dir, v.cmd, strings.Join(args, " "))
++	if ee, ok := err.(*exec.ExitError); ok && len(ee.Stderr) > 0 {
++		os.Stderr.Write(ee.Stderr)
++		return
++	}
++	fmt.Fprintf(os.Stderr, err.Error())
++}
++
+ // run runs the command line cmd in the given directory.
+ // keyval is a list of key, value pairs. run expands
+ // instances of {key} in cmd into value, but only after
+@@ -365,55 +392,74 @@ func (v *vcsCmd) String() string {
+ // command's combined stdout+stderr to standard error.
+ // Otherwise run discards the command's output.
+ func (v *vcsCmd) run(dir string, cmd string, keyval ...string) error {
+-	_, err := v.run1(dir, cmd, keyval, true)
++	_, err := v.runOutputWithReporter(dir, cmd, keyval, alwaysVcsErrorReporter{})
+ 	return err
+ }
+ 
+ // runVerboseOnly is like run but only generates error output to standard error in verbose mode.
+ func (v *vcsCmd) runVerboseOnly(dir string, cmd string, keyval ...string) error {
+-	_, err := v.run1(dir, cmd, keyval, false)
++	_, err := v.runOutputWithReporter(dir, cmd, keyval, verboseOnlyVcsErrorReporter{})
+ 	return err
+ }
+ 
+ // runOutput is like run but returns the output of the command.
+ func (v *vcsCmd) runOutput(dir string, cmd string, keyval ...string) ([]byte, error) {
+-	return v.run1(dir, cmd, keyval, true)
++	return v.runOutputWithReporter(dir, cmd, keyval, alwaysVcsErrorReporter{})
+ }
+ 
+-// run1 is the generalized implementation of run and runOutput.
+-func (v *vcsCmd) run1(dir string, cmdline string, keyval []string, verbose bool) ([]byte, error) {
++func buildKeyValueMap(keyval []string) map[string]string {
+ 	m := make(map[string]string)
+ 	for i := 0; i < len(keyval); i += 2 {
+ 		m[keyval[i]] = keyval[i+1]
+ 	}
++	return m
++}
++
++func expandCommandLineArgs(cmdline string, keyvals map[string]string) []string {
+ 	args := strings.Fields(cmdline)
+ 	for i, arg := range args {
+-		args[i] = expand(m, arg)
++		args[i] = expand(keyvals, arg)
+ 	}
++	return args
++}
+ 
+-	if len(args) >= 2 && args[0] == "-go-internal-mkdir" {
+-		var err error
+-		if filepath.IsAbs(args[1]) {
+-			err = os.Mkdir(args[1], os.ModePerm)
+-		} else {
+-			err = os.Mkdir(filepath.Join(dir, args[1]), os.ModePerm)
+-		}
+-		if err != nil {
+-			return nil, err
++func applyGoInternalDirectives(dir string, args []string) (string, []string, error) {
++	for len(args) >= 2 {
++		switch args[0] {
++		case "-go-internal-mkdir":
++			absPath := args[1]
++			if !filepath.IsAbs(absPath) {
++				absPath = filepath.Join(dir, absPath)
++			}
++			if err := os.Mkdir(absPath, os.ModePerm); err != nil {
++				return "", nil, err
++			}
++			args = args[2:]
++		case "-go-internal-cd":
++			if filepath.IsAbs(args[1]) {
++				dir = args[1]
++			} else {
++				dir = filepath.Join(dir, args[1])
++			}
++			args = args[2:]
++		default:
++			return dir, args, nil
+ 		}
+-		args = args[2:]
+ 	}
++	return dir, args, nil
++}
+ 
+-	if len(args) >= 2 && args[0] == "-go-internal-cd" {
+-		if filepath.IsAbs(args[1]) {
+-			dir = args[1]
+-		} else {
+-			dir = filepath.Join(dir, args[1])
+-		}
+-		args = args[2:]
++// runOutputWithReporter is the generalized implementation of run and runOutput.
++func (v *vcsCmd) runOutputWithReporter(dir string, cmdline string, keyval []string, reporter vcsErrorReporter) ([]byte, error) {
++	args := expandCommandLineArgs(cmdline, buildKeyValueMap(keyval))
++
++	var err error
++	dir, args, err = applyGoInternalDirectives(dir, args)
++	if err != nil {
++		return nil, err
+ 	}
+ 
+-	_, err := exec.LookPath(v.cmd)
++	_, err = exec.LookPath(v.cmd)
+ 	if err != nil {
+ 		fmt.Fprintf(os.Stderr,
+ 			"go: missing %s command. See https://golang.org/s/gogetcmd\n",
+@@ -421,23 +467,16 @@ func (v *vcsCmd) run1(dir string, cmdline string, keyval []string, verbose bool)
+ 		return nil, err
+ 	}
+ 
+-	cmd := exec.Command(v.cmd, args...)
+-	cmd.Dir = dir
+-	cmd.Env = base.EnvForDir(cmd.Dir, os.Environ())
++	execCmd := exec.Command(v.cmd, args...)
++	execCmd.Dir = dir
++	execCmd.Env = base.EnvForDir(execCmd.Dir, os.Environ())
+ 	if cfg.BuildX {
+ 		fmt.Fprintf(os.Stderr, "cd %s\n", dir)
+ 		fmt.Fprintf(os.Stderr, "%s %s\n", v.cmd, strings.Join(args, " "))
+ 	}
+-	out, err := cmd.Output()
++	out, err := execCmd.Output()
+ 	if err != nil {
+-		if verbose || cfg.BuildV {
+-			fmt.Fprintf(os.Stderr, "# cd %s; %s %s\n", dir, v.cmd, strings.Join(args, " "))
+-			if ee, ok := err.(*exec.ExitError); ok && len(ee.Stderr) > 0 {
+-				os.Stderr.Write(ee.Stderr)
+-			} else {
+-				fmt.Fprintf(os.Stderr, err.Error())
+-			}
+-		}
++		reporter.reportCommandError(dir, v, args, err)
+ 	}
+ 	return out, err
+ }
+diff --git a/src/cmd/pack/pack.go b/src/cmd/pack/pack.go
+index 95ecad0..80d40fd 100644
+--- a/src/cmd/pack/pack.go
++++ b/src/cmd/pack/pack.go
+@@ -265,13 +265,12 @@ func (ar *Archive) scan(action func(*Entry)) {
+ 	}
+ }
+ 
+-// listEntry prints to standard output a line describing the entry.
+-func listEntry(entry *Entry, verbose bool) {
+-	if verbose {
+-		fmt.Fprintf(stdout, "%s\n", entry)
+-	} else {
+-		fmt.Fprintf(stdout, "%s\n", entry.name)
+-	}
++func printEntryName(entry *Entry) {
++	fmt.Fprintf(stdout, "%s\n", entry.name)
++}
++
++func printEntryLong(entry *Entry) {
++	fmt.Fprintf(stdout, "%s\n", entry)
+ }
+ 
+ // output copies the entry to the specified writer.
+@@ -457,7 +456,7 @@ var stdout io.Writer = os.Stdout
+ func (ar *Archive) printContents(entry *Entry) {
+ 	if ar.match(entry) {
+ 		if verbose {
+-			listEntry(entry, false)
++			printEntryName(entry)
+ 		}
+ 		ar.output(entry, stdout)
+ 	} else {
+@@ -474,7 +473,11 @@ func (ar *Archive) skipContents(entry *Entry) {
+ // tableOfContents implements the 't' command.
+ func (ar *Archive) tableOfContents(entry *Entry) {
+ 	if ar.match(entry) {
+-		listEntry(entry, verbose)
++		if verbose {
++			printEntryLong(entry)
++		} else {
++			printEntryName(entry)
++		}
+ 	}
+ 	ar.skip(entry)
+ }
+@@ -483,7 +486,7 @@ func (ar *Archive) tableOfContents(entry *Entry) {
+ func (ar *Archive) extractContents(entry *Entry) {
+ 	if ar.match(entry) {
+ 		if verbose {
+-			listEntry(entry, false)
++			printEntryName(entry)
+ 		}
+ 		fd, err := os.OpenFile(entry.name, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, entry.mode)
+ 		if err != nil {

@@ -1,0 +1,348 @@
+diff --git a/llama_index/llms/palm.py b/llama_index/llms/palm.py
+index 567ca29..d73ee1e 100644
+--- a/llama_index/llms/palm.py
++++ b/llama_index/llms/palm.py
+@@ -1,7 +1,9 @@
+ """Palm API."""
++import importlib
+ import os
++from typing import Any, Optional
++
+ from pydantic import Field, PrivateAttr
+-from typing import Optional, Any
+ 
+ from llama_index.callbacks import CallbackManager
+ from llama_index.llms.custom import CustomLLM
+@@ -24,6 +26,16 @@ class PaLM(CustomLLM):
+ 
+     _model: Any = PrivateAttr()
+ 
++    @staticmethod
++    def _get_palm_module() -> Any:
++        try:
++            return importlib.import_module("google.generativeai")
++        except ImportError as exc:
++            raise ValueError(
++                "PaLM is not installed. "
++                "Please install it with `pip install google-generativeai`."
++            ) from exc
++
+     def __init__(
+         self,
+         api_key: Optional[str] = None,
+@@ -33,13 +45,7 @@ class PaLM(CustomLLM):
+         **generate_kwargs: Any,
+     ) -> None:
+         """Initialize params."""
+-        try:
+-            import google.generativeai as palm
+-        except ImportError:
+-            raise ValueError(
+-                "PaLM is not installed. "
+-                "Please install it with `pip install google-generativeai`."
+-            )
++        palm = self._get_palm_module()
+         api_key = api_key or os.environ.get("PALM_API_KEY")
+         palm.configure(api_key=api_key)
+ 
+@@ -86,8 +92,7 @@ class PaLM(CustomLLM):
+             Tuple[str, str]: Tuple of the predicted answer and the formatted prompt.
+ 
+         """
+-
+-        import google.generativeai as palm
++        palm = self._get_palm_module()
+ 
+         completion = palm.generate_text(
+             model=self.model_name,
+diff --git a/llama_index/text_splitter/code_splitter.py b/llama_index/text_splitter/code_splitter.py
+index 3153c46..c54558a 100644
+--- a/llama_index/text_splitter/code_splitter.py
++++ b/llama_index/text_splitter/code_splitter.py
+@@ -1,6 +1,10 @@
+ """Code splitter."""
++from __future__ import annotations
++
++from dataclasses import dataclass
++from typing import Any, Callable, Iterable, List, Optional
++
+ from pydantic import Field
+-from typing import Any, List, Optional
+ 
+ from llama_index.callbacks.base import CallbackManager
+ from llama_index.callbacks.schema import CBEventType, EventPayload
+@@ -11,6 +15,14 @@ DEFAULT_LINES_OVERLAP = 15
+ DEFAULT_MAX_CHARS = 1500
+ 
+ 
++@dataclass(frozen=True)
++class _ChunkingInput:
++    language: str
++    max_chars: int
++    chunk_lines: int
++    chunk_lines_overlap: int
++
++
+ class CodeSplitter(TextSplitter):
+     """Split code using a AST parser.
+ 
+@@ -19,7 +31,7 @@ class CodeSplitter(TextSplitter):
+     """
+ 
+     language: str = Field(
+-        description="The programming languge of the code being split."
++        description="The programming language of the code being split."
+     )
+     chunk_lines: int = Field(
+         default=DEFAULT_CHUNK_LINES,
+@@ -44,6 +56,15 @@ class CodeSplitter(TextSplitter):
+         max_chars: int = 1500,
+         callback_manager: Optional[CallbackManager] = None,
+     ):
++        if chunk_lines <= 0:
++            raise ValueError("chunk_lines must be > 0.")
++        if chunk_lines_overlap < 0:
++            raise ValueError("chunk_lines_overlap must be >= 0.")
++        if chunk_lines_overlap >= chunk_lines:
++            raise ValueError("chunk_lines_overlap must be < chunk_lines.")
++        if max_chars <= 0:
++            raise ValueError("max_chars must be > 0.")
++
+         callback_manager = callback_manager or CallbackManager([])
+         super().__init__(
+             language=language,
+@@ -53,6 +74,137 @@ class CodeSplitter(TextSplitter):
+             callback_manager=callback_manager,
+         )
+ 
++    def _split_text_by_lines(self, text: str) -> List[str]:
++        lines = text.splitlines(keepends=True)
++        if not lines:
++            return []
++
++        inputs = _ChunkingInput(
++            language=self.language,
++            max_chars=self.max_chars,
++            chunk_lines=self.chunk_lines,
++            chunk_lines_overlap=self.chunk_lines_overlap,
++        )
++        blocks = self._split_into_blocks(lines, inputs)
++        return [block.strip() for block in blocks if block.strip()]
++
++    def _split_into_blocks(self, lines: List[str], inputs: _ChunkingInput) -> List[str]:
++        language = inputs.language.lower()
++        preprocessed_lines = list(self._preprocess_lines(lines, language))
++        block_starts = self._find_block_starts(preprocessed_lines, language)
++        if len(block_starts) <= 1:
++            return self._split_by_line_windows(preprocessed_lines, inputs)
++
++        blocks: List[str] = []
++        for idx, start in enumerate(block_starts):
++            end = block_starts[idx + 1] if idx + 1 < len(block_starts) else None
++            block_lines = preprocessed_lines[start:end]
++            block_text = "".join(block_lines)
++            if len(block_text) > inputs.max_chars:
++                blocks.extend(self._split_by_line_windows(block_lines, inputs))
++            else:
++                blocks.append(block_text)
++        return blocks
++
++    def _preprocess_lines(self, lines: List[str], language: str) -> Iterable[str]:
++        if language not in {"c", "cpp", "c++", "java", "javascript", "typescript"}:
++            yield from lines
++            return
++
++        for line in lines:
++            stripped = line.rstrip("\n")
++            newline = "\n" if line.endswith("\n") else ""
++            if "{" in stripped and stripped.rstrip().endswith("{"):
++                before = stripped[: stripped.rfind("{")].rstrip()
++                if before:
++                    yield before + newline
++                yield "{" + newline
++            else:
++                yield line
++
++    def _find_block_starts(self, lines: List[str], language: str) -> List[int]:
++        starts = [0]
++
++        def add_start(idx: int) -> None:
++            if idx not in starts:
++                starts.append(idx)
++
++        for idx, line in enumerate(lines):
++            stripped = line.lstrip()
++            trimmed = stripped.strip()
++            if idx == 0 or not stripped:
++                continue
++
++            if language == "python":
++                if trimmed.startswith("def ") or trimmed.startswith("class "):
++                    add_start(idx)
++            elif language in {"typescript", "javascript"}:
++                if (
++                    trimmed.startswith("function ")
++                    or trimmed.startswith("class ")
++                    or trimmed.startswith("interface ")
++                    or trimmed.startswith("type ")
++                    or trimmed.startswith("export ")
++                    or trimmed.startswith("import ")
++                    or trimmed.startswith("const ")
++                    or trimmed.startswith("let ")
++                ):
++                    add_start(idx)
++            elif language == "html":
++                if trimmed.startswith("<"):
++                    add_start(idx)
++            elif language in {"c", "cpp", "c++"}:
++                if not trimmed:
++                    continue
++
++                first_token = trimmed.split(maxsplit=1)[0]
++                is_control_stmt = first_token in {
++                    "if",
++                    "for",
++                    "while",
++                    "switch",
++                    "catch",
++                }
++                looks_like_signature = (
++                    not is_control_stmt
++                    and "(" in trimmed
++                    and ")" in trimmed
++                    and trimmed.endswith(")")
++                )
++                if (
++                    trimmed.startswith("#include")
++                    or trimmed == "{"
++                    or looks_like_signature
++                ):
++                    add_start(idx)
++        starts.sort()
++        return starts
++
++    def _split_by_line_windows(self, lines: List[str], inputs: _ChunkingInput) -> List[str]:
++        if not lines:
++            return []
++
++        step = max(1, inputs.chunk_lines - inputs.chunk_lines_overlap)
++        chunks: List[str] = []
++        start = 0
++        while start < len(lines):
++            end = min(len(lines), start + inputs.chunk_lines)
++            chunk_lines = lines[start:end]
++            chunk_text = "".join(chunk_lines)
++            while len(chunk_text) > inputs.max_chars and end > start + 1:
++                end -= 1
++                chunk_lines = lines[start:end]
++                chunk_text = "".join(chunk_lines)
++
++            if len(chunk_text) > inputs.max_chars and end == start + 1:
++                chunk_text = chunk_text[: inputs.max_chars]
++
++            chunks.append(chunk_text)
++            if end == len(lines):
++                break
++            start += step
++        return chunks
++
+     def _chunk_node(self, node: Any, text: str, last_end: int = 0) -> List[str]:
+         new_chunks = []
+         current_chunk = ""
+@@ -84,19 +236,18 @@ class CodeSplitter(TextSplitter):
+             try:
+                 import tree_sitter_languages
+             except ImportError:
+-                raise ImportError(
+-                    "Please install tree_sitter_languages to use CodeSplitter."
+-                )
++                chunks = self._split_text_by_lines(text)
++                event.on_end(payload={EventPayload.CHUNKS: chunks})
++                return chunks
+ 
+             try:
+                 parser = tree_sitter_languages.get_parser(self.language)
+-            except Exception as e:
+-                print(
+-                    f"Could not get parser for language {self.language}. Check "
+-                    "https://github.com/grantjenks/py-tree-sitter-languages#license "
++            except Exception as exc:
++                raise ValueError(
++                    f"Could not get parser for language {self.language}. "
++                    "Check https://github.com/grantjenks/py-tree-sitter-languages#license "
+                     "for a list of valid languages."
+-                )
+-                raise e
++                ) from exc
+ 
+             tree = parser.parse(bytes(text, "utf-8"))
+ 
+@@ -112,7 +263,8 @@ class CodeSplitter(TextSplitter):
+                 )
+ 
+                 return chunks
+-            else:
+-                raise ValueError(f"Could not parse code with language {self.language}.")
++            chunks = self._split_text_by_lines(text)
++            event.on_end(payload={EventPayload.CHUNKS: chunks})
++            return chunks
+ 
+         # TODO: set up auto-language detection using something like https://github.com/yoeo/guesslang.
+diff --git a/llama_index/text_splitter/utils.py b/llama_index/text_splitter/utils.py
+index 0025864..ed2ca75 100644
+--- a/llama_index/text_splitter/utils.py
++++ b/llama_index/text_splitter/utils.py
+@@ -31,10 +31,19 @@ def split_by_char() -> Callable[[str], List[str]]:
+ 
+ 
+ def split_by_sentence_tokenizer() -> Callable[[str], List[str]]:
+-    import nltk
+     import os
++    import re
+     from llama_index.utils import get_cache_dir
+ 
++    def _regex_sentence_split(text: str) -> List[str]:
++        # Keep end punctuation with the preceding sentence.
++        return re.findall(r"[^.!?。！？]+[.!?。！？]?", text)
++
++    try:
++        import nltk  # type: ignore
++    except ImportError:
++        return _regex_sentence_split
++
+     cache_dir = get_cache_dir()
+     nltk_data_dir = os.environ.get("NLTK_DATA", cache_dir)
+ 
+@@ -42,12 +51,14 @@ def split_by_sentence_tokenizer() -> Callable[[str], List[str]]:
+     if nltk_data_dir not in nltk.data.path:
+         nltk.data.path.append(nltk_data_dir)
+ 
+-    try:
+-        nltk.data.find("tokenizers/punkt")
+-    except LookupError:
+-        nltk.download("punkt", download_dir=nltk_data_dir)
++    required_resources = ("tokenizers/punkt", "tokenizers/punkt_tab")
++    for resource in required_resources:
++        try:
++            nltk.data.find(resource)
++        except LookupError:
++            return _regex_sentence_split
+ 
+-    return nltk.sent_tokenize
++    return nltk.sent_tokenize  # type: ignore[return-value]
+ 
+ 
+ def split_by_regex(regex: str) -> Callable[[str], List[str]]:
+diff --git a/tests/llm_predictor/vellum/conftest.py b/tests/llm_predictor/vellum/conftest.py
+index 29cfb14..a9cf351 100644
+--- a/tests/llm_predictor/vellum/conftest.py
++++ b/tests/llm_predictor/vellum/conftest.py
+@@ -30,7 +30,7 @@ def fake_vellum_api_key() -> str:
+ 
+ @pytest.fixture
+ def mock_vellum_client_factory() -> Callable[..., mock.MagicMock]:
+-    import vellum
++    vellum = pytest.importorskip("vellum")
+ 
+     def _create_vellum_client(
+         compiled_prompt_text: str = "<example-compiled-prompt-text>",

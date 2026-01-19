@@ -1,267 +1,226 @@
-diff --git a/pyproject.toml b/pyproject.toml
-index 99203ad..b16bcef 100644
---- a/pyproject.toml
-+++ b/pyproject.toml
-@@ -159,7 +159,7 @@ extend_exclude = ["conftest\\.py", ".*/conftest\\.py", ".*/tests/.*"]
+diff --git a/saleor/csv/data_types.py b/saleor/csv/data_types.py
+new file mode 100644
+index 0000000..055e8a1
+--- /dev/null
++++ b/saleor/csv/data_types.py
+@@ -0,0 +1,19 @@
++from typing import Final
++
++PRODUCTS: Final[str] = "products"
++GIFT_CARDS: Final[str] = "gift cards"
++VOUCHER_CODES: Final[str] = "voucher codes"
++UNKNOWN: Final[str] = "unknown data"
++
++TASK_NAME_TO_DATA_TYPE: Final[dict[str, str]] = {
++    "export-products": PRODUCTS,
++    "export-gift-cards": GIFT_CARDS,
++    "export-voucher-codes": VOUCHER_CODES,
++}
++
++EXPORT_COMPLETED_CALLBACKS: Final[dict[str, str]] = {
++    GIFT_CARDS: "gift_card_export_completed",
++    PRODUCTS: "product_export_completed",
++    VOUCHER_CODES: "voucher_code_export_completed",
++}
++
+diff --git a/saleor/csv/notifications.py b/saleor/csv/notifications.py
+index 09762f0..4b24d1d 100644
+--- a/saleor/csv/notifications.py
++++ b/saleor/csv/notifications.py
+@@ -1,10 +1,11 @@
+-from typing import TYPE_CHECKING
++from typing import TYPE_CHECKING, Optional
  
- [tool.ruff]
- extend-select = ["D", "I", "ISC001", "ISC002", "PIE", "PT", "T20", "UP"]
--ignore = ["D100", "D101", "D102", "D103", "D104", "D105", "D106", "D107", "D202", "D203", "D206", "D213", "D407", "PT019"]
-+ignore = ["D100", "D101", "D102", "D103", "D104", "D105", "D106", "D107", "D202", "D203", "D206", "D213", "D407", "ISC001", "PT019"]
- target-version = "py39"
+ from ..core.notification.utils import get_site_context
+ from ..core.notify_events import NotifyEventType
+ from ..core.utils import build_absolute_uri
+ from ..graphql.core.utils import to_global_id_or_none
+ from ..plugins.manager import get_plugins_manager
++from .data_types import EXPORT_COMPLETED_CALLBACKS
  
-   [tool.ruff.flake8-pytest-style]
-diff --git a/saleor/core/jwt.py b/saleor/core/jwt.py
-index 83fa81b..3e7905d 100644
---- a/saleor/core/jwt.py
-+++ b/saleor/core/jwt.py
-@@ -1,5 +1,5 @@
- from collections.abc import Iterable
--from datetime import datetime, timedelta
-+from datetime import datetime, timedelta, timezone
- from typing import Any, Optional
+ if TYPE_CHECKING:
+     from .models import ExportFile
+@@ -26,39 +27,44 @@ def get_default_export_payload(export_file: "ExportFile") -> dict:
+     }
  
- import graphene
-@@ -31,7 +31,7 @@ JWT_OWNER_FIELD = "owner"
- def jwt_base_payload(
-     exp_delta: Optional[timedelta], token_owner: str
- ) -> dict[str, Any]:
--    utc_now = datetime.utcnow()
-+    utc_now = datetime.utcnow().replace(tzinfo=timezone.utc)
  
+-def send_export_download_link_notification(export_file: "ExportFile", data_type: str):
+-    """Call PluginManager.notify to trigger the notification for success export."""
++def _notify_export_completed(manager, export_file: "ExportFile", data_type: str) -> None:
++    callback_name = EXPORT_COMPLETED_CALLBACKS.get(data_type)
++    if not callback_name:
++        return
++    getattr(manager, callback_name)(export_file)
++
++
++def _send_export_notification(
++    export_file: "ExportFile",
++    data_type: str,
++    event_type: NotifyEventType,
++    *,
++    csv_link: Optional[str] = None,
++) -> None:
      payload = {
-         "iat": utc_now,
-diff --git a/saleor/graphql/account/tests/mutations/authentication/test_token_create.py b/saleor/graphql/account/tests/mutations/authentication/test_token_create.py
-index 26512a0..1a0b68d 100644
---- a/saleor/graphql/account/tests/mutations/authentication/test_token_create.py
-+++ b/saleor/graphql/account/tests/mutations/authentication/test_token_create.py
-@@ -56,16 +56,26 @@ def test_create_token(api_client, customer_user, settings):
-     payload = jwt_decode(token)
-     assert payload["email"] == customer_user.email
-     assert payload["user_id"] == graphene.Node.to_global_id("User", customer_user.id)
--    assert datetime.fromtimestamp(payload["iat"]) == datetime.utcnow()
--    expected_expiration_datetime = datetime.utcnow() + settings.JWT_TTL_ACCESS
--    assert datetime.fromtimestamp(payload["exp"]) == expected_expiration_datetime
-+    assert datetime.fromtimestamp(payload["iat"], tz=timezone.utc) == datetime.now(
-+        timezone.utc
-+    )
-+    expected_expiration_datetime = datetime.now(timezone.utc) + settings.JWT_TTL_ACCESS
-+    assert (
-+        datetime.fromtimestamp(payload["exp"], tz=timezone.utc)
-+        == expected_expiration_datetime
-+    )
-     assert payload["type"] == JWT_ACCESS_TYPE
+         "export": get_default_export_payload(export_file),
+-        "csv_link": build_absolute_uri(export_file.content_file.url),
+         "recipient_email": export_file.user.email if export_file.user else None,
+         "data_type": data_type,
+         **get_site_context(),
+     }
++    if csv_link:
++        payload["csv_link"] = csv_link
  
-     payload = jwt_decode(refreshToken)
-     assert payload["email"] == customer_user.email
--    assert datetime.fromtimestamp(payload["iat"]) == datetime.utcnow()
--    expected_expiration_datetime = datetime.utcnow() + settings.JWT_TTL_REFRESH
--    assert datetime.fromtimestamp(payload["exp"]) == expected_expiration_datetime
-+    assert datetime.fromtimestamp(payload["iat"], tz=timezone.utc) == datetime.now(
-+        timezone.utc
+     manager = get_plugins_manager()
+-    manager.notify(NotifyEventType.CSV_EXPORT_SUCCESS, payload)
+-    if data_type == "gift cards":
+-        manager.gift_card_export_completed(export_file)
+-    if data_type == "products":
+-        manager.product_export_completed(export_file)
+-    if data_type == "voucher codes":
+-        manager.voucher_code_export_completed(export_file)
++    manager.notify(event_type, payload)
++    _notify_export_completed(manager, export_file, data_type)
++
++
++def send_export_download_link_notification(export_file: "ExportFile", data_type: str):
++    """Call PluginManager.notify to trigger the notification for success export."""
++    _send_export_notification(
++        export_file,
++        data_type,
++        NotifyEventType.CSV_EXPORT_SUCCESS,
++        csv_link=build_absolute_uri(export_file.content_file.url),
 +    )
-+    expected_expiration_datetime = datetime.now(timezone.utc) + settings.JWT_TTL_REFRESH
-+    assert (
-+        datetime.fromtimestamp(payload["exp"], tz=timezone.utc)
-+        == expected_expiration_datetime
-+    )
-     assert payload["type"] == JWT_REFRESH_TYPE
-     assert payload["token"] == customer_user.jwt_token_key
-     assert payload["iss"] == build_absolute_uri(reverse("api"))
-@@ -94,17 +104,27 @@ def test_create_token_with_audience(api_client, customer_user, settings):
-     payload = jwt_decode(token)
-     assert payload["email"] == customer_user.email
-     assert payload["user_id"] == graphene.Node.to_global_id("User", customer_user.id)
--    assert datetime.fromtimestamp(payload["iat"]) == datetime.utcnow()
--    expected_expiration_datetime = datetime.utcnow() + settings.JWT_TTL_ACCESS
--    assert datetime.fromtimestamp(payload["exp"]) == expected_expiration_datetime
-+    assert datetime.fromtimestamp(payload["iat"], tz=timezone.utc) == datetime.now(
-+        timezone.utc
-+    )
-+    expected_expiration_datetime = datetime.now(timezone.utc) + settings.JWT_TTL_ACCESS
-+    assert (
-+        datetime.fromtimestamp(payload["exp"], tz=timezone.utc)
-+        == expected_expiration_datetime
-+    )
-     assert payload["type"] == JWT_ACCESS_TYPE
-     assert payload["aud"] == f"custom:{audience}"
- 
-     payload = jwt_decode(refreshToken)
-     assert payload["email"] == customer_user.email
--    assert datetime.fromtimestamp(payload["iat"]) == datetime.utcnow()
--    expected_expiration_datetime = datetime.utcnow() + settings.JWT_TTL_REFRESH
--    assert datetime.fromtimestamp(payload["exp"]) == expected_expiration_datetime
-+    assert datetime.fromtimestamp(payload["iat"], tz=timezone.utc) == datetime.now(
-+        timezone.utc
-+    )
-+    expected_expiration_datetime = datetime.now(timezone.utc) + settings.JWT_TTL_REFRESH
-+    assert (
-+        datetime.fromtimestamp(payload["exp"], tz=timezone.utc)
-+        == expected_expiration_datetime
-+    )
-     assert payload["type"] == JWT_REFRESH_TYPE
-     assert payload["token"] == customer_user.jwt_token_key
-     assert payload["aud"] == f"custom:{audience}"
-diff --git a/saleor/graphql/account/tests/mutations/authentication/test_token_refresh.py b/saleor/graphql/account/tests/mutations/authentication/test_token_refresh.py
-index e969dbc..e446486 100644
---- a/saleor/graphql/account/tests/mutations/authentication/test_token_refresh.py
-+++ b/saleor/graphql/account/tests/mutations/authentication/test_token_refresh.py
-@@ -1,4 +1,4 @@
--from datetime import datetime
-+from datetime import datetime, timezone
- 
- from django.urls import reverse
- from freezegun import freeze_time
-@@ -50,10 +50,12 @@ def test_refresh_token_with_audience(api_client, customer_user, settings):
-     assert token
-     payload = jwt_decode(token)
-     assert payload["email"] == customer_user.email
--    assert datetime.fromtimestamp(payload["iat"]) == datetime.utcnow()
-+    assert datetime.fromtimestamp(payload["iat"], tz=timezone.utc) == datetime.now(
-+        timezone.utc
-+    )
-     assert (
--        datetime.fromtimestamp(payload["exp"])
--        == datetime.utcnow() + settings.JWT_TTL_ACCESS
-+        datetime.fromtimestamp(payload["exp"], tz=timezone.utc)
-+        == datetime.now(timezone.utc) + settings.JWT_TTL_ACCESS
-     )
-     assert payload["type"] == JWT_ACCESS_TYPE
-     assert payload["token"] == customer_user.jwt_token_key
-@@ -82,10 +84,12 @@ def test_refresh_token_get_token_from_cookie(api_client, customer_user, settings
-     assert token
-     payload = jwt_decode(token)
-     assert payload["email"] == customer_user.email
--    assert datetime.fromtimestamp(payload["iat"]) == datetime.utcnow()
-+    assert datetime.fromtimestamp(payload["iat"], tz=timezone.utc) == datetime.now(
-+        timezone.utc
-+    )
-     assert (
--        datetime.fromtimestamp(payload["exp"])
--        == datetime.utcnow() + settings.JWT_TTL_ACCESS
-+        datetime.fromtimestamp(payload["exp"], tz=timezone.utc)
-+        == datetime.now(timezone.utc) + settings.JWT_TTL_ACCESS
-     )
-     assert payload["type"] == JWT_ACCESS_TYPE
-     assert payload["token"] == customer_user.jwt_token_key
-@@ -108,10 +112,12 @@ def test_refresh_token_get_token_from_input(api_client, customer_user, settings)
-     assert token
-     payload = jwt_decode(token)
-     assert payload["email"] == customer_user.email
--    assert datetime.fromtimestamp(payload["iat"]) == datetime.utcnow()
-+    assert datetime.fromtimestamp(payload["iat"], tz=timezone.utc) == datetime.now(
-+        timezone.utc
-+    )
-     assert (
--        datetime.fromtimestamp(payload["exp"])
--        == datetime.utcnow() + settings.JWT_TTL_ACCESS
-+        datetime.fromtimestamp(payload["exp"], tz=timezone.utc)
-+        == datetime.now(timezone.utc) + settings.JWT_TTL_ACCESS
-     )
-     assert payload["type"] == JWT_ACCESS_TYPE
- 
-diff --git a/saleor/graphql/product/tests/queries/test_products_query.py b/saleor/graphql/product/tests/queries/test_products_query.py
-index a93db37..c086645 100644
---- a/saleor/graphql/product/tests/queries/test_products_query.py
-+++ b/saleor/graphql/product/tests/queries/test_products_query.py
-@@ -1,8 +1,8 @@
--from datetime import datetime
- from decimal import Decimal
- 
- import graphene
- import pytest
-+from django.utils import timezone
- from django.utils.dateparse import parse_datetime
- 
- from .....core.postgres import FlatConcatSearchVector
-@@ -561,12 +561,12 @@ SORT_PRODUCTS_QUERY = """
  
  
- def test_sort_products(user_api_client, product, channel_USD):
--    product.updated_at = datetime.utcnow()
-+    product.updated_at = timezone.now()
-     product.save()
+ def send_export_failed_info(export_file: "ExportFile", data_type: str):
+     """Call PluginManager.notify to trigger the notification for failed export."""
+-    payload = {
+-        "export": get_default_export_payload(export_file),
+-        "recipient_email": export_file.user.email if export_file.user else None,
+-        "data_type": data_type,
+-        **get_site_context(),
+-    }
+-    manager = get_plugins_manager()
+-    manager.notify(NotifyEventType.CSV_EXPORT_FAILED, payload)
+-    if data_type == "gift cards":
+-        manager.gift_card_export_completed(export_file)
+-    if data_type == "products":
+-        manager.product_export_completed(export_file)
+-    if data_type == "voucher codes":
+-        manager.voucher_code_export_completed(export_file)
++    _send_export_notification(export_file, data_type, NotifyEventType.CSV_EXPORT_FAILED)
+diff --git a/saleor/csv/tasks.py b/saleor/csv/tasks.py
+index 058867d..2aed9bd 100644
+--- a/saleor/csv/tasks.py
++++ b/saleor/csv/tasks.py
+@@ -11,6 +11,7 @@ from django.utils import timezone
+ from ..celeryconf import app
+ from ..core import JobStatus
+ from . import events
++from .data_types import TASK_NAME_TO_DATA_TYPE, UNKNOWN
+ from .models import ExportEvent, ExportFile
+ from .notifications import send_export_failed_info
+ from .utils.export import export_gift_cards, export_products, export_voucher_codes
+@@ -20,11 +21,7 @@ task_logger = get_task_logger(__name__)
  
-     product.pk = None
-     product.slug = "second-product"
--    product.updated_at = datetime.utcnow()
-+    product.updated_at = timezone.now()
-     product.save()
-     ProductChannelListing.objects.create(
-         product=product,
-@@ -585,7 +585,7 @@ def test_sort_products(user_api_client, product, channel_USD):
-     )
-     product.pk = None
-     product.slug = "third-product"
--    product.updated_at = datetime.utcnow()
-+    product.updated_at = timezone.now()
-     product.save()
-     ProductChannelListing.objects.create(
-         product=product,
-@@ -671,13 +671,13 @@ def test_sort_products(user_api_client, product, channel_USD):
- def test_sort_products_by_price_as_staff(
-     staff_api_client, product, channel_USD, permission_manage_products
- ):
--    product.updated_at = datetime.utcnow()
-+    product.updated_at = timezone.now()
-     product.save()
-     staff_api_client.user.user_permissions.add(permission_manage_products)
+ class ExportTask(celery.Task):
+     # should be updated when new export task is added
+-    TASK_NAME_TO_DATA_TYPE_MAPPING = {
+-        "export-products": "products",
+-        "export-gift-cards": "gift cards",
+-        "export-voucher-codes": "voucher codes",
+-    }
++    TASK_NAME_TO_DATA_TYPE_MAPPING = TASK_NAME_TO_DATA_TYPE
  
-     product.pk = None
-     product.slug = "second-product"
--    product.updated_at = datetime.utcnow()
-+    product.updated_at = timezone.now()
-     product.save()
-     ProductChannelListing.objects.create(
-         product=product,
-@@ -696,7 +696,7 @@ def test_sort_products_by_price_as_staff(
-     )
-     product.pk = None
-     product.slug = "third-product"
--    product.updated_at = datetime.utcnow()
-+    product.updated_at = timezone.now()
-     product.save()
-     ProductChannelListing.objects.create(
-         product=product,
-diff --git a/saleor/webhook/transport/tests/test_utils.py b/saleor/webhook/transport/tests/test_utils.py
-index c13fd3a..7c8b966 100644
---- a/saleor/webhook/transport/tests/test_utils.py
-+++ b/saleor/webhook/transport/tests/test_utils.py
-@@ -1,9 +1,8 @@
--import datetime
+     def on_failure(self, exc, task_id, args, kwargs, einfo):
+         export_file_id = args[0]
+@@ -44,7 +41,7 @@ class ExportTask(celery.Task):
+ 
+         data_type = ExportTask.TASK_NAME_TO_DATA_TYPE_MAPPING.get(self.name)
+         if not data_type:
+-            data_type = "unknown data"
++            data_type = UNKNOWN
+         send_export_failed_info(export_file, data_type)
+ 
+     def on_success(self, retval, task_id, args, kwargs):
+diff --git a/saleor/csv/utils/export.py b/saleor/csv/utils/export.py
+index 1424b59..d75a6f1 100644
+--- a/saleor/csv/utils/export.py
++++ b/saleor/csv/utils/export.py
+@@ -10,6 +10,7 @@ from ...discount.models import VoucherCode
+ from ...giftcard.models import GiftCard
+ from ...product.models import Product
+ from .. import FileTypes
++from ..data_types import GIFT_CARDS, PRODUCTS, VOUCHER_CODES
+ from ..notifications import send_export_download_link_notification
+ from .product_headers import get_product_export_fields_and_headers_info
+ from .products_data import get_products_data
+@@ -56,7 +57,7 @@ def export_products(
+     save_csv_file_in_export_file(export_file, temporary_file, file_name)
+     temporary_file.close()
+ 
+-    send_export_download_link_notification(export_file, "products")
++    send_export_download_link_notification(export_file, PRODUCTS)
+ 
+ 
+ def export_gift_cards(
+@@ -87,7 +88,7 @@ def export_gift_cards(
+     save_csv_file_in_export_file(export_file, temporary_file, file_name)
+     temporary_file.close()
+ 
+-    send_export_download_link_notification(export_file, "gift cards")
++    send_export_download_link_notification(export_file, GIFT_CARDS)
+ 
+ 
+ def export_voucher_codes(
+@@ -118,7 +119,7 @@ def export_voucher_codes(
+ 
+     save_csv_file_in_export_file(export_file, temporary_file, file_name)
+     temporary_file.close()
+-    send_export_download_link_notification(export_file, "voucher codes")
++    send_export_download_link_notification(export_file, VOUCHER_CODES)
+ 
+ 
+ def get_filename(model_name: str, file_type: str) -> str:
+@@ -171,13 +172,9 @@ def parse_input(data: Any) -> dict[str, Union[str, dict]]:
+ 
+ def create_file_with_headers(file_headers: list[str], delimiter: str, file_type: str):
+     table = etl.wrap([file_headers])
 -
- import pytest
- from celery import Task
- from celery.exceptions import Retry
- from celery.utils.threads import LocalStack
-+from django.utils import timezone
+-    if file_type == FileTypes.CSV:
+-        temp_file = NamedTemporaryFile("ab+", suffix=".csv")
+-        etl.tocsv(table, temp_file.name, delimiter=delimiter)
+-    else:
+-        temp_file = NamedTemporaryFile("ab+", suffix=".xlsx")
+-        etl.io.xlsx.toxlsx(table, temp_file.name)
++    suffix = ".csv" if file_type == FileTypes.CSV else ".xlsx"
++    temp_file = NamedTemporaryFile("ab+", suffix=suffix)
++    _write_table(table, temp_file.name, file_type, delimiter)
  
- from ....core import EventDeliveryStatus
- from ....core.models import EventDeliveryAttempt
-@@ -20,7 +19,7 @@ def test_webhook_retry(webhook, event_delivery):
-     # given
-     attempt = EventDeliveryAttempt(
-         id=1,
--        created_at=datetime.datetime.utcnow(),
-+        created_at=timezone.now(),
-         delivery=event_delivery,
-         request_headers="",
-         task_id="123",
-@@ -40,7 +39,7 @@ def test_webhook_retry_404(webhook, event_delivery):
-     # given
-     attempt = EventDeliveryAttempt(
-         id=1,
--        created_at=datetime.datetime.utcnow(),
-+        created_at=timezone.now(),
-         delivery=event_delivery,
-         request_headers="",
-         task_id="123",
-@@ -60,7 +59,7 @@ def test_webhook_retry_redirect(webhook, event_delivery):
-     # given
-     attempt = EventDeliveryAttempt(
-         id=1,
--        created_at=datetime.datetime.utcnow(),
-+        created_at=timezone.now(),
-         delivery=event_delivery,
-         request_headers="",
-         task_id="123",
+     return temp_file
+ 
+@@ -269,11 +266,21 @@ def append_to_file(
+     delimiter: str,
+ ):
+     table = etl.fromdicts(export_data, header=headers, missing="")
++    _append_table(table, temporary_file.name, file_type, delimiter)
++
++
++def _write_table(table: Any, path: str, file_type: str, delimiter: str) -> None:
++    if file_type == FileTypes.CSV:
++        etl.tocsv(table, path, delimiter=delimiter)
++        return
++    etl.io.xlsx.toxlsx(table, path)
++
+ 
++def _append_table(table: Any, path: str, file_type: str, delimiter: str) -> None:
+     if file_type == FileTypes.CSV:
+-        etl.io.csv.appendcsv(table, temporary_file.name, delimiter=delimiter)
+-    else:
+-        etl.io.xlsx.appendxlsx(table, temporary_file.name)
++        etl.io.csv.appendcsv(table, path, delimiter=delimiter)
++        return
++    etl.io.xlsx.appendxlsx(table, path)
+ 
+ 
+ def save_csv_file_in_export_file(

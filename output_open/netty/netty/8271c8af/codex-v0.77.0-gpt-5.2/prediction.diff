@@ -1,0 +1,240 @@
+diff --git a/handler-proxy/src/main/java/io/netty/handler/proxy/ProxyHandler.java b/handler-proxy/src/main/java/io/netty/handler/proxy/ProxyHandler.java
+index a4ed952..dc1130e 100644
+--- a/handler-proxy/src/main/java/io/netty/handler/proxy/ProxyHandler.java
++++ b/handler-proxy/src/main/java/io/netty/handler/proxy/ProxyHandler.java
+@@ -56,9 +56,8 @@ public abstract class ProxyHandler extends ChannelDuplexHandler {
+ 
+     private volatile ChannelHandlerContext ctx;
+     private PendingWriteQueue pendingWrites;
+-    private boolean finished;
+-    private boolean suppressChannelReadComplete;
+-    private boolean flushedPrematurely;
++    private ProxyConnectionState state = new ConnectingState();
++    private final ProxyConnectionState forwardingState = new ForwardingState();
+     private final LazyChannelPromise connectPromise = new LazyChannelPromise();
+     private ScheduledFuture<?> connectTimeoutFuture;
+     private final ChannelFutureListener writeListener = new ChannelFutureListener() {
+@@ -228,47 +227,17 @@ public abstract class ProxyHandler extends ChannelDuplexHandler {
+ 
+     @Override
+     public final void channelInactive(ChannelHandlerContext ctx) throws Exception {
+-        if (finished) {
+-            ctx.fireChannelInactive();
+-        } else {
+-            // Disconnected before connected to the destination.
+-            setConnectFailure(new ProxyConnectException(exceptionMessage("disconnected")));
+-        }
++        state.channelInactive(ctx);
+     }
+ 
+     @Override
+     public final void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
+-        if (finished) {
+-            ctx.fireExceptionCaught(cause);
+-        } else {
+-            // Exception was raised before the connection attempt is finished.
+-            setConnectFailure(cause);
+-        }
++        state.exceptionCaught(ctx, cause);
+     }
+ 
+     @Override
+     public final void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
+-        if (finished) {
+-            // Received a message after the connection has been established; pass through.
+-            suppressChannelReadComplete = false;
+-            ctx.fireChannelRead(msg);
+-        } else {
+-            suppressChannelReadComplete = true;
+-            Throwable cause = null;
+-            try {
+-                boolean done = handleResponse(ctx, msg);
+-                if (done) {
+-                    setConnectSuccess();
+-                }
+-            } catch (Throwable t) {
+-                cause = t;
+-            } finally {
+-                ReferenceCountUtil.release(msg);
+-                if (cause != null) {
+-                    setConnectFailure(cause);
+-                }
+-            }
+-        }
++        state.channelRead(ctx, msg);
+     }
+ 
+     /**
+@@ -280,8 +249,8 @@ public abstract class ProxyHandler extends ChannelDuplexHandler {
+      */
+     protected abstract boolean handleResponse(ChannelHandlerContext ctx, Object response) throws Exception;
+ 
+-    private void setConnectSuccess() {
+-        finished = true;
++    private void setConnectSuccess(boolean flushPending) {
++        state = forwardingState;
+         if (connectTimeoutFuture != null) {
+             connectTimeoutFuture.cancel(false);
+         }
+@@ -299,7 +268,7 @@ public abstract class ProxyHandler extends ChannelDuplexHandler {
+             if (removedCodec) {
+                 writePendingWrites();
+ 
+-                if (flushedPrematurely) {
++                if (flushPending) {
+                     ctx.flush();
+                 }
+             } else {
+@@ -336,7 +305,7 @@ public abstract class ProxyHandler extends ChannelDuplexHandler {
+     }
+ 
+     private void setConnectFailure(Throwable cause) {
+-        finished = true;
++        state = forwardingState;
+         if (connectTimeoutFuture != null) {
+             connectTimeoutFuture.cancel(false);
+         }
+@@ -382,35 +351,17 @@ public abstract class ProxyHandler extends ChannelDuplexHandler {
+ 
+     @Override
+     public final void channelReadComplete(ChannelHandlerContext ctx) throws Exception {
+-        if (suppressChannelReadComplete) {
+-            suppressChannelReadComplete = false;
+-
+-            if (!ctx.channel().config().isAutoRead()) {
+-                ctx.read();
+-            }
+-        } else {
+-            ctx.fireChannelReadComplete();
+-        }
++        state.channelReadComplete(ctx);
+     }
+ 
+     @Override
+     public final void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) throws Exception {
+-        if (finished) {
+-            writePendingWrites();
+-            ctx.write(msg, promise);
+-        } else {
+-            addPendingWrite(ctx, msg, promise);
+-        }
++        state.write(ctx, msg, promise);
+     }
+ 
+     @Override
+     public final void flush(ChannelHandlerContext ctx) throws Exception {
+-        if (finished) {
+-            writePendingWrites();
+-            ctx.flush();
+-        } else {
+-            flushedPrematurely = true;
+-        }
++        state.flush(ctx);
+     }
+ 
+     private void writePendingWrites() {
+@@ -444,4 +395,104 @@ public abstract class ProxyHandler extends ChannelDuplexHandler {
+             return ctx.executor();
+         }
+     }
++
++    private interface ProxyConnectionState {
++        void channelInactive(ChannelHandlerContext ctx) throws Exception;
++        void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception;
++        void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception;
++        void channelReadComplete(ChannelHandlerContext ctx) throws Exception;
++        void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) throws Exception;
++        void flush(ChannelHandlerContext ctx) throws Exception;
++    }
++
++    private final class ConnectingState implements ProxyConnectionState {
++        private boolean suppressChannelReadComplete;
++        private boolean flushPending;
++
++        @Override
++        public void channelInactive(ChannelHandlerContext ctx) throws Exception {
++            setConnectFailure(new ProxyConnectException(exceptionMessage("disconnected")));
++        }
++
++        @Override
++        public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
++            setConnectFailure(cause);
++        }
++
++        @Override
++        public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
++            suppressChannelReadComplete = true;
++            Throwable cause = null;
++            try {
++                boolean done = handleResponse(ctx, msg);
++                if (done) {
++                    setConnectSuccess(flushPending);
++                }
++            } catch (Throwable t) {
++                cause = t;
++            } finally {
++                ReferenceCountUtil.release(msg);
++                if (cause != null) {
++                    setConnectFailure(cause);
++                }
++            }
++        }
++
++        @Override
++        public void channelReadComplete(ChannelHandlerContext ctx) throws Exception {
++            if (suppressChannelReadComplete) {
++                suppressChannelReadComplete = false;
++
++                if (!ctx.channel().config().isAutoRead()) {
++                    ctx.read();
++                }
++            } else {
++                ctx.fireChannelReadComplete();
++            }
++        }
++
++        @Override
++        public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) throws Exception {
++            addPendingWrite(ctx, msg, promise);
++        }
++
++        @Override
++        public void flush(ChannelHandlerContext ctx) throws Exception {
++            flushPending = true;
++        }
++    }
++
++    private final class ForwardingState implements ProxyConnectionState {
++        @Override
++        public void channelInactive(ChannelHandlerContext ctx) throws Exception {
++            ctx.fireChannelInactive();
++        }
++
++        @Override
++        public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
++            ctx.fireExceptionCaught(cause);
++        }
++
++        @Override
++        public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
++            ctx.fireChannelRead(msg);
++        }
++
++        @Override
++        public void channelReadComplete(ChannelHandlerContext ctx) throws Exception {
++            ctx.fireChannelReadComplete();
++        }
++
++        @Override
++        public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) throws Exception {
++            writePendingWrites();
++            ctx.write(msg, promise);
++        }
++
++        @Override
++        public void flush(ChannelHandlerContext ctx) throws Exception {
++            writePendingWrites();
++            ctx.flush();
++        }
++    }
+ }

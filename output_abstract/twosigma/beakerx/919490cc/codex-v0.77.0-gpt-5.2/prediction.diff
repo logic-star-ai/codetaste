@@ -1,0 +1,426 @@
+diff --git a/js/notebook/src/Plot.ts b/js/notebook/src/Plot.ts
+index 3d7d244..9c28295 100644
+--- a/js/notebook/src/Plot.ts
++++ b/js/notebook/src/Plot.ts
+@@ -15,15 +15,10 @@
+  */
+ 
+ import widgets from './widgets';
+-import * as _ from 'underscore';
++import { PlotWidgetController } from './plotting/controller/plotWidgetController';
+ 
+ const d3 = require('d3');
+ 
+-const PlotScope = require('./plot/plotScope');
+-const CombinedPlotScope = require('./plot/combinedPlotScope');
+-const OUTUPT_POINTS_LIMIT = 1000000;
+-const OUTUPT_POINTS_PREVIEW_NUMBER = 10000;
+-
+ export class PlotModel extends widgets.DOMWidgetModel {
+   defaults() {
+     return {
+@@ -38,127 +33,19 @@ export class PlotModel extends widgets.DOMWidgetModel {
+ }
+ 
+ export class PlotView extends widgets.DOMWidgetView {
+-  render() {
+-    this._currentScope = null;
+-
+-    this.displayed.then(() => {
+-      const plotModel = this.model.get('model');
+-      const type = plotModel.type || 'Text';
+-
+-      this.limitPoints(plotModel);
+-
+-      switch (type) {
+-        case 'CombinedPlot':
+-          this.initCombinedPlot(plotModel);
+-          break;
+-        default:
+-          this.initStandardPlot(plotModel);
+-          break;
+-      }
+-
+-      this.listenTo(this.model, 'change:updateData', this.handleUpdateData);
+-      this.listenTo(this.model, 'change:model', this.handleModellUpdate);
+-      this.listenTo(this.model, 'beakerx-tabSelected', () => {
+-        this._currentScope.adjustModelWidth();
+-      });
+-
+-      this.on('remove', () => {
+-        if (this._currentScope instanceof CombinedPlotScope) {
+-          this._currentScope.scopes.forEach(function(scope) {
+-            scope.destroy();
+-          });
+-        } else if (this._currentScope) {
+-          this._currentScope.destroy();
+-        }
+-        setTimeout(() => { this._currentScope = null; });
+-      });
+-    });
+-  }
++  private controller: PlotWidgetController | null = null;
+ 
+-  getNumberOfPointsForStandardPlot(plotModel) {
+-    return Math.max.apply(null, plotModel.graphics_list.map((graphic) => {
+-      const points = graphic.x ? graphic.x : graphic.y;
+-
+-      return points ? points.length : 0;
+-    }));
+-  }
+-
+-  truncatePointsForStandardPlot(plotModel) {
+-    plotModel.graphics_list.forEach((graphic) => {
+-      if (graphic.x && graphic.y) {
+-        graphic.x = graphic.x.slice(0, OUTUPT_POINTS_PREVIEW_NUMBER);
+-        graphic.y = graphic.y.slice(0, OUTUPT_POINTS_PREVIEW_NUMBER);
+-      }
+-    });
+-  }
+-
+-  limitPoints(plotModel) {
+-    let numberOfPoints;
+-
+-    if (!_.isArray(plotModel.graphics_list)) {
+-      return;
+-    }
+-
+-    if (!plotModel.plots) {
+-      numberOfPoints = this.getNumberOfPointsForStandardPlot(plotModel);
+-      this.limitPointsForStandardPlot(plotModel, numberOfPoints);
+-
+-      return;
+-    }
+-
+-    numberOfPoints = Math.max.apply(plotModel.plots.map(this.getNumberOfPointsForStandardPlot));
+-    plotModel.plots.forEach((standardPlotModel) => {
+-      this.limitPointsForStandardPlot(standardPlotModel, numberOfPoints);
+-    });
+-  }
+-
+-  limitPointsForStandardPlot(plotModel, numberOfPoints) {
+-    this.truncatePointsForStandardPlot(plotModel);
+-
+-    plotModel.numberOfPoints = numberOfPoints;
+-    plotModel.outputPointsLimit = OUTUPT_POINTS_LIMIT;
+-    plotModel.outputPointsPreviewNumber = OUTUPT_POINTS_PREVIEW_NUMBER;
++  render() {
++    this.controller = new PlotWidgetController(this, this.model);
++    this.controller.render();
+   }
+ 
+   handleModellUpdate() {
+-    const newModel = this.model.get('model');
+-    this._currentScope.updateModelData && this._currentScope.updateModelData(newModel);
+-    this._currentScope.updatePlot();
++    this.controller && this.controller.handleModelUpdate();
+   }
+ 
+   handleUpdateData() {
+-    const change = this.model.get('updateData');
+-    const currentModel = this.model.get('model');
+-    const updatedModel = _.extend(currentModel, change);
+-    this.model.set('model', updatedModel, {updated_view: this});
+-    this.handleModellUpdate();
+-  }
+-
+-  initStandardPlot(model) {
+-    this._currentScope = new PlotScope('wrap_'+this.model.model_id);
+-    const tmpl = this._currentScope.buildTemplate();
+-    const tmplElement = $(tmpl);
+-
+-    tmplElement.appendTo(this.$el);
+-
+-    this._currentScope.setWidgetModel(this.model);
+-    this._currentScope.setElement(tmplElement.children('.dtcontainer'));
+-    this._currentScope.setModelData(model);
+-    this._currentScope.setWidgetView(this);
+-    this._currentScope.init(this.model);
+-  }
+-
+-  initCombinedPlot(model) {
+-    this._currentScope = new CombinedPlotScope(`wrap_${this.id}`);
+-    const tmpl = this._currentScope.buildTemplate();
+-    const tmplElement = $(tmpl);
+-    
+-    tmplElement.appendTo(this.$el);
+-    
+-    this._currentScope.setModelData(model);
+-    this._currentScope.setElement(tmplElement);
+-    this._currentScope.setWidgetView(this);
+-    this._currentScope.init(this.model);
++    this.controller && this.controller.handleUpdateData();
+   }
+ }
+ 
+diff --git a/js/notebook/src/plotting/controller/plotWidgetController.ts b/js/notebook/src/plotting/controller/plotWidgetController.ts
+new file mode 100644
+index 0000000..ea23bf5
+--- /dev/null
++++ b/js/notebook/src/plotting/controller/plotWidgetController.ts
+@@ -0,0 +1,92 @@
++import { limitPlotPoints } from '../points/pointLimiter';
++import { createScopeHandle } from '../scopes/scopeFactory';
++import { PlotScopeHandle } from '../scopes/scopeTypes';
++import * as _ from 'underscore';
++
++type AnyWidgetModel = any;
++type AnyWidgetView = any;
++
++export class PlotWidgetController {
++  private currentScopeHandle: PlotScopeHandle | null = null;
++
++  constructor(private readonly widgetView: AnyWidgetView, private readonly widgetModel: AnyWidgetModel) {}
++
++  render(): void {
++    this.currentScopeHandle = null;
++
++    this.widgetView.displayed.then(() => {
++      const plotModel = this.widgetModel.get('model');
++      limitPlotPoints(plotModel);
++
++      this.initPlot(plotModel);
++
++      this.widgetView.listenTo(this.widgetModel, 'change:updateData', this.widgetView.handleUpdateData);
++      this.widgetView.listenTo(this.widgetModel, 'change:model', this.widgetView.handleModellUpdate);
++      this.widgetView.listenTo(this.widgetModel, 'beakerx-tabSelected', () => {
++        const scope = this.currentScopeHandle && this.currentScopeHandle.scope;
++        scope && scope.adjustModelWidth && scope.adjustModelWidth();
++      });
++
++      this.widgetView.on('remove', () => this.destroy());
++    });
++  }
++
++  destroy(): void {
++    if (this.currentScopeHandle) {
++      this.currentScopeHandle.destroy();
++    }
++
++    setTimeout(() => {
++      this.currentScopeHandle = null;
++    });
++  }
++
++  handleModelUpdate(): void {
++    const newModel = this.widgetModel.get('model');
++    const scope = this.currentScopeHandle && this.currentScopeHandle.scope;
++
++    if (!scope) {
++      return;
++    }
++
++    scope.updateModelData && scope.updateModelData(newModel);
++    scope.updatePlot && scope.updatePlot();
++  }
++
++  handleUpdateData(): void {
++    const change = this.widgetModel.get('updateData');
++    const currentModel = this.widgetModel.get('model');
++    const updatedModel = _.extend(currentModel, change);
++    this.widgetModel.set('model', updatedModel, { updated_view: this.widgetView });
++
++    this.handleModelUpdate();
++  }
++
++  private initPlot(model: any): void {
++    this.currentScopeHandle = createScopeHandle({
++      model,
++      widgetModel: this.widgetModel,
++      widgetView: this.widgetView
++    });
++
++    const scope = this.currentScopeHandle.scope;
++    const tmpl = scope.buildTemplate();
++    const tmplElement = $(tmpl);
++
++    tmplElement.appendTo(this.widgetView.$el);
++
++    if ((model && model.type) === 'CombinedPlot') {
++      scope.setModelData(model);
++      scope.setElement(tmplElement);
++      scope.setWidgetView(this.widgetView);
++      scope.init(this.widgetModel);
++      return;
++    }
++
++    scope.setWidgetModel(this.widgetModel);
++    scope.setElement(tmplElement.children('.dtcontainer'));
++    scope.setModelData(model);
++    scope.setWidgetView(this.widgetView);
++    scope.init(this.widgetModel);
++  }
++}
+diff --git a/js/notebook/src/plotting/points/pointLimiter.ts b/js/notebook/src/plotting/points/pointLimiter.ts
+new file mode 100644
+index 0000000..4aaf0f1
+--- /dev/null
++++ b/js/notebook/src/plotting/points/pointLimiter.ts
+@@ -0,0 +1,67 @@
++import * as _ from 'underscore';
++import { OUTPUT_POINTS_LIMIT, OUTPUT_POINTS_PREVIEW_NUMBER } from './pointLimits';
++
++type AnyPlotModel = any;
++
++function getNumberOfPointsForStandardPlot(plotModel: AnyPlotModel): number {
++  if (!plotModel || !_.isArray(plotModel.graphics_list)) {
++    return 0;
++  }
++
++  return Math.max.apply(
++    null,
++    plotModel.graphics_list.map((graphic: any) => {
++      const points = graphic && (graphic.x ? graphic.x : graphic.y);
++      return points ? points.length : 0;
++    })
++  );
++}
++
++function truncatePointsForStandardPlot(plotModel: AnyPlotModel): void {
++  if (!plotModel || !_.isArray(plotModel.graphics_list)) {
++    return;
++  }
++
++  plotModel.graphics_list.forEach((graphic: any) => {
++    if (graphic && graphic.x && graphic.y) {
++      graphic.x = graphic.x.slice(0, OUTPUT_POINTS_PREVIEW_NUMBER);
++      graphic.y = graphic.y.slice(0, OUTPUT_POINTS_PREVIEW_NUMBER);
++    }
++  });
++}
++
++function limitPointsForStandardPlot(plotModel: AnyPlotModel, numberOfPoints: number): void {
++  truncatePointsForStandardPlot(plotModel);
++
++  plotModel.numberOfPoints = numberOfPoints;
++  plotModel.outputPointsLimit = OUTPUT_POINTS_LIMIT;
++  plotModel.outputPointsPreviewNumber = OUTPUT_POINTS_PREVIEW_NUMBER;
++}
++
++export function limitPlotPoints(plotModel: AnyPlotModel): void {
++  if (!plotModel) {
++    return;
++  }
++
++  if (!_.isArray(plotModel.graphics_list) && !_.isArray(plotModel.plots)) {
++    return;
++  }
++
++  if (!plotModel.plots) {
++    const numberOfPoints = getNumberOfPointsForStandardPlot(plotModel);
++    limitPointsForStandardPlot(plotModel, numberOfPoints);
++    return;
++  }
++
++  const maxPoints = Math.max.apply(
++    null,
++    plotModel.plots.map((standardPlotModel: AnyPlotModel) =>
++      getNumberOfPointsForStandardPlot(standardPlotModel)
++    )
++  );
++
++  plotModel.plots.forEach((standardPlotModel: AnyPlotModel) => {
++    limitPointsForStandardPlot(standardPlotModel, maxPoints);
++  });
++}
++
+diff --git a/js/notebook/src/plotting/points/pointLimits.ts b/js/notebook/src/plotting/points/pointLimits.ts
+new file mode 100644
+index 0000000..57327de
+--- /dev/null
++++ b/js/notebook/src/plotting/points/pointLimits.ts
+@@ -0,0 +1,3 @@
++export const OUTPUT_POINTS_LIMIT = 1000000;
++export const OUTPUT_POINTS_PREVIEW_NUMBER = 10000;
++
+diff --git a/js/notebook/src/plotting/scopes/scopeFactory.ts b/js/notebook/src/plotting/scopes/scopeFactory.ts
+new file mode 100644
+index 0000000..f5e8d39
+--- /dev/null
++++ b/js/notebook/src/plotting/scopes/scopeFactory.ts
+@@ -0,0 +1,53 @@
++import { PlotScopeHandle } from './scopeTypes';
++
++const PlotScope = require('../../plot/plotScope');
++const CombinedPlotScope = require('../../plot/combinedPlotScope');
++
++type AnyPlotModel = any;
++type AnyWidgetModel = any;
++type AnyWidgetView = any;
++
++function destroyCombinedPlotScope(scope: any): void {
++  if (!scope) {
++    return;
++  }
++
++  if (scope.scopes && Array.isArray(scope.scopes)) {
++    scope.scopes.forEach((childScope: any) => {
++      childScope && childScope.destroy && childScope.destroy();
++    });
++  }
++
++  scope.doDestroy && scope.doDestroy();
++}
++
++function destroyStandardPlotScope(scope: any): void {
++  if (!scope) {
++    return;
++  }
++
++  scope.destroy && scope.destroy();
++}
++
++export function createScopeHandle(opts: {
++  model: AnyPlotModel;
++  widgetModel: AnyWidgetModel;
++  widgetView: AnyWidgetView;
++}): PlotScopeHandle {
++  const type = (opts.model && opts.model.type) || 'Text';
++
++  if (type === 'CombinedPlot') {
++    const scope = new CombinedPlotScope(`wrap_${opts.widgetView.id}`);
++    return {
++      scope,
++      destroy: () => destroyCombinedPlotScope(scope)
++    };
++  }
++
++  const scope = new PlotScope(`wrap_${opts.widgetModel.model_id}`);
++  return {
++    scope,
++    destroy: () => destroyStandardPlotScope(scope)
++  };
++}
++
+diff --git a/js/notebook/src/plotting/scopes/scopeTypes.ts b/js/notebook/src/plotting/scopes/scopeTypes.ts
+new file mode 100644
+index 0000000..77ec5ff
+--- /dev/null
++++ b/js/notebook/src/plotting/scopes/scopeTypes.ts
+@@ -0,0 +1,7 @@
++export type AnyPlotScope = any;
++
++export interface PlotScopeHandle {
++  scope: AnyPlotScope;
++  destroy: () => void;
++}
++
+diff --git a/js/notebook/src/types/Plot.d.ts b/js/notebook/src/types/Plot.d.ts
+index e485b90..ae3c892 100644
+--- a/js/notebook/src/types/Plot.d.ts
++++ b/js/notebook/src/types/Plot.d.ts
+@@ -20,14 +20,8 @@ export declare class PlotModel extends widgets.DOMWidgetModel {
+ }
+ export declare class PlotView extends widgets.DOMWidgetView {
+     render(): void;
+-    getNumberOfPointsForStandardPlot(plotModel: any): any;
+-    truncatePointsForStandardPlot(plotModel: any): void;
+-    limitPoints(plotModel: any): void;
+-    limitPointsForStandardPlot(plotModel: any, numberOfPoints: any): void;
+     handleModellUpdate(): void;
+     handleUpdateData(): void;
+-    initStandardPlot(model: any): void;
+-    initCombinedPlot(model: any): void;
+ }
+ declare const _default: {
+     PlotModel: typeof PlotModel;

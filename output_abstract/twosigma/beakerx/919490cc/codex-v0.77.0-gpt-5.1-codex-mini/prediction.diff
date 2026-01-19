@@ -1,0 +1,485 @@
+diff --git a/js/notebook/src/Plot.ts b/js/notebook/src/Plot.ts
+index 3d7d244..67db95a 100644
+--- a/js/notebook/src/Plot.ts
++++ b/js/notebook/src/Plot.ts
+@@ -17,12 +17,10 @@
+ import widgets from './widgets';
+ import * as _ from 'underscore';
+ 
+-const d3 = require('d3');
+-
+ const PlotScope = require('./plot/plotScope');
+ const CombinedPlotScope = require('./plot/combinedPlotScope');
+-const OUTUPT_POINTS_LIMIT = 1000000;
+-const OUTUPT_POINTS_PREVIEW_NUMBER = 10000;
++import { limitPoints } from './plot/core/pointsLimiter';
++import { destroyPlotScope, initCombinedPlotScope, initStandardPlotScope } from './plot/core/scopeLifecycle';
+ 
+ export class PlotModel extends widgets.DOMWidgetModel {
+   defaults() {
+@@ -45,7 +43,7 @@ export class PlotView extends widgets.DOMWidgetView {
+       const plotModel = this.model.get('model');
+       const type = plotModel.type || 'Text';
+ 
+-      this.limitPoints(plotModel);
++      limitPoints(plotModel);
+ 
+       switch (type) {
+         case 'CombinedPlot':
+@@ -59,67 +57,16 @@ export class PlotView extends widgets.DOMWidgetView {
+       this.listenTo(this.model, 'change:updateData', this.handleUpdateData);
+       this.listenTo(this.model, 'change:model', this.handleModellUpdate);
+       this.listenTo(this.model, 'beakerx-tabSelected', () => {
+-        this._currentScope.adjustModelWidth();
++        this._currentScope && this._currentScope.adjustModelWidth && this._currentScope.adjustModelWidth();
+       });
+ 
+       this.on('remove', () => {
+-        if (this._currentScope instanceof CombinedPlotScope) {
+-          this._currentScope.scopes.forEach(function(scope) {
+-            scope.destroy();
+-          });
+-        } else if (this._currentScope) {
+-          this._currentScope.destroy();
+-        }
++        destroyPlotScope(this._currentScope);
+         setTimeout(() => { this._currentScope = null; });
+       });
+     });
+   }
+ 
+-  getNumberOfPointsForStandardPlot(plotModel) {
+-    return Math.max.apply(null, plotModel.graphics_list.map((graphic) => {
+-      const points = graphic.x ? graphic.x : graphic.y;
+-
+-      return points ? points.length : 0;
+-    }));
+-  }
+-
+-  truncatePointsForStandardPlot(plotModel) {
+-    plotModel.graphics_list.forEach((graphic) => {
+-      if (graphic.x && graphic.y) {
+-        graphic.x = graphic.x.slice(0, OUTUPT_POINTS_PREVIEW_NUMBER);
+-        graphic.y = graphic.y.slice(0, OUTUPT_POINTS_PREVIEW_NUMBER);
+-      }
+-    });
+-  }
+-
+-  limitPoints(plotModel) {
+-    let numberOfPoints;
+-
+-    if (!_.isArray(plotModel.graphics_list)) {
+-      return;
+-    }
+-
+-    if (!plotModel.plots) {
+-      numberOfPoints = this.getNumberOfPointsForStandardPlot(plotModel);
+-      this.limitPointsForStandardPlot(plotModel, numberOfPoints);
+-
+-      return;
+-    }
+-
+-    numberOfPoints = Math.max.apply(plotModel.plots.map(this.getNumberOfPointsForStandardPlot));
+-    plotModel.plots.forEach((standardPlotModel) => {
+-      this.limitPointsForStandardPlot(standardPlotModel, numberOfPoints);
+-    });
+-  }
+-
+-  limitPointsForStandardPlot(plotModel, numberOfPoints) {
+-    this.truncatePointsForStandardPlot(plotModel);
+-
+-    plotModel.numberOfPoints = numberOfPoints;
+-    plotModel.outputPointsLimit = OUTUPT_POINTS_LIMIT;
+-    plotModel.outputPointsPreviewNumber = OUTUPT_POINTS_PREVIEW_NUMBER;
+-  }
+-
+   handleModellUpdate() {
+     const newModel = this.model.get('model');
+     this._currentScope.updateModelData && this._currentScope.updateModelData(newModel);
+@@ -135,30 +82,23 @@ export class PlotView extends widgets.DOMWidgetView {
+   }
+ 
+   initStandardPlot(model) {
+-    this._currentScope = new PlotScope('wrap_'+this.model.model_id);
+-    const tmpl = this._currentScope.buildTemplate();
+-    const tmplElement = $(tmpl);
+-
+-    tmplElement.appendTo(this.$el);
+-
+-    this._currentScope.setWidgetModel(this.model);
+-    this._currentScope.setElement(tmplElement.children('.dtcontainer'));
+-    this._currentScope.setModelData(model);
+-    this._currentScope.setWidgetView(this);
+-    this._currentScope.init(this.model);
++    this._currentScope = initStandardPlotScope(PlotScope, {
++      wrapperId: 'wrap_' + this.model.model_id,
++      widgetModel: this.model,
++      widgetView: this,
++      hostElement: this.$el,
++      plotModel: model
++    });
+   }
+ 
+   initCombinedPlot(model) {
+-    this._currentScope = new CombinedPlotScope(`wrap_${this.id}`);
+-    const tmpl = this._currentScope.buildTemplate();
+-    const tmplElement = $(tmpl);
+-    
+-    tmplElement.appendTo(this.$el);
+-    
+-    this._currentScope.setModelData(model);
+-    this._currentScope.setElement(tmplElement);
+-    this._currentScope.setWidgetView(this);
+-    this._currentScope.init(this.model);
++    this._currentScope = initCombinedPlotScope(CombinedPlotScope, {
++      wrapperId: `wrap_${this.id}`,
++      widgetModel: this.model,
++      widgetView: this,
++      hostElement: this.$el,
++      plotModel: model
++    });
+   }
+ }
+ 
+diff --git a/js/notebook/src/plot/core/pointsLimiter.ts b/js/notebook/src/plot/core/pointsLimiter.ts
+new file mode 100644
+index 0000000..c4e3d52
+--- /dev/null
++++ b/js/notebook/src/plot/core/pointsLimiter.ts
+@@ -0,0 +1,112 @@
++export interface PlotGraphic {
++  x?: any[];
++  y?: any[];
++}
++
++export interface StandardPlotModel {
++  graphics_list?: PlotGraphic[];
++  numberOfPoints?: number;
++  outputPointsLimit?: number;
++  outputPointsPreviewNumber?: number;
++}
++
++export interface CombinedPlotModel {
++  plots?: StandardPlotModel[];
++  graphics_list?: PlotGraphic[];
++}
++
++export interface PointsLimitOptions {
++  outputPointsLimit: number;
++  outputPointsPreviewNumber: number;
++}
++
++export const DEFAULT_POINTS_LIMIT_OPTIONS: PointsLimitOptions = {
++  outputPointsLimit: 1000000,
++  outputPointsPreviewNumber: 10000
++};
++
++export function getNumberOfPointsForStandardPlot(plotModel: StandardPlotModel): number {
++  const graphicsList = plotModel && plotModel.graphics_list;
++  if (!Array.isArray(graphicsList) || graphicsList.length === 0) {
++    return 0;
++  }
++
++  let maxPoints = 0;
++  for (let index = 0; index < graphicsList.length; index++) {
++    const graphic = graphicsList[index];
++    const points = graphic && (graphic.x ? graphic.x : graphic.y);
++    const length = points ? points.length : 0;
++    maxPoints = Math.max(maxPoints, length);
++  }
++  return maxPoints;
++}
++
++export function truncatePointsForStandardPlot(
++  plotModel: StandardPlotModel,
++  outputPointsPreviewNumber: number
++): void {
++  const graphicsList = plotModel && plotModel.graphics_list;
++  if (!Array.isArray(graphicsList)) {
++    return;
++  }
++
++  for (let index = 0; index < graphicsList.length; index++) {
++    const graphic = graphicsList[index];
++    if (graphic && graphic.x && graphic.y) {
++      graphic.x = graphic.x.slice(0, outputPointsPreviewNumber);
++      graphic.y = graphic.y.slice(0, outputPointsPreviewNumber);
++    }
++  }
++}
++
++export function limitPointsForStandardPlot(
++  plotModel: StandardPlotModel,
++  numberOfPoints: number,
++  options: PointsLimitOptions
++): void {
++  truncatePointsForStandardPlot(plotModel, options.outputPointsPreviewNumber);
++
++  plotModel.numberOfPoints = numberOfPoints;
++  plotModel.outputPointsLimit = options.outputPointsLimit;
++  plotModel.outputPointsPreviewNumber = options.outputPointsPreviewNumber;
++}
++
++export function limitPoints(plotModel: CombinedPlotModel, options?: Partial<PointsLimitOptions>): void {
++  if (!plotModel) {
++    return;
++  }
++
++  const resolvedOptions: PointsLimitOptions = {
++    outputPointsLimit:
++      options && typeof options.outputPointsLimit === 'number'
++        ? options.outputPointsLimit
++        : DEFAULT_POINTS_LIMIT_OPTIONS.outputPointsLimit,
++    outputPointsPreviewNumber:
++      options && typeof options.outputPointsPreviewNumber === 'number'
++        ? options.outputPointsPreviewNumber
++        : DEFAULT_POINTS_LIMIT_OPTIONS.outputPointsPreviewNumber
++  };
++
++  if (!Array.isArray(plotModel.graphics_list) && !Array.isArray(plotModel.plots)) {
++    return;
++  }
++
++  if (!Array.isArray(plotModel.plots)) {
++    const numberOfPoints = getNumberOfPointsForStandardPlot(plotModel);
++    limitPointsForStandardPlot(plotModel, numberOfPoints, resolvedOptions);
++    return;
++  }
++
++  let maxPointsAcrossPlots = 0;
++  for (let index = 0; index < plotModel.plots.length; index++) {
++    maxPointsAcrossPlots = Math.max(
++      maxPointsAcrossPlots,
++      getNumberOfPointsForStandardPlot(plotModel.plots[index])
++    );
++  }
++
++  for (let index = 0; index < plotModel.plots.length; index++) {
++    limitPointsForStandardPlot(plotModel.plots[index], maxPointsAcrossPlots, resolvedOptions);
++  }
++}
++
+diff --git a/js/notebook/src/plot/core/scopeLifecycle.ts b/js/notebook/src/plot/core/scopeLifecycle.ts
+new file mode 100644
+index 0000000..0de606e
+--- /dev/null
++++ b/js/notebook/src/plot/core/scopeLifecycle.ts
+@@ -0,0 +1,57 @@
++import * as $ from 'jquery';
++
++export interface ScopeLifecycleArgs {
++  wrapperId: string;
++  widgetModel: any;
++  widgetView: any;
++  hostElement: JQuery;
++  plotModel: any;
++}
++
++export function initStandardPlotScope(PlotScope: any, args: ScopeLifecycleArgs): any {
++  const scope = new PlotScope(args.wrapperId);
++  const tmpl = scope.buildTemplate();
++  const tmplElement = $(tmpl);
++
++  tmplElement.appendTo(args.hostElement);
++
++  scope.setWidgetModel(args.widgetModel);
++  scope.setElement(tmplElement.children('.dtcontainer'));
++  scope.setModelData(args.plotModel);
++  scope.setWidgetView(args.widgetView);
++  scope.init(args.widgetModel);
++
++  return scope;
++}
++
++export function initCombinedPlotScope(CombinedPlotScope: any, args: ScopeLifecycleArgs): any {
++  const scope = new CombinedPlotScope(args.wrapperId);
++  const tmpl = scope.buildTemplate();
++  const tmplElement = $(tmpl);
++
++  tmplElement.appendTo(args.hostElement);
++
++  scope.setModelData(args.plotModel);
++  scope.setElement(tmplElement);
++  scope.setWidgetView(args.widgetView);
++  scope.init(args.widgetModel);
++
++  return scope;
++}
++
++export function destroyPlotScope(scope: any): void {
++  if (!scope) {
++    return;
++  }
++
++  const childScopes = scope.scopes;
++  if (Array.isArray(childScopes)) {
++    childScopes.forEach(function(childScope: any) {
++      childScope && childScope.destroy && childScope.destroy();
++    });
++    return;
++  }
++
++  scope.destroy && scope.destroy();
++}
++
+diff --git a/js/notebook/src/plot/core/styleApplier.ts b/js/notebook/src/plot/core/styleApplier.ts
+new file mode 100644
+index 0000000..6643304
+--- /dev/null
++++ b/js/notebook/src/plot/core/styleApplier.ts
+@@ -0,0 +1,65 @@
++import * as $ from 'jquery';
++import sanitize from '../plotSanitize';
++
++export interface ApplyCustomStylesArgs {
++  wrapperId: string;
++  scopeId: string;
++  rootElement: JQuery;
++  customStyles: string[];
++}
++
++export interface ApplyElementStylesArgs {
++  wrapperId: string;
++  scopeId: string;
++  rootElement: JQuery;
++  elementStyles: { [selector: string]: string };
++}
++
++function prependSanitizedStyle(rootElement: JQuery, rawCss: string): void {
++  $('<style>\n' + sanitize(rawCss) + '\n</style>').prependTo(rootElement);
++}
++
++export function applyCustomStyles(args: ApplyCustomStylesArgs): void {
++  if (!args.customStyles || args.customStyles.length === 0) {
++    return;
++  }
++
++  const customStyleString = args.customStyles
++    .map(function(style) {
++      return '#' + args.wrapperId + ' #' + args.scopeId + ' ' + style;
++    })
++    .join('\n');
++
++  prependSanitizedStyle(args.rootElement, customStyleString);
++}
++
++export function applyElementStyles(args: ApplyElementStylesArgs): void {
++  if (!args.elementStyles) {
++    return;
++  }
++
++  const styleLines: string[] = [];
++  for (const selector in args.elementStyles) {
++    if (Object.prototype.hasOwnProperty.call(args.elementStyles, selector)) {
++      styleLines.push(
++        '#' + args.wrapperId + ' #' + args.scopeId + ' ' + selector + ' { ' + args.elementStyles[selector] + ' }'
++      );
++    }
++  }
++
++  if (styleLines.length > 0) {
++    prependSanitizedStyle(args.rootElement, styleLines.join('\n'));
++  }
++
++  const titleStyle = args.elementStyles['.plot-title'];
++  if (titleStyle) {
++    const titleSelector = '.plot-title-' + args.scopeId;
++    prependSanitizedStyle($(titleSelector), titleSelector + ' { ' + titleStyle + ' }');
++  }
++}
++
++export default {
++  applyCustomStyles: applyCustomStyles,
++  applyElementStyles: applyElementStyles
++};
++
+diff --git a/js/notebook/src/plot/plotScope.js b/js/notebook/src/plot/plotScope.js
+index 6c43110..944714c 100644
+--- a/js/notebook/src/plot/plotScope.js
++++ b/js/notebook/src/plot/plotScope.js
+@@ -26,7 +26,8 @@ define([
+   './plotFormatter',
+   './plotFactory',
+   './gradientlegend',
+-  './chartExtender'
++  './chartExtender',
++  './core/styleApplier'
+ ], function(
+   _,
+   $,
+@@ -39,7 +40,8 @@ define([
+   plotFormatter,
+   plotFactory,
+   GradientLegend,
+-  bkoChartExtender
++  bkoChartExtender,
++  PlotStyleApplierModule
+ ) {
+ 
+   var PlotRange = require('./range/PlotRange').default;
+@@ -49,6 +51,7 @@ define([
+   var bkHelper = require('./../shared/bkHelper').default;
+   var zoomHelpers = require('./zoom/helpers').default;
+   var PointShapeHelper = require('./std/PointShapeHelper.ts').default;
++  var PlotStyleApplier = PlotStyleApplierModule.default;
+ 
+   function PlotScope(wrapperId) {
+     this.wrapperId = wrapperId;
+@@ -149,16 +152,16 @@ define([
+     this.jqsvg.css(plotSize);
+ 
+     $(window).resize(this.resizeFunction);
+-
+-    var sanitize = require('./plotSanitize').default;
++    var plotContainerElement = this.element.find('.plot-plotcontainer');
+ 
+     // Apply advanced custom styles set directly by user
+     if(model.customStyles) {
+-      var customStyleString = model.customStyles.map(function(s) {
+-        return '#' + wrapperId + ' #' + scopeId + ' ' + s;
+-      }).join('\n');
+-      // this string needs to be sanitized
+-      $("<style>"+ sanitize(customStyleString) + "\n</style>").prependTo(this.element.find('.plot-plotcontainer'));
++      PlotStyleApplier.applyCustomStyles({
++        wrapperId: wrapperId,
++        scopeId: scopeId,
++        rootElement: plotContainerElement,
++        customStyles: model.customStyles
++      });
+     }
+ 
+     // set title
+@@ -167,20 +170,12 @@ define([
+ 
+     // Apply any specific element styles (labelStyle,elementStyle, etc)
+     if(model['elementStyles']) {
+-      var styles = [];
+-      for(var style in model['elementStyles']) {
+-        styles.push('#' + wrapperId + ' #' + scopeId + ' ' + style + ' { ' + model['elementStyles'][style] + '}');
+-      }
+-      $("<style>\n" + sanitize(styles.join('\n')) + "\n</style>").prependTo(this.element.find('.plot-plotcontainer'));
+-      
+-      // Title style has to be handlded separately because it sits in a separate
+-      // div outside the hierachy the rest of the plot is in
+-      if(model['elementStyles']['.plot-title']) {
+-        var styleString = '.plot-title-' + scopeId + ' { ' +
+-          model['elementStyles']['.plot-title'] +
+-          '}'; 
+-        $("<style>\n" + sanitize(styleString) + "\n</style>").prependTo(this.element.find('.plot-title-' + scopeId));
+-      }
++      PlotStyleApplier.applyElementStyles({
++        wrapperId: wrapperId,
++        scopeId: scopeId,
++        rootElement: plotContainerElement,
++        elementStyles: model['elementStyles']
++      });
+     }
+ 
+     this.maing = d3.select(this.element[0]).select("#maing");
+@@ -2176,4 +2171,4 @@ define([
+ 
+   return PlotScope;
+ 
+-});
+\ No newline at end of file
++});
