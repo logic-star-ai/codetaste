@@ -17,6 +17,6 @@ python -m refactoring_benchmark.scripts.analyze \
     --output-dir "./output" \
     --output-dir "./output_nano" \
     --output-dir "./output_open" \
+    --output-dir "./output_abstract" \
     --statistics
-    # --output-dir "./output_abstract" \
     # --plot-type bar

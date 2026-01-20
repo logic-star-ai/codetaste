@@ -44,13 +44,14 @@ def read_file_lines(file_path: Path, max_lines: int = 15) -> str:
         return f"[Error reading file: {e}]"
 
 
-def investigate_instance(row: dict, base_path: Path) -> None:
+def investigate_instance(row: dict, base_path: Path, description_type: str) -> None:
     """
     Print investigation information for a single instance.
 
     Args:
         row: Dictionary from CSV DictReader
         base_path: Base path for the repository (parent of assets/)
+        description_type: Type of description to use (e.g., 'nano')
     """
     owner = row['owner']
     repo = row['repo']
@@ -66,7 +67,7 @@ def investigate_instance(row: dict, base_path: Path) -> None:
     descriptions_dir = base_path / 'assets' / 'descriptions'
     rules_dir = base_path / 'assets' / 'rules'
 
-    nano_desc_path = descriptions_dir / owner / repo / short_hash / 'nano_description.md'
+    nano_desc_path = descriptions_dir / owner / repo / short_hash / f'{description_type}_description.md'
     positive_rules_path = rules_dir / owner / repo / short_hash / 'rules_positive.yml'
     negative_rules_path = rules_dir / owner / repo / short_hash / 'rules_negative.yml'
 
@@ -77,7 +78,7 @@ def investigate_instance(row: dict, base_path: Path) -> None:
     print()
 
     # Print nano description
-    print("Nano Description:")
+    print(f"{description_type.capitalize()} Description:")
     print("-" * 80)
     nano_content = read_file_lines(nano_desc_path, max_lines=999999)  # Read full nano (usually 1 line)
     print(nano_content)
@@ -119,6 +120,12 @@ def main():
         required=True,
         help='Number of instances to investigate'
     )
+    parser.add_argument(
+        '--description-type',
+        type=str,
+        default='nano',
+        help='Type of description to use (default: nano)'
+    )
 
     args = parser.parse_args()
 
@@ -151,7 +158,7 @@ def main():
             if i >= args.nr_instances:
                 break
 
-            investigate_instance(row, base_path)
+            investigate_instance(row, base_path, args.description_type)
 
     print(f"Investigated {min(args.nr_instances, i + 1)} instance(s)")
     return 0

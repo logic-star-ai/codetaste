@@ -26,6 +26,8 @@ from refactoring_benchmark.podman import utils as podman_utils
 from refactoring_benchmark.utils.logger import get_logger
 from refactoring_benchmark.utils.models import InstanceRow
 
+ABSTRACT_HEADER = """Perform the task described below in it's ENTIRETY. You operate completely AUTONOMOUSLY in this sandboxed environment. You must EDIT the codebase DIRECTLY to complete the task.\n"""
+
 def _output_container_logs(container: PodmanContainer, output_path: Path, instance_logger: logging.Logger) -> None:
     """Helper to output container logs to file and logger."""
     raw_logs = container.logs(stream=False, follow=False)
@@ -53,6 +55,12 @@ def _prepare_temp_description(instance: InstanceRow, instance_logger: logging.Lo
     temp_dir = Path(path)
     if source_dir.exists():
         shutil.copytree(source_dir, temp_dir, dirs_exist_ok=True)
+    for abstract_file in temp_dir.rglob("abstract_description.md"):
+        try:
+            content = abstract_file.read_text(encoding="utf-8")
+            abstract_file.write_text(ABSTRACT_HEADER + content, encoding="utf-8")
+        except Exception as e:
+            instance_logger.error(f"Failed to prepend header to {abstract_file}: {e}")   
     os.chmod(temp_dir, 0o777)
     for path in temp_dir.rglob('*'):
         os.chmod(path, 0o777)
@@ -82,7 +90,7 @@ def run_single_instance(instance: InstanceRow, config: InferenceConfig) -> bool:
     output_dir.mkdir(parents=True, exist_ok=True)
     copy_agent_config(config.agent_dir, output_dir)
 
-    client = podman_utils.get_local_client()
+    client = podman_utils.get_local_client(timeout=config.timeout + 120)
     if not client:
         instance_logger.error("Failed to connect to Podman")
         return False
