@@ -1,0 +1,1 @@
+Rename `appconfig` to `inicfg` and remove `config_*` convenience macros

@@ -1,0 +1,1 @@
+Enable Self-Registration for Plugin SDK Resources and Data Sources

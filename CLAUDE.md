@@ -1,297 +1,213 @@
-# Refactoring Benchmark - Setup Guide
+# Refactoring Benchmark
 
-A benchmark system for evaluating AI agents on code refactoring tasks with security isolation and multi-mode evaluation.
+A comprehensive benchmarking framework for evaluating AI agents' code refactoring capabilities. Tests agents on real-world refactoring tasks and measures their instruction-following rate (IFR) through test execution and static analysis.
 
-## Prerequisites
+## Overview
 
-- **Python**: 3.12+
-- **Poetry**: For dependency management
-- **Docker/Podman**: For containerization
-- **Anthropic API Key**: For Claude agent during bootstrap
+The benchmark evaluates how well AI agents can:
+- Follow specific refactoring instructions (positive rules: patterns to implement)
+- Avoid anti-patterns (negative rules: bad patterns to avoid)
+- Maintain test suite validity
+- Generate correct code patches
 
-```bash
-# Set Docker socket for Podman users
-export DOCKER_HOST=unix:///run/user/$(id -u)/podman/podman.sock
-```
+## Architecture
 
-## Quick Start
+The system operates in four main phases:
 
-### 1. Install Dependencies
+### 1. Bootstrap Phase (`refactoring_benchmark/bootstrap/`)
+Sets up containerized execution environments for each benchmark instance.
 
-```bash
-# Install project dependencies
-poetry install --with dev
+**Process:**
+1. **Setup Phase**: Creates base execution environment using AI agent assistance
+2. **Runtime Phase**: Installs dependencies, runs baseline tests, captures metrics
+3. **Output**: Two Podman images per instance (`setup_image`, `runtime_image`) + baseline metrics
 
-# Activate virtual environment
-poetry shell
-```
+**Entry point:** `refactoring_benchmark/scripts/bootstrap.py`
 
-### 2. Configure API Key
+### 2. Inference Phase (`refactoring_benchmark/inference/`)
+Runs AI agents on benchmark instances to generate refactoring patches.
 
-```bash
-export ANTHROPIC_API_KEY=your_key_here
-```
+**Process:**
+1. Loads agent configuration from `agent/agent_config.json`
+2. Executes agent in isolated container (`runtime_image`)
+3. Extracts git diff as `prediction.diff`
+4. Saves inference metadata
 
-### 3. Build Base Images
+**Description Types:**
+Agents can be given different types of task descriptions:
+- `standard`: Full description including title, summary, why, and scope sections
+- `minimal`: Only title and summary (reduced context)
+- `nano`: Only title (very limited context)
+- `open`: Open-ended prompt asking to maximize usability without specific instructions
 
-```bash
-# Build base images for each language
-cd refactoring_benchmark/base_images/
-docker build -t benchmark-base-python -f Dockerfile.python .
-```
+**Entry point:** `refactoring_benchmark/scripts/inference.py`
 
-### 4. Bootstrap Instances
+### 3. Evaluation Phase (`refactoring_benchmark/evaluation/`)
+Evaluates agent outputs through parallel test execution and static analysis.
 
-```bash
-# Build benchmark instances from instances.csv
-poetry run python -m refactoring_benchmark.scripts.bootstrap
-```
+**Process (parallel):**
+- **Test Evaluation**: Applies patch, runs test suite, calculates pass rate
+- **Rule Evaluation**: Applies patch, runs opengrep SARIF rules, calculates IFR
 
-This will:
-- **Phase 1 (Setup)**: Clone repo, run Claude agent, verify tests, commit setup image
-- **Phase 2 (Runtime)**: Inject runtime components and security rules, commit runtime image
-- Creates two images per instance: `{owner}__{repo}-{hash}__setup` and `{owner}__{repo}-{hash}__runtime`
+**Metrics:**
+- `TestMetrics`: passed/failed/skipped counts, pass_rate, validity
+- `RuleMetrics`: positive/negative rule matches, IFR scores
+- `EvaluationResult`: Combined test + rule metrics
 
-### 5. Run Inference
+**Entry point:** `refactoring_benchmark/scripts/evaluate.py`
 
-```bash
-# Create agent script
-mkdir -p agent
-cat > agent/run_agent << 'EOF'
-#!/bin/bash
-cd /testbed
-# Your refactoring logic
-EOF
-chmod +x agent/run_agent
+### 4. Analysis Phase (`refactoring_benchmark/analyze/`)
+Aggregates results, computes statistics, generates visualizations.
 
-# Run inference
-mkdir -p output
-docker run --rm \
-    --env ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY \
-    -v $(pwd)/agent:/agent \
-    -v $(pwd)/output:/output \
-    localhost/benchmark/ray-project-ray:f781622f \
-    inference
-```
+**Features:**
+- Load all evaluation results from output directory
+- Filter by agent, instance, validity status
+- Calculate aggregate IFR metrics
+- Generate comparison plots
 
-### 6. Evaluate Results
+**Entry point:** `refactoring_benchmark/scripts/analyze.py`
 
-```bash
-# Test evaluation
-docker run --rm \
-    -v $(pwd)/output/prediction.diff:/input/patch.diff \
-    localhost/benchmark/ray-project-ray:f781622f \
-    eval_test
+## Key Components
 
-# Rule evaluation
-docker run --rm \
-    -v $(pwd)/output/prediction.diff:/input/patch.diff \
-    -v $(pwd)/output:/output \
-    localhost/benchmark/ray-project-ray:f781622f \
-    eval_rule
-```
+### Data Models (Pydantic)
+- `InstanceRow` (`utils/models.py`): Benchmark instance from CSV
+- `AgentConfig` (`inference/models.py`): Agent metadata
+- `EvaluationResult` (`evaluation/models.py`): Complete evaluation data
+- Coverage models (`coverage/models.py`): Code coverage data structures
+
+### Container Management (`podman/`)
+- Uses Podman (not Docker) for container orchestration
+- Automatic cleanup on exit/errors
+- Isolated execution with network blocking
+
+### Orchestrators
+- `BootstrapOrchestrator`: Parallel bootstrap execution
+- `InferenceOrchestrator`: Parallel agent runs
+- `EvaluationOrchestrator`: Parallel evaluation with test + rule workers
+
+All use `ThreadPoolExecutor` with graceful shutdown handling.
 
 ## Project Structure
 
 ```
-refactoring-benchmark/
-├── refactoring_benchmark/
-│   ├── base_images/           # Dockerfiles for base images
-│   ├── scripts/
-│   │   └── bootstrap.py       # Build benchmark containers
-│   └── utils/
-│       ├── container_utils.py # Docker container utilities
-│       ├── logger.py          # Logging infrastructure
-│       ├── models.py          # Pydantic data models
-│       └── prompts.py         # Agent setup prompts
-├── assets/                    # Benchmark assets
-│   ├── rules/                 # Static analysis rules (hidden from agent)
-│   │   └── {owner}/{repo}/{hash}/
-│   │       ├── rules_positive.yml
-│   │       └── rules_negative.yml
-│   └── descriptions/          # Task descriptions (visible to agent)
-│       └── {owner}/{repo}/{hash}/
-│           └── README.md
-├── instance_images/           # Saved scripts from containers
-│   └── {repo}/{owner}/{hash}/
-│       └── scripts/
-├── tests/                     # Pytest test suite
-├── logs/                      # Bootstrap logs
-├── instances.csv              # Benchmark instances
-├── entrypoint.sh              # Container runtime router
-└── pyproject.toml             # Dependencies
+refactoring_benchmark/
+├── bootstrap/          # Phase 1: Environment setup
+├── inference/          # Phase 2: Agent execution
+├── evaluation/         # Phase 3: Results evaluation
+├── analyze/            # Phase 4: Analysis & visualization
+├── podman/             # Container management utilities
+├── coverage/           # Code coverage parsing
+├── utils/              # Shared utilities, models, prompts
+├── tools/              # Utilities (pseudo agents, description builder)
+├── scripts/            # Main entry points
+└── base_images/        # Docker base image definitions
+
+instances.csv           # Benchmark instance definitions
+entrypoint.sh          # Container entry point (3 modes)
+pyproject.toml         # Poetry project configuration
 ```
 
-## Key Concepts
+## Key Files
 
-### Three Runtime Modes
+- **`instances.csv`**: Benchmark definitions (owner, repo, commits, category, language)
+- **`entrypoint.sh`**: Container entry point supporting modes: `inference`, `eval_test`, `eval_rule`
 
-1. **Inference**: Agent refactors code with security restrictions
-   - Network blocked (GitHub sinkholed)
-   - Git history sanitized (golden commit removed)
-   - Runs as unprivileged `agent_user`
-   - Can read task descriptions, cannot access rules
+## Metrics
 
-2. **Test Evaluation**: Applies patch and runs test suite
-   - Validates correctness
-   - Outputs JSON test results
+### Instruction Following Rate (IFR)
+- **Positive IFR**: Fraction of good patterns successfully implemented
+- **Negative IFR**: Fraction of bad patterns successfully avoided
+- **Total IFR**: Combined score across all rules
 
-3. **Rule Evaluation**: Applies patch and runs static analysis
-   - Uses Semgrep/Opengrep rules
-   - Outputs SARIF format results
-   - Rules hidden from agent during inference
+### Test Validity
+Tests are considered valid if:
+- No crashes during execution
+- At least 10 tests run
+- Fewer than 10,000 tests run
 
-### Security Model
+### Evaluation Result
+Each instance produces:
+- Test metrics (pass/fail/skip counts, pass_rate)
+- Rule metrics (positive/negative matches, IFR scores)
+- Validity flags for filtering analysis
 
-| Component | Visibility | Permissions | Purpose |
-|-----------|-----------|-------------|---------|
-| `/rules/` | Hidden | root:root 700 | Evaluation criteria |
-| `/task_description/` | Visible | agent_user 755 | Task guidance |
-| `/testbed/` | Visible | agent_user 755 | Code to refactor |
+## Technologies
 
-## Common Commands
+- **Python 3.x** with Poetry dependency management
+- **Podman >=5.6.0** for container orchestration
+- **Pydantic >=2.0.0** for data validation
+- **Pandas** for data analysis
+- **Matplotlib** for visualizations
+- **PyYAML** for configuration
+- **Pytest** for testing
+
+## Workflows
+
+### Running Bootstrap
+```bash
+python -m refactoring_benchmark.scripts.bootstrap
+```
+
+### Running Inference
+```bash
+python -m refactoring_benchmark.scripts.inference
+```
+
+### Running Evaluation
+```bash
+python -m refactoring_benchmark.scripts.evaluate
+```
+
+### Running Analysis
+```bash
+python -m refactoring_benchmark.scripts.analyze
+```
+
+### Creating Pseudo Agent Outputs
+Create baseline comparison agents without running actual inference:
 
 ```bash
-# Run tests
-poetry run pytest
-
-# Run specific test
-poetry run pytest tests/test_bootstrap.py::TestGoldenMetricsCriteria
-
-# Check coverage
-poetry run pytest --cov=refactoring_benchmark --cov-report=html
-
-# Format code
-poetry run black refactoring_benchmark/
-
-# View logs
-tail -f logs/bootstrap.log
-tail -f logs/bootstrap-{owner}-{repo}-{hash}.log
-
-# List containers
-docker ps -a
-
-# Remove all benchmark images
-docker images | grep localhost/benchmark | awk '{print $3}' | xargs docker rmi -f
+python -m refactoring_benchmark.tools.create_pseudo_agents --agent golden --agent null --output-dir output_minimal
 ```
 
-## Adding New Instances
+Both agents create complete output structures (prediction.diff, agent_config.json, inference_metadata.json) compatible with evaluation.
 
-### 1. Add to instances.csv
+## Output Structure
 
-```csv
-owner,repo,commit_hash,golden_commit_hash,combined_score,category,language
-owner,repo,buggy_hash,golden_hash,0.7,structural,python
+```
+output/
+└── {instance_id}/
+    └── {agent_name}/
+        ├── prediction.diff           # Generated patch
+        ├── inference_metadata.json   # Inference details
+        ├── evaluation_result.json    # Evaluation metrics
+        └── logs/                      # Execution logs
 ```
 
-### 2. Create Rules
+## Development
 
+### Contributing
+Special care should be taken to write clean, lean and maintainable code. It's important to explore the repository enough to avoid code duplication! 
+
+### Testing
 ```bash
-mkdir -p assets/rules/{owner}/{repo}/{hash[:8]}
-# Create rules_positive.yml and rules_negative.yml
+pytest                           # Run all tests
+pytest -m unit                   # Unit tests only
+pytest -m integration            # Integration tests
+pytest --cov                     # With coverage report
 ```
 
-### 3. Create Task Description
-
+### Code Formatting
 ```bash
-mkdir -p assets/descriptions/{owner}/{repo}/{hash[:8]}
-# Create README.md with task description
+black ./refactoring_benchmark
 ```
 
-### 4. Bootstrap
+## Container Modes
 
-```bash
-poetry run python -m refactoring_benchmark.scripts.bootstrap
-```
+The `entrypoint.sh` supports three execution modes:
 
-## Development Workflow
+1. **inference**: Runs agent, captures git diff
+2. **eval_test**: Applies patch, runs tests
+3. **eval_rule**: Applies patch, runs static analysis (opengrep)
 
-### 1. Testing Changes
-
-```bash
-# Run tests after code changes
-poetry run pytest -v
-
-# Check specific functionality
-poetry run pytest tests/test_bootstrap.py -k "save_criteria"
-```
-
-### 2. Debugging Bootstrap
-
-```bash
-# Check logs for specific instance
-tail -f logs/bootstrap-owner-repo-hash.log
-
-# Manually inspect container
-docker run -it benchmark-base-python bash
-```
-
-### 3. Iterating on Rules
-
-```bash
-# Test rules locally
-semgrep --config assets/rules/{owner}/{repo}/{hash}/rules_negative.yml /path/to/code
-```
-
-## Troubleshooting
-
-### Docker Connection Failed
-```bash
-export DOCKER_HOST=unix:///run/user/$(id -u)/podman/podman.sock
-docker ps  # Verify connection
-```
-
-### Bootstrap Fails
-- Check logs in `logs/` directory
-- Ensure base images are built
-- Verify API key is set
-- Check instances.csv format
-
-### Tests Don't Pass in Container
-- Review golden vs buggy commit diffs
-- Check if tests are flaky
-- Verify environment setup in logs
-
-### Agent Cannot Access Files
-- Task descriptions should be in `assets/descriptions/` (visible)
-- Rules should be in `assets/rules/` (hidden)
-- Check entrypoint.sh permissions logic
-
-## Next Steps
-
-- **RUNTIME.md**: Detailed runtime execution guide
-- **assets/rules/README.md**: Rule creation guidelines
-- **assets/descriptions/README.md**: Task description templates
-- **tests/README.md**: Testing documentation
-
-## Architecture Overview
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                     Bootstrap Phase 1: Setup                 │
-│  ┌────────────┐  ┌──────────┐  ┌─────────┐  ┌───────────┐ │
-│  │ Clone Repo │→ │Setup Env │→ │ Verify  │→ │  Commit   │ │
-│  │ (golden)   │  │ (Claude) │  │ Tests   │  │{id}__setup│ │
-│  └────────────┘  └──────────┘  └─────────┘  └───────────┘ │
-└─────────────────────────────────────────────────────────────┘
-                            ↓
-┌─────────────────────────────────────────────────────────────┐
-│                  Bootstrap Phase 2: Runtime                  │
-│  ┌────────────┐  ┌──────────┐  ┌─────────┐  ┌───────────┐ │
-│  │   Inject   │→ │  Inject  │→ │ Inject  │→ │  Commit   │ │
-│  │ Entrypoint │  │  Rules   │  │  Tasks  │  │{id}__rtme │ │
-│  └────────────┘  └──────────┘  └─────────┘  └───────────┘ │
-└─────────────────────────────────────────────────────────────┘
-                            ↓
-┌─────────────────────────────────────────────────────────────┐
-│                     Runtime Execution                        │
-│  ┌────────────┐  ┌──────────┐  ┌─────────────────────────┐ │
-│  │ Inference  │→ │eval_test │→ │    eval_rule (SARIF)    │ │
-│  │ (isolated) │  │  (JSON)  │  │   (Semgrep/Opengrep)    │ │
-│  └────────────┘  └──────────┘  └─────────────────────────┘ │
-└─────────────────────────────────────────────────────────────┘
-```
-
-## License
-
-See LICENSE file for details.
+All modes include security hardening (network sinkholing, restricted user execution).

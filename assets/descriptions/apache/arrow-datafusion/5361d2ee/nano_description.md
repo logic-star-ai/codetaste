@@ -1,0 +1,1 @@
+Rename `SessionContext::with_*` constructors to `SessionContext::new_with_*` for consistency with Rust idioms

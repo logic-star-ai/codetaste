@@ -1,0 +1,3060 @@
+diff --git a/core/trino-main/src/main/java/io/trino/metadata/BlockEncodingManager.java b/core/trino-main/src/main/java/io/trino/metadata/BlockEncodingManager.java
+index 97a02dfb738a..54ab5fabf85c 100644
+--- a/core/trino-main/src/main/java/io/trino/metadata/BlockEncodingManager.java
++++ b/core/trino-main/src/main/java/io/trino/metadata/BlockEncodingManager.java
+@@ -21,7 +21,6 @@
+ import io.trino.spi.block.Fixed12BlockEncoding;
+ import io.trino.spi.block.Int128ArrayBlockEncoding;
+ import io.trino.spi.block.IntArrayBlockEncoding;
+-import io.trino.spi.block.LazyBlockEncoding;
+ import io.trino.spi.block.LongArrayBlockEncoding;
+ import io.trino.spi.block.MapBlockEncoding;
+ import io.trino.spi.block.RowBlockEncoding;
+@@ -57,7 +56,6 @@ public BlockEncodingManager()
+         addBlockEncoding(new MapBlockEncoding());
+         addBlockEncoding(new RowBlockEncoding());
+         addBlockEncoding(new RunLengthBlockEncoding());
+-        addBlockEncoding(new LazyBlockEncoding());
+     }
+ 
+     public BlockEncoding getBlockEncodingByName(String encodingName)
+diff --git a/core/trino-main/src/main/java/io/trino/operator/ChangeOnlyUpdatedColumnsMergeProcessor.java b/core/trino-main/src/main/java/io/trino/operator/ChangeOnlyUpdatedColumnsMergeProcessor.java
+index 9313d9f204f2..a004f1983ad2 100644
+--- a/core/trino-main/src/main/java/io/trino/operator/ChangeOnlyUpdatedColumnsMergeProcessor.java
++++ b/core/trino-main/src/main/java/io/trino/operator/ChangeOnlyUpdatedColumnsMergeProcessor.java
+@@ -65,7 +65,7 @@ public Page transformPage(Page inputPage)
+         int positionCount = inputPage.getPositionCount();
+         checkArgument(positionCount > 0, "positionCount should be > 0, but is %s", positionCount);
+ 
+-        Block mergeRow = inputPage.getBlock(mergeRowChannel).getLoadedBlock();
++        Block mergeRow = inputPage.getBlock(mergeRowChannel);
+         List<Block> fields = getRowFieldsFromBlock(mergeRow);
+         List<Block> builder = new ArrayList<>(dataColumnChannels.size() + 4);
+         for (int channel : dataColumnChannels) {
+diff --git a/core/trino-main/src/main/java/io/trino/operator/JoinDomainBuilder.java b/core/trino-main/src/main/java/io/trino/operator/JoinDomainBuilder.java
+index 5875eebe619b..6c14459e2e2b 100644
+--- a/core/trino-main/src/main/java/io/trino/operator/JoinDomainBuilder.java
++++ b/core/trino-main/src/main/java/io/trino/operator/JoinDomainBuilder.java
+@@ -14,13 +14,11 @@
+ package io.trino.operator;
+ 
+ import com.google.common.base.Throwables;
+-import com.google.common.base.VerifyException;
+ import com.google.common.collect.ImmutableList;
+ import io.airlift.units.DataSize;
+ import io.trino.spi.TrinoException;
+ import io.trino.spi.block.Block;
+ import io.trino.spi.block.DictionaryBlock;
+-import io.trino.spi.block.LazyBlock;
+ import io.trino.spi.block.RunLengthEncodedBlock;
+ import io.trino.spi.block.ValueBlock;
+ import io.trino.spi.predicate.Domain;
+@@ -162,7 +160,6 @@ public boolean isCollecting()
+ 
+     public void add(Block block)
+     {
+-        block = block.getLoadedBlock();
+         if (collectDistinctValues) {
+             switch (block) {
+                 case ValueBlock valueBlock -> {
+@@ -177,7 +174,6 @@ public void add(Block block)
+                         add(dictionary, dictionaryBlock.getId(i));
+                     }
+                 }
+-                case LazyBlock _ -> throw new VerifyException("Did not expect LazyBlock after loading " + block.getClass().getSimpleName());
+             }
+ 
+             // if the distinct size is too large, fall back to min max, and drop the distinct values
+diff --git a/core/trino-main/src/main/java/io/trino/operator/RowReferencePageManager.java b/core/trino-main/src/main/java/io/trino/operator/RowReferencePageManager.java
+index cce070a08cee..c82f72953ae5 100644
+--- a/core/trino-main/src/main/java/io/trino/operator/RowReferencePageManager.java
++++ b/core/trino-main/src/main/java/io/trino/operator/RowReferencePageManager.java
+@@ -65,7 +65,6 @@ public LoadCursor add(Page page, int startingPosition)
+             // Initiate additional actions on close
+             checkState(currentCursor != null);
+             pageAccounting.unlockPage();
+-            pageAccounting.loadPageLoadIfNeeded();
+             // Account for page size after lazy loading (which can change the page size)
+             pageBytes += pageAccounting.sizeOf();
+             currentCursor = null;
+@@ -237,7 +236,6 @@ private final class PageAccounting
+ 
+         private final int pageId;
+         private Page page;
+-        private boolean isPageLoaded;
+         private long[] rowIds;
+         // Start off locked to give the caller time to declare which rows to reference
+         private boolean lockedPage = true;
+@@ -315,14 +313,6 @@ public boolean isCompactionEligible()
+             return !lockedPage && activePositions * COMPACTION_MIN_FILL_MULTIPLIER < page.getPositionCount();
+         }
+ 
+-        public void loadPageLoadIfNeeded()
+-        {
+-            if (!isPageLoaded && activePositions > 0) {
+-                page = page.getLoadedPage();
+-                isPageLoaded = true;
+-            }
+-        }
+-
+         public void compact()
+         {
+             checkState(!lockedPage, "Should not attempt compaction when page is locked");
+@@ -331,8 +321,6 @@ public void compact()
+                 return;
+             }
+ 
+-            loadPageLoadIfNeeded();
+-
+             int newIndex = 0;
+             int[] positionsToKeep = new int[activePositions];
+             long[] newRowIds = new long[activePositions];
+@@ -354,9 +342,7 @@ public void compact()
+ 
+         public long sizeOf()
+         {
+-            // Getting the size of a page forces a lazy page to be loaded, so only provide the size after an explicit decision to load
+-            long loadedPageSize = isPageLoaded ? page.getSizeInBytes() : 0;
+-            return PAGE_ACCOUNTING_INSTANCE_SIZE + loadedPageSize + SizeOf.sizeOf(rowIds);
++            return PAGE_ACCOUNTING_INSTANCE_SIZE + page.getSizeInBytes() + SizeOf.sizeOf(rowIds);
+         }
+     }
+ 
+diff --git a/core/trino-main/src/main/java/io/trino/operator/StreamingAggregationOperator.java b/core/trino-main/src/main/java/io/trino/operator/StreamingAggregationOperator.java
+index a86ca48b97d7..dcbbf7adbdbd 100644
+--- a/core/trino-main/src/main/java/io/trino/operator/StreamingAggregationOperator.java
++++ b/core/trino-main/src/main/java/io/trino/operator/StreamingAggregationOperator.java
+@@ -295,8 +295,7 @@ private void processInput(Page page)
+                     startPosition = nextGroupStart;
+                 }
+                 else {
+-                    // late materialization requires that page being locally stored is materialized before the next one is fetched
+-                    currentGroup = page.getRegion(page.getPositionCount() - 1, 1).getLoadedPage();
++                    currentGroup = page.getRegion(page.getPositionCount() - 1, 1);
+                     return;
+                 }
+             }
+diff --git a/core/trino-main/src/main/java/io/trino/operator/TableScanOperator.java b/core/trino-main/src/main/java/io/trino/operator/TableScanOperator.java
+index cfe03a05fe02..c3f588998858 100644
+--- a/core/trino-main/src/main/java/io/trino/operator/TableScanOperator.java
++++ b/core/trino-main/src/main/java/io/trino/operator/TableScanOperator.java
+@@ -270,8 +270,6 @@ public Page getOutput()
+         Page page = null;
+         if (sourcePage != null) {
+             page = sourcePage.getPage();
+-            // assure the page is in memory before handing to another operator
+-            page = page.getLoadedPage();
+ 
+             // update operator stats
+             long endCompletedBytes = source.getCompletedBytes();
+diff --git a/core/trino-main/src/main/java/io/trino/operator/WorkProcessorSourceOperatorAdapter.java b/core/trino-main/src/main/java/io/trino/operator/WorkProcessorSourceOperatorAdapter.java
+index bbe2aab252b8..cff258170959 100644
+--- a/core/trino-main/src/main/java/io/trino/operator/WorkProcessorSourceOperatorAdapter.java
++++ b/core/trino-main/src/main/java/io/trino/operator/WorkProcessorSourceOperatorAdapter.java
+@@ -66,7 +66,6 @@ public WorkProcessorSourceOperatorAdapter(OperatorContext operatorContext, WorkP
+                         operatorContext.getDriverContext().getYieldSignal(),
+                         WorkProcessor.create(splitBuffer));
+         this.pages = sourceOperator.getOutputPages()
+-                .map(Page::getLoadedPage)
+                 .withProcessStateMonitor(state -> updateOperatorStats())
+                 .finishWhen(() -> operatorFinishing);
+         operatorContext.setInfoSupplier(() -> sourceOperator.getOperatorInfo().orElse(null));
+diff --git a/core/trino-main/src/main/java/io/trino/operator/aggregation/AggregationMaskCompiler.java b/core/trino-main/src/main/java/io/trino/operator/aggregation/AggregationMaskCompiler.java
+index 606c6086cb22..10f6b9828a6d 100644
+--- a/core/trino-main/src/main/java/io/trino/operator/aggregation/AggregationMaskCompiler.java
++++ b/core/trino-main/src/main/java/io/trino/operator/aggregation/AggregationMaskCompiler.java
+@@ -29,7 +29,6 @@
+ import io.trino.spi.block.Block;
+ import io.trino.spi.block.ByteArrayBlock;
+ import io.trino.spi.block.DictionaryBlock;
+-import io.trino.spi.block.LazyBlock;
+ import io.trino.spi.block.RunLengthEncodedBlock;
+ import io.trino.spi.block.ValueBlock;
+ 
+@@ -50,14 +49,12 @@
+ import static io.airlift.bytecode.expression.BytecodeExpressions.constantFalse;
+ import static io.airlift.bytecode.expression.BytecodeExpressions.constantInt;
+ import static io.airlift.bytecode.expression.BytecodeExpressions.constantNull;
+-import static io.airlift.bytecode.expression.BytecodeExpressions.constantString;
+ import static io.airlift.bytecode.expression.BytecodeExpressions.equal;
+ import static io.airlift.bytecode.expression.BytecodeExpressions.invokeStatic;
+ import static io.airlift.bytecode.expression.BytecodeExpressions.isNotNull;
+ import static io.airlift.bytecode.expression.BytecodeExpressions.isNull;
+ import static io.airlift.bytecode.expression.BytecodeExpressions.lessThan;
+ import static io.airlift.bytecode.expression.BytecodeExpressions.newArray;
+-import static io.airlift.bytecode.expression.BytecodeExpressions.newInstance;
+ import static io.airlift.bytecode.expression.BytecodeExpressions.not;
+ import static io.airlift.bytecode.expression.BytecodeExpressions.notEqual;
+ import static io.airlift.bytecode.expression.BytecodeExpressions.or;
+@@ -104,11 +101,6 @@ public static Constructor<? extends AggregationMaskBuilder> generateAggregationM
+                 .ifTrue(invokeStatic(AggregationMask.class, "createSelectNone", AggregationMask.class, positionCount).ret()));
+ 
+         Variable maskBlock = scope.declareVariable("maskBlock", body, maskBlockParameter.invoke("orElse", Object.class, constantNull(Object.class)).cast(Block.class));
+-        body.append(new IfStatement()
+-                .condition(maskBlock.instanceOf(LazyBlock.class))
+-                .ifTrue(new BytecodeBlock()
+-                        .append(newInstance(IllegalArgumentException.class, constantString("mask block must not be a LazyBlock")))
+-                        .throwObject()));
+         Variable hasMaskBlock = scope.declareVariable("hasMaskBlock", body, isNotNull(maskBlock));
+         Variable maskBlockMayHaveNull = scope.declareVariable(
+                 "maskBlockMayHaveNull",
+diff --git a/core/trino-main/src/main/java/io/trino/operator/aggregation/GroupedAggregator.java b/core/trino-main/src/main/java/io/trino/operator/aggregation/GroupedAggregator.java
+index 18434899ab13..1ce8b1eb0f05 100644
+--- a/core/trino-main/src/main/java/io/trino/operator/aggregation/GroupedAggregator.java
++++ b/core/trino-main/src/main/java/io/trino/operator/aggregation/GroupedAggregator.java
+@@ -82,15 +82,13 @@ public void processPage(int groupCount, int[] groupIds, Page page)
+             Page arguments = page.getColumns(inputChannels);
+             Optional<Block> maskBlock = Optional.empty();
+             if (maskChannel.isPresent()) {
+-                maskBlock = Optional.of(page.getBlock(maskChannel.getAsInt()).getLoadedBlock());
++                maskBlock = Optional.of(page.getBlock(maskChannel.getAsInt()));
+             }
+             AggregationMask mask = maskBuilder.buildAggregationMask(arguments, maskBlock);
+ 
+             if (mask.isSelectNone()) {
+                 return;
+             }
+-            // Unwrap any LazyBlock values before evaluating the accumulator
+-            arguments = arguments.getLoadedPage();
+             long start = System.nanoTime();
+             accumulator.addInput(groupIds, arguments, mask);
+             metrics.recordAccumulatorUpdateTimeSince(start);
+diff --git a/core/trino-main/src/main/java/io/trino/operator/aggregation/builder/InMemoryHashAggregationBuilder.java b/core/trino-main/src/main/java/io/trino/operator/aggregation/builder/InMemoryHashAggregationBuilder.java
+index c043fae41a5e..aa5bff3be714 100644
+--- a/core/trino-main/src/main/java/io/trino/operator/aggregation/builder/InMemoryHashAggregationBuilder.java
++++ b/core/trino-main/src/main/java/io/trino/operator/aggregation/builder/InMemoryHashAggregationBuilder.java
+@@ -158,10 +158,10 @@ public void close() {}
+     public Work<?> processPage(Page page)
+     {
+         if (groupedAggregators.isEmpty()) {
+-            return new MeasuredGroupByHashWork<>(groupByHash.addPage(page.getLoadedPage(groupByChannels)), aggregationMetrics);
++            return new MeasuredGroupByHashWork<>(groupByHash.addPage(page.getColumns(groupByChannels)), aggregationMetrics);
+         }
+         return new TransformWork<>(
+-                new MeasuredGroupByHashWork<>(groupByHash.getGroupIds(page.getLoadedPage(groupByChannels)), aggregationMetrics),
++                new MeasuredGroupByHashWork<>(groupByHash.getGroupIds(page.getColumns(groupByChannels)), aggregationMetrics),
+                 groupByIdBlock -> {
+                     int groupCount = groupByHash.getGroupCount();
+                     for (GroupedAggregator groupedAggregator : groupedAggregators) {
+diff --git a/core/trino-main/src/main/java/io/trino/operator/exchange/PageChannelSelector.java b/core/trino-main/src/main/java/io/trino/operator/exchange/PageChannelSelector.java
+index 3f689c57b18b..7f9fea4432e5 100644
+--- a/core/trino-main/src/main/java/io/trino/operator/exchange/PageChannelSelector.java
++++ b/core/trino-main/src/main/java/io/trino/operator/exchange/PageChannelSelector.java
+@@ -23,9 +23,6 @@
+ public class PageChannelSelector
+         implements Function<Page, Page>
+ {
+-    // No channels need to be remapped, only ensure that all page blocks are loaded
+-    private static final Function<Page, Page> GET_LOADED_PAGE = Page::getLoadedPage;
+-
+     private final int[] channels;
+ 
+     public PageChannelSelector(int... channels)
+@@ -37,12 +34,6 @@ public PageChannelSelector(int... channels)
+     @Override
+     public Page apply(Page page)
+     {
+-        // Ensure the channels that are emitted are fully loaded and in the correct order
+-        return page.getLoadedPage(channels);
+-    }
+-
+-    public static Function<Page, Page> identitySelection()
+-    {
+-        return GET_LOADED_PAGE;
++        return page.getColumns(channels);
+     }
+ }
+diff --git a/core/trino-main/src/main/java/io/trino/operator/join/JoinProbe.java b/core/trino-main/src/main/java/io/trino/operator/join/JoinProbe.java
+index fc5f6e979fc2..9480ad472e36 100644
+--- a/core/trino-main/src/main/java/io/trino/operator/join/JoinProbe.java
++++ b/core/trino-main/src/main/java/io/trino/operator/join/JoinProbe.java
+@@ -41,8 +41,8 @@ public JoinProbeFactory(int[] probeOutputChannels, List<Integer> probeJoinChanne
+ 
+         public JoinProbe createJoinProbe(Page page)
+         {
+-            Page probePage = page.getLoadedPage(probeJoinChannels);
+-            return new JoinProbe(probeOutputChannels, page, probePage, probeHashChannel >= 0 ? page.getBlock(probeHashChannel).getLoadedBlock() : null);
++            Page probePage = page.getColumns(probeJoinChannels);
++            return new JoinProbe(probeOutputChannels, page, probePage, probeHashChannel >= 0 ? page.getBlock(probeHashChannel) : null);
+         }
+     }
+ 
+diff --git a/core/trino-main/src/main/java/io/trino/operator/join/LookupJoinPageBuilder.java b/core/trino-main/src/main/java/io/trino/operator/join/LookupJoinPageBuilder.java
+index 03b625c8ffda..a54f732b532a 100644
+--- a/core/trino-main/src/main/java/io/trino/operator/join/LookupJoinPageBuilder.java
++++ b/core/trino-main/src/main/java/io/trino/operator/join/LookupJoinPageBuilder.java
+@@ -111,7 +111,7 @@ public Page build(JoinProbe probe)
+         if (!isSequentialProbeIndices || outputPositions == 0) {
+             int[] probeIndices = probeIndexBuilder.toIntArray();
+             for (int i = 0; i < probeOutputChannels.length; i++) {
+-                blocks[i] = unwrapLoadedBlock(probePage.getBlock(probeOutputChannels[i]).getPositions(probeIndices, 0, outputPositions));
++                blocks[i] = probePage.getBlock(probeOutputChannels[i]).getPositions(probeIndices, 0, outputPositions);
+             }
+         }
+         else {
+@@ -127,7 +127,7 @@ public Page build(JoinProbe probe)
+                     // only a subregion of the block should be output
+                     block = block.getRegion(startRegion, outputPositions);
+                 }
+-                blocks[i] = unwrapLoadedBlock(block);
++                blocks[i] = block;
+             }
+         }
+ 
+@@ -148,13 +148,6 @@ public String toString()
+                 .toString();
+     }
+ 
+-    private static Block unwrapLoadedBlock(Block filteredProbeBlock)
+-    {
+-        // Lazy blocks (e.g. used in filter condition) could be loaded during filter evaluation.
+-        // Unwrap them to reduce overhead of further processing.
+-        return filteredProbeBlock.isLoaded() ? filteredProbeBlock.getLoadedBlock() : filteredProbeBlock;
+-    }
+-
+     private void appendProbeIndex(JoinProbe probe)
+     {
+         int position = probe.getPosition();
+@@ -206,7 +199,6 @@ private long getEstimatedProbeRowSize(JoinProbe probe)
+         for (int index : probe.getOutputChannels()) {
+             Block block = probe.getPage().getBlock(index);
+             // Estimate the size of the probe row
+-            // TODO: improve estimation for unloaded blocks by making it similar as in PageProcessor
+             estimatedProbeRowSize += block.getSizeInBytes() / block.getPositionCount();
+         }
+ 
+diff --git a/core/trino-main/src/main/java/io/trino/operator/join/unspilled/JoinProbe.java b/core/trino-main/src/main/java/io/trino/operator/join/unspilled/JoinProbe.java
+index b58a54b59adf..b97bef1b3146 100644
+--- a/core/trino-main/src/main/java/io/trino/operator/join/unspilled/JoinProbe.java
++++ b/core/trino-main/src/main/java/io/trino/operator/join/unspilled/JoinProbe.java
+@@ -51,8 +51,8 @@ public JoinProbeFactory(List<Integer> probeOutputChannels, List<Integer> probeJo
+ 
+         public JoinProbe createJoinProbe(Page page, LookupSource lookupSource)
+         {
+-            Page probePage = page.getLoadedPage(probeJoinChannels);
+-            return new JoinProbe(probeOutputChannels, page, probePage, lookupSource, probeHashChannel >= 0 ? page.getBlock(probeHashChannel).getLoadedBlock() : null, hasFilter);
++            Page probePage = page.getColumns(probeJoinChannels);
++            return new JoinProbe(probeOutputChannels, page, probePage, lookupSource, probeHashChannel >= 0 ? page.getBlock(probeHashChannel) : null, hasFilter);
+         }
+     }
+ 
+diff --git a/core/trino-main/src/main/java/io/trino/operator/join/unspilled/LookupJoinPageBuilder.java b/core/trino-main/src/main/java/io/trino/operator/join/unspilled/LookupJoinPageBuilder.java
+index cb224977116f..97a46b88f2a7 100644
+--- a/core/trino-main/src/main/java/io/trino/operator/join/unspilled/LookupJoinPageBuilder.java
++++ b/core/trino-main/src/main/java/io/trino/operator/join/unspilled/LookupJoinPageBuilder.java
+@@ -131,7 +131,7 @@ public Page build(JoinProbe probe)
+         if (!isSequentialProbeIndices || outputPositions == 0) {
+             int[] probeIndices = probeIndexBuilder.toIntArray();
+             for (int i = 0; i < probeOutputChannels.length; i++) {
+-                blocks[i] = unwrapLoadedBlock(probePage.getBlock(probeOutputChannels[i]).getPositions(probeIndices, 0, outputPositions));
++                blocks[i] = probePage.getBlock(probeOutputChannels[i]).getPositions(probeIndices, 0, outputPositions);
+             }
+         }
+         else {
+@@ -147,7 +147,7 @@ public Page build(JoinProbe probe)
+                     // only a subregion of the block should be output
+                     block = block.getRegion(startRegion, outputPositions);
+                 }
+-                blocks[i] = unwrapLoadedBlock(block);
++                blocks[i] = block;
+             }
+         }
+ 
+@@ -194,13 +194,6 @@ public String toString()
+                 .toString();
+     }
+ 
+-    private static Block unwrapLoadedBlock(Block filteredProbeBlock)
+-    {
+-        // Lazy blocks (e.g. used in filter condition) could be loaded during filter evaluation.
+-        // Unwrap them to reduce overhead of further processing.
+-        return filteredProbeBlock.isLoaded() ? filteredProbeBlock.getLoadedBlock() : filteredProbeBlock;
+-    }
+-
+     private void appendProbeIndex(JoinProbe probe)
+     {
+         int position = probe.getPosition();
+@@ -252,7 +245,6 @@ private long getEstimatedProbeRowSize(JoinProbe probe)
+         for (int index : probe.getOutputChannels()) {
+             Block block = probe.getPage().getBlock(index);
+             // Estimate the size of the probe row
+-            // TODO: improve estimation for unloaded blocks by making it similar as in PageProcessor
+             estimatedProbeRowSize += block.getSizeInBytes() / block.getPositionCount();
+         }
+ 
+diff --git a/core/trino-main/src/main/java/io/trino/operator/output/UnnestingPositionsAppender.java b/core/trino-main/src/main/java/io/trino/operator/output/UnnestingPositionsAppender.java
+index 793a12218a45..ed2624687ac9 100644
+--- a/core/trino-main/src/main/java/io/trino/operator/output/UnnestingPositionsAppender.java
++++ b/core/trino-main/src/main/java/io/trino/operator/output/UnnestingPositionsAppender.java
+@@ -15,7 +15,6 @@
+ 
+ import io.trino.spi.block.Block;
+ import io.trino.spi.block.DictionaryBlock;
+-import io.trino.spi.block.LazyBlock;
+ import io.trino.spi.block.RunLengthEncodedBlock;
+ import io.trino.spi.block.ValueBlock;
+ import io.trino.type.BlockTypeOperators.BlockPositionIsIdentical;
+@@ -103,7 +102,6 @@ else if (state == State.DICTIONARY && this.dictionary == dictionary) {
+                 transitionToDirect();
+                 delegate.append(positions, valueBlock);
+             }
+-            case LazyBlock ignore -> throw new IllegalArgumentException("Unsupported block type: " + source.getClass().getSimpleName());
+         }
+     }
+ 
+@@ -149,7 +147,6 @@ public void append(int position, Block source)
+             case RunLengthEncodedBlock runLengthEncodedBlock -> delegate.append(0, runLengthEncodedBlock.getValue());
+             case DictionaryBlock dictionaryBlock -> delegate.append(dictionaryBlock.getId(position), dictionaryBlock.getDictionary());
+             case ValueBlock valueBlock -> delegate.append(position, valueBlock);
+-            case LazyBlock ignore -> throw new IllegalArgumentException("Unsupported block type: " + source.getClass().getSimpleName());
+         }
+     }
+ 
+diff --git a/core/trino-main/src/main/java/io/trino/operator/project/DictionaryAwarePageFilter.java b/core/trino-main/src/main/java/io/trino/operator/project/DictionaryAwarePageFilter.java
+index 0d540b07d40f..d1ad0888f6f6 100644
+--- a/core/trino-main/src/main/java/io/trino/operator/project/DictionaryAwarePageFilter.java
++++ b/core/trino-main/src/main/java/io/trino/operator/project/DictionaryAwarePageFilter.java
+@@ -56,7 +56,7 @@ public InputChannels getInputChannels()
+     @Override
+     public SelectedPositions filter(ConnectorSession session, SourcePage page)
+     {
+-        Block block = page.getBlock(0).getLoadedBlock();
++        Block block = page.getBlock(0);
+ 
+         if (block instanceof RunLengthEncodedBlock runLengthEncodedBlock) {
+             Block value = runLengthEncodedBlock.getValue();
+diff --git a/core/trino-main/src/main/java/io/trino/operator/project/DictionaryAwarePageProjection.java b/core/trino-main/src/main/java/io/trino/operator/project/DictionaryAwarePageProjection.java
+index fa32a846b307..3fcd5014affa 100644
+--- a/core/trino-main/src/main/java/io/trino/operator/project/DictionaryAwarePageProjection.java
++++ b/core/trino-main/src/main/java/io/trino/operator/project/DictionaryAwarePageProjection.java
+@@ -180,8 +180,6 @@ public Block getResult()
+ 
+         private void setupDictionaryBlockProjection()
+         {
+-            block = block.getLoadedBlock();
+-
+             Optional<Block> dictionary = Optional.empty();
+             if (block instanceof RunLengthEncodedBlock runLengthEncodedBlock) {
+                 dictionary = Optional.of(runLengthEncodedBlock.getValue());
+diff --git a/core/trino-main/src/main/java/io/trino/operator/project/InputChannels.java b/core/trino-main/src/main/java/io/trino/operator/project/InputChannels.java
+index a53f582cb6a1..1189d380636f 100644
+--- a/core/trino-main/src/main/java/io/trino/operator/project/InputChannels.java
++++ b/core/trino-main/src/main/java/io/trino/operator/project/InputChannels.java
+@@ -97,7 +97,7 @@ private InputChannelsSourcePage(SourcePage sourcePage, int[] channels, @Nullable
+             if (eagerlyLoad != null) {
+                 for (int channel = 0; channel < eagerlyLoad.length; channel++) {
+                     if (eagerlyLoad[channel]) {
+-                        this.blocks[channel] = sourcePage.getBlock(channels[channel]).getLoadedBlock();
++                        this.blocks[channel] = sourcePage.getBlock(channels[channel]);
+                     }
+                 }
+             }
+diff --git a/core/trino-main/src/main/java/io/trino/operator/project/MergePages.java b/core/trino-main/src/main/java/io/trino/operator/project/MergePages.java
+index a2294fcfccb2..5ff92ada8d07 100644
+--- a/core/trino-main/src/main/java/io/trino/operator/project/MergePages.java
++++ b/core/trino-main/src/main/java/io/trino/operator/project/MergePages.java
+@@ -178,7 +178,7 @@ public TransformationState<Page> process(Page inputPage)
+             }
+ 
+             // TODO: merge low cardinality blocks lazily
+-            if (inputPage.getPositionCount() >= minRowCount || !isLoaded(inputPage) || inputPage.getSizeInBytes() >= minPageSizeInBytes) {
++            if (inputPage.getPositionCount() >= minRowCount || inputPage.getSizeInBytes() >= minPageSizeInBytes) {
+                 if (pageBuilder.isEmpty()) {
+                     return ofResult(inputPage);
+                 }
+@@ -207,7 +207,7 @@ private void appendPage(Page page)
+             for (int channel = 0; channel < types.size(); channel++) {
+                 appendBlock(
+                         types.get(channel),
+-                        page.getBlock(channel).getLoadedBlock(),
++                        page.getBlock(channel),
+                         pageBuilder.getBlockBuilder(channel));
+             }
+         }
+@@ -226,18 +226,5 @@ private Page flush()
+             memoryContext.setBytes(pageBuilder.getRetainedSizeInBytes());
+             return output;
+         }
+-
+-        private static boolean isLoaded(Page page)
+-        {
+-            // TODO: provide better heuristics there, e.g. check if last produced page was materialized
+-            for (int channel = 0; channel < page.getChannelCount(); ++channel) {
+-                Block block = page.getBlock(channel);
+-                if (!block.isLoaded()) {
+-                    return false;
+-                }
+-            }
+-
+-            return true;
+-        }
+     }
+ }
+diff --git a/core/trino-main/src/main/java/io/trino/operator/project/PageProcessor.java b/core/trino-main/src/main/java/io/trino/operator/project/PageProcessor.java
+index d126ccedcdc7..c9fb58cccc2f 100644
+--- a/core/trino-main/src/main/java/io/trino/operator/project/PageProcessor.java
++++ b/core/trino-main/src/main/java/io/trino/operator/project/PageProcessor.java
+@@ -318,7 +318,6 @@ private ProcessBatchResult processBatch(int batchSize)
+                     blocks[i] = previouslyComputedResults[i];
+                 }
+ 
+-                blocks[i] = blocks[i].getLoadedBlock();
+                 pageSize += blocks[i].getSizeInBytes();
+             }
+             return ProcessBatchResult.processBatchSuccess(new Page(positionsBatch.size(), blocks));
+diff --git a/core/trino-main/src/main/java/io/trino/server/protocol/Query.java b/core/trino-main/src/main/java/io/trino/server/protocol/Query.java
+index c09d52ff98ae..a7aeae6b3ff0 100644
+--- a/core/trino-main/src/main/java/io/trino/server/protocol/Query.java
++++ b/core/trino-main/src/main/java/io/trino/server/protocol/Query.java
+@@ -585,8 +585,6 @@ private synchronized QueryResultRows removePagesFromExchange(ResultQueryInfo que
+                 }
+ 
+                 Page page = deserializer.deserialize(serializedPage);
+-                // page should already be loaded since it was just deserialized
+-                page = page.getLoadedPage();
+                 bytes += estimateJsonSize(page);
+                 resultBuilder.addPage(page);
+             }
+diff --git a/core/trino-main/src/main/java/io/trino/sql/planner/LocalExecutionPlanner.java b/core/trino-main/src/main/java/io/trino/sql/planner/LocalExecutionPlanner.java
+index 51b2c9a4da9b..95f30637aae6 100644
+--- a/core/trino-main/src/main/java/io/trino/sql/planner/LocalExecutionPlanner.java
++++ b/core/trino-main/src/main/java/io/trino/sql/planner/LocalExecutionPlanner.java
+@@ -660,7 +660,7 @@ public LocalExecutionPlan plan(
+ 
+         PhysicalOperation physicalOperation = plan.accept(new Visitor(session), context);
+ 
+-        Function<Page, Page> pagePreprocessor = session.getQueryDataEncoding().isPresent() ? PageChannelSelector.identitySelection() : enforceLoadedLayoutProcessor(outputLayout, physicalOperation.getLayout());
++        Function<Page, Page> pagePreprocessor = session.getQueryDataEncoding().isPresent() ? Function.identity() : enforceLoadedLayoutProcessor(outputLayout, physicalOperation.getLayout());
+ 
+         List<Type> outputTypes = outputLayout.stream()
+                 .map(Symbol::type)
+@@ -4278,8 +4278,7 @@ private static Function<Page, Page> enforceLoadedLayoutProcessor(List<Symbol> ex
+                 .toArray();
+ 
+         if (Arrays.equals(channels, range(0, inputLayout.size()).toArray())) {
+-            // this is an identity mapping, simply ensuring that the page is fully loaded is sufficient
+-            return PageChannelSelector.identitySelection();
++            return Function.identity();
+         }
+ 
+         return new PageChannelSelector(channels);
+diff --git a/core/trino-main/src/test/java/io/trino/operator/TestScanFilterAndProjectOperator.java b/core/trino-main/src/test/java/io/trino/operator/TestScanFilterAndProjectOperator.java
+index 625834c5cf18..061d2ef9af77 100644
+--- a/core/trino-main/src/test/java/io/trino/operator/TestScanFilterAndProjectOperator.java
++++ b/core/trino-main/src/test/java/io/trino/operator/TestScanFilterAndProjectOperator.java
+@@ -29,9 +29,7 @@
+ import io.trino.operator.project.TestPageProcessor.LazyPagePageProjection;
+ import io.trino.operator.project.TestPageProcessor.SelectAllFilter;
+ import io.trino.spi.Page;
+-import io.trino.spi.block.ArrayBlock;
+ import io.trino.spi.block.Block;
+-import io.trino.spi.block.LazyBlock;
+ import io.trino.spi.connector.ConnectorPageSource;
+ import io.trino.spi.connector.DynamicFilter;
+ import io.trino.spi.connector.FixedPageSource;
+@@ -410,47 +408,27 @@ public void testRecordCursorYield()
+     @Test
+     public void testRecordMaterializedBytes()
+     {
+-        Block first = createIntsBlock(1, 2, 3);
+-        LazyBlock second = lazyWrapper(first);
+-        LazyBlock third = lazyWrapper(first);
+-        SourcePage page = new TestingSourcePage(3, first, second, third);
++        Block block = createIntsBlock(1, 2, 3);
++        SourcePage page = new TestingSourcePage(3, block, block, block);
+ 
+-        second.getLoadedBlock();
++        page.getBlock(1);
+ 
+         AtomicLong sizeInBytes = new AtomicLong();
+         ScanFilterAndProjectOperator.ProcessedBytesMonitor monitor = new ScanFilterAndProjectOperator.ProcessedBytesMonitor(page, sizeInBytes::getAndAdd);
+ 
+-        assertThat(sizeInBytes.get()).isEqualTo(first.getSizeInBytes() * 2);
++        assertThat(sizeInBytes.get()).isEqualTo(block.getSizeInBytes() * 1);
+ 
+-        page.getBlock(2).getLoadedBlock();
++        page.getBlock(2);
+         monitor.update();
+-        assertThat(sizeInBytes.get()).isEqualTo(first.getSizeInBytes() * 3);
+-    }
+-
+-    @Test
+-    public void testNestedBlocks()
+-    {
+-        Block elements = lazyWrapper(createIntsBlock(1, 2, 3));
+-        Block arrayBlock = ArrayBlock.fromElementBlock(2, Optional.empty(), new int[] {0, 1, 3}, elements);
+-        long initialArraySize = arrayBlock.getSizeInBytes();
+-        SourcePage page = new TestingSourcePage(2, arrayBlock);
++        assertThat(sizeInBytes.get()).isEqualTo(block.getSizeInBytes() * 2);
+ 
+-        AtomicLong sizeInBytes = new AtomicLong();
+-        ScanFilterAndProjectOperator.ProcessedBytesMonitor monitor = new ScanFilterAndProjectOperator.ProcessedBytesMonitor(page, sizeInBytes::getAndAdd);
+-
+-        assertThat(arrayBlock.getSizeInBytes()).isEqualTo(initialArraySize);
+-        assertThat(sizeInBytes.get()).isEqualTo(arrayBlock.getSizeInBytes());
+-
+-        // dictionary block caches size in bytes
+-        arrayBlock.getLoadedBlock();
++        page.getBlock(1);
+         monitor.update();
+-        assertThat(sizeInBytes.get()).isEqualTo(arrayBlock.getSizeInBytes());
+-        assertThat(sizeInBytes.get()).isEqualTo(initialArraySize + elements.getSizeInBytes());
+-    }
++        assertThat(sizeInBytes.get()).isEqualTo(block.getSizeInBytes() * 2);
+ 
+-    private static LazyBlock lazyWrapper(Block block)
+-    {
+-        return new LazyBlock(block.getPositionCount(), block::getLoadedBlock);
++        page.getBlock(0);
++        monitor.update();
++        assertThat(sizeInBytes.get()).isEqualTo(block.getSizeInBytes() * 3);
+     }
+ 
+     private static List<Page> toPages(Operator operator)
+diff --git a/core/trino-main/src/test/java/io/trino/operator/TestingSourcePage.java b/core/trino-main/src/test/java/io/trino/operator/TestingSourcePage.java
+index 6dd8c2b15c60..0857af6dd3c6 100644
+--- a/core/trino-main/src/test/java/io/trino/operator/TestingSourcePage.java
++++ b/core/trino-main/src/test/java/io/trino/operator/TestingSourcePage.java
+@@ -47,8 +47,9 @@ public int getPositionCount()
+     public long getSizeInBytes()
+     {
+         long sizeInBytes = 0;
+-        for (Block block : blocks) {
+-            if (block != null) {
++        for (int i = 0; i < blocks.length; i++) {
++            Block block = blocks[i];
++            if (loaded[i] && block != null) {
+                 sizeInBytes += block.getSizeInBytes();
+             }
+         }
+diff --git a/core/trino-main/src/test/java/io/trino/operator/join/TestHashJoinOperator.java b/core/trino-main/src/test/java/io/trino/operator/join/TestHashJoinOperator.java
+index 52b6de33cff8..7ed900f42200 100644
+--- a/core/trino-main/src/test/java/io/trino/operator/join/TestHashJoinOperator.java
++++ b/core/trino-main/src/test/java/io/trino/operator/join/TestHashJoinOperator.java
+@@ -36,22 +36,15 @@
+ import io.trino.operator.DriverContext;
+ import io.trino.operator.Operator;
+ import io.trino.operator.OperatorAssertion;
+-import io.trino.operator.OperatorContext;
+ import io.trino.operator.OperatorFactory;
+-import io.trino.operator.ProcessorContext;
+ import io.trino.operator.TaskContext;
+ import io.trino.operator.ValuesOperator.ValuesOperatorFactory;
+-import io.trino.operator.WorkProcessor;
+-import io.trino.operator.WorkProcessorOperator;
+-import io.trino.operator.WorkProcessorOperatorAdapter;
+-import io.trino.operator.WorkProcessorOperatorFactory;
+ import io.trino.operator.index.PageBuffer;
+ import io.trino.operator.index.PageBufferOperator.PageBufferOperatorFactory;
+ import io.trino.operator.join.JoinTestUtils.BuildSideSetup;
+ import io.trino.operator.join.JoinTestUtils.DummySpillerFactory;
+ import io.trino.operator.join.JoinTestUtils.TestInternalJoinFilterFunction;
+ import io.trino.spi.Page;
+-import io.trino.spi.block.LazyBlock;
+ import io.trino.spi.block.RunLengthEncodedBlock;
+ import io.trino.spi.type.Type;
+ import io.trino.spi.type.TypeOperators;
+@@ -93,8 +86,6 @@
+ import static io.trino.operator.OperatorAssertion.dropChannel;
+ import static io.trino.operator.OperatorAssertion.without;
+ import static io.trino.operator.OperatorFactories.spillingJoin;
+-import static io.trino.operator.WorkProcessor.ProcessState.finished;
+-import static io.trino.operator.WorkProcessor.ProcessState.ofResult;
+ import static io.trino.operator.join.JoinTestUtils.buildLookupSource;
+ import static io.trino.operator.join.JoinTestUtils.getHashChannelAsInt;
+ import static io.trino.operator.join.JoinTestUtils.innerJoinOperatorFactory;
+@@ -102,7 +93,6 @@
+ import static io.trino.operator.join.JoinTestUtils.runDriverInThread;
+ import static io.trino.operator.join.JoinTestUtils.setupBuildSide;
+ import static io.trino.spi.type.BigintType.BIGINT;
+-import static io.trino.spi.type.IntegerType.INTEGER;
+ import static io.trino.spi.type.VarcharType.VARCHAR;
+ import static java.util.Arrays.asList;
+ import static java.util.Collections.nCopies;
+@@ -231,53 +221,6 @@ public void testInnerJoinWithRunLengthEncodedProbe()
+         assertOperatorEquals(joinOperatorFactory, taskContext.addPipelineContext(0, true, true, false).addDriverContext(), probeInput, expected, true, getHashChannels(probePages, buildPages));
+     }
+ 
+-    @Test
+-    public void testUnwrapsLazyBlocks()
+-    {
+-        TaskContext taskContext = createTaskContext();
+-        DriverContext driverContext = taskContext.addPipelineContext(0, true, true, false).addDriverContext();
+-
+-        InternalJoinFilterFunction filterFunction = new TestInternalJoinFilterFunction(
+-                (leftPosition, leftPage, rightPosition, rightPage) -> {
+-                    // force loading of probe block
+-                    rightPage.getBlock(1).getLoadedBlock();
+-                    return true;
+-                });
+-
+-        RowPagesBuilder buildPages = rowPagesBuilder(false, Ints.asList(0), ImmutableList.of(BIGINT)).addSequencePage(1, 0);
+-        BuildSideSetup buildSideSetup = setupBuildSide(nodePartitioningManager, true, taskContext, buildPages, Optional.of(filterFunction), false, SINGLE_STREAM_SPILLER_FACTORY);
+-        JoinBridgeManager<PartitionedLookupSourceFactory> lookupSourceFactory = buildSideSetup.getLookupSourceFactoryManager();
+-
+-        RowPagesBuilder probePages = rowPagesBuilder(false, Ints.asList(0), ImmutableList.of(BIGINT, BIGINT));
+-        List<Page> probeInput = probePages.addSequencePage(1, 0, 0).build();
+-        probeInput = probeInput.stream()
+-                .map(page -> new Page(page.getBlock(0), new LazyBlock(1, () -> page.getBlock(1))))
+-                .collect(toImmutableList());
+-
+-        OperatorFactory joinOperatorFactory = spillingJoin(
+-                innerJoin(false, false),
+-                0,
+-                new PlanNodeId("test"),
+-                lookupSourceFactory,
+-                probePages.getTypes(),
+-                Ints.asList(0),
+-                getHashChannelAsInt(probePages),
+-                Optional.empty(),
+-                OptionalInt.of(1),
+-                PARTITIONING_SPILLER_FACTORY,
+-                TYPE_OPERATORS);
+-
+-        instantiateBuildDrivers(buildSideSetup, taskContext);
+-        buildLookupSource(executor, buildSideSetup);
+-        Operator operator = joinOperatorFactory.createOperator(driverContext);
+-        assertThat(operator.needsInput()).isTrue();
+-        operator.addInput(probeInput.get(0));
+-        operator.finish();
+-
+-        Page output = operator.getOutput();
+-        assertThat(output.getBlock(1)).isNotInstanceOf(LazyBlock.class);
+-    }
+-
+     @Test
+     public void testYield()
+     {
+@@ -1694,87 +1637,6 @@ private void testInnerJoinWithBlockingLookupSource(boolean parallelBuild, boolea
+         }
+     }
+ 
+-    @Test
+-    public void testInnerJoinLoadsPagesInOrder()
+-    {
+-        TaskContext taskContext = createTaskContext();
+-
+-        // build factory
+-        List<Type> buildTypes = ImmutableList.of(VARCHAR);
+-        RowPagesBuilder buildPages = rowPagesBuilder(false, Ints.asList(0), buildTypes);
+-        for (int i = 0; i < 100_000; ++i) {
+-            buildPages.row("a");
+-        }
+-        BuildSideSetup buildSideSetup = setupBuildSide(nodePartitioningManager, false, taskContext, buildPages, Optional.empty(), false, SINGLE_STREAM_SPILLER_FACTORY);
+-        JoinBridgeManager<PartitionedLookupSourceFactory> lookupSourceFactory = buildSideSetup.getLookupSourceFactoryManager();
+-
+-        // probe factory
+-        List<Type> probeTypes = ImmutableList.of(VARCHAR, INTEGER, INTEGER);
+-        RowPagesBuilder probePages = rowPagesBuilder(false, Ints.asList(0), probeTypes);
+-        probePages.row("a", 1L, 2L);
+-        WorkProcessorOperatorFactory joinOperatorFactory = ((WorkProcessorOperatorAdapter.Factory) innerJoinOperatorFactory(lookupSourceFactory, probePages, PARTITIONING_SPILLER_FACTORY, false))
+-                .getWorkProcessorOperatorFactory();
+-
+-        // build drivers and operators
+-        instantiateBuildDrivers(buildSideSetup, taskContext);
+-        buildLookupSource(executor, buildSideSetup);
+-
+-        Page probePage = getOnlyElement(probePages.build());
+-        AtomicInteger totalProbePages = new AtomicInteger();
+-        WorkProcessor<Page> inputPages = WorkProcessor.create(() -> {
+-            int probePageNumber = totalProbePages.incrementAndGet();
+-            if (probePageNumber == 5) {
+-                return finished();
+-            }
+-
+-            return ofResult(new Page(
+-                    1,
+-                    probePage.getBlock(0),
+-                    // this block should not be loaded by join operator as it's not being used by join
+-                    new LazyBlock(1, () -> probePage.getBlock(1)),
+-                    // this block is force loaded in test to ensure join doesn't fetch next probe page before joining
+-                    // and outputting current probe page
+-                    new LazyBlock(
+-                            1,
+-                            () -> {
+-                                // when loaded this block should be the latest one
+-                                assertThat(probePageNumber).isEqualTo(totalProbePages.get());
+-                                return probePage.getBlock(2);
+-                            })));
+-        });
+-
+-        DriverContext driverContext = taskContext.addPipelineContext(0, true, true, false).addDriverContext();
+-        OperatorContext operatorContext = driverContext.addOperatorContext(joinOperatorFactory.getOperatorId(), joinOperatorFactory.getPlanNodeId(), joinOperatorFactory.getOperatorType());
+-        WorkProcessorOperator joinOperator = joinOperatorFactory.create(
+-                new ProcessorContext(taskContext.getSession(), taskContext.getTaskMemoryContext(), operatorContext),
+-                inputPages);
+-        WorkProcessor<Page> outputPages = joinOperator.getOutputPages();
+-        int totalOutputPages = 0;
+-        for (int i = 0; i < 1_000_000; ++i) {
+-            if (!outputPages.process()) {
+-                // allow join to progress
+-                driverContext.getYieldSignal().resetYieldForTesting();
+-                continue;
+-            }
+-
+-            if (outputPages.isFinished()) {
+-                break;
+-            }
+-
+-            Page page = outputPages.getResult();
+-            totalOutputPages++;
+-            assertThat(page.getBlock(1).isLoaded()).isFalse();
+-            page.getBlock(2).getLoadedBlock();
+-
+-            // yield to enforce more complex execution
+-            driverContext.getYieldSignal().forceYieldForTesting();
+-        }
+-
+-        // make sure that multiple pages were produced for some probe pages
+-        assertThat(totalOutputPages > totalProbePages.get()).isTrue();
+-        assertThat(outputPages.isFinished()).isTrue();
+-    }
+-
+     private OperatorFactory createJoinOperatorFactoryWithBlockingLookupSource(TaskContext taskContext, boolean parallelBuild, boolean probeHashEnabled, boolean buildHashEnabled, boolean waitForBuild)
+     {
+         // build factory
+diff --git a/core/trino-main/src/test/java/io/trino/operator/join/unspilled/TestHashJoinOperator.java b/core/trino-main/src/test/java/io/trino/operator/join/unspilled/TestHashJoinOperator.java
+index 321452dfda64..bb4c32b49f3e 100644
+--- a/core/trino-main/src/test/java/io/trino/operator/join/unspilled/TestHashJoinOperator.java
++++ b/core/trino-main/src/test/java/io/trino/operator/join/unspilled/TestHashJoinOperator.java
+@@ -30,21 +30,14 @@
+ import io.trino.operator.DriverContext;
+ import io.trino.operator.JoinOperatorType;
+ import io.trino.operator.Operator;
+-import io.trino.operator.OperatorContext;
+ import io.trino.operator.OperatorFactory;
+-import io.trino.operator.ProcessorContext;
+ import io.trino.operator.TaskContext;
+-import io.trino.operator.WorkProcessor;
+-import io.trino.operator.WorkProcessorOperator;
+-import io.trino.operator.WorkProcessorOperatorAdapter;
+-import io.trino.operator.WorkProcessorOperatorFactory;
+ import io.trino.operator.join.InternalJoinFilterFunction;
+ import io.trino.operator.join.JoinBridgeManager;
+ import io.trino.operator.join.JoinOperatorInfo;
+ import io.trino.operator.join.unspilled.JoinTestUtils.BuildSideSetup;
+ import io.trino.operator.join.unspilled.JoinTestUtils.TestInternalJoinFilterFunction;
+ import io.trino.spi.Page;
+-import io.trino.spi.block.LazyBlock;
+ import io.trino.spi.block.LongArrayBlock;
+ import io.trino.spi.block.RunLengthEncodedBlock;
+ import io.trino.spi.block.VariableWidthBlock;
+@@ -66,7 +59,6 @@
+ import java.util.concurrent.ScheduledExecutorService;
+ import java.util.concurrent.atomic.AtomicInteger;
+ 
+-import static com.google.common.collect.ImmutableList.toImmutableList;
+ import static com.google.common.collect.Iterables.getOnlyElement;
+ import static io.airlift.concurrent.Threads.daemonThreadsNamed;
+ import static io.trino.RowPagesBuilder.rowPagesBuilder;
+@@ -80,15 +72,12 @@
+ import static io.trino.operator.OperatorAssertion.toMaterializedResult;
+ import static io.trino.operator.OperatorAssertion.toPages;
+ import static io.trino.operator.OperatorFactories.join;
+-import static io.trino.operator.WorkProcessor.ProcessState.finished;
+-import static io.trino.operator.WorkProcessor.ProcessState.ofResult;
+ import static io.trino.operator.join.unspilled.JoinTestUtils.buildLookupSource;
+ import static io.trino.operator.join.unspilled.JoinTestUtils.getHashChannelAsInt;
+ import static io.trino.operator.join.unspilled.JoinTestUtils.innerJoinOperatorFactory;
+ import static io.trino.operator.join.unspilled.JoinTestUtils.instantiateBuildDrivers;
+ import static io.trino.operator.join.unspilled.JoinTestUtils.setupBuildSide;
+ import static io.trino.spi.type.BigintType.BIGINT;
+-import static io.trino.spi.type.IntegerType.INTEGER;
+ import static io.trino.spi.type.VarcharType.VARCHAR;
+ import static java.util.concurrent.Executors.newCachedThreadPool;
+ import static java.util.concurrent.Executors.newScheduledThreadPool;
+@@ -253,58 +242,6 @@ private JoinOperatorInfo getJoinOperatorInfo(DriverContext driverContext)
+         return (JoinOperatorInfo) getOnlyElement(driverContext.getOperatorStats()).getInfo();
+     }
+ 
+-    @Test
+-    public void testUnwrapsLazyBlocks()
+-    {
+-        testUnwrapsLazyBlocks(false);
+-        testUnwrapsLazyBlocks(true);
+-    }
+-
+-    private void testUnwrapsLazyBlocks(boolean singleBigintLookupSource)
+-    {
+-        TaskContext taskContext = createTaskContext();
+-        DriverContext driverContext = taskContext.addPipelineContext(0, true, true, false).addDriverContext();
+-
+-        InternalJoinFilterFunction filterFunction = new TestInternalJoinFilterFunction(
+-                (leftPosition, leftPage, rightPosition, rightPage) -> {
+-                    // force loading of probe block
+-                    rightPage.getBlock(1).getLoadedBlock();
+-                    return true;
+-                });
+-
+-        RowPagesBuilder buildPages = rowPagesBuilder(false, Ints.asList(0), ImmutableList.of(BIGINT)).addSequencePage(1, 0);
+-        BuildSideSetup buildSideSetup = setupBuildSide(nodePartitioningManager, true, taskContext, buildPages, Optional.of(filterFunction), singleBigintLookupSource);
+-        JoinBridgeManager<PartitionedLookupSourceFactory> lookupSourceFactory = buildSideSetup.getLookupSourceFactoryManager();
+-
+-        RowPagesBuilder probePages = rowPagesBuilder(false, Ints.asList(0), ImmutableList.of(BIGINT, BIGINT));
+-        List<Page> probeInput = probePages.addSequencePage(1, 0, 0).build();
+-        probeInput = probeInput.stream()
+-                .map(page -> new Page(page.getBlock(0), new LazyBlock(1, () -> page.getBlock(1))))
+-                .collect(toImmutableList());
+-
+-        OperatorFactory joinOperatorFactory = join(
+-                innerJoin(false, false),
+-                0,
+-                new PlanNodeId("test"),
+-                lookupSourceFactory,
+-                true,
+-                probePages.getTypes(),
+-                Ints.asList(0),
+-                getHashChannelAsInt(probePages),
+-                Optional.empty(),
+-                TYPE_OPERATORS);
+-
+-        instantiateBuildDrivers(buildSideSetup, taskContext);
+-        buildLookupSource(executor, buildSideSetup);
+-        Operator operator = joinOperatorFactory.createOperator(driverContext);
+-        assertThat(operator.needsInput()).isTrue();
+-        operator.addInput(probeInput.get(0));
+-        operator.finish();
+-
+-        Page output = operator.getOutput();
+-        assertThat(output.getBlock(1)).isNotInstanceOf(LazyBlock.class);
+-    }
+-
+     @Test
+     public void testYield()
+     {
+@@ -1536,87 +1473,6 @@ private void testInnerJoinWithBlockingLookupSource(boolean parallelBuild, boolea
+         }
+     }
+ 
+-    @Test
+-    public void testInnerJoinLoadsPagesInOrder()
+-    {
+-        TaskContext taskContext = createTaskContext();
+-
+-        // build factory
+-        List<Type> buildTypes = ImmutableList.of(VARCHAR);
+-        RowPagesBuilder buildPages = rowPagesBuilder(false, Ints.asList(0), buildTypes);
+-        for (int i = 0; i < 100_000; ++i) {
+-            buildPages.row("a");
+-        }
+-        BuildSideSetup buildSideSetup = setupBuildSide(nodePartitioningManager, false, taskContext, buildPages, Optional.empty());
+-        JoinBridgeManager<PartitionedLookupSourceFactory> lookupSourceFactory = buildSideSetup.getLookupSourceFactoryManager();
+-
+-        // probe factory
+-        List<Type> probeTypes = ImmutableList.of(VARCHAR, INTEGER, INTEGER);
+-        RowPagesBuilder probePages = rowPagesBuilder(false, Ints.asList(0), probeTypes);
+-        probePages.row("a", 1L, 2L);
+-        WorkProcessorOperatorFactory joinOperatorFactory = ((WorkProcessorOperatorAdapter.Factory) innerJoinOperatorFactory(lookupSourceFactory, probePages, false))
+-                .getWorkProcessorOperatorFactory();
+-
+-        // build drivers and operators
+-        instantiateBuildDrivers(buildSideSetup, taskContext);
+-        buildLookupSource(executor, buildSideSetup);
+-
+-        Page probePage = getOnlyElement(probePages.build());
+-        AtomicInteger totalProbePages = new AtomicInteger();
+-        WorkProcessor<Page> inputPages = WorkProcessor.create(() -> {
+-            int probePageNumber = totalProbePages.incrementAndGet();
+-            if (probePageNumber == 5) {
+-                return finished();
+-            }
+-
+-            return ofResult(new Page(
+-                    1,
+-                    probePage.getBlock(0),
+-                    // this block should not be loaded by join operator as it's not being used by join
+-                    new LazyBlock(1, () -> probePage.getBlock(1)),
+-                    // this block is force loaded in test to ensure join doesn't fetch next probe page before joining
+-                    // and outputting current probe page
+-                    new LazyBlock(
+-                            1,
+-                            () -> {
+-                                // when loaded this block should be the latest one
+-                                assertThat(probePageNumber).isEqualTo(totalProbePages.get());
+-                                return probePage.getBlock(2);
+-                            })));
+-        });
+-
+-        DriverContext driverContext = taskContext.addPipelineContext(0, true, true, false).addDriverContext();
+-        OperatorContext operatorContext = driverContext.addOperatorContext(joinOperatorFactory.getOperatorId(), joinOperatorFactory.getPlanNodeId(), joinOperatorFactory.getOperatorType());
+-        WorkProcessorOperator joinOperator = joinOperatorFactory.create(
+-                new ProcessorContext(taskContext.getSession(), taskContext.getTaskMemoryContext(), operatorContext),
+-                inputPages);
+-        WorkProcessor<Page> outputPages = joinOperator.getOutputPages();
+-        int totalOutputPages = 0;
+-        for (int i = 0; i < 1_000_000; ++i) {
+-            if (!outputPages.process()) {
+-                // allow join to progress
+-                driverContext.getYieldSignal().resetYieldForTesting();
+-                continue;
+-            }
+-
+-            if (outputPages.isFinished()) {
+-                break;
+-            }
+-
+-            Page page = outputPages.getResult();
+-            totalOutputPages++;
+-            assertThat(page.getBlock(1).isLoaded()).isFalse();
+-            page.getBlock(2).getLoadedBlock();
+-
+-            // yield to enforce more complex execution
+-            driverContext.getYieldSignal().forceYieldForTesting();
+-        }
+-
+-        // make sure that multiple pages were produced for some probe pages
+-        assertThat(totalOutputPages > totalProbePages.get()).isTrue();
+-        assertThat(outputPages.isFinished()).isTrue();
+-    }
+-
+     private OperatorFactory createJoinOperatorFactoryWithBlockingLookupSource(TaskContext taskContext, boolean parallelBuild, boolean probeHashEnabled, boolean buildHashEnabled, boolean waitForBuild)
+     {
+         // build factory
+diff --git a/core/trino-main/src/test/java/io/trino/operator/output/TestPagePartitionerPool.java b/core/trino-main/src/test/java/io/trino/operator/output/TestPagePartitionerPool.java
+index 1a9878780769..97ccf2b444a4 100644
+--- a/core/trino-main/src/test/java/io/trino/operator/output/TestPagePartitionerPool.java
++++ b/core/trino-main/src/test/java/io/trino/operator/output/TestPagePartitionerPool.java
+@@ -30,7 +30,6 @@
+ import io.trino.operator.BucketPartitionFunction;
+ import io.trino.operator.DriverContext;
+ import io.trino.operator.Operator;
+-import io.trino.operator.exchange.PageChannelSelector;
+ import io.trino.operator.output.PartitionedOutputOperator.PartitionedOutputOperatorFactory;
+ import io.trino.spi.Page;
+ import io.trino.sql.planner.plan.PlanNodeId;
+@@ -48,6 +47,7 @@
+ import java.util.Optional;
+ import java.util.OptionalInt;
+ import java.util.concurrent.ScheduledExecutorService;
++import java.util.function.Function;
+ import java.util.stream.Stream;
+ 
+ import static com.google.common.collect.ImmutableList.toImmutableList;
+@@ -169,7 +169,7 @@ private static PartitionedOutputOperatorFactory createFactory(DataSize maxPagePa
+                 0,
+                 new PlanNodeId("0"),
+                 ImmutableList.of(BIGINT),
+-                PageChannelSelector.identitySelection(),
++                Function.identity(),
+                 new BucketPartitionFunction((page, position) -> 0, new int[1]),
+                 ImmutableList.of(0),
+                 ImmutableList.of(),
+diff --git a/core/trino-main/src/test/java/io/trino/operator/project/TestDictionaryAwarePageFilter.java b/core/trino-main/src/test/java/io/trino/operator/project/TestDictionaryAwarePageFilter.java
+index 2e567cff170f..db66f13ae9fd 100644
+--- a/core/trino-main/src/test/java/io/trino/operator/project/TestDictionaryAwarePageFilter.java
++++ b/core/trino-main/src/test/java/io/trino/operator/project/TestDictionaryAwarePageFilter.java
+@@ -16,7 +16,6 @@
+ import com.google.common.collect.ImmutableList;
+ import io.trino.spi.block.Block;
+ import io.trino.spi.block.DictionaryBlock;
+-import io.trino.spi.block.LazyBlock;
+ import io.trino.spi.block.LongArrayBlock;
+ import io.trino.spi.block.RunLengthEncodedBlock;
+ import io.trino.spi.connector.ConnectorSession;
+@@ -171,8 +170,6 @@ private static void testFilter(Block block, Class<? extends Block> expectedType)
+     {
+         testFilter(block, true, expectedType);
+         testFilter(block, false, expectedType);
+-        testFilter(lazyWrapper(block), true, expectedType);
+-        testFilter(lazyWrapper(block), false, expectedType);
+     }
+ 
+     private static void testFilter(Block block, boolean filterRange, Class<? extends Block> expectedType)
+@@ -192,8 +189,6 @@ private static void testFilter(DictionaryAwarePageFilter filter, Block block, bo
+     {
+         IntSet actualSelectedPositions = toSet(filter.filter(null, SourcePage.create(block)));
+ 
+-        block = block.getLoadedBlock();
+-
+         IntSet expectedSelectedPositions = new IntArraySet(block.getPositionCount());
+         for (int position = 0; position < block.getPositionCount(); position++) {
+             if (isSelected(filterRange, BIGINT.getLong(block, position))) {
+@@ -213,11 +208,6 @@ private static IntSet toSet(SelectedPositions selectedPositions)
+         return new IntArraySet(IntStream.range(start, end).toArray());
+     }
+ 
+-    private static LazyBlock lazyWrapper(Block block)
+-    {
+-        return new LazyBlock(block.getPositionCount(), () -> block);
+-    }
+-
+     private static boolean isSelected(boolean filterRange, long value)
+     {
+         if (value < 0) {
+diff --git a/core/trino-main/src/test/java/io/trino/operator/project/TestDictionaryAwarePageProjection.java b/core/trino-main/src/test/java/io/trino/operator/project/TestDictionaryAwarePageProjection.java
+index df21dc586e1a..4167003637f2 100644
+--- a/core/trino-main/src/test/java/io/trino/operator/project/TestDictionaryAwarePageProjection.java
++++ b/core/trino-main/src/test/java/io/trino/operator/project/TestDictionaryAwarePageProjection.java
+@@ -19,7 +19,6 @@
+ import io.trino.spi.block.Block;
+ import io.trino.spi.block.BlockBuilder;
+ import io.trino.spi.block.DictionaryBlock;
+-import io.trino.spi.block.LazyBlock;
+ import io.trino.spi.block.LongArrayBlock;
+ import io.trino.spi.block.RunLengthEncodedBlock;
+ import io.trino.spi.block.ValueBlock;
+@@ -255,8 +254,6 @@ private static void testProject(Block block, Class<? extends Block> expectedResu
+     {
+         testProjectRange(block, expectedResultType, createProjection(), forceYield);
+         testProjectList(block, expectedResultType, createProjection(), forceYield);
+-        testProjectRange(lazyWrapper(block), expectedResultType, createProjection(), forceYield);
+-        testProjectList(lazyWrapper(block), expectedResultType, createProjection(), forceYield);
+     }
+ 
+     private static void testProjectFails(Block block, Class<? extends Block> expectedResultType, boolean forceYield)
+@@ -267,12 +264,6 @@ private static void testProjectFails(Block block, Class<? extends Block> expecte
+         assertThatThrownBy(() -> testProjectList(block, expectedResultType, createProjection(), forceYield))
+                 .isInstanceOf(NegativeValueException.class)
+                 .hasMessageContaining("value is negative");
+-        assertThatThrownBy(() -> testProjectRange(lazyWrapper(block), expectedResultType, createProjection(), forceYield))
+-                .isInstanceOf(NegativeValueException.class)
+-                .hasMessageContaining("value is negative");
+-        assertThatThrownBy(() -> testProjectList(lazyWrapper(block), expectedResultType, createProjection(), forceYield))
+-                .isInstanceOf(NegativeValueException.class)
+-                .hasMessageContaining("value is negative");
+     }
+ 
+     private static void testProjectRange(Block block, Class<? extends Block> expectedResultType, DictionaryAwarePageProjection projection, boolean forceYield)
+@@ -342,11 +333,6 @@ private static DictionaryAwarePageProjection createProjection()
+                 _ -> randomDictionaryId());
+     }
+ 
+-    private static LazyBlock lazyWrapper(Block block)
+-    {
+-        return new LazyBlock(block.getPositionCount(), block::getLoadedBlock);
+-    }
+-
+     private static class TestPageProjection
+             implements PageProjection
+     {
+diff --git a/core/trino-main/src/test/java/io/trino/operator/project/TestInputPageProjection.java b/core/trino-main/src/test/java/io/trino/operator/project/TestInputPageProjection.java
+deleted file mode 100644
+index 31e6ff7647ff..000000000000
+--- a/core/trino-main/src/test/java/io/trino/operator/project/TestInputPageProjection.java
++++ /dev/null
+@@ -1,47 +0,0 @@
+-/*
+- * Licensed under the Apache License, Version 2.0 (the "License");
+- * you may not use this file except in compliance with the License.
+- * You may obtain a copy of the License at
+- *
+- *     http://www.apache.org/licenses/LICENSE-2.0
+- *
+- * Unless required by applicable law or agreed to in writing, software
+- * distributed under the License is distributed on an "AS IS" BASIS,
+- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+- * See the License for the specific language governing permissions and
+- * limitations under the License.
+- */
+-package io.trino.operator.project;
+-
+-import io.trino.operator.DriverYieldSignal;
+-import io.trino.spi.block.Block;
+-import io.trino.spi.block.LazyBlock;
+-import io.trino.spi.connector.SourcePage;
+-import org.junit.jupiter.api.Test;
+-
+-import static io.trino.block.BlockAssertions.createLongSequenceBlock;
+-import static io.trino.spi.type.BigintType.BIGINT;
+-import static io.trino.testing.TestingConnectorSession.SESSION;
+-import static org.assertj.core.api.Assertions.assertThat;
+-
+-public class TestInputPageProjection
+-{
+-    @Test
+-    public void testLazyInputPage()
+-    {
+-        InputPageProjection projection = new InputPageProjection(0, BIGINT);
+-        Block block = createLongSequenceBlock(0, 100);
+-        Block result = projection.project(SESSION, new DriverYieldSignal(), SourcePage.create(block), SelectedPositions.positionsRange(0, 100)).getResult();
+-        assertThat(result).isNotInstanceOf(LazyBlock.class);
+-
+-        block = lazyWrapper(block);
+-        result = projection.project(SESSION, new DriverYieldSignal(), SourcePage.create(block), SelectedPositions.positionsRange(0, 100)).getResult();
+-        assertThat(result).isInstanceOf(LazyBlock.class);
+-        assertThat(result.isLoaded()).isFalse();
+-    }
+-
+-    private static LazyBlock lazyWrapper(Block block)
+-    {
+-        return new LazyBlock(block.getPositionCount(), block::getLoadedBlock);
+-    }
+-}
+diff --git a/core/trino-main/src/test/java/io/trino/operator/project/TestMergePages.java b/core/trino-main/src/test/java/io/trino/operator/project/TestMergePages.java
+index a37a5961c6c8..8b8c32c465c8 100644
+--- a/core/trino-main/src/test/java/io/trino/operator/project/TestMergePages.java
++++ b/core/trino-main/src/test/java/io/trino/operator/project/TestMergePages.java
+@@ -16,8 +16,6 @@
+ import com.google.common.collect.ImmutableList;
+ import io.trino.operator.WorkProcessor;
+ import io.trino.spi.Page;
+-import io.trino.spi.block.Block;
+-import io.trino.spi.block.LazyBlock;
+ import io.trino.spi.type.Type;
+ import org.junit.jupiter.api.Test;
+ 
+@@ -34,7 +32,6 @@
+ import static io.trino.spi.type.DoubleType.DOUBLE;
+ import static io.trino.spi.type.RealType.REAL;
+ import static java.lang.Math.toIntExact;
+-import static org.assertj.core.api.Assertions.assertThat;
+ 
+ public class TestMergePages
+ {
+@@ -74,34 +71,6 @@ public void testMinRowCountThreshold()
+         assertFinishes(mergePages);
+     }
+ 
+-    @Test
+-    public void testMinRowCountThresholdWithLazyPages()
+-    {
+-        Page page = createSequencePage(TYPES, 10);
+-
+-        LazyBlock channel1 = lazyWrapper(page.getBlock(0));
+-        LazyBlock channel2 = lazyWrapper(page.getBlock(1));
+-        LazyBlock channel3 = lazyWrapper(page.getBlock(2));
+-        page = new Page(channel1, channel2, channel3);
+-
+-        WorkProcessor<Page> mergePages = mergePages(
+-                TYPES,
+-                1024 * 1024,
+-                page.getPositionCount() * 2,
+-                Integer.MAX_VALUE,
+-                pagesSource(page),
+-                newSimpleAggregatedMemoryContext());
+-
+-        assertThat(mergePages.process()).isTrue();
+-        assertThat(mergePages.isFinished()).isFalse();
+-
+-        Page result = mergePages.getResult();
+-        assertThat(channel1.isLoaded()).isFalse();
+-        assertThat(channel2.isLoaded()).isFalse();
+-        assertThat(channel3.isLoaded()).isFalse();
+-        assertPageEquals(TYPES, result, page);
+-    }
+-
+     @Test
+     public void testBufferSmallPages()
+     {
+@@ -161,11 +130,6 @@ public void testFlushOnFullPage()
+         assertFinishes(mergePages);
+     }
+ 
+-    private static LazyBlock lazyWrapper(Block block)
+-    {
+-        return new LazyBlock(block.getPositionCount(), block::getLoadedBlock);
+-    }
+-
+     private static WorkProcessor<Page> pagesSource(Page... pages)
+     {
+         return WorkProcessor.fromIterable(ImmutableList.copyOf(pages));
+diff --git a/core/trino-main/src/test/java/io/trino/operator/project/TestPageProcessor.java b/core/trino-main/src/test/java/io/trino/operator/project/TestPageProcessor.java
+index 131c80680824..ceb5a8318c81 100644
+--- a/core/trino-main/src/test/java/io/trino/operator/project/TestPageProcessor.java
++++ b/core/trino-main/src/test/java/io/trino/operator/project/TestPageProcessor.java
+@@ -648,7 +648,7 @@ public InputChannels getInputChannels()
+         @Override
+         public Work<Block> project(ConnectorSession session, DriverYieldSignal yieldSignal, SourcePage page, SelectedPositions selectedPositions)
+         {
+-            return new CompletedWork<>(page.getBlock(0).getLoadedBlock());
++            return new CompletedWork<>(page.getBlock(0));
+         }
+     }
+ 
+diff --git a/core/trino-main/src/test/java/io/trino/sql/gen/BenchmarkDynamicPageFilter.java b/core/trino-main/src/test/java/io/trino/sql/gen/BenchmarkDynamicPageFilter.java
+index 33be36fec48f..95d1d454d478 100644
+--- a/core/trino-main/src/test/java/io/trino/sql/gen/BenchmarkDynamicPageFilter.java
++++ b/core/trino-main/src/test/java/io/trino/sql/gen/BenchmarkDynamicPageFilter.java
+@@ -20,7 +20,6 @@
+ import io.trino.spi.Page;
+ import io.trino.spi.block.Block;
+ import io.trino.spi.block.BlockBuilder;
+-import io.trino.spi.block.LazyBlock;
+ import io.trino.spi.connector.ColumnHandle;
+ import io.trino.spi.connector.SourcePage;
+ import io.trino.spi.connector.TestingColumnHandle;
+@@ -116,7 +115,7 @@ public TupleDomain<ColumnHandle> createFilterTupleDomain(int filterSize, boolean
+             List<Page> filterValues = createSingleColumnData(valueWriter, type, 0, filterSize);
+             ImmutableList.Builder<Object> valuesBuilder = ImmutableList.builder();
+             for (Page page : filterValues) {
+-                Block block = page.getBlock(0).getLoadedBlock();
++                Block block = page.getBlock(0);
+                 for (int position = 0; position < block.getPositionCount(); position++) {
+                     valuesBuilder.add(readNativeValue(type, block, position));
+                 }
+@@ -199,14 +198,14 @@ private static List<Page> createSingleColumnData(ValueWriter valueWriter, Type t
+ 
+             if (blockBuilder.getPositionCount() >= batchSize) {
+                 Block block = blockBuilder.build();
+-                pages.add(new Page(new LazyBlock(block.getPositionCount(), () -> block)));
++                pages.add(new Page(block));
+                 batchSize = Math.min(1024, batchSize * 2);
+                 blockBuilder = type.createBlockBuilder(null, batchSize);
+             }
+         }
+         if (blockBuilder.getPositionCount() > 0) {
+             Block block = blockBuilder.build();
+-            pages.add(new Page(new LazyBlock(block.getPositionCount(), () -> block)));
++            pages.add(new Page(block));
+         }
+         return pages.build();
+     }
+diff --git a/core/trino-main/src/test/java/io/trino/sql/gen/TestColumnarFilters.java b/core/trino-main/src/test/java/io/trino/sql/gen/TestColumnarFilters.java
+index df64f35cfd6d..bdc917a5ce92 100644
+--- a/core/trino-main/src/test/java/io/trino/sql/gen/TestColumnarFilters.java
++++ b/core/trino-main/src/test/java/io/trino/sql/gen/TestColumnarFilters.java
+@@ -32,8 +32,6 @@
+ import io.trino.spi.block.DictionaryBlock;
+ import io.trino.spi.block.IntArrayBlock;
+ import io.trino.spi.block.IntArrayBlockBuilder;
+-import io.trino.spi.block.LazyBlock;
+-import io.trino.spi.block.LazyBlockLoader;
+ import io.trino.spi.block.LongArrayBlock;
+ import io.trino.spi.block.VariableWidthBlockBuilder;
+ import io.trino.spi.connector.ConnectorSession;
+@@ -689,23 +687,18 @@ private static List<Page> createInputPages(NullsProvider nullsProvider, boolean
+             builder.add(new Page(
+                     positionsCount,
+                     createRowNumberBlock(finalRowCount, positionsCount),
+-                    lazyBlock(positionsCount, () -> createDoublesBlock(positionsCount, nullsProvider, dictionaryEncoded)),
+-                    lazyBlock(positionsCount, () -> createIntsBlock(positionsCount, nullsProvider, dictionaryEncoded)),
+-                    lazyBlock(positionsCount, () -> createStringsBlock(positionsCount, nullsProvider, dictionaryEncoded)),
+-                    lazyBlock(positionsCount, () -> createIntsBlock(positionsCount, nullsProvider, dictionaryEncoded)),
+-                    lazyBlock(positionsCount, () -> createIntsBlock(positionsCount, nullsProvider, dictionaryEncoded)),
+-                    lazyBlock(positionsCount, () -> createArraysBlock(positionsCount, nullsProvider)),
+-                    lazyBlock(positionsCount, () -> createIntsBlock(positionsCount, nullsProvider, dictionaryEncoded))));
++                    createDoublesBlock(positionsCount, nullsProvider, dictionaryEncoded),
++                    createIntsBlock(positionsCount, nullsProvider, dictionaryEncoded),
++                    createStringsBlock(positionsCount, nullsProvider, dictionaryEncoded),
++                    createIntsBlock(positionsCount, nullsProvider, dictionaryEncoded),
++                    createIntsBlock(positionsCount, nullsProvider, dictionaryEncoded),
++                    createArraysBlock(positionsCount, nullsProvider),
++                    createIntsBlock(positionsCount, nullsProvider, dictionaryEncoded)));
+             rowCount += positionsCount;
+         }
+         return builder.build();
+     }
+ 
+-    private static Block lazyBlock(int positionCount, LazyBlockLoader loader)
+-    {
+-        return new LazyBlock(positionCount, loader);
+-    }
+-
+     private static Block createRowNumberBlock(long start, int positionsCount)
+     {
+         long[] values = new long[positionsCount];
+diff --git a/core/trino-spi/pom.xml b/core/trino-spi/pom.xml
+index b2220c39d695..5e5acada6f75 100644
+--- a/core/trino-spi/pom.xml
++++ b/core/trino-spi/pom.xml
+@@ -356,6 +356,82 @@
+                                     <old>method int io.trino.spi.type.RowType::relocateFlatVariableWidthOffsets(byte[], int, byte[], int)</old>
+                                     <justification>Remove flat offsets relocation method since offsets are no longer stored in flat representations</justification>
+                                 </item>
++                                <item>
++                                    <code>java.method.removed</code>
++                                    <old>method io.trino.spi.Page io.trino.spi.Page::getLoadedPage(int[], int[])</old>
++                                </item>
++                                <item>
++                                    <code>java.method.removed</code>
++                                    <old>method io.trino.spi.block.ArrayBlock io.trino.spi.block.ArrayBlock::getLoadedBlock()</old>
++                                </item>
++                                <item>
++                                    <code>java.method.removed</code>
++                                    <old>method boolean io.trino.spi.block.ArrayBlock::isLoaded()</old>
++                                </item>
++                                <item>
++                                    <code>java.method.removed</code>
++                                    <old>method io.trino.spi.block.Block io.trino.spi.block.Block::getLoadedBlock()</old>
++                                </item>
++                                <item>
++                                    <code>java.method.removed</code>
++                                    <old>method boolean io.trino.spi.block.Block::isLoaded()</old>
++                                </item>
++                                <item>
++                                    <code>java.method.removed</code>
++                                    <old>method io.trino.spi.block.Block io.trino.spi.block.DictionaryBlock::getLoadedBlock()</old>
++                                </item>
++                                <item>
++                                    <code>java.method.removed</code>
++                                    <old>method boolean io.trino.spi.block.DictionaryBlock::isLoaded()</old>
++                                </item>
++                                <item>
++                                    <code>java.class.removed</code>
++                                    <old>class io.trino.spi.block.LazyBlock</old>
++                                </item>
++                                <item>
++                                    <code>java.class.removed</code>
++                                    <old>class io.trino.spi.block.LazyBlockEncoding</old>
++                                </item>
++                                <item>
++                                    <code>java.class.removed</code>
++                                    <old>interface io.trino.spi.block.LazyBlockLoader</old>
++                                </item>
++                                <item>
++                                    <code>java.method.removed</code>
++                                    <old>method io.trino.spi.block.Block io.trino.spi.block.MapBlock::getLoadedBlock()</old>
++                                </item>
++                                <item>
++                                    <code>java.method.removed</code>
++                                    <old>method boolean io.trino.spi.block.MapBlock::isLoaded()</old>
++                                </item>
++                                <item>
++                                    <code>java.method.removed</code>
++                                    <old>method io.trino.spi.block.Block io.trino.spi.block.RowBlock::getLoadedBlock()</old>
++                                </item>
++                                <item>
++                                    <code>java.method.removed</code>
++                                    <old>method boolean io.trino.spi.block.RowBlock::isLoaded()</old>
++                                </item>
++                                <item>
++                                    <code>java.method.removed</code>
++                                    <old>method io.trino.spi.block.Block io.trino.spi.block.RunLengthEncodedBlock::getLoadedBlock()</old>
++                                </item>
++                                <item>
++                                    <code>java.method.removed</code>
++                                    <old>method boolean io.trino.spi.block.RunLengthEncodedBlock::isLoaded()</old>
++                                </item>
++                                <item>
++                                    <code>java.method.removed</code>
++                                    <old>method io.trino.spi.Page io.trino.spi.Page::getLoadedPage(int)</old>
++                                </item>
++                                <item>
++                                    <code>java.method.removed</code>
++                                    <old>method io.trino.spi.Page io.trino.spi.Page::getLoadedPage()</old>
++                                </item>
++                                <item>
++                                    <code>java.method.removed</code>
++                                    <old>method io.trino.spi.Page io.trino.spi.Page::getLoadedPage(int[])</old>
++                                </item>
+                             </differences>
+                         </revapi.differences>
+                     </analysisConfiguration>
+diff --git a/core/trino-spi/src/main/java/io/trino/spi/Page.java b/core/trino-spi/src/main/java/io/trino/spi/Page.java
+index 2ef49a30e66a..39fec58c8dde 100644
+--- a/core/trino-spi/src/main/java/io/trino/spi/Page.java
++++ b/core/trino-spi/src/main/java/io/trino/spi/Page.java
+@@ -101,7 +101,7 @@ public long getSizeInBytes()
+         if (sizeInBytes < 0) {
+             sizeInBytes = 0;
+             for (Block block : blocks) {
+-                long blockSizeInBytes = block.getLoadedBlock().getSizeInBytes();
++                long blockSizeInBytes = block.getSizeInBytes();
+                 if (blockSizeInBytes < 0) {
+                     throw new IllegalStateException(format("Block sizeInBytes is negative (%s)", blockSizeInBytes));
+                 }
+@@ -210,47 +210,6 @@ private Map<DictionaryId, DictionaryBlockIndexes> getRelatedDictionaryBlocks()
+         return relatedDictionaryBlocks;
+     }
+ 
+-    /**
+-     * Returns a page that assures all data is in memory.
+-     * May return the same page if all page data is already in memory.
+-     * <p>
+-     * This allows streaming data sources to skip sections that are not
+-     * accessed in a query.
+-     */
+-    public Page getLoadedPage()
+-    {
+-        for (int i = 0; i < blocks.length; i++) {
+-            Block loaded = blocks[i].getLoadedBlock();
+-            if (loaded != blocks[i]) {
+-                // Transition to new block creation mode after the first newly loaded block is encountered
+-                Block[] loadedBlocks = blocks.clone();
+-                loadedBlocks[i++] = loaded;
+-                for (; i < blocks.length; i++) {
+-                    loadedBlocks[i] = blocks[i].getLoadedBlock();
+-                }
+-                return wrapBlocksWithoutCopy(positionCount, loadedBlocks);
+-            }
+-        }
+-        // No newly loaded blocks
+-        return this;
+-    }
+-
+-    public Page getLoadedPage(int column)
+-    {
+-        return wrapBlocksWithoutCopy(positionCount, new Block[] {this.blocks[column].getLoadedBlock()});
+-    }
+-
+-    public Page getLoadedPage(int... columns)
+-    {
+-        requireNonNull(columns, "columns is null");
+-
+-        Block[] blocks = new Block[columns.length];
+-        for (int i = 0; i < columns.length; i++) {
+-            blocks[i] = this.blocks[columns[i]].getLoadedBlock();
+-        }
+-        return wrapBlocksWithoutCopy(positionCount, blocks);
+-    }
+-
+     @Override
+     public String toString()
+     {
+diff --git a/core/trino-spi/src/main/java/io/trino/spi/block/ArrayBlock.java b/core/trino-spi/src/main/java/io/trino/spi/block/ArrayBlock.java
+index 10530ad73ed5..f5bcf17d5407 100644
+--- a/core/trino-spi/src/main/java/io/trino/spi/block/ArrayBlock.java
++++ b/core/trino-spi/src/main/java/io/trino/spi/block/ArrayBlock.java
+@@ -128,9 +128,6 @@ public int getPositionCount()
+     public long getSizeInBytes()
+     {
+         if (sizeInBytes < 0) {
+-            if (!values.isLoaded()) {
+-                return getBaseSizeInBytes();
+-            }
+             calculateSize();
+         }
+         return sizeInBytes;
+@@ -218,28 +215,6 @@ public String toString()
+         return "ArrayBlock{positionCount=" + getPositionCount() + '}';
+     }
+ 
+-    @Override
+-    public boolean isLoaded()
+-    {
+-        return values.isLoaded();
+-    }
+-
+-    @Override
+-    public ArrayBlock getLoadedBlock()
+-    {
+-        Block loadedValuesBlock = values.getLoadedBlock();
+-
+-        if (loadedValuesBlock == values) {
+-            return this;
+-        }
+-        return createArrayBlockInternal(
+-                arrayOffset,
+-                positionCount,
+-                valueIsNull,
+-                offsets,
+-                loadedValuesBlock);
+-    }
+-
+     @Override
+     public ArrayBlock copyWithAppendedNull()
+     {
+diff --git a/core/trino-spi/src/main/java/io/trino/spi/block/Block.java b/core/trino-spi/src/main/java/io/trino/spi/block/Block.java
+index 28accd96d239..867b975963d2 100644
+--- a/core/trino-spi/src/main/java/io/trino/spi/block/Block.java
++++ b/core/trino-spi/src/main/java/io/trino/spi/block/Block.java
+@@ -20,7 +20,7 @@
+ import static io.trino.spi.block.DictionaryId.randomDictionaryId;
+ 
+ public sealed interface Block
+-        permits DictionaryBlock, RunLengthEncodedBlock, LazyBlock, ValueBlock
++        permits DictionaryBlock, RunLengthEncodedBlock, ValueBlock
+ {
+     /**
+      * Gets the value at the specified position as a single element block.  The method
+@@ -39,8 +39,7 @@ public sealed interface Block
+     int getPositionCount();
+ 
+     /**
+-     * Returns the size of this block as if it was compacted, ignoring any over-allocations
+-     * and any unloaded nested blocks.
++     * Returns the size of this block as if it was compacted, ignoring any over-allocations.
+      * For example, in dictionary blocks, this only counts each dictionary entry once,
+      * rather than each time a value is referenced.
+      */
+@@ -170,28 +169,6 @@ default boolean hasNull()
+      */
+     boolean isNull(int position);
+ 
+-    /**
+-     * Returns true if block data is fully loaded into memory.
+-     */
+-    default boolean isLoaded()
+-    {
+-        return true;
+-    }
+-
+-    /**
+-     * Returns a fully loaded block that assures all data is in memory.
+-     * Neither the returned block nor any nested block will be a {@link LazyBlock}.
+-     * The same block will be returned if neither the current block nor any
+-     * nested blocks are {@link LazyBlock},
+-     * <p>
+-     * This allows streaming data sources to skip sections that are not
+-     * accessed in a query.
+-     */
+-    default Block getLoadedBlock()
+-    {
+-        return this;
+-    }
+-
+     /**
+      * Returns a block that contains a copy of the contents of the current block, and an appended null at the end. The
+      * original block will not be modified. The purpose of this method is to leverage the contents of a block and the
+diff --git a/core/trino-spi/src/main/java/io/trino/spi/block/BlockBuilder.java b/core/trino-spi/src/main/java/io/trino/spi/block/BlockBuilder.java
+index 345f954f7ea0..32d9950c53dd 100644
+--- a/core/trino-spi/src/main/java/io/trino/spi/block/BlockBuilder.java
++++ b/core/trino-spi/src/main/java/io/trino/spi/block/BlockBuilder.java
+@@ -23,8 +23,7 @@ public interface BlockBuilder
+     int getPositionCount();
+ 
+     /**
+-     * Returns the size of this block as if it was compacted, ignoring any over-allocations
+-     * and any unloaded nested blocks.
++     * Returns the size of this block as if it was compacted, ignoring any over-allocations.
+      * For example, in dictionary blocks, this only counts each dictionary entry once,
+      * rather than each time a value is referenced.
+      */
+diff --git a/core/trino-spi/src/main/java/io/trino/spi/block/BlockUtil.java b/core/trino-spi/src/main/java/io/trino/spi/block/BlockUtil.java
+index 20aff985df90..75927a91d198 100644
+--- a/core/trino-spi/src/main/java/io/trino/spi/block/BlockUtil.java
++++ b/core/trino-spi/src/main/java/io/trino/spi/block/BlockUtil.java
+@@ -246,27 +246,6 @@ static boolean arraySame(Object[] array1, Object[] array2)
+         return true;
+     }
+ 
+-    /**
+-     * Returns the input blocks array if all blocks are already loaded, otherwise returns a new blocks array with all blocks loaded
+-     */
+-    static Block[] ensureBlocksAreLoaded(Block[] blocks)
+-    {
+-        for (int i = 0; i < blocks.length; i++) {
+-            Block loaded = blocks[i].getLoadedBlock();
+-            if (loaded != blocks[i]) {
+-                // Transition to new block creation mode after the first newly loaded block is encountered
+-                Block[] loadedBlocks = blocks.clone();
+-                loadedBlocks[i++] = loaded;
+-                for (; i < blocks.length; i++) {
+-                    loadedBlocks[i] = blocks[i].getLoadedBlock();
+-                }
+-                return loadedBlocks;
+-            }
+-        }
+-        // No newly loaded blocks
+-        return blocks;
+-    }
+-
+     static boolean[] copyIsNullAndAppendNull(@Nullable boolean[] isNull, int offsetBase, int positionCount)
+     {
+         int desiredLength = offsetBase + positionCount + 1;
+@@ -360,12 +339,10 @@ else if (buffer.length < capacity) {
+ 
+     static void appendRawBlockRange(Block rawBlock, int offset, int length, BlockBuilder blockBuilder)
+     {
+-        rawBlock = rawBlock.getLoadedBlock();
+         switch (rawBlock) {
+             case RunLengthEncodedBlock rleBlock -> blockBuilder.appendRepeated(rleBlock.getValue(), 0, length);
+             case DictionaryBlock dictionaryBlock -> blockBuilder.appendPositions(dictionaryBlock.getDictionary(), dictionaryBlock.getRawIds(), offset, length);
+             case ValueBlock valueBlock -> blockBuilder.appendRange(valueBlock, offset, length);
+-            case LazyBlock _ -> throw new IllegalStateException("Did not expect LazyBlock after loading " + rawBlock.getClass().getSimpleName());
+         }
+     }
+ 
+diff --git a/core/trino-spi/src/main/java/io/trino/spi/block/ColumnarArray.java b/core/trino-spi/src/main/java/io/trino/spi/block/ColumnarArray.java
+index 4c46be6e4b48..c4583e8c1905 100644
+--- a/core/trino-spi/src/main/java/io/trino/spi/block/ColumnarArray.java
++++ b/core/trino-spi/src/main/java/io/trino/spi/block/ColumnarArray.java
+@@ -26,9 +26,6 @@ public static ColumnarArray toColumnarArray(Block block)
+     {
+         requireNonNull(block, "block is null");
+ 
+-        if (block instanceof LazyBlock lazyBlock) {
+-            block = lazyBlock.getBlock();
+-        }
+         if (block instanceof DictionaryBlock dictionaryBlock) {
+             return toColumnarArray(dictionaryBlock);
+         }
+diff --git a/core/trino-spi/src/main/java/io/trino/spi/block/ColumnarMap.java b/core/trino-spi/src/main/java/io/trino/spi/block/ColumnarMap.java
+index d6a935203de0..5a77b522aeaf 100644
+--- a/core/trino-spi/src/main/java/io/trino/spi/block/ColumnarMap.java
++++ b/core/trino-spi/src/main/java/io/trino/spi/block/ColumnarMap.java
+@@ -27,9 +27,6 @@ public static ColumnarMap toColumnarMap(Block block)
+     {
+         requireNonNull(block, "block is null");
+ 
+-        if (block instanceof LazyBlock lazyBlock) {
+-            block = lazyBlock.getBlock();
+-        }
+         if (block instanceof DictionaryBlock dictionaryBlock) {
+             return toColumnarMap(dictionaryBlock);
+         }
+diff --git a/core/trino-spi/src/main/java/io/trino/spi/block/DictionaryBlock.java b/core/trino-spi/src/main/java/io/trino/spi/block/DictionaryBlock.java
+index 775092971241..427eeec69a52 100644
+--- a/core/trino-spi/src/main/java/io/trino/spi/block/DictionaryBlock.java
++++ b/core/trino-spi/src/main/java/io/trino/spi/block/DictionaryBlock.java
+@@ -106,8 +106,7 @@ private DictionaryBlock(int idsOffset, int positionCount, ValueBlock dictionary,
+         this.ids = ids;
+         this.dictionarySourceId = requireNonNull(dictionarySourceId, "dictionarySourceId is null");
+         this.retainedSizeInBytes = INSTANCE_SIZE + sizeOf(ids);
+-        // avoid eager loading of lazy dictionaries
+-        this.mayHaveNull = positionCount > 0 && (!dictionary.isLoaded() || dictionary.mayHaveNull());
++        this.mayHaveNull = positionCount > 0 && dictionary.mayHaveNull();
+ 
+         if (dictionaryIsCompacted) {
+             this.sizeInBytes = dictionary.getSizeInBytes() + (Integer.BYTES * (long) positionCount);
+@@ -457,23 +456,6 @@ public String toString()
+         return sb.toString();
+     }
+ 
+-    @Override
+-    public boolean isLoaded()
+-    {
+-        return dictionary.isLoaded();
+-    }
+-
+-    @Override
+-    public Block getLoadedBlock()
+-    {
+-        Block loadedDictionary = dictionary.getLoadedBlock();
+-
+-        if (loadedDictionary == dictionary) {
+-            return this;
+-        }
+-        return createInternal(idsOffset, getPositionCount(), loadedDictionary, ids, randomDictionaryId());
+-    }
+-
+     @Override
+     public ValueBlock getUnderlyingValueBlock()
+     {
+@@ -497,13 +479,6 @@ public Block createProjection(Block newDictionary)
+             throw new IllegalArgumentException("newDictionary must have the same position count");
+         }
+ 
+-        // if the new dictionary is lazy be careful to not materialize it
+-        if (newDictionary instanceof LazyBlock lazyBlock) {
+-            return new LazyBlock(positionCount, () -> {
+-                Block newDictionaryBlock = lazyBlock.getBlock();
+-                return createProjection(newDictionaryBlock);
+-            });
+-        }
+         if (newDictionary instanceof ValueBlock valueBlock) {
+             return new DictionaryBlock(idsOffset, positionCount, valueBlock, ids, isCompact(), false, dictionarySourceId);
+         }
+diff --git a/core/trino-spi/src/main/java/io/trino/spi/block/LazyBlock.java b/core/trino-spi/src/main/java/io/trino/spi/block/LazyBlock.java
+deleted file mode 100644
+index 6e52514ac2b4..000000000000
+--- a/core/trino-spi/src/main/java/io/trino/spi/block/LazyBlock.java
++++ /dev/null
+@@ -1,384 +0,0 @@
+-/*
+- * Licensed under the Apache License, Version 2.0 (the "License");
+- * you may not use this file except in compliance with the License.
+- * You may obtain a copy of the License at
+- *
+- *     http://www.apache.org/licenses/LICENSE-2.0
+- *
+- * Unless required by applicable law or agreed to in writing, software
+- * distributed under the License is distributed on an "AS IS" BASIS,
+- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+- * See the License for the specific language governing permissions and
+- * limitations under the License.
+- */
+-package io.trino.spi.block;
+-
+-import jakarta.annotation.Nullable;
+-
+-import java.util.ArrayList;
+-import java.util.List;
+-import java.util.OptionalInt;
+-import java.util.function.Consumer;
+-import java.util.function.ObjLongConsumer;
+-
+-import static io.airlift.slice.SizeOf.instanceSize;
+-import static io.trino.spi.block.BlockUtil.checkArrayRange;
+-import static io.trino.spi.block.BlockUtil.checkValidRegion;
+-import static java.lang.String.format;
+-import static java.util.Collections.singletonList;
+-import static java.util.Objects.requireNonNull;
+-
+-// This class is not considered thread-safe.
+-public final class LazyBlock
+-        implements Block
+-{
+-    private static final int INSTANCE_SIZE = instanceSize(LazyBlock.class) + instanceSize(LazyData.class);
+-
+-    private final int positionCount;
+-    private final LazyData lazyData;
+-
+-    public LazyBlock(int positionCount, LazyBlockLoader loader)
+-    {
+-        this.positionCount = positionCount;
+-        this.lazyData = new LazyData(positionCount, loader);
+-    }
+-
+-    @Override
+-    public int getPositionCount()
+-    {
+-        return positionCount;
+-    }
+-
+-    @Override
+-    public ValueBlock getSingleValueBlock(int position)
+-    {
+-        return getBlock().getSingleValueBlock(position);
+-    }
+-
+-    @Override
+-    public OptionalInt fixedSizeInBytesPerPosition()
+-    {
+-        if (!isLoaded()) {
+-            return OptionalInt.empty();
+-        }
+-        return getBlock().fixedSizeInBytesPerPosition();
+-    }
+-
+-    @Override
+-    public long getSizeInBytes()
+-    {
+-        if (!isLoaded()) {
+-            return 0;
+-        }
+-        return getBlock().getSizeInBytes();
+-    }
+-
+-    @Override
+-    public long getRegionSizeInBytes(int position, int length)
+-    {
+-        if (!isLoaded()) {
+-            return 0;
+-        }
+-        return getBlock().getRegionSizeInBytes(position, length);
+-    }
+-
+-    @Override
+-    public long getPositionsSizeInBytes(boolean[] positions, int selectedPositionsCount)
+-    {
+-        if (!isLoaded()) {
+-            return 0;
+-        }
+-        return getBlock().getPositionsSizeInBytes(positions, selectedPositionsCount);
+-    }
+-
+-    @Override
+-    public long getRetainedSizeInBytes()
+-    {
+-        if (!isLoaded()) {
+-            return INSTANCE_SIZE;
+-        }
+-        return INSTANCE_SIZE + getBlock().getRetainedSizeInBytes();
+-    }
+-
+-    @Override
+-    public long getEstimatedDataSizeForStats(int position)
+-    {
+-        return getBlock().getEstimatedDataSizeForStats(position);
+-    }
+-
+-    @Override
+-    public void retainedBytesForEachPart(ObjLongConsumer<Object> consumer)
+-    {
+-        getBlock().retainedBytesForEachPart(consumer);
+-        consumer.accept(this, INSTANCE_SIZE);
+-    }
+-
+-    @Override
+-    public Block copyWithAppendedNull()
+-    {
+-        throw new UnsupportedOperationException("LazyBlock does not support newBlockWithAppendedNull()");
+-    }
+-
+-    @Override
+-    public Block getPositions(int[] positions, int offset, int length)
+-    {
+-        if (isLoaded()) {
+-            return getBlock().getPositions(positions, offset, length);
+-        }
+-        checkArrayRange(positions, offset, length);
+-        return new LazyBlock(length, new PositionLazyBlockLoader(lazyData, positions, offset, length));
+-    }
+-
+-    @Override
+-    public Block copyPositions(int[] positions, int offset, int length)
+-    {
+-        return getBlock().copyPositions(positions, offset, length);
+-    }
+-
+-    @Override
+-    public Block getRegion(int positionOffset, int length)
+-    {
+-        if (isLoaded()) {
+-            return getBlock().getRegion(positionOffset, length);
+-        }
+-        checkValidRegion(getPositionCount(), positionOffset, length);
+-        return new LazyBlock(length, new RegionLazyBlockLoader(lazyData, positionOffset, length));
+-    }
+-
+-    @Override
+-    public Block copyRegion(int position, int length)
+-    {
+-        return getBlock().copyRegion(position, length);
+-    }
+-
+-    @Override
+-    public boolean isNull(int position)
+-    {
+-        return getBlock().isNull(position);
+-    }
+-
+-    @Override
+-    public boolean mayHaveNull()
+-    {
+-        return getBlock().mayHaveNull();
+-    }
+-
+-    @Override
+-    public boolean hasNull()
+-    {
+-        return getBlock().hasNull();
+-    }
+-
+-    public Block getBlock()
+-    {
+-        return lazyData.getTopLevelBlock();
+-    }
+-
+-    @Override
+-    public boolean isLoaded()
+-    {
+-        return lazyData.isFullyLoaded();
+-    }
+-
+-    @Override
+-    public Block getLoadedBlock()
+-    {
+-        return lazyData.getFullyLoadedBlock();
+-    }
+-
+-    @Override
+-    public ValueBlock getUnderlyingValueBlock()
+-    {
+-        return getBlock().getUnderlyingValueBlock();
+-    }
+-
+-    @Override
+-    public int getUnderlyingValuePosition(int position)
+-    {
+-        return getBlock().getUnderlyingValuePosition(position);
+-    }
+-
+-    public static void listenForLoads(Block block, Consumer<Block> listener)
+-    {
+-        requireNonNull(block, "block is null");
+-        requireNonNull(listener, "listener is null");
+-
+-        LazyData.addListenersRecursive(block, singletonList(listener));
+-    }
+-
+-    private static class RegionLazyBlockLoader
+-            implements LazyBlockLoader
+-    {
+-        private final LazyData delegate;
+-        private final int positionOffset;
+-        private final int length;
+-
+-        public RegionLazyBlockLoader(LazyData delegate, int positionOffset, int length)
+-        {
+-            this.delegate = requireNonNull(delegate, "delegate is null");
+-            this.positionOffset = positionOffset;
+-            this.length = length;
+-        }
+-
+-        @Override
+-        public Block load()
+-        {
+-            return delegate.getTopLevelBlock().getRegion(positionOffset, length);
+-        }
+-    }
+-
+-    private static class PositionLazyBlockLoader
+-            implements LazyBlockLoader
+-    {
+-        private final LazyData delegate;
+-        private final int[] positions;
+-        private final int offset;
+-        private final int length;
+-
+-        public PositionLazyBlockLoader(LazyData delegate, int[] positions, int offset, int length)
+-        {
+-            this.delegate = requireNonNull(delegate, "delegate is null");
+-            this.positions = requireNonNull(positions, "positions is null");
+-            this.offset = offset;
+-            this.length = length;
+-        }
+-
+-        @Override
+-        public Block load()
+-        {
+-            return delegate.getTopLevelBlock().getPositions(positions, offset, length);
+-        }
+-    }
+-
+-    private static class LazyData
+-    {
+-        private final int positionsCount;
+-        @Nullable
+-        private LazyBlockLoader loader;
+-        @Nullable
+-        private Block block;
+-        @Nullable
+-        private List<Consumer<Block>> listeners;
+-
+-        public LazyData(int positionsCount, LazyBlockLoader loader)
+-        {
+-            this.positionsCount = positionsCount;
+-            this.loader = requireNonNull(loader, "loader is null");
+-        }
+-
+-        public boolean isFullyLoaded()
+-        {
+-            return block != null && block.isLoaded();
+-        }
+-
+-        public boolean isTopLevelBlockLoaded()
+-        {
+-            return block != null;
+-        }
+-
+-        public Block getTopLevelBlock()
+-        {
+-            load(false);
+-            return block;
+-        }
+-
+-        public Block getFullyLoadedBlock()
+-        {
+-            if (block != null) {
+-                return block.getLoadedBlock();
+-            }
+-
+-            load(true);
+-            return block;
+-        }
+-
+-        private void addListeners(List<Consumer<Block>> listeners)
+-        {
+-            if (isTopLevelBlockLoaded()) {
+-                throw new IllegalStateException("Top level block is already loaded");
+-            }
+-            if (this.listeners == null) {
+-                this.listeners = new ArrayList<>();
+-            }
+-            this.listeners.addAll(listeners);
+-        }
+-
+-        private void load(boolean recursive)
+-        {
+-            if (loader == null) {
+-                return;
+-            }
+-
+-            block = requireNonNull(loader.load(), "loader returned null");
+-            if (block.getPositionCount() != positionsCount) {
+-                throw new IllegalStateException(format("Loaded block positions count (%s) doesn't match lazy block positions count (%s)", block.getPositionCount(), positionsCount));
+-            }
+-
+-            if (recursive) {
+-                block = block.getLoadedBlock();
+-            }
+-            else {
+-                // load and remove directly nested lazy blocks
+-                while (block instanceof LazyBlock) {
+-                    block = ((LazyBlock) block).getBlock();
+-                }
+-            }
+-
+-            // clear reference to loader to free resources, since load was successful
+-            loader = null;
+-
+-            // notify listeners
+-            List<Consumer<Block>> listeners = this.listeners;
+-            this.listeners = null;
+-            if (listeners != null) {
+-                listeners.forEach(listener -> listener.accept(block));
+-
+-                // add listeners to unloaded child blocks
+-                if (!recursive) {
+-                    addListenersRecursive(block, listeners);
+-                }
+-            }
+-        }
+-
+-        /**
+-         * If the block is unloaded, add the listeners; otherwise call this method on the nested blocks
+-         */
+-        private static void addListenersRecursive(Block block, List<Consumer<Block>> listeners)
+-        {
+-            if (block == null) {
+-                return;
+-            }
+-
+-            switch (block) {
+-                case LazyBlock lazyBlock -> {
+-                    LazyData lazyData = lazyBlock.lazyData;
+-                    if (lazyData.isTopLevelBlockLoaded()) {
+-                        addListenersRecursive(lazyBlock.getBlock(), listeners);
+-                    }
+-                    else {
+-                        lazyData.addListeners(listeners);
+-                    }
+-                }
+-                case DictionaryBlock dictionaryBlock -> addListenersRecursive(dictionaryBlock.getDictionary(), listeners);
+-                case RunLengthEncodedBlock runLengthEncodedBlock -> addListenersRecursive(runLengthEncodedBlock.getValue(), listeners);
+-                case ValueBlock valueBlock -> {
+-                    switch (valueBlock) {
+-                        case ArrayBlock arrayBlock -> addListenersRecursive(arrayBlock.getRawElementBlock(), listeners);
+-                        case MapBlock mapBlock -> {
+-                            addListenersRecursive(mapBlock.getRawKeyBlock(), listeners);
+-                            addListenersRecursive(mapBlock.getRawValueBlock(), listeners);
+-                        }
+-                        case RowBlock rowBlock -> {
+-                            for (Block fieldBlock : rowBlock.getFieldBlocks()) {
+-                                addListenersRecursive(fieldBlock, listeners);
+-                            }
+-                        }
+-                        default -> {
+-                            // no other value blocks are container types
+-                        }
+-                    }
+-                }
+-            }
+-        }
+-    }
+-}
+diff --git a/core/trino-spi/src/main/java/io/trino/spi/block/LazyBlockEncoding.java b/core/trino-spi/src/main/java/io/trino/spi/block/LazyBlockEncoding.java
+deleted file mode 100644
+index 698e0641a083..000000000000
+--- a/core/trino-spi/src/main/java/io/trino/spi/block/LazyBlockEncoding.java
++++ /dev/null
+@@ -1,57 +0,0 @@
+-/*
+- * Licensed under the Apache License, Version 2.0 (the "License");
+- * you may not use this file except in compliance with the License.
+- * You may obtain a copy of the License at
+- *
+- *     http://www.apache.org/licenses/LICENSE-2.0
+- *
+- * Unless required by applicable law or agreed to in writing, software
+- * distributed under the License is distributed on an "AS IS" BASIS,
+- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+- * See the License for the specific language governing permissions and
+- * limitations under the License.
+- */
+-package io.trino.spi.block;
+-
+-import io.airlift.slice.SliceInput;
+-import io.airlift.slice.SliceOutput;
+-
+-import java.util.Optional;
+-
+-public class LazyBlockEncoding
+-        implements BlockEncoding
+-{
+-    public static final String NAME = "LAZY";
+-
+-    @Override
+-    public String getName()
+-    {
+-        return NAME;
+-    }
+-
+-    @Override
+-    public Class<? extends Block> getBlockClass()
+-    {
+-        return LazyBlock.class;
+-    }
+-
+-    @Override
+-    public Block readBlock(BlockEncodingSerde blockEncodingSerde, SliceInput input)
+-    {
+-        // We write the actual underlying block, so we will never need to read a lazy block
+-        throw new UnsupportedOperationException();
+-    }
+-
+-    @Override
+-    public void writeBlock(BlockEncodingSerde blockEncodingSerde, SliceOutput sliceOutput, Block block)
+-    {
+-        // We implemented replacementBlockForWrite, so we will never need to write a lazy block
+-        throw new UnsupportedOperationException();
+-    }
+-
+-    @Override
+-    public Optional<Block> replacementBlockForWrite(Block block)
+-    {
+-        return Optional.of(block.getLoadedBlock());
+-    }
+-}
+diff --git a/core/trino-spi/src/main/java/io/trino/spi/block/LazyBlockLoader.java b/core/trino-spi/src/main/java/io/trino/spi/block/LazyBlockLoader.java
+deleted file mode 100644
+index ae4cbcf31fa0..000000000000
+--- a/core/trino-spi/src/main/java/io/trino/spi/block/LazyBlockLoader.java
++++ /dev/null
+@@ -1,23 +0,0 @@
+-/*
+- * Licensed under the Apache License, Version 2.0 (the "License");
+- * you may not use this file except in compliance with the License.
+- * You may obtain a copy of the License at
+- *
+- *     http://www.apache.org/licenses/LICENSE-2.0
+- *
+- * Unless required by applicable law or agreed to in writing, software
+- * distributed under the License is distributed on an "AS IS" BASIS,
+- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+- * See the License for the specific language governing permissions and
+- * limitations under the License.
+- */
+-package io.trino.spi.block;
+-
+-public interface LazyBlockLoader
+-{
+-    /**
+-     * Loads a lazy block. If possible lazy block loader should load top level {@link Block} only
+-     * (in case of when loaded blocks are nested, e.g. for structural types).
+-     */
+-    Block load();
+-}
+diff --git a/core/trino-spi/src/main/java/io/trino/spi/block/MapBlock.java b/core/trino-spi/src/main/java/io/trino/spi/block/MapBlock.java
+index 6fc50f7400bc..e1a917eb9d68 100644
+--- a/core/trino-spi/src/main/java/io/trino/spi/block/MapBlock.java
++++ b/core/trino-spi/src/main/java/io/trino/spi/block/MapBlock.java
+@@ -255,9 +255,6 @@ public int getPositionCount()
+     public long getSizeInBytes()
+     {
+         if (valueSizeInBytes < 0) {
+-            if (!valueBlock.isLoaded()) {
+-                return baseSizeInBytes + valueBlock.getSizeInBytes();
+-            }
+             valueSizeInBytes = calculateSize(valueBlock);
+         }
+ 
+@@ -297,35 +294,6 @@ public String toString()
+         return "MapBlock{positionCount=" + getPositionCount() + '}';
+     }
+ 
+-    @Override
+-    public boolean isLoaded()
+-    {
+-        return keyBlock.isLoaded() && valueBlock.isLoaded();
+-    }
+-
+-    @Override
+-    public Block getLoadedBlock()
+-    {
+-        if (keyBlock != keyBlock.getLoadedBlock()) {
+-            // keyBlock has to be loaded since MapBlock constructs hash table eagerly.
+-            throw new IllegalStateException();
+-        }
+-
+-        Block loadedValueBlock = valueBlock.getLoadedBlock();
+-        if (loadedValueBlock == valueBlock) {
+-            return this;
+-        }
+-        return createMapBlockInternal(
+-                getMapType(),
+-                startOffset,
+-                positionCount,
+-                Optional.ofNullable(mapIsNull),
+-                offsets,
+-                keyBlock,
+-                loadedValueBlock,
+-                hashTables);
+-    }
+-
+     void ensureHashTableLoaded()
+     {
+         hashTables.buildAllHashTablesIfNecessary(keyBlock, offsets, mapIsNull);
+diff --git a/core/trino-spi/src/main/java/io/trino/spi/block/RowBlock.java b/core/trino-spi/src/main/java/io/trino/spi/block/RowBlock.java
+index 0b0307f35040..4df4b69fa1d4 100644
+--- a/core/trino-spi/src/main/java/io/trino/spi/block/RowBlock.java
++++ b/core/trino-spi/src/main/java/io/trino/spi/block/RowBlock.java
+@@ -29,7 +29,6 @@
+ import static io.trino.spi.block.BlockUtil.checkValidPositions;
+ import static io.trino.spi.block.BlockUtil.checkValidRegion;
+ import static io.trino.spi.block.BlockUtil.compactArray;
+-import static io.trino.spi.block.BlockUtil.ensureBlocksAreLoaded;
+ import static java.lang.String.format;
+ import static java.util.Objects.requireNonNull;
+ 
+@@ -70,12 +69,9 @@ public static RowBlock fromNotNullSuppressedFieldBlocks(int positionCount, Optio
+ 
+             for (int fieldIndex = 0; fieldIndex < fieldBlocks.length; fieldIndex++) {
+                 Block field = fieldBlocks[fieldIndex];
+-                // LazyBlock may not have loaded the field yet
+-                if (!(field instanceof LazyBlock lazyBlock) || lazyBlock.isLoaded()) {
+-                    for (int position = 0; position < positionCount; position++) {
+-                        if (rowIsNull[position] && !field.isNull(position)) {
+-                            throw new IllegalArgumentException(format("Field value for null row must be null: field %s, position %s", fieldIndex, position));
+-                        }
++                for (int position = 0; position < positionCount; position++) {
++                    if (rowIsNull[position] && !field.isNull(position)) {
++                        throw new IllegalArgumentException(format("Field value for null row must be null: field %s, position %s", fieldIndex, position));
+                     }
+                 }
+             }
+@@ -185,16 +181,10 @@ public long getSizeInBytes()
+         }
+ 
+         long sizeInBytes = Byte.BYTES * (long) positionCount;
+-        boolean hasUnloadedBlocks = false;
+-
+         for (Block fieldBlock : fieldBlocks) {
+             sizeInBytes += fieldBlock.getSizeInBytes();
+-            hasUnloadedBlocks = hasUnloadedBlocks || !fieldBlock.isLoaded();
+-        }
+-
+-        if (!hasUnloadedBlocks) {
+-            this.sizeInBytes = sizeInBytes;
+         }
++        this.sizeInBytes = sizeInBytes;
+         return sizeInBytes;
+     }
+ 
+@@ -226,28 +216,6 @@ public String toString()
+         return format("RowBlock{fieldCount=%d, positionCount=%d}", fieldBlocks.length, positionCount);
+     }
+ 
+-    @Override
+-    public boolean isLoaded()
+-    {
+-        for (Block fieldBlock : fieldBlocks) {
+-            if (!fieldBlock.isLoaded()) {
+-                return false;
+-            }
+-        }
+-        return true;
+-    }
+-
+-    @Override
+-    public Block getLoadedBlock()
+-    {
+-        Block[] loadedFieldBlocks = ensureBlocksAreLoaded(fieldBlocks);
+-        if (loadedFieldBlocks == fieldBlocks) {
+-            // All blocks are already loaded
+-            return this;
+-        }
+-        return new RowBlock(positionCount, rowIsNull, loadedFieldBlocks, fixedSizePerRow);
+-    }
+-
+     @Override
+     public RowBlock copyWithAppendedNull()
+     {
+@@ -408,17 +376,12 @@ public boolean isNull(int position)
+     }
+ 
+     /**
+-     * Returns the row fields from the specified block. The block maybe a LazyBlock, RunLengthEncodedBlock, or
++     * Returns the row fields from the specified block. The block maybe a RunLengthEncodedBlock, or
+      * DictionaryBlock, but the underlying block must be a RowBlock. The returned field blocks will be the same
+      * length as the specified block, which means they are not null suppressed.
+      */
+     public static List<Block> getRowFieldsFromBlock(Block block)
+     {
+-        // if the block is lazy, be careful to not materialize the nested blocks
+-        if (block instanceof LazyBlock lazyBlock) {
+-            block = lazyBlock.getBlock();
+-        }
+-
+         if (block instanceof RunLengthEncodedBlock runLengthEncodedBlock) {
+             RowBlock rowBlock = (RowBlock) runLengthEncodedBlock.getValue();
+             return rowBlock.fieldBlocksList.stream()
+@@ -438,17 +401,12 @@ public static List<Block> getRowFieldsFromBlock(Block block)
+     }
+ 
+     /**
+-     * Returns the row fields from the specified block with null rows suppressed. The block maybe a LazyBlock, RunLengthEncodedBlock, or
++     * Returns the row fields from the specified block with null rows suppressed. The block maybe a RunLengthEncodedBlock, or
+      * DictionaryBlock, but the underlying block must be a RowBlock. The returned field blocks will not be the same
+      * length as the specified block if it contains null rows.
+      */
+     public static List<Block> getNullSuppressedRowFieldsFromBlock(Block block)
+     {
+-        // if the block is lazy, be careful to not materialize the nested blocks
+-        if (block instanceof LazyBlock lazyBlock) {
+-            block = lazyBlock.getBlock();
+-        }
+-
+         if (!block.mayHaveNull()) {
+             return getRowFieldsFromBlock(block);
+         }
+diff --git a/core/trino-spi/src/main/java/io/trino/spi/block/RowBlockBuilder.java b/core/trino-spi/src/main/java/io/trino/spi/block/RowBlockBuilder.java
+index 33d92aef822f..5e8e352b39e5 100644
+--- a/core/trino-spi/src/main/java/io/trino/spi/block/RowBlockBuilder.java
++++ b/core/trino-spi/src/main/java/io/trino/spi/block/RowBlockBuilder.java
+@@ -135,7 +135,6 @@ public void append(ValueBlock block, int position)
+ 
+     private static void appendToField(Block fieldBlock, int position, BlockBuilder fieldBlockBuilder)
+     {
+-        fieldBlock = fieldBlock.getLoadedBlock();
+         if (fieldBlock instanceof RunLengthEncodedBlock rleBlock) {
+             fieldBlockBuilder.append(rleBlock.getValue(), 0);
+         }
+@@ -188,7 +187,6 @@ public void appendRange(ValueBlock block, int offset, int length)
+ 
+     private static void appendRangeToField(Block fieldBlock, int offset, int length, BlockBuilder fieldBlockBuilder)
+     {
+-        fieldBlock = fieldBlock.getLoadedBlock();
+         if (fieldBlock instanceof RunLengthEncodedBlock rleBlock) {
+             fieldBlockBuilder.appendRepeated(rleBlock.getValue(), 0, length);
+         }
+@@ -240,7 +238,6 @@ public void appendRepeated(ValueBlock block, int position, int count)
+ 
+     private static void appendRepeatedToField(Block fieldBlock, int position, int count, BlockBuilder fieldBlockBuilder)
+     {
+-        fieldBlock = fieldBlock.getLoadedBlock();
+         if (fieldBlock instanceof RunLengthEncodedBlock rleBlock) {
+             fieldBlockBuilder.appendRepeated(rleBlock.getValue(), 0, count);
+         }
+@@ -293,7 +290,6 @@ public void appendPositions(ValueBlock block, int[] positions, int offset, int l
+ 
+     private static void appendPositionsToField(Block fieldBlock, int[] positions, int offset, int length, BlockBuilder fieldBlockBuilder)
+     {
+-        fieldBlock = fieldBlock.getLoadedBlock();
+         if (fieldBlock instanceof RunLengthEncodedBlock rleBlock) {
+             fieldBlockBuilder.appendRepeated(rleBlock.getValue(), 0, length);
+         }
+diff --git a/core/trino-spi/src/main/java/io/trino/spi/block/RunLengthEncodedBlock.java b/core/trino-spi/src/main/java/io/trino/spi/block/RunLengthEncodedBlock.java
+index a10b94eea451..ea12691d776c 100644
+--- a/core/trino-spi/src/main/java/io/trino/spi/block/RunLengthEncodedBlock.java
++++ b/core/trino-spi/src/main/java/io/trino/spi/block/RunLengthEncodedBlock.java
+@@ -60,11 +60,6 @@ public static Block create(Block value, int positionCount)
+             return new RunLengthEncodedBlock(valueBlock, positionCount);
+         }
+ 
+-        // if the value is lazy be careful to not materialize it
+-        if (value instanceof LazyBlock lazyBlock) {
+-            return new LazyBlock(positionCount, () -> create(lazyBlock.getBlock(), positionCount));
+-        }
+-
+         // unwrap the value
+         ValueBlock valueBlock = value.getUnderlyingValueBlock();
+         int valuePosition = value.getUnderlyingValuePosition(0);
+@@ -232,23 +227,6 @@ public String toString()
+         return sb.toString();
+     }
+ 
+-    @Override
+-    public boolean isLoaded()
+-    {
+-        return value.isLoaded();
+-    }
+-
+-    @Override
+-    public Block getLoadedBlock()
+-    {
+-        Block loadedValueBlock = value.getLoadedBlock();
+-
+-        if (loadedValueBlock == value) {
+-            return this;
+-        }
+-        return create(loadedValueBlock, positionCount);
+-    }
+-
+     @Override
+     public ValueBlock getUnderlyingValueBlock()
+     {
+diff --git a/core/trino-spi/src/main/java/io/trino/spi/predicate/SortedRangeSet.java b/core/trino-spi/src/main/java/io/trino/spi/predicate/SortedRangeSet.java
+index f2b01b6a1fce..27d016e75880 100644
+--- a/core/trino-spi/src/main/java/io/trino/spi/predicate/SortedRangeSet.java
++++ b/core/trino-spi/src/main/java/io/trino/spi/predicate/SortedRangeSet.java
+@@ -19,7 +19,6 @@
+ import io.trino.spi.block.Block;
+ import io.trino.spi.block.BlockBuilder;
+ import io.trino.spi.block.DictionaryBlock;
+-import io.trino.spi.block.LazyBlock;
+ import io.trino.spi.block.RunLengthEncodedBlock;
+ import io.trino.spi.block.ValueBlock;
+ import io.trino.spi.connector.ConnectorSession;
+@@ -777,7 +776,6 @@ private static void copyBlock(SortedRangeSet source, int sourceOffset, BlockBuil
+             case ValueBlock valueBlock -> copyValueBlock(source, valueBlock, sourceOffset, destination, destinationInclusive, destinationOffset, size);
+             case DictionaryBlock dictionaryBlock -> copyDictionaryBlock(source, dictionaryBlock, sourceOffset, destination, destinationInclusive, destinationOffset, size);
+             case RunLengthEncodedBlock rleBlock -> copyRleBlock(source, rleBlock, sourceOffset, destination, destinationInclusive, destinationOffset, size);
+-            case LazyBlock _ -> throw new IllegalArgumentException("Did not expect LazyBlock");
+         }
+     }
+ 
+diff --git a/core/trino-spi/src/main/java/io/trino/spi/type/ArrayType.java b/core/trino-spi/src/main/java/io/trino/spi/type/ArrayType.java
+index e31c07690ca4..8eedcf393124 100644
+--- a/core/trino-spi/src/main/java/io/trino/spi/type/ArrayType.java
++++ b/core/trino-spi/src/main/java/io/trino/spi/type/ArrayType.java
+@@ -19,7 +19,6 @@
+ import io.trino.spi.block.BlockBuilder;
+ import io.trino.spi.block.BlockBuilderStatus;
+ import io.trino.spi.block.DictionaryBlock;
+-import io.trino.spi.block.LazyBlock;
+ import io.trino.spi.block.RunLengthEncodedBlock;
+ import io.trino.spi.block.ValueBlock;
+ import io.trino.spi.connector.ConnectorSession;
+@@ -443,8 +442,6 @@ private static void writeFlat(
+     private static int writeFlatElements(Type elementType, MethodHandle elementWriteFlat, int elementFixedSize, boolean elementVariableWidth, Block array, byte[] slice, int offset)
+             throws Throwable
+     {
+-        array = array.getLoadedBlock();
+-
+         int positionCount = array.getPositionCount();
+         // variable width data starts after fixed width data
+         // there is one extra byte per position for the null flag
+@@ -471,7 +468,6 @@ private static int writeFlatElements(Type elementType, MethodHandle elementWrite
+                     offset += 1 + elementFixedSize;
+                 }
+             }
+-            case LazyBlock _ -> throw new IllegalStateException("Did not expect LazyBlock after loading " + array.getClass().getSimpleName());
+         }
+         return writeVariableWidthOffset;
+     }
+@@ -504,9 +500,6 @@ private static Boolean equalOperator(MethodHandle equalOperator, Block leftArray
+             return false;
+         }
+ 
+-        leftArray = leftArray.getLoadedBlock();
+-        rightArray = rightArray.getLoadedBlock();
+-
+         ValueBlock leftValues = leftArray.getUnderlyingValueBlock();
+         ValueBlock rightValues = rightArray.getUnderlyingValueBlock();
+ 
+@@ -536,8 +529,6 @@ else if (!result) {
+     private static long hashOperator(MethodHandle hashOperator, Block array)
+             throws Throwable
+     {
+-        array = array.getLoadedBlock();
+-
+         if (array instanceof ValueBlock valuesBlock) {
+             long hash = 0;
+             for (int index = 0; index < valuesBlock.getPositionCount(); index++) {
+@@ -585,9 +576,6 @@ private static boolean identicalOperator(MethodHandle identicalOperator, Block l
+             return false;
+         }
+ 
+-        leftArray = leftArray.getLoadedBlock();
+-        rightArray = rightArray.getLoadedBlock();
+-
+         ValueBlock leftValues = leftArray.getUnderlyingValueBlock();
+         ValueBlock rightValues = rightArray.getUnderlyingValueBlock();
+ 
+@@ -620,8 +608,6 @@ private static boolean indeterminateOperator(MethodHandle elementIndeterminateFu
+             return true;
+         }
+ 
+-        array = array.getLoadedBlock();
+-
+         if (array instanceof ValueBlock valuesBlock) {
+             for (int index = 0; index < valuesBlock.getPositionCount(); index++) {
+                 if (valuesBlock.isNull(index)) {
+@@ -665,9 +651,6 @@ private static boolean indeterminateOperator(MethodHandle elementIndeterminateFu
+     private static long comparisonOperator(MethodHandle comparisonOperator, Block leftArray, Block rightArray)
+             throws Throwable
+     {
+-        leftArray = leftArray.getLoadedBlock();
+-        rightArray = rightArray.getLoadedBlock();
+-
+         ValueBlock leftValues = leftArray.getUnderlyingValueBlock();
+         ValueBlock rightValues = rightArray.getUnderlyingValueBlock();
+ 
+diff --git a/core/trino-spi/src/test/java/io/trino/spi/TestPage.java b/core/trino-spi/src/test/java/io/trino/spi/TestPage.java
+index f46623356a36..37a5668ada87 100644
+--- a/core/trino-spi/src/test/java/io/trino/spi/TestPage.java
++++ b/core/trino-spi/src/test/java/io/trino/spi/TestPage.java
+@@ -19,12 +19,10 @@
+ import io.trino.spi.block.BlockBuilder;
+ import io.trino.spi.block.DictionaryBlock;
+ import io.trino.spi.block.DictionaryId;
+-import io.trino.spi.block.LazyBlock;
+ import org.junit.jupiter.api.Test;
+ 
+ import static com.google.common.base.Preconditions.checkArgument;
+ import static com.google.common.base.Verify.verifyNotNull;
+-import static io.airlift.slice.SizeOf.sizeOf;
+ import static io.trino.spi.block.DictionaryBlock.createProjectedDictionaryBlock;
+ import static io.trino.spi.block.DictionaryId.randomDictionaryId;
+ import static io.trino.spi.type.BigintType.BIGINT;
+@@ -139,37 +137,6 @@ public void testGetPositions()
+         }
+     }
+ 
+-    @Test
+-    public void testGetLoadedPage()
+-    {
+-        int entries = 10;
+-        BlockBuilder blockBuilder = BIGINT.createFixedSizeBlockBuilder(entries);
+-        for (int i = 0; i < entries; i++) {
+-            BIGINT.writeLong(blockBuilder, i);
+-        }
+-        Block block = blockBuilder.build();
+-
+-        LazyBlock lazyBlock = lazyWrapper(block);
+-        Page page = new Page(lazyBlock);
+-        long lazyPageRetainedSize = Page.INSTANCE_SIZE + sizeOf(new Block[] {block}) + lazyBlock.getRetainedSizeInBytes();
+-        assertThat(page.getRetainedSizeInBytes()).isEqualTo(lazyPageRetainedSize);
+-        Page loadedPage = page.getLoadedPage();
+-        // Retained size of page remains the same
+-        assertThat(page.getRetainedSizeInBytes()).isEqualTo(lazyPageRetainedSize);
+-        long loadedPageRetainedSize = Page.INSTANCE_SIZE + sizeOf(new Block[] {block}) + block.getRetainedSizeInBytes();
+-        // Retained size of loaded page depends on the loaded block
+-        assertThat(loadedPage.getRetainedSizeInBytes()).isEqualTo(loadedPageRetainedSize);
+-
+-        lazyBlock = lazyWrapper(block);
+-        page = new Page(lazyBlock);
+-        assertThat(page.getRetainedSizeInBytes()).isEqualTo(lazyPageRetainedSize);
+-    }
+-
+-    private static LazyBlock lazyWrapper(Block block)
+-    {
+-        return new LazyBlock(block.getPositionCount(), block::getLoadedBlock);
+-    }
+-
+     private static Slice[] createExpectedValues(int positionCount)
+     {
+         Slice[] expectedValues = new Slice[positionCount];
+diff --git a/core/trino-spi/src/test/java/io/trino/spi/block/TestLazyBlock.java b/core/trino-spi/src/test/java/io/trino/spi/block/TestLazyBlock.java
+deleted file mode 100644
+index c765c1d1d5ef..000000000000
+--- a/core/trino-spi/src/test/java/io/trino/spi/block/TestLazyBlock.java
++++ /dev/null
+@@ -1,146 +0,0 @@
+-/*
+- * Licensed under the Apache License, Version 2.0 (the "License");
+- * you may not use this file except in compliance with the License.
+- * You may obtain a copy of the License at
+- *
+- *     http://www.apache.org/licenses/LICENSE-2.0
+- *
+- * Unless required by applicable law or agreed to in writing, software
+- * distributed under the License is distributed on an "AS IS" BASIS,
+- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+- * See the License for the specific language governing permissions and
+- * limitations under the License.
+- */
+-package io.trino.spi.block;
+-
+-import com.google.common.collect.ImmutableList;
+-import org.junit.jupiter.api.Test;
+-
+-import java.util.ArrayList;
+-import java.util.List;
+-import java.util.Optional;
+-
+-import static org.assertj.core.api.Assertions.assertThat;
+-
+-public class TestLazyBlock
+-{
+-    @Test
+-    public void testListener()
+-    {
+-        List<Block> notifications = new ArrayList<>();
+-        LazyBlock lazyBlock = new LazyBlock(1, () -> createSingleValueBlock(1));
+-        LazyBlock.listenForLoads(lazyBlock, notifications::add);
+-
+-        Block loadedBlock = lazyBlock.getBlock();
+-        assertThat(notifications).isEqualTo(ImmutableList.of(loadedBlock));
+-
+-        loadedBlock = lazyBlock.getBlock();
+-        assertThat(notifications).isEqualTo(ImmutableList.of(loadedBlock));
+-    }
+-
+-    @Test
+-    public void testNestedListener()
+-    {
+-        List<Block> actualNotifications = new ArrayList<>();
+-        LazyBlock lazyBlock = new LazyBlock(1, TestLazyBlock::createInfiniteRecursiveRowBlock);
+-        LazyBlock.listenForLoads(lazyBlock, actualNotifications::add);
+-
+-        List<Block> expectedNotifications = new ArrayList<>();
+-        assertNotificationsRecursive(5, lazyBlock, actualNotifications, expectedNotifications);
+-    }
+-
+-    @Test
+-    public void testLoadedBlockNestedListener()
+-    {
+-        List<Block> actualNotifications = new ArrayList<>();
+-        LazyBlock lazyBlock = new LazyBlock(1, TestLazyBlock::createInfiniteRecursiveRowBlock);
+-        RowBlock nestedRowBlock = (RowBlock) lazyBlock.getBlock();
+-        LazyBlock.listenForLoads(lazyBlock, actualNotifications::add);
+-        Block loadedBlock = ((LazyBlock) nestedRowBlock.getFieldBlock(0)).getBlock();
+-        assertThat(actualNotifications).isEqualTo(ImmutableList.of(loadedBlock));
+-    }
+-
+-    @Test
+-    public void testNestedGetLoadedBlock()
+-    {
+-        List<Block> actualNotifications = new ArrayList<>();
+-        Block arrayBlock = new IntArrayBlock(2, Optional.empty(), new int[] {0, 1});
+-        LazyBlock lazyArrayBlock = new LazyBlock(2, () -> arrayBlock);
+-        Block rowBlock = RowBlock.fromFieldBlocks(2, new Block[] {lazyArrayBlock});
+-        LazyBlock lazyBlock = new LazyBlock(2, () -> rowBlock);
+-        LazyBlock.listenForLoads(lazyBlock, actualNotifications::add);
+-
+-        Block loadedBlock = lazyBlock.getBlock();
+-        assertThat(loadedBlock).isInstanceOf(RowBlock.class);
+-        assertThat(((RowBlock) loadedBlock).getFieldBlock(0)).isInstanceOf(LazyBlock.class);
+-        assertThat(actualNotifications).isEqualTo(ImmutableList.of(loadedBlock));
+-
+-        Block fullyLoadedBlock = lazyBlock.getLoadedBlock();
+-        assertThat(fullyLoadedBlock).isInstanceOf(RowBlock.class);
+-        assertThat(((RowBlock) fullyLoadedBlock).getFieldBlock(0)).isInstanceOf(IntArrayBlock.class);
+-        assertThat(actualNotifications).isEqualTo(ImmutableList.of(loadedBlock, arrayBlock));
+-        assertThat(lazyBlock.isLoaded()).isTrue();
+-        assertThat(rowBlock.isLoaded()).isTrue();
+-    }
+-
+-    private static void assertNotificationsRecursive(int depth, Block lazyBlock, List<Block> actualNotifications, List<Block> expectedNotifications)
+-    {
+-        assertThat(lazyBlock.isLoaded()).isFalse();
+-        Block loadedBlock = ((LazyBlock) lazyBlock).getBlock();
+-        expectedNotifications.add(loadedBlock);
+-        assertThat(actualNotifications).isEqualTo(expectedNotifications);
+-
+-        if (loadedBlock instanceof ArrayBlock arrayBlock) {
+-            long expectedSize = (long) (Integer.BYTES + Byte.BYTES) * loadedBlock.getPositionCount();
+-            assertThat(loadedBlock.getSizeInBytes()).isEqualTo(expectedSize);
+-
+-            Block elementsBlock = arrayBlock.getRawElementBlock();
+-            if (depth > 0) {
+-                assertNotificationsRecursive(depth - 1, elementsBlock, actualNotifications, expectedNotifications);
+-            }
+-
+-            expectedSize += elementsBlock.getSizeInBytes();
+-            assertThat(loadedBlock.getSizeInBytes()).isEqualTo(expectedSize);
+-            return;
+-        }
+-        if (loadedBlock instanceof RowBlock rowBlock) {
+-            long expectedSizeInBytes = loadedBlock.getPositionCount();
+-            assertThat(loadedBlock.getSizeInBytes()).isEqualTo(expectedSizeInBytes);
+-
+-            for (Block fieldBlock : rowBlock.getFieldBlocks()) {
+-                if (depth > 0) {
+-                    assertNotificationsRecursive(depth - 1, fieldBlock, actualNotifications, expectedNotifications);
+-                }
+-
+-                long fieldBlockSize = fieldBlock.getSizeInBytes();
+-                expectedSizeInBytes += fieldBlockSize;
+-                assertThat(loadedBlock.getSizeInBytes()).isEqualTo(expectedSizeInBytes);
+-            }
+-            return;
+-        }
+-        throw new IllegalArgumentException("Unexpected loaded block type: " + loadedBlock.getClass().getSimpleName());
+-    }
+-
+-    private static Block createSingleValueBlock(int value)
+-    {
+-        return new IntArrayBlock(1, Optional.empty(), new int[] {value});
+-    }
+-
+-    private static Block createInfiniteRecursiveRowBlock()
+-    {
+-        return RowBlock.fromFieldBlocks(1, new Block[] {
+-                new LazyBlock(1, TestLazyBlock::createInfiniteRecursiveArrayBlock),
+-                new LazyBlock(1, TestLazyBlock::createInfiniteRecursiveArrayBlock),
+-                new LazyBlock(1, TestLazyBlock::createInfiniteRecursiveArrayBlock)
+-        });
+-    }
+-
+-    private static Block createInfiniteRecursiveArrayBlock()
+-    {
+-        return ArrayBlock.fromElementBlock(
+-                1,
+-                Optional.empty(),
+-                new int[] {0, 1},
+-                new LazyBlock(1, TestLazyBlock::createInfiniteRecursiveRowBlock));
+-    }
+-}
+diff --git a/core/trino-spi/src/test/java/io/trino/spi/block/TestingBlockEncodingSerde.java b/core/trino-spi/src/test/java/io/trino/spi/block/TestingBlockEncodingSerde.java
+index 46698df39615..248eebf6323c 100644
+--- a/core/trino-spi/src/test/java/io/trino/spi/block/TestingBlockEncodingSerde.java
++++ b/core/trino-spi/src/test/java/io/trino/spi/block/TestingBlockEncodingSerde.java
+@@ -58,7 +58,6 @@ public TestingBlockEncodingSerde(Function<TypeId, Type> types)
+         addBlockEncoding(new MapBlockEncoding());
+         addBlockEncoding(new RowBlockEncoding());
+         addBlockEncoding(new RunLengthBlockEncoding());
+-        addBlockEncoding(new LazyBlockEncoding());
+     }
+ 
+     private void addBlockEncoding(BlockEncoding blockEncoding)
+diff --git a/lib/trino-orc/src/main/java/io/trino/orc/OrcWriteValidation.java b/lib/trino-orc/src/main/java/io/trino/orc/OrcWriteValidation.java
+index 6a8d3c60b850..5307b937afc0 100644
+--- a/lib/trino-orc/src/main/java/io/trino/orc/OrcWriteValidation.java
++++ b/lib/trino-orc/src/main/java/io/trino/orc/OrcWriteValidation.java
+@@ -687,7 +687,7 @@ else if (type instanceof MapType) {
+             }
+             else if (type instanceof RowType) {
+                 statisticsBuilder = new CountStatisticsBuilder();
+-                fieldExtractor = block -> RowBlock.getRowFieldsFromBlock(block.getLoadedBlock());
++                fieldExtractor = RowBlock::getRowFieldsFromBlock;
+                 fieldBuilders = type.getTypeParameters().stream()
+                         .map(ColumnStatisticsValidation::new)
+                         .collect(toImmutableList());
+diff --git a/lib/trino-orc/src/main/java/io/trino/orc/OrcWriter.java b/lib/trino-orc/src/main/java/io/trino/orc/OrcWriter.java
+index e3c8e6d3724d..0aa747d0eafb 100644
+--- a/lib/trino-orc/src/main/java/io/trino/orc/OrcWriter.java
++++ b/lib/trino-orc/src/main/java/io/trino/orc/OrcWriter.java
+@@ -254,8 +254,6 @@ public void write(Page page)
+         }
+ 
+         checkArgument(page.getChannelCount() == columnWriters.size());
+-        // page should already be loaded, but double check
+-        page = page.getLoadedPage();
+ 
+         if (validationBuilder != null) {
+             validationBuilder.addPage(page);
+diff --git a/lib/trino-orc/src/main/java/io/trino/orc/reader/ReaderUtils.java b/lib/trino-orc/src/main/java/io/trino/orc/reader/ReaderUtils.java
+index f6e0e314d2ab..f1f9725f4270 100644
+--- a/lib/trino-orc/src/main/java/io/trino/orc/reader/ReaderUtils.java
++++ b/lib/trino-orc/src/main/java/io/trino/orc/reader/ReaderUtils.java
+@@ -168,7 +168,6 @@ static Block toNotNullSupressedBlock(int positionCount, boolean[] rowIsNull, Blo
+         }
+         // if there are no null positions, append a null to the end of the block
+         if (nullIndex == -1) {
+-            fieldBlock = fieldBlock.getLoadedBlock();
+             nullIndex = fieldBlock.getPositionCount();
+             fieldBlock = fieldBlock.copyWithAppendedNull();
+         }
+diff --git a/lib/trino-orc/src/test/java/io/trino/orc/BenchmarkColumnReaders.java b/lib/trino-orc/src/test/java/io/trino/orc/BenchmarkColumnReaders.java
+index eadbeed05874..7e701d5de6c4 100644
+--- a/lib/trino-orc/src/test/java/io/trino/orc/BenchmarkColumnReaders.java
++++ b/lib/trino-orc/src/test/java/io/trino/orc/BenchmarkColumnReaders.java
+@@ -377,7 +377,7 @@ private Object readFirstColumn(OrcRecordReader recordReader)
+     {
+         List<Block> blocks = new ArrayList<>();
+         for (SourcePage page = recordReader.nextPage(); page != null; page = recordReader.nextPage()) {
+-            blocks.add(page.getBlock(0).getLoadedBlock());
++            blocks.add(page.getBlock(0));
+         }
+         return blocks;
+     }
+diff --git a/lib/trino-orc/src/test/java/io/trino/orc/TestStructColumnReader.java b/lib/trino-orc/src/test/java/io/trino/orc/TestStructColumnReader.java
+index a3d022175d80..4cf7050c9b97 100644
+--- a/lib/trino-orc/src/test/java/io/trino/orc/TestStructColumnReader.java
++++ b/lib/trino-orc/src/test/java/io/trino/orc/TestStructColumnReader.java
+@@ -273,7 +273,7 @@ private RowBlock read(TempFile tempFile, Type readerType)
+                 OrcReader.INITIAL_BATCH_SIZE,
+                 RuntimeException::new);
+ 
+-        RowBlock block = (RowBlock) recordReader.nextPage().getBlock(0).getLoadedBlock();
++        RowBlock block = (RowBlock) recordReader.nextPage().getBlock(0);
+         recordReader.close();
+         return block;
+     }
+diff --git a/lib/trino-parquet/src/main/java/io/trino/parquet/reader/ParquetReader.java b/lib/trino-parquet/src/main/java/io/trino/parquet/reader/ParquetReader.java
+index 4ff0ec8e8c3b..f717ff5bee1f 100644
+--- a/lib/trino-parquet/src/main/java/io/trino/parquet/reader/ParquetReader.java
++++ b/lib/trino-parquet/src/main/java/io/trino/parquet/reader/ParquetReader.java
+@@ -589,7 +589,6 @@ private static Block toNotNullSupressedBlock(int positionCount, boolean[] rowIsN
+         }
+         // if there are no null positions, append a null to the end of the block
+         if (nullIndex == -1) {
+-            fieldBlock = fieldBlock.getLoadedBlock();
+             nullIndex = fieldBlock.getPositionCount();
+             fieldBlock = fieldBlock.copyWithAppendedNull();
+         }
+diff --git a/lib/trino-parquet/src/main/java/io/trino/parquet/writer/ParquetWriter.java b/lib/trino-parquet/src/main/java/io/trino/parquet/writer/ParquetWriter.java
+index f58a1d37f16c..ec26f1113641 100644
+--- a/lib/trino-parquet/src/main/java/io/trino/parquet/writer/ParquetWriter.java
++++ b/lib/trino-parquet/src/main/java/io/trino/parquet/writer/ParquetWriter.java
+@@ -175,9 +175,6 @@ public void write(Page page)
+ 
+         checkArgument(page.getChannelCount() == columnWriters.size());
+ 
+-        // page should already be loaded, but double check
+-        page = page.getLoadedPage();
+-
+         Page validationPage = page;
+         recordValidation(validation -> validation.addPage(validationPage));
+ 
+diff --git a/lib/trino-parquet/src/test/java/io/trino/parquet/reader/TestByteStreamSplitEncoding.java b/lib/trino-parquet/src/test/java/io/trino/parquet/reader/TestByteStreamSplitEncoding.java
+index cfa97ee617c0..8e5574ffe5b0 100644
+--- a/lib/trino-parquet/src/test/java/io/trino/parquet/reader/TestByteStreamSplitEncoding.java
++++ b/lib/trino-parquet/src/test/java/io/trino/parquet/reader/TestByteStreamSplitEncoding.java
+@@ -84,7 +84,7 @@ private static void readAndCompare(ParquetReader reader, List<List<Double>> expe
+             assertThat(page.getChannelCount()).isEqualTo(2);
+             if (pageCount % 2 == 1) { // Skip loading every alternative page
+                 for (int channel = 0; channel < page.getChannelCount(); channel++) {
+-                    Block block = page.getBlock(channel).getLoadedBlock();
++                    Block block = page.getBlock(channel);
+                     List<Double> expectedValues = expected.get(channel);
+                     for (int postition = 0; postition < block.getPositionCount(); postition++) {
+                         if (block instanceof IntArrayBlock) {
+diff --git a/lib/trino-parquet/src/test/java/io/trino/parquet/reader/TestInt96Timestamp.java b/lib/trino-parquet/src/test/java/io/trino/parquet/reader/TestInt96Timestamp.java
+index 31a41c2688d9..a6c3e74a1148 100644
+--- a/lib/trino-parquet/src/test/java/io/trino/parquet/reader/TestInt96Timestamp.java
++++ b/lib/trino-parquet/src/test/java/io/trino/parquet/reader/TestInt96Timestamp.java
+@@ -118,7 +118,7 @@ public void testNanosOutsideDayRange()
+         SourcePage page = reader.nextPage();
+         ImmutableList.Builder<LocalDateTime> builder = ImmutableList.builder();
+         while (page != null) {
+-            Fixed12Block block = (Fixed12Block) page.getBlock(0).getLoadedBlock();
++            Fixed12Block block = (Fixed12Block) page.getBlock(0);
+             for (int i = 0; i < block.getPositionCount(); i++) {
+                 builder.add(toLocalDateTime(block, i));
+             }
+diff --git a/lib/trino-parquet/src/test/java/io/trino/parquet/reader/TestParquetReader.java b/lib/trino-parquet/src/test/java/io/trino/parquet/reader/TestParquetReader.java
+index 85ce0784b47e..4a08ed354ba5 100644
+--- a/lib/trino-parquet/src/test/java/io/trino/parquet/reader/TestParquetReader.java
++++ b/lib/trino-parquet/src/test/java/io/trino/parquet/reader/TestParquetReader.java
+@@ -25,7 +25,6 @@
+ import io.trino.parquet.writer.ParquetWriterOptions;
+ import io.trino.spi.TrinoException;
+ import io.trino.spi.block.Block;
+-import io.trino.spi.block.LazyBlock;
+ import io.trino.spi.connector.ConnectorSession;
+ import io.trino.spi.connector.SourcePage;
+ import io.trino.spi.metrics.Count;
+@@ -93,15 +92,14 @@ public void testColumnReaderMemoryUsage()
+         ParquetReader reader = createParquetReader(dataSource, parquetMetadata, memoryContext, types, columnNames);
+ 
+         SourcePage page = reader.nextPage();
+-        assertThat(page.getBlock(0)).isInstanceOf(LazyBlock.class);
+         assertThat(memoryContext.getBytes()).isEqualTo(0);
+-        page.getBlock(0).getLoadedBlock();
++        page.getBlock(0);
+         // Memory usage due to reading data and decoding parquet page of 1st block
+         long initialMemoryUsage = memoryContext.getBytes();
+         assertThat(initialMemoryUsage).isGreaterThan(0);
+ 
+         // Memory usage due to decoding parquet page of 2nd block
+-        page.getBlock(1).getLoadedBlock();
++        page.getBlock(1);
+         long currentMemoryUsage = memoryContext.getBytes();
+         assertThat(currentMemoryUsage).isGreaterThan(initialMemoryUsage);
+ 
+diff --git a/lib/trino-parquet/src/test/java/io/trino/parquet/reader/TestTimeMillis.java b/lib/trino-parquet/src/test/java/io/trino/parquet/reader/TestTimeMillis.java
+index 4555bc525b7d..d1a6d78cf3d9 100644
+--- a/lib/trino-parquet/src/test/java/io/trino/parquet/reader/TestTimeMillis.java
++++ b/lib/trino-parquet/src/test/java/io/trino/parquet/reader/TestTimeMillis.java
+@@ -64,14 +64,14 @@ private void testTimeMillsInt32(TimeType timeType)
+         ParquetReader reader = createParquetReader(dataSource, parquetMetadata, newSimpleAggregatedMemoryContext(), types, columnNames);
+ 
+         SourcePage page = reader.nextPage();
+-        Block block = page.getBlock(0).getLoadedBlock();
++        Block block = page.getBlock(0);
+         assertThat(block.getPositionCount()).isEqualTo(1);
+         // TIME '15:03:00'
+         assertThat(timeType.getObjectValue(SESSION, block, 0))
+                 .isEqualTo(SqlTime.newInstance(precision, 54180000000000000L));
+ 
+         // TIME '23:59:59.999'
+-        block = page.getBlock(1).getLoadedBlock();
++        block = page.getBlock(1);
+         assertThat(block.getPositionCount()).isEqualTo(1);
+         // Rounded up to 0 if precision < 3
+         assertThat(timeType.getObjectValue(SESSION, block, 0))
+diff --git a/plugin/trino-delta-lake/src/main/java/io/trino/plugin/deltalake/DeltaLakeWriter.java b/plugin/trino-delta-lake/src/main/java/io/trino/plugin/deltalake/DeltaLakeWriter.java
+index ba9eb2ae955d..9210ab4aa0fe 100644
+--- a/plugin/trino-delta-lake/src/main/java/io/trino/plugin/deltalake/DeltaLakeWriter.java
++++ b/plugin/trino-delta-lake/src/main/java/io/trino/plugin/deltalake/DeltaLakeWriter.java
+@@ -342,8 +342,6 @@ public RowCoercer(RowType rowType)
+         @Override
+         public Block apply(Block block)
+         {
+-            block = block.getLoadedBlock();
+-
+             if (block instanceof RunLengthEncodedBlock runLengthEncodedBlock) {
+                 RowBlock rowBlock = (RowBlock) runLengthEncodedBlock.getValue();
+                 RowBlock newRowBlock = RowBlock.fromNotNullSuppressedFieldBlocks(
+diff --git a/plugin/trino-delta-lake/src/main/java/io/trino/plugin/deltalake/transactionlog/checkpoint/CheckpointEntryIterator.java b/plugin/trino-delta-lake/src/main/java/io/trino/plugin/deltalake/transactionlog/checkpoint/CheckpointEntryIterator.java
+index ef1710ca588d..267c66c7e1c5 100644
+--- a/plugin/trino-delta-lake/src/main/java/io/trino/plugin/deltalake/transactionlog/checkpoint/CheckpointEntryIterator.java
++++ b/plugin/trino-delta-lake/src/main/java/io/trino/plugin/deltalake/transactionlog/checkpoint/CheckpointEntryIterator.java
+@@ -515,7 +515,6 @@ public DeltaLakeTransactionLogEntry getEntry(ConnectorSession session, int pageP
+             }
+ 
+             // Materialize from Parquet the information needed to build the AddEntry instance
+-            addBlock = addBlock.getLoadedBlock();
+             SqlRow addEntryRow = getRow(addBlock, pagePosition);
+             log.debug("Block %s has %s fields", addBlock, addEntryRow.getFieldCount());
+             CheckpointFieldReader addReader = new CheckpointFieldReader(session, addEntryRow, addType.orElseThrow());
+@@ -758,14 +757,7 @@ private void fillNextEntries()
+             // process page
+             int blockIndex = 0;
+             for (CheckpointFieldExtractor extractor : extractors) {
+-                DeltaLakeTransactionLogEntry entry;
+-                if (extractor instanceof AddFileEntryExtractor) {
+-                    // Avoid unnecessary loading of the block in case there is a partition predicate mismatch for this add entry
+-                    entry = extractor.getEntry(session, pagePosition, page.getBlock(blockIndex));
+-                }
+-                else {
+-                    entry = extractor.getEntry(session, pagePosition, page.getBlock(blockIndex).getLoadedBlock());
+-                }
++                DeltaLakeTransactionLogEntry entry = extractor.getEntry(session, pagePosition, page.getBlock(blockIndex));
+                 if (entry != null) {
+                     nextEntries.add(entry);
+                 }
+diff --git a/plugin/trino-hive/src/main/java/io/trino/plugin/hive/coercions/CoercionUtils.java b/plugin/trino-hive/src/main/java/io/trino/plugin/hive/coercions/CoercionUtils.java
+index 95b5210fbb0d..3ac679d83a83 100644
+--- a/plugin/trino-hive/src/main/java/io/trino/plugin/hive/coercions/CoercionUtils.java
++++ b/plugin/trino-hive/src/main/java/io/trino/plugin/hive/coercions/CoercionUtils.java
+@@ -35,7 +35,6 @@
+ import io.trino.spi.block.ColumnarArray;
+ import io.trino.spi.block.ColumnarMap;
+ import io.trino.spi.block.DictionaryBlock;
+-import io.trino.spi.block.LazyBlock;
+ import io.trino.spi.block.RowBlock;
+ import io.trino.spi.block.RunLengthEncodedBlock;
+ import io.trino.spi.type.ArrayType;
+@@ -466,11 +465,6 @@ public StructCoercer(RowType fromType, RowType toType, List<Optional<TypeCoercer
+         @Override
+         public Block apply(Block block)
+         {
+-            if (block instanceof LazyBlock lazyBlock) {
+-                // only load the top level block so non-coerced fields are not loaded
+-                block = lazyBlock.getBlock();
+-            }
+-
+             if (block instanceof RunLengthEncodedBlock runLengthEncodedBlock) {
+                 RowBlock rowBlock = (RowBlock) runLengthEncodedBlock.getValue();
+                 RowBlock newRowBlock = RowBlock.fromNotNullSuppressedFieldBlocks(
+diff --git a/plugin/trino-hive/src/main/java/io/trino/plugin/hive/util/HiveBlockEncodingSerde.java b/plugin/trino-hive/src/main/java/io/trino/plugin/hive/util/HiveBlockEncodingSerde.java
+index 821595efd5d3..00afd090724a 100644
+--- a/plugin/trino-hive/src/main/java/io/trino/plugin/hive/util/HiveBlockEncodingSerde.java
++++ b/plugin/trino-hive/src/main/java/io/trino/plugin/hive/util/HiveBlockEncodingSerde.java
+@@ -26,7 +26,6 @@
+ import io.trino.spi.block.Fixed12BlockEncoding;
+ import io.trino.spi.block.Int128ArrayBlockEncoding;
+ import io.trino.spi.block.IntArrayBlockEncoding;
+-import io.trino.spi.block.LazyBlockEncoding;
+ import io.trino.spi.block.LongArrayBlockEncoding;
+ import io.trino.spi.block.MapBlockEncoding;
+ import io.trino.spi.block.RowBlockEncoding;
+@@ -80,7 +79,6 @@ public HiveBlockEncodingSerde()
+         addBlockEncoding(new MapBlockEncoding());
+         addBlockEncoding(new RowBlockEncoding());
+         addBlockEncoding(new RunLengthBlockEncoding());
+-        addBlockEncoding(new LazyBlockEncoding());
+     }
+ 
+     private void addBlockEncoding(BlockEncoding blockEncoding)
+diff --git a/plugin/trino-hive/src/main/java/io/trino/plugin/hive/util/TempFileReader.java b/plugin/trino-hive/src/main/java/io/trino/plugin/hive/util/TempFileReader.java
+index dec6c5534055..2c4c5fb81af6 100644
+--- a/plugin/trino-hive/src/main/java/io/trino/plugin/hive/util/TempFileReader.java
++++ b/plugin/trino-hive/src/main/java/io/trino/plugin/hive/util/TempFileReader.java
+@@ -74,8 +74,7 @@ protected Page computeNext()
+                 return endOfData();
+             }
+ 
+-            // eagerly load the page
+-            return page.getPage().getLoadedPage();
++            return page.getPage();
+         }
+         catch (IOException e) {
+             throw handleException(e);
+diff --git a/plugin/trino-hive/src/test/java/io/trino/plugin/hive/TestHivePageSource.java b/plugin/trino-hive/src/test/java/io/trino/plugin/hive/TestHivePageSource.java
+index d52c1f5b7b92..3d91e4002ad0 100644
+--- a/plugin/trino-hive/src/test/java/io/trino/plugin/hive/TestHivePageSource.java
++++ b/plugin/trino-hive/src/test/java/io/trino/plugin/hive/TestHivePageSource.java
+@@ -101,10 +101,10 @@ private void testGetNextPageWhenHiveBucketingEnabled(OptionalInt tableBucketNumb
+                 nativeValueToBlock(VARCHAR, utf8Slice("a")),
+                 nativeValueToBlock(BIGINT, 1L)
+         };
+-        Page page = new Page(1, blocks);
++        SourcePage page = SourcePage.create(new Page(1, blocks));
+ 
+         try (
+-                ConnectorPageSource pageSource = new TestScanFilterAndProjectOperator.SinglePagePageSource(SourcePage.create(page));
++                ConnectorPageSource pageSource = new TestScanFilterAndProjectOperator.SinglePagePageSource(page);
+                 ConnectorPageSource hivePageSource = createHivePageSource(
+                         columnMappings,
+                         Optional.empty(),
+diff --git a/plugin/trino-hive/src/test/java/io/trino/plugin/hive/TestOrcPageSourceMemoryTracking.java b/plugin/trino-hive/src/test/java/io/trino/plugin/hive/TestOrcPageSourceMemoryTracking.java
+index d0e43d6e0035..6bbc48bb58a5 100644
+--- a/plugin/trino-hive/src/test/java/io/trino/plugin/hive/TestOrcPageSourceMemoryTracking.java
++++ b/plugin/trino-hive/src/test/java/io/trino/plugin/hive/TestOrcPageSourceMemoryTracking.java
+@@ -369,7 +369,7 @@ private void testMaxReadBytes(int rowCount)
+                 }
+                 assertThat(page).isNotNull();
+                 // load all page data
+-                page.getPage().getLoadedPage();
++                page.getPage();
+                 positionCount += page.getPositionCount();
+                 // assert upper bound is tight
+                 // ignore the first MAX_BATCH_SIZE rows given the sizes are set when loading the blocks

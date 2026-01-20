@@ -1,0 +1,2246 @@
+diff --git a/library/std/src/sys/pal/hermit/mod.rs b/library/std/src/sys/pal/hermit/mod.rs
+index eca7351d54c8d..55583b89d6714 100644
+--- a/library/std/src/sys/pal/hermit/mod.rs
++++ b/library/std/src/sys/pal/hermit/mod.rs
+@@ -32,9 +32,6 @@ pub mod pipe;
+ pub mod process;
+ pub mod stdio;
+ pub mod thread;
+-pub mod thread_local_dtor;
+-#[path = "../unsupported/thread_local_key.rs"]
+-pub mod thread_local_key;
+ pub mod time;
+ 
+ use crate::io::ErrorKind;
+@@ -97,7 +94,6 @@ pub unsafe extern "C" fn runtime_entry(
+     argv: *const *const c_char,
+     env: *const *const c_char,
+ ) -> ! {
+-    use thread_local_dtor::run_dtors;
+     extern "C" {
+         fn main(argc: isize, argv: *const *const c_char) -> i32;
+     }
+@@ -107,7 +103,7 @@ pub unsafe extern "C" fn runtime_entry(
+ 
+     let result = main(argc as isize, argv);
+ 
+-    run_dtors();
++    crate::sys::thread_local::destructors::run();
+     hermit_abi::exit(result);
+ }
+ 
+diff --git a/library/std/src/sys/pal/hermit/thread.rs b/library/std/src/sys/pal/hermit/thread.rs
+index 07a843a597ea3..a244b953d2a49 100644
+--- a/library/std/src/sys/pal/hermit/thread.rs
++++ b/library/std/src/sys/pal/hermit/thread.rs
+@@ -1,7 +1,6 @@
+ #![allow(dead_code)]
+ 
+ use super::hermit_abi;
+-use super::thread_local_dtor::run_dtors;
+ use crate::ffi::CStr;
+ use crate::io;
+ use crate::mem;
+@@ -50,7 +49,7 @@ impl Thread {
+                 Box::from_raw(ptr::with_exposed_provenance::<Box<dyn FnOnce()>>(main).cast_mut())();
+ 
+                 // run all destructors
+-                run_dtors();
++                crate::sys::thread_local::destructors::run();
+             }
+         }
+     }
+diff --git a/library/std/src/sys/pal/hermit/thread_local_dtor.rs b/library/std/src/sys/pal/hermit/thread_local_dtor.rs
+deleted file mode 100644
+index 98adaf4bff1aa..0000000000000
+--- a/library/std/src/sys/pal/hermit/thread_local_dtor.rs
++++ /dev/null
+@@ -1,29 +0,0 @@
+-#![cfg(target_thread_local)]
+-#![unstable(feature = "thread_local_internals", issue = "none")]
+-
+-// Simplify dtor registration by using a list of destructors.
+-// The this solution works like the implementation of macOS and
+-// doesn't additional OS support
+-
+-use crate::cell::RefCell;
+-
+-#[thread_local]
+-static DTORS: RefCell<Vec<(*mut u8, unsafe extern "C" fn(*mut u8))>> = RefCell::new(Vec::new());
+-
+-pub unsafe fn register_dtor(t: *mut u8, dtor: unsafe extern "C" fn(*mut u8)) {
+-    match DTORS.try_borrow_mut() {
+-        Ok(mut dtors) => dtors.push((t, dtor)),
+-        Err(_) => rtabort!("global allocator may not use TLS"),
+-    }
+-}
+-
+-// every thread call this function to run through all possible destructors
+-pub unsafe fn run_dtors() {
+-    let mut list = DTORS.take();
+-    while !list.is_empty() {
+-        for (ptr, dtor) in list {
+-            dtor(ptr);
+-        }
+-        list = DTORS.take();
+-    }
+-}
+diff --git a/library/std/src/sys/pal/itron/thread.rs b/library/std/src/sys/pal/itron/thread.rs
+index a0c8217128f39..fd7b5558f7566 100644
+--- a/library/std/src/sys/pal/itron/thread.rs
++++ b/library/std/src/sys/pal/itron/thread.rs
+@@ -15,7 +15,6 @@ use crate::{
+     num::NonZero,
+     ptr::NonNull,
+     sync::atomic::{AtomicUsize, Ordering},
+-    sys::thread_local_dtor::run_dtors,
+     time::Duration,
+ };
+ 
+@@ -117,7 +116,7 @@ impl Thread {
+ 
+             // Run TLS destructors now because they are not
+             // called automatically for terminated tasks.
+-            unsafe { run_dtors() };
++            unsafe { crate::sys::thread_local::destructors::run() };
+ 
+             let old_lifecycle = inner
+                 .lifecycle
+diff --git a/library/std/src/sys/pal/sgx/mod.rs b/library/std/src/sys/pal/sgx/mod.rs
+index d30976ec15149..851ab9b9f9767 100644
+--- a/library/std/src/sys/pal/sgx/mod.rs
++++ b/library/std/src/sys/pal/sgx/mod.rs
+@@ -26,7 +26,6 @@ pub mod pipe;
+ pub mod process;
+ pub mod stdio;
+ pub mod thread;
+-pub mod thread_local_key;
+ pub mod thread_parking;
+ pub mod time;
+ pub mod waitqueue;
+diff --git a/library/std/src/sys/pal/solid/mod.rs b/library/std/src/sys/pal/solid/mod.rs
+index 3f6ff37903ac6..9a7741ddda71e 100644
+--- a/library/std/src/sys/pal/solid/mod.rs
++++ b/library/std/src/sys/pal/solid/mod.rs
+@@ -33,8 +33,6 @@ pub mod pipe;
+ pub mod process;
+ pub mod stdio;
+ pub use self::itron::thread;
+-pub mod thread_local_dtor;
+-pub mod thread_local_key;
+ pub use self::itron::thread_parking;
+ pub mod time;
+ 
+diff --git a/library/std/src/sys/pal/solid/thread_local_dtor.rs b/library/std/src/sys/pal/solid/thread_local_dtor.rs
+deleted file mode 100644
+index 26918a4fcb012..0000000000000
+--- a/library/std/src/sys/pal/solid/thread_local_dtor.rs
++++ /dev/null
+@@ -1,43 +0,0 @@
+-#![cfg(target_thread_local)]
+-#![unstable(feature = "thread_local_internals", issue = "none")]
+-
+-// Simplify dtor registration by using a list of destructors.
+-
+-use super::{abi, itron::task};
+-use crate::cell::{Cell, RefCell};
+-
+-#[thread_local]
+-static REGISTERED: Cell<bool> = Cell::new(false);
+-
+-#[thread_local]
+-static DTORS: RefCell<Vec<(*mut u8, unsafe extern "C" fn(*mut u8))>> = RefCell::new(Vec::new());
+-
+-pub unsafe fn register_dtor(t: *mut u8, dtor: unsafe extern "C" fn(*mut u8)) {
+-    if !REGISTERED.get() {
+-        let tid = task::current_task_id_aborting();
+-        // Register `tls_dtor` to make sure the TLS destructors are called
+-        // for tasks created by other means than `std::thread`
+-        unsafe { abi::SOLID_TLS_AddDestructor(tid as i32, tls_dtor) };
+-        REGISTERED.set(true);
+-    }
+-
+-    match DTORS.try_borrow_mut() {
+-        Ok(mut dtors) => dtors.push((t, dtor)),
+-        Err(_) => rtabort!("global allocator may not use TLS"),
+-    }
+-}
+-
+-pub unsafe fn run_dtors() {
+-    let mut list = DTORS.take();
+-    while !list.is_empty() {
+-        for (ptr, dtor) in list {
+-            unsafe { dtor(ptr) };
+-        }
+-
+-        list = DTORS.take();
+-    }
+-}
+-
+-unsafe extern "C" fn tls_dtor(_unused: *mut u8) {
+-    unsafe { run_dtors() };
+-}
+diff --git a/library/std/src/sys/pal/solid/thread_local_key.rs b/library/std/src/sys/pal/solid/thread_local_key.rs
+deleted file mode 100644
+index b37bf99969887..0000000000000
+--- a/library/std/src/sys/pal/solid/thread_local_key.rs
++++ /dev/null
+@@ -1,21 +0,0 @@
+-pub type Key = usize;
+-
+-#[inline]
+-pub unsafe fn create(_dtor: Option<unsafe extern "C" fn(*mut u8)>) -> Key {
+-    panic!("should not be used on the solid target");
+-}
+-
+-#[inline]
+-pub unsafe fn set(_key: Key, _value: *mut u8) {
+-    panic!("should not be used on the solid target");
+-}
+-
+-#[inline]
+-pub unsafe fn get(_key: Key) -> *mut u8 {
+-    panic!("should not be used on the solid target");
+-}
+-
+-#[inline]
+-pub unsafe fn destroy(_key: Key) {
+-    panic!("should not be used on the solid target");
+-}
+diff --git a/library/std/src/sys/pal/teeos/mod.rs b/library/std/src/sys/pal/teeos/mod.rs
+index 6dd465a12ed49..2a789e72722bd 100644
+--- a/library/std/src/sys/pal/teeos/mod.rs
++++ b/library/std/src/sys/pal/teeos/mod.rs
+@@ -27,9 +27,6 @@ pub mod process;
+ mod rand;
+ pub mod stdio;
+ pub mod thread;
+-pub mod thread_local_dtor;
+-#[path = "../unix/thread_local_key.rs"]
+-pub mod thread_local_key;
+ #[allow(non_upper_case_globals)]
+ #[path = "../unix/time.rs"]
+ pub mod time;
+diff --git a/library/std/src/sys/pal/teeos/thread_local_dtor.rs b/library/std/src/sys/pal/teeos/thread_local_dtor.rs
+deleted file mode 100644
+index 5c6bc4d675011..0000000000000
+--- a/library/std/src/sys/pal/teeos/thread_local_dtor.rs
++++ /dev/null
+@@ -1,4 +0,0 @@
+-pub unsafe fn register_dtor(t: *mut u8, dtor: unsafe extern "C" fn(*mut u8)) {
+-    use crate::sys_common::thread_local_dtor::register_dtor_fallback;
+-    register_dtor_fallback(t, dtor);
+-}
+diff --git a/library/std/src/sys/pal/uefi/mod.rs b/library/std/src/sys/pal/uefi/mod.rs
+index 48b74df138439..408031a461665 100644
+--- a/library/std/src/sys/pal/uefi/mod.rs
++++ b/library/std/src/sys/pal/uefi/mod.rs
+@@ -28,8 +28,6 @@ pub mod pipe;
+ pub mod process;
+ pub mod stdio;
+ pub mod thread;
+-#[path = "../unsupported/thread_local_key.rs"]
+-pub mod thread_local_key;
+ pub mod time;
+ 
+ mod helpers;
+diff --git a/library/std/src/sys/pal/unix/mod.rs b/library/std/src/sys/pal/unix/mod.rs
+index b370f06e92baf..16fc2011d7085 100644
+--- a/library/std/src/sys/pal/unix/mod.rs
++++ b/library/std/src/sys/pal/unix/mod.rs
+@@ -33,8 +33,6 @@ pub mod rand;
+ pub mod stack_overflow;
+ pub mod stdio;
+ pub mod thread;
+-pub mod thread_local_dtor;
+-pub mod thread_local_key;
+ pub mod thread_parking;
+ pub mod time;
+ 
+diff --git a/library/std/src/sys/pal/unix/thread_local_dtor.rs b/library/std/src/sys/pal/unix/thread_local_dtor.rs
+deleted file mode 100644
+index 75db6e112ed35..0000000000000
+--- a/library/std/src/sys/pal/unix/thread_local_dtor.rs
++++ /dev/null
+@@ -1,126 +0,0 @@
+-#![cfg(target_thread_local)]
+-#![unstable(feature = "thread_local_internals", issue = "none")]
+-
+-//! Provides thread-local destructors without an associated "key", which
+-//! can be more efficient.
+-
+-// Since what appears to be glibc 2.18 this symbol has been shipped which
+-// GCC and clang both use to invoke destructors in thread_local globals, so
+-// let's do the same!
+-//
+-// Note, however, that we run on lots older linuxes, as well as cross
+-// compiling from a newer linux to an older linux, so we also have a
+-// fallback implementation to use as well.
+-#[cfg(any(
+-    target_os = "linux",
+-    target_os = "android",
+-    target_os = "fuchsia",
+-    target_os = "redox",
+-    target_os = "hurd",
+-    target_os = "netbsd",
+-    target_os = "dragonfly"
+-))]
+-// FIXME: The Rust compiler currently omits weakly function definitions (i.e.,
+-// __cxa_thread_atexit_impl) and its metadata from LLVM IR.
+-#[no_sanitize(cfi, kcfi)]
+-pub unsafe fn register_dtor(t: *mut u8, dtor: unsafe extern "C" fn(*mut u8)) {
+-    use crate::mem;
+-    use crate::sys_common::thread_local_dtor::register_dtor_fallback;
+-
+-    /// This is necessary because the __cxa_thread_atexit_impl implementation
+-    /// std links to by default may be a C or C++ implementation that was not
+-    /// compiled using the Clang integer normalization option.
+-    #[cfg(sanitizer_cfi_normalize_integers)]
+-    use core::ffi::c_int;
+-    #[cfg(not(sanitizer_cfi_normalize_integers))]
+-    #[cfi_encoding = "i"]
+-    #[repr(transparent)]
+-    pub struct c_int(#[allow(dead_code)] pub libc::c_int);
+-
+-    extern "C" {
+-        #[linkage = "extern_weak"]
+-        static __dso_handle: *mut u8;
+-        #[linkage = "extern_weak"]
+-        static __cxa_thread_atexit_impl: Option<
+-            extern "C" fn(
+-                unsafe extern "C" fn(*mut libc::c_void),
+-                *mut libc::c_void,
+-                *mut libc::c_void,
+-            ) -> c_int,
+-        >;
+-    }
+-
+-    if let Some(f) = __cxa_thread_atexit_impl {
+-        unsafe {
+-            f(
+-                mem::transmute::<
+-                    unsafe extern "C" fn(*mut u8),
+-                    unsafe extern "C" fn(*mut libc::c_void),
+-                >(dtor),
+-                t.cast(),
+-                core::ptr::addr_of!(__dso_handle) as *mut _,
+-            );
+-        }
+-        return;
+-    }
+-    register_dtor_fallback(t, dtor);
+-}
+-
+-// This implementation is very similar to register_dtor_fallback in
+-// sys_common/thread_local.rs. The main difference is that we want to hook into
+-// macOS's analog of the above linux function, _tlv_atexit. OSX will run the
+-// registered dtors before any TLS slots get freed, and when the main thread
+-// exits.
+-//
+-// Unfortunately, calling _tlv_atexit while tls dtors are running is UB. The
+-// workaround below is to register, via _tlv_atexit, a custom DTOR list once per
+-// thread. thread_local dtors are pushed to the DTOR list without calling
+-// _tlv_atexit.
+-#[cfg(target_vendor = "apple")]
+-pub unsafe fn register_dtor(t: *mut u8, dtor: unsafe extern "C" fn(*mut u8)) {
+-    use crate::cell::{Cell, RefCell};
+-    use crate::ptr;
+-
+-    #[thread_local]
+-    static REGISTERED: Cell<bool> = Cell::new(false);
+-
+-    #[thread_local]
+-    static DTORS: RefCell<Vec<(*mut u8, unsafe extern "C" fn(*mut u8))>> = RefCell::new(Vec::new());
+-
+-    if !REGISTERED.get() {
+-        _tlv_atexit(run_dtors, ptr::null_mut());
+-        REGISTERED.set(true);
+-    }
+-
+-    extern "C" {
+-        fn _tlv_atexit(dtor: unsafe extern "C" fn(*mut u8), arg: *mut u8);
+-    }
+-
+-    match DTORS.try_borrow_mut() {
+-        Ok(mut dtors) => dtors.push((t, dtor)),
+-        Err(_) => rtabort!("global allocator may not use TLS"),
+-    }
+-
+-    unsafe extern "C" fn run_dtors(_: *mut u8) {
+-        let mut list = DTORS.take();
+-        while !list.is_empty() {
+-            for (ptr, dtor) in list {
+-                dtor(ptr);
+-            }
+-            list = DTORS.take();
+-        }
+-    }
+-}
+-
+-#[cfg(any(
+-    target_os = "vxworks",
+-    target_os = "horizon",
+-    target_os = "emscripten",
+-    target_os = "aix",
+-    target_os = "freebsd",
+-))]
+-#[cfg_attr(target_family = "wasm", allow(unused))] // might remain unused depending on target details (e.g. wasm32-unknown-emscripten)
+-pub unsafe fn register_dtor(t: *mut u8, dtor: unsafe extern "C" fn(*mut u8)) {
+-    use crate::sys_common::thread_local_dtor::register_dtor_fallback;
+-    register_dtor_fallback(t, dtor);
+-}
+diff --git a/library/std/src/sys/pal/unix/thread_local_key.rs b/library/std/src/sys/pal/unix/thread_local_key.rs
+deleted file mode 100644
+index 2b2d079ee4d01..0000000000000
+--- a/library/std/src/sys/pal/unix/thread_local_key.rs
++++ /dev/null
+@@ -1,29 +0,0 @@
+-#![allow(dead_code)] // not used on all platforms
+-
+-use crate::mem;
+-
+-pub type Key = libc::pthread_key_t;
+-
+-#[inline]
+-pub unsafe fn create(dtor: Option<unsafe extern "C" fn(*mut u8)>) -> Key {
+-    let mut key = 0;
+-    assert_eq!(libc::pthread_key_create(&mut key, mem::transmute(dtor)), 0);
+-    key
+-}
+-
+-#[inline]
+-pub unsafe fn set(key: Key, value: *mut u8) {
+-    let r = libc::pthread_setspecific(key, value as *mut _);
+-    debug_assert_eq!(r, 0);
+-}
+-
+-#[inline]
+-pub unsafe fn get(key: Key) -> *mut u8 {
+-    libc::pthread_getspecific(key) as *mut u8
+-}
+-
+-#[inline]
+-pub unsafe fn destroy(key: Key) {
+-    let r = libc::pthread_key_delete(key);
+-    debug_assert_eq!(r, 0);
+-}
+diff --git a/library/std/src/sys/pal/unsupported/mod.rs b/library/std/src/sys/pal/unsupported/mod.rs
+index 01f5cfd429753..442e6042ad561 100644
+--- a/library/std/src/sys/pal/unsupported/mod.rs
++++ b/library/std/src/sys/pal/unsupported/mod.rs
+@@ -11,9 +11,6 @@ pub mod pipe;
+ pub mod process;
+ pub mod stdio;
+ pub mod thread;
+-#[cfg(target_thread_local)]
+-pub mod thread_local_dtor;
+-pub mod thread_local_key;
+ pub mod time;
+ 
+ mod common;
+diff --git a/library/std/src/sys/pal/unsupported/thread_local_dtor.rs b/library/std/src/sys/pal/unsupported/thread_local_dtor.rs
+deleted file mode 100644
+index 84660ea588156..0000000000000
+--- a/library/std/src/sys/pal/unsupported/thread_local_dtor.rs
++++ /dev/null
+@@ -1,10 +0,0 @@
+-#![unstable(feature = "thread_local_internals", issue = "none")]
+-
+-#[cfg_attr(target_family = "wasm", allow(unused))] // unused on wasm32-unknown-unknown
+-pub unsafe fn register_dtor(_t: *mut u8, _dtor: unsafe extern "C" fn(*mut u8)) {
+-    // FIXME: right now there is no concept of "thread exit", but this is likely
+-    // going to show up at some point in the form of an exported symbol that the
+-    // wasm runtime is going to be expected to call. For now we basically just
+-    // ignore the arguments, but if such a function starts to exist it will
+-    // likely look like the OSX implementation in `unix/fast_thread_local.rs`
+-}
+diff --git a/library/std/src/sys/pal/unsupported/thread_local_key.rs b/library/std/src/sys/pal/unsupported/thread_local_key.rs
+deleted file mode 100644
+index b6e5e4cd2e197..0000000000000
+--- a/library/std/src/sys/pal/unsupported/thread_local_key.rs
++++ /dev/null
+@@ -1,21 +0,0 @@
+-pub type Key = usize;
+-
+-#[inline]
+-pub unsafe fn create(_dtor: Option<unsafe extern "C" fn(*mut u8)>) -> Key {
+-    panic!("should not be used on this target");
+-}
+-
+-#[inline]
+-pub unsafe fn set(_key: Key, _value: *mut u8) {
+-    panic!("should not be used on this target");
+-}
+-
+-#[inline]
+-pub unsafe fn get(_key: Key) -> *mut u8 {
+-    panic!("should not be used on this target");
+-}
+-
+-#[inline]
+-pub unsafe fn destroy(_key: Key) {
+-    panic!("should not be used on this target");
+-}
+diff --git a/library/std/src/sys/pal/wasi/mod.rs b/library/std/src/sys/pal/wasi/mod.rs
+index c1266619b36ab..8dfb733043e77 100644
+--- a/library/std/src/sys/pal/wasi/mod.rs
++++ b/library/std/src/sys/pal/wasi/mod.rs
+@@ -33,10 +33,6 @@ pub mod pipe;
+ pub mod process;
+ pub mod stdio;
+ pub mod thread;
+-#[path = "../unsupported/thread_local_dtor.rs"]
+-pub mod thread_local_dtor;
+-#[path = "../unsupported/thread_local_key.rs"]
+-pub mod thread_local_key;
+ pub mod time;
+ 
+ #[path = "../unsupported/common.rs"]
+diff --git a/library/std/src/sys/pal/wasip2/mod.rs b/library/std/src/sys/pal/wasip2/mod.rs
+index 6787ffb4bed8f..7af0917b8ed42 100644
+--- a/library/std/src/sys/pal/wasip2/mod.rs
++++ b/library/std/src/sys/pal/wasip2/mod.rs
+@@ -34,10 +34,6 @@ pub mod process;
+ pub mod stdio;
+ #[path = "../wasi/thread.rs"]
+ pub mod thread;
+-#[path = "../unsupported/thread_local_dtor.rs"]
+-pub mod thread_local_dtor;
+-#[path = "../unsupported/thread_local_key.rs"]
+-pub mod thread_local_key;
+ #[path = "../wasi/time.rs"]
+ pub mod time;
+ 
+diff --git a/library/std/src/sys/pal/wasm/mod.rs b/library/std/src/sys/pal/wasm/mod.rs
+index 75dd10826cc04..4c34859e918bb 100644
+--- a/library/std/src/sys/pal/wasm/mod.rs
++++ b/library/std/src/sys/pal/wasm/mod.rs
+@@ -34,10 +34,6 @@ pub mod pipe;
+ pub mod process;
+ #[path = "../unsupported/stdio.rs"]
+ pub mod stdio;
+-#[path = "../unsupported/thread_local_dtor.rs"]
+-pub mod thread_local_dtor;
+-#[path = "../unsupported/thread_local_key.rs"]
+-pub mod thread_local_key;
+ #[path = "../unsupported/time.rs"]
+ pub mod time;
+ 
+diff --git a/library/std/src/sys/pal/windows/c.rs b/library/std/src/sys/pal/windows/c.rs
+index 9d58ce05f018b..6ec82693077dc 100644
+--- a/library/std/src/sys/pal/windows/c.rs
++++ b/library/std/src/sys/pal/windows/c.rs
+@@ -54,6 +54,7 @@ pub const EXIT_FAILURE: u32 = 1;
+ pub const CONDITION_VARIABLE_INIT: CONDITION_VARIABLE = CONDITION_VARIABLE { Ptr: ptr::null_mut() };
+ #[cfg(target_vendor = "win7")]
+ pub const SRWLOCK_INIT: SRWLOCK = SRWLOCK { Ptr: ptr::null_mut() };
++#[cfg(not(target_thread_local))]
+ pub const INIT_ONCE_STATIC_INIT: INIT_ONCE = INIT_ONCE { Ptr: ptr::null_mut() };
+ 
+ // Some windows_sys types have different signs than the types we use.
+diff --git a/library/std/src/sys/pal/windows/mod.rs b/library/std/src/sys/pal/windows/mod.rs
+index 402a205977b07..a1bc2965e2e55 100644
+--- a/library/std/src/sys/pal/windows/mod.rs
++++ b/library/std/src/sys/pal/windows/mod.rs
+@@ -31,8 +31,6 @@ pub mod process;
+ pub mod rand;
+ pub mod stdio;
+ pub mod thread;
+-pub mod thread_local_dtor;
+-pub mod thread_local_key;
+ pub mod time;
+ cfg_if::cfg_if! {
+     if #[cfg(not(target_vendor = "uwp"))] {
+diff --git a/library/std/src/sys/pal/windows/thread_local_dtor.rs b/library/std/src/sys/pal/windows/thread_local_dtor.rs
+deleted file mode 100644
+index cf542d2bfb838..0000000000000
+--- a/library/std/src/sys/pal/windows/thread_local_dtor.rs
++++ /dev/null
+@@ -1,7 +0,0 @@
+-//! Implements thread-local destructors that are not associated with any
+-//! particular data.
+-
+-#![unstable(feature = "thread_local_internals", issue = "none")]
+-#![cfg(target_thread_local)]
+-
+-pub use super::thread_local_key::register_keyless_dtor as register_dtor;
+diff --git a/library/std/src/sys/pal/windows/thread_local_key.rs b/library/std/src/sys/pal/windows/thread_local_key.rs
+deleted file mode 100644
+index e5ba619fc6ba4..0000000000000
+--- a/library/std/src/sys/pal/windows/thread_local_key.rs
++++ /dev/null
+@@ -1,351 +0,0 @@
+-use crate::cell::UnsafeCell;
+-use crate::ptr;
+-use crate::sync::atomic::{
+-    AtomicPtr, AtomicU32,
+-    Ordering::{AcqRel, Acquire, Relaxed, Release},
+-};
+-use crate::sys::c;
+-
+-#[cfg(test)]
+-mod tests;
+-
+-// Using a per-thread list avoids the problems in synchronizing global state.
+-#[thread_local]
+-#[cfg(target_thread_local)]
+-static DESTRUCTORS: crate::cell::RefCell<Vec<(*mut u8, unsafe extern "C" fn(*mut u8))>> =
+-    crate::cell::RefCell::new(Vec::new());
+-
+-// Ensure this can never be inlined because otherwise this may break in dylibs.
+-// See #44391.
+-#[inline(never)]
+-#[cfg(target_thread_local)]
+-pub unsafe fn register_keyless_dtor(t: *mut u8, dtor: unsafe extern "C" fn(*mut u8)) {
+-    dtors_used();
+-    match DESTRUCTORS.try_borrow_mut() {
+-        Ok(mut dtors) => dtors.push((t, dtor)),
+-        Err(_) => rtabort!("global allocator may not use TLS"),
+-    }
+-}
+-
+-#[inline(never)] // See comment above
+-#[cfg(target_thread_local)]
+-/// Runs destructors. This should not be called until thread exit.
+-unsafe fn run_keyless_dtors() {
+-    // Drop all the destructors.
+-    //
+-    // Note: While this is potentially an infinite loop, it *should* be
+-    // the case that this loop always terminates because we provide the
+-    // guarantee that a TLS key cannot be set after it is flagged for
+-    // destruction.
+-    loop {
+-        // Use a let-else binding to ensure the `RefCell` guard is dropped
+-        // immediately. Otherwise, a panic would occur if a TLS destructor
+-        // tries to access the list.
+-        let Some((ptr, dtor)) = DESTRUCTORS.borrow_mut().pop() else {
+-            break;
+-        };
+-        (dtor)(ptr);
+-    }
+-    // We're done so free the memory.
+-    DESTRUCTORS.replace(Vec::new());
+-}
+-
+-type Key = c::DWORD;
+-type Dtor = unsafe extern "C" fn(*mut u8);
+-
+-// Turns out, like pretty much everything, Windows is pretty close the
+-// functionality that Unix provides, but slightly different! In the case of
+-// TLS, Windows does not provide an API to provide a destructor for a TLS
+-// variable. This ends up being pretty crucial to this implementation, so we
+-// need a way around this.
+-//
+-// The solution here ended up being a little obscure, but fear not, the
+-// internet has informed me [1][2] that this solution is not unique (no way
+-// I could have thought of it as well!). The key idea is to insert some hook
+-// somewhere to run arbitrary code on thread termination. With this in place
+-// we'll be able to run anything we like, including all TLS destructors!
+-//
+-// To accomplish this feat, we perform a number of threads, all contained
+-// within this module:
+-//
+-// * All TLS destructors are tracked by *us*, not the Windows runtime. This
+-//   means that we have a global list of destructors for each TLS key that
+-//   we know about.
+-// * When a thread exits, we run over the entire list and run dtors for all
+-//   non-null keys. This attempts to match Unix semantics in this regard.
+-//
+-// For more details and nitty-gritty, see the code sections below!
+-//
+-// [1]: https://www.codeproject.com/Articles/8113/Thread-Local-Storage-The-C-Way
+-// [2]: https://github.com/ChromiumWebApps/chromium/blob/master/base/threading/thread_local_storage_win.cc#L42
+-
+-pub struct StaticKey {
+-    /// The key value shifted up by one. Since TLS_OUT_OF_INDEXES == DWORD::MAX
+-    /// is not a valid key value, this allows us to use zero as sentinel value
+-    /// without risking overflow.
+-    key: AtomicU32,
+-    dtor: Option<Dtor>,
+-    next: AtomicPtr<StaticKey>,
+-    /// Currently, destructors cannot be unregistered, so we cannot use racy
+-    /// initialization for keys. Instead, we need synchronize initialization.
+-    /// Use the Windows-provided `Once` since it does not require TLS.
+-    once: UnsafeCell<c::INIT_ONCE>,
+-}
+-
+-impl StaticKey {
+-    #[inline]
+-    pub const fn new(dtor: Option<Dtor>) -> StaticKey {
+-        StaticKey {
+-            key: AtomicU32::new(0),
+-            dtor,
+-            next: AtomicPtr::new(ptr::null_mut()),
+-            once: UnsafeCell::new(c::INIT_ONCE_STATIC_INIT),
+-        }
+-    }
+-
+-    #[inline]
+-    pub unsafe fn set(&'static self, val: *mut u8) {
+-        let r = c::TlsSetValue(self.key(), val.cast());
+-        debug_assert_eq!(r, c::TRUE);
+-    }
+-
+-    #[inline]
+-    pub unsafe fn get(&'static self) -> *mut u8 {
+-        c::TlsGetValue(self.key()).cast()
+-    }
+-
+-    #[inline]
+-    unsafe fn key(&'static self) -> Key {
+-        match self.key.load(Acquire) {
+-            0 => self.init(),
+-            key => key - 1,
+-        }
+-    }
+-
+-    #[cold]
+-    unsafe fn init(&'static self) -> Key {
+-        if self.dtor.is_some() {
+-            dtors_used();
+-            let mut pending = c::FALSE;
+-            let r = c::InitOnceBeginInitialize(self.once.get(), 0, &mut pending, ptr::null_mut());
+-            assert_eq!(r, c::TRUE);
+-
+-            if pending == c::FALSE {
+-                // Some other thread initialized the key, load it.
+-                self.key.load(Relaxed) - 1
+-            } else {
+-                let key = c::TlsAlloc();
+-                if key == c::TLS_OUT_OF_INDEXES {
+-                    // Wakeup the waiting threads before panicking to avoid deadlock.
+-                    c::InitOnceComplete(self.once.get(), c::INIT_ONCE_INIT_FAILED, ptr::null_mut());
+-                    panic!("out of TLS indexes");
+-                }
+-
+-                register_dtor(self);
+-
+-                // Release-storing the key needs to be the last thing we do.
+-                // This is because in `fn key()`, other threads will do an acquire load of the key,
+-                // and if that sees this write then it will entirely bypass the `InitOnce`. We thus
+-                // need to establish synchronization through `key`. In particular that acquire load
+-                // must happen-after the register_dtor above, to ensure the dtor actually runs!
+-                self.key.store(key + 1, Release);
+-
+-                let r = c::InitOnceComplete(self.once.get(), 0, ptr::null_mut());
+-                debug_assert_eq!(r, c::TRUE);
+-
+-                key
+-            }
+-        } else {
+-            // If there is no destructor to clean up, we can use racy initialization.
+-
+-            let key = c::TlsAlloc();
+-            assert_ne!(key, c::TLS_OUT_OF_INDEXES, "out of TLS indexes");
+-
+-            match self.key.compare_exchange(0, key + 1, AcqRel, Acquire) {
+-                Ok(_) => key,
+-                Err(new) => {
+-                    // Some other thread completed initialization first, so destroy
+-                    // our key and use theirs.
+-                    let r = c::TlsFree(key);
+-                    debug_assert_eq!(r, c::TRUE);
+-                    new - 1
+-                }
+-            }
+-        }
+-    }
+-}
+-
+-unsafe impl Send for StaticKey {}
+-unsafe impl Sync for StaticKey {}
+-
+-// -------------------------------------------------------------------------
+-// Dtor registration
+-//
+-// Windows has no native support for running destructors so we manage our own
+-// list of destructors to keep track of how to destroy keys. We then install a
+-// callback later to get invoked whenever a thread exits, running all
+-// appropriate destructors.
+-//
+-// Currently unregistration from this list is not supported. A destructor can be
+-// registered but cannot be unregistered. There's various simplifying reasons
+-// for doing this, the big ones being:
+-//
+-// 1. Currently we don't even support deallocating TLS keys, so normal operation
+-//    doesn't need to deallocate a destructor.
+-// 2. There is no point in time where we know we can unregister a destructor
+-//    because it could always be getting run by some remote thread.
+-//
+-// Typically processes have a statically known set of TLS keys which is pretty
+-// small, and we'd want to keep this memory alive for the whole process anyway
+-// really.
+-
+-static DTORS: AtomicPtr<StaticKey> = AtomicPtr::new(ptr::null_mut());
+-
+-/// Should only be called once per key, otherwise loops or breaks may occur in
+-/// the linked list.
+-unsafe fn register_dtor(key: &'static StaticKey) {
+-    // Ensure this is never run when native thread locals are available.
+-    assert_eq!(false, cfg!(target_thread_local));
+-    let this = <*const StaticKey>::cast_mut(key);
+-    // Use acquire ordering to pass along the changes done by the previously
+-    // registered keys when we store the new head with release ordering.
+-    let mut head = DTORS.load(Acquire);
+-    loop {
+-        key.next.store(head, Relaxed);
+-        match DTORS.compare_exchange_weak(head, this, Release, Acquire) {
+-            Ok(_) => break,
+-            Err(new) => head = new,
+-        }
+-    }
+-}
+-
+-// -------------------------------------------------------------------------
+-// Where the Magic (TM) Happens
+-//
+-// If you're looking at this code, and wondering "what is this doing?",
+-// you're not alone! I'll try to break this down step by step:
+-//
+-// # What's up with CRT$XLB?
+-//
+-// For anything about TLS destructors to work on Windows, we have to be able
+-// to run *something* when a thread exits. To do so, we place a very special
+-// static in a very special location. If this is encoded in just the right
+-// way, the kernel's loader is apparently nice enough to run some function
+-// of ours whenever a thread exits! How nice of the kernel!
+-//
+-// Lots of detailed information can be found in source [1] above, but the
+-// gist of it is that this is leveraging a feature of Microsoft's PE format
+-// (executable format) which is not actually used by any compilers today.
+-// This apparently translates to any callbacks in the ".CRT$XLB" section
+-// being run on certain events.
+-//
+-// So after all that, we use the compiler's #[link_section] feature to place
+-// a callback pointer into the magic section so it ends up being called.
+-//
+-// # What's up with this callback?
+-//
+-// The callback specified receives a number of parameters from... someone!
+-// (the kernel? the runtime? I'm not quite sure!) There are a few events that
+-// this gets invoked for, but we're currently only interested on when a
+-// thread or a process "detaches" (exits). The process part happens for the
+-// last thread and the thread part happens for any normal thread.
+-//
+-// # Ok, what's up with running all these destructors?
+-//
+-// This will likely need to be improved over time, but this function
+-// attempts a "poor man's" destructor callback system. Once we've got a list
+-// of what to run, we iterate over all keys, check their values, and then run
+-// destructors if the values turn out to be non null (setting them to null just
+-// beforehand). We do this a few times in a loop to basically match Unix
+-// semantics. If we don't reach a fixed point after a short while then we just
+-// inevitably leak something most likely.
+-//
+-// # The article mentions weird stuff about "/INCLUDE"?
+-//
+-// It sure does! Specifically we're talking about this quote:
+-//
+-//      The Microsoft run-time library facilitates this process by defining a
+-//      memory image of the TLS Directory and giving it the special name
+-//      “__tls_used” (Intel x86 platforms) or “_tls_used” (other platforms). The
+-//      linker looks for this memory image and uses the data there to create the
+-//      TLS Directory. Other compilers that support TLS and work with the
+-//      Microsoft linker must use this same technique.
+-//
+-// Basically what this means is that if we want support for our TLS
+-// destructors/our hook being called then we need to make sure the linker does
+-// not omit this symbol. Otherwise it will omit it and our callback won't be
+-// wired up.
+-//
+-// We don't actually use the `/INCLUDE` linker flag here like the article
+-// mentions because the Rust compiler doesn't propagate linker flags, but
+-// instead we use a shim function which performs a volatile 1-byte load from
+-// the address of the symbol to ensure it sticks around.
+-
+-#[link_section = ".CRT$XLB"]
+-#[cfg_attr(miri, used)] // Miri only considers explicitly `#[used]` statics for `lookup_link_section`
+-pub static p_thread_callback: unsafe extern "system" fn(c::LPVOID, c::DWORD, c::LPVOID) =
+-    on_tls_callback;
+-
+-fn dtors_used() {
+-    // we don't want LLVM eliminating p_thread_callback when destructors are used.
+-    // when the symbol makes it to the linker the linker will take over
+-    unsafe { crate::intrinsics::volatile_load(&p_thread_callback) };
+-}
+-
+-unsafe extern "system" fn on_tls_callback(_h: c::LPVOID, dwReason: c::DWORD, _pv: c::LPVOID) {
+-    if dwReason == c::DLL_THREAD_DETACH || dwReason == c::DLL_PROCESS_DETACH {
+-        #[cfg(not(target_thread_local))]
+-        run_dtors();
+-        #[cfg(target_thread_local)]
+-        run_keyless_dtors();
+-    }
+-
+-    // See comments above for what this is doing. Note that we don't need this
+-    // trickery on GNU windows, just on MSVC.
+-    #[cfg(all(target_env = "msvc", not(target_thread_local)))]
+-    {
+-        extern "C" {
+-            static _tls_used: u8;
+-        }
+-        crate::intrinsics::volatile_load(&_tls_used);
+-    }
+-}
+-
+-#[cfg(not(target_thread_local))]
+-unsafe fn run_dtors() {
+-    for _ in 0..5 {
+-        let mut any_run = false;
+-
+-        // Use acquire ordering to observe key initialization.
+-        let mut cur = DTORS.load(Acquire);
+-        while !cur.is_null() {
+-            let pre_key = (*cur).key.load(Acquire);
+-            let dtor = (*cur).dtor.unwrap();
+-            cur = (*cur).next.load(Relaxed);
+-
+-            // In StaticKey::init, we register the dtor before setting `key`.
+-            // So if one thread's `run_dtors` races with another thread executing `init` on the same
+-            // `StaticKey`, we can encounter a key of 0 here. That means this key was never
+-            // initialized in this thread so we can safely skip it.
+-            if pre_key == 0 {
+-                continue;
+-            }
+-            // If this is non-zero, then via the `Acquire` load above we synchronized with
+-            // everything relevant for this key. (It's not clear that this is needed, since the
+-            // release-acquire pair on DTORS also establishes synchronization, but better safe than
+-            // sorry.)
+-            let key = pre_key - 1;
+-
+-            let ptr = c::TlsGetValue(key);
+-            if !ptr.is_null() {
+-                c::TlsSetValue(key, ptr::null_mut());
+-                dtor(ptr as *mut _);
+-                any_run = true;
+-            }
+-        }
+-
+-        if !any_run {
+-            break;
+-        }
+-    }
+-}
+diff --git a/library/std/src/sys/pal/xous/mod.rs b/library/std/src/sys/pal/xous/mod.rs
+index 68189bcc2e377..a28a52e305e22 100644
+--- a/library/std/src/sys/pal/xous/mod.rs
++++ b/library/std/src/sys/pal/xous/mod.rs
+@@ -17,7 +17,6 @@ pub mod pipe;
+ pub mod process;
+ pub mod stdio;
+ pub mod thread;
+-pub mod thread_local_key;
+ pub mod time;
+ 
+ #[path = "../unsupported/common.rs"]
+diff --git a/library/std/src/sys/pal/xous/thread.rs b/library/std/src/sys/pal/xous/thread.rs
+index da7d722cc7082..279f24f9ee8e4 100644
+--- a/library/std/src/sys/pal/xous/thread.rs
++++ b/library/std/src/sys/pal/xous/thread.rs
+@@ -81,7 +81,7 @@ impl Thread {
+             // Destroy TLS, which will free the TLS page and call the destructor for
+             // any thread local storage (if any).
+             unsafe {
+-                crate::sys::thread_local_key::destroy_tls();
++                crate::sys::thread_local::key::destroy_tls();
+             }
+ 
+             // Deallocate the stack memory, along with the guard pages. Afterwards,
+diff --git a/library/std/src/sys/pal/zkvm/mod.rs b/library/std/src/sys/pal/zkvm/mod.rs
+index 0b22eabca6d82..bacde9d880c2c 100644
+--- a/library/std/src/sys/pal/zkvm/mod.rs
++++ b/library/std/src/sys/pal/zkvm/mod.rs
+@@ -25,7 +25,6 @@ pub mod pipe;
+ #[path = "../unsupported/process.rs"]
+ pub mod process;
+ pub mod stdio;
+-pub mod thread_local_key;
+ #[path = "../unsupported/time.rs"]
+ pub mod time;
+ 
+diff --git a/library/std/src/sys/pal/zkvm/thread_local_key.rs b/library/std/src/sys/pal/zkvm/thread_local_key.rs
+deleted file mode 100644
+index 2f67924c61823..0000000000000
+--- a/library/std/src/sys/pal/zkvm/thread_local_key.rs
++++ /dev/null
+@@ -1,23 +0,0 @@
+-use crate::alloc::{alloc, Layout};
+-
+-pub type Key = usize;
+-
+-#[inline]
+-pub unsafe fn create(_dtor: Option<unsafe extern "C" fn(*mut u8)>) -> Key {
+-    alloc(Layout::new::<*mut u8>()) as _
+-}
+-
+-#[inline]
+-pub unsafe fn set(key: Key, value: *mut u8) {
+-    let key: *mut *mut u8 = core::ptr::with_exposed_provenance_mut(key);
+-    *key = value;
+-}
+-
+-#[inline]
+-pub unsafe fn get(key: Key) -> *mut u8 {
+-    let key: *mut *mut u8 = core::ptr::with_exposed_provenance_mut(key);
+-    *key
+-}
+-
+-#[inline]
+-pub unsafe fn destroy(_key: Key) {}
+diff --git a/library/std/src/sys/thread_local/destructors/linux_like.rs b/library/std/src/sys/thread_local/destructors/linux_like.rs
+new file mode 100644
+index 0000000000000..c381be0bf8c76
+--- /dev/null
++++ b/library/std/src/sys/thread_local/destructors/linux_like.rs
+@@ -0,0 +1,58 @@
++//! Destructor registration for Linux-like systems.
++//!
++//! Since what appears to be version 2.18, glibc has shipped the
++//! `__cxa_thread_atexit_impl` symbol which GCC and clang both use to invoke
++//! destructors in C++ thread_local globals. This function does exactly what
++//! we want: it schedules a callback which will be run at thread exit with the
++//! provided argument.
++//!
++//! Unfortunately, our minimum supported glibc version (at the time of writing)
++//! is 2.17, so we can only link this symbol weakly and need to use the
++//! [`list`](super::list) destructor implementation as fallback.
++
++use crate::mem::transmute;
++
++// FIXME: The Rust compiler currently omits weakly function definitions (i.e.,
++// __cxa_thread_atexit_impl) and its metadata from LLVM IR.
++#[no_sanitize(cfi, kcfi)]
++pub unsafe fn register(t: *mut u8, dtor: unsafe extern "C" fn(*mut u8)) {
++    /// This is necessary because the __cxa_thread_atexit_impl implementation
++    /// std links to by default may be a C or C++ implementation that was not
++    /// compiled using the Clang integer normalization option.
++    #[cfg(sanitizer_cfi_normalize_integers)]
++    use core::ffi::c_int;
++    #[cfg(not(sanitizer_cfi_normalize_integers))]
++    #[cfi_encoding = "i"]
++    #[repr(transparent)]
++    #[allow(non_camel_case_types)]
++    pub struct c_int(#[allow(dead_code)] pub core::ffi::c_int);
++
++    extern "C" {
++        #[linkage = "extern_weak"]
++        static __dso_handle: *mut u8;
++        #[linkage = "extern_weak"]
++        static __cxa_thread_atexit_impl: Option<
++            extern "C" fn(
++                unsafe extern "C" fn(*mut libc::c_void),
++                *mut libc::c_void,
++                *mut libc::c_void,
++            ) -> c_int,
++        >;
++    }
++
++    if let Some(f) = unsafe { __cxa_thread_atexit_impl } {
++        unsafe {
++            f(
++                transmute::<unsafe extern "C" fn(*mut u8), unsafe extern "C" fn(*mut libc::c_void)>(
++                    dtor,
++                ),
++                t.cast(),
++                core::ptr::addr_of!(__dso_handle) as *mut _,
++            );
++        }
++    } else {
++        unsafe {
++            super::list::register(t, dtor);
++        }
++    }
++}
+diff --git a/library/std/src/sys/thread_local/destructors/list.rs b/library/std/src/sys/thread_local/destructors/list.rs
+new file mode 100644
+index 0000000000000..b9d5214c438d2
+--- /dev/null
++++ b/library/std/src/sys/thread_local/destructors/list.rs
+@@ -0,0 +1,44 @@
++use crate::cell::RefCell;
++use crate::sys::thread_local::guard;
++
++#[thread_local]
++static DTORS: RefCell<Vec<(*mut u8, unsafe extern "C" fn(*mut u8))>> = RefCell::new(Vec::new());
++
++pub unsafe fn register(t: *mut u8, dtor: unsafe extern "C" fn(*mut u8)) {
++    let Ok(mut dtors) = DTORS.try_borrow_mut() else {
++        // This point can only be reached if the global allocator calls this
++        // function again.
++        // FIXME: maybe use the system allocator instead?
++        rtabort!("the global allocator may not use TLS with destructors");
++    };
++
++    guard::enable();
++
++    dtors.push((t, dtor));
++}
++
++/// The [`guard`] module contains platform-specific functions which will run this
++/// function on thread exit if [`guard::enable`] has been called.
++///
++/// # Safety
++///
++/// May only be run on thread exit to guarantee that there are no live references
++/// to TLS variables while they are destroyed.
++pub unsafe fn run() {
++    loop {
++        let mut dtors = DTORS.borrow_mut();
++        match dtors.pop() {
++            Some((t, dtor)) => {
++                drop(dtors);
++                unsafe {
++                    dtor(t);
++                }
++            }
++            None => {
++                // Free the list memory.
++                *dtors = Vec::new();
++                break;
++            }
++        }
++    }
++}
+diff --git a/library/std/src/sys/thread_local/guard/apple.rs b/library/std/src/sys/thread_local/guard/apple.rs
+new file mode 100644
+index 0000000000000..6c27f7ae35cba
+--- /dev/null
++++ b/library/std/src/sys/thread_local/guard/apple.rs
+@@ -0,0 +1,31 @@
++//! macOS allows registering destructors through _tlv_atexit. But since calling
++//! it while TLS destructors are running is UB, we still need to keep our own
++//! list of destructors.
++
++use crate::cell::Cell;
++use crate::ptr;
++use crate::sys::thread_local::destructors;
++
++pub fn enable() {
++    #[thread_local]
++    static REGISTERED: Cell<bool> = Cell::new(false);
++
++    extern "C" {
++        fn _tlv_atexit(dtor: unsafe extern "C" fn(*mut u8), arg: *mut u8);
++    }
++
++    if !REGISTERED.replace(true) {
++        // SAFETY: Calling _tlv_atexit while TLS destructors are running is UB.
++        // But as run_dtors is only called after being registered, this point
++        // cannot be reached from it.
++        unsafe {
++            _tlv_atexit(run_dtors, ptr::null_mut());
++        }
++    }
++
++    unsafe extern "C" fn run_dtors(_: *mut u8) {
++        unsafe {
++            destructors::run();
++        }
++    }
++}
+diff --git a/library/std/src/sys/thread_local/guard/key.rs b/library/std/src/sys/thread_local/guard/key.rs
+new file mode 100644
+index 0000000000000..ee9d55ddd5e8e
+--- /dev/null
++++ b/library/std/src/sys/thread_local/guard/key.rs
+@@ -0,0 +1,23 @@
++//! A lot of UNIX platforms don't have a specialized way to register TLS
++//! destructors for native TLS. Instead, we use one TLS key with a destructor
++//! that will run all native TLS destructors in the destructor list.
++
++use crate::ptr;
++use crate::sys::thread_local::destructors;
++use crate::sys::thread_local::key::StaticKey;
++
++pub fn enable() {
++    static DTORS: StaticKey = StaticKey::new(Some(run));
++
++    // Setting the key value to something other than NULL will result in the
++    // destructor being run at thread exit.
++    unsafe {
++        DTORS.set(ptr::without_provenance_mut(1));
++    }
++
++    unsafe extern "C" fn run(_: *mut u8) {
++        unsafe {
++            destructors::run();
++        }
++    }
++}
+diff --git a/library/std/src/sys/thread_local/guard/solid.rs b/library/std/src/sys/thread_local/guard/solid.rs
+new file mode 100644
+index 0000000000000..b65d00c5b5fb7
+--- /dev/null
++++ b/library/std/src/sys/thread_local/guard/solid.rs
+@@ -0,0 +1,23 @@
++//! SOLID, just like macOS, has an API to register TLS destructors. But since
++//! it does not allow specifying an argument to that function, and will not run
++//! destructors for terminated tasks, we still keep our own list.
++
++use crate::cell::Cell;
++use crate::sys::pal::{abi, itron::task};
++use crate::sys::thread_local::destructors;
++
++pub fn enable() {
++    #[thread_local]
++    static REGISTERED: Cell<bool> = Cell::new(false);
++
++    if !REGISTERED.replace(true) {
++        let tid = task::current_task_id_aborting();
++        // Register `tls_dtor` to make sure the TLS destructors are called
++        // for tasks created by other means than `std::thread`
++        unsafe { abi::SOLID_TLS_AddDestructor(tid as i32, tls_dtor) };
++    }
++
++    unsafe extern "C" fn tls_dtor(_unused: *mut u8) {
++        unsafe { destructors::run() };
++    }
++}
+diff --git a/library/std/src/sys/thread_local/guard/windows.rs b/library/std/src/sys/thread_local/guard/windows.rs
+new file mode 100644
+index 0000000000000..81797f55170d7
+--- /dev/null
++++ b/library/std/src/sys/thread_local/guard/windows.rs
+@@ -0,0 +1,103 @@
++//! Support for Windows TLS destructors.
++//!
++//! Unfortunately, Windows does not provide a nice API to provide a destructor
++//! for a TLS variable. Thus, the solution here ended up being a little more
++//! obscure, but fear not, the internet has informed me [1][2] that this solution
++//! is not unique (no way I could have thought of it as well!). The key idea is
++//! to insert some hook somewhere to run arbitrary code on thread termination.
++//! With this in place we'll be able to run anything we like, including all
++//! TLS destructors!
++//!
++//! In order to realize this, all TLS destructors are tracked by *us*, not the
++//! Windows runtime. This means that we have a global list of destructors for
++//! each TLS key or variable that we know about.
++//!
++//! # What's up with CRT$XLB?
++//!
++//! For anything about TLS destructors to work on Windows, we have to be able
++//! to run *something* when a thread exits. To do so, we place a very special
++//! static in a very special location. If this is encoded in just the right
++//! way, the kernel's loader is apparently nice enough to run some function
++//! of ours whenever a thread exits! How nice of the kernel!
++//!
++//! Lots of detailed information can be found in source [1] above, but the
++//! gist of it is that this is leveraging a feature of Microsoft's PE format
++//! (executable format) which is not actually used by any compilers today.
++//! This apparently translates to any callbacks in the ".CRT$XLB" section
++//! being run on certain events.
++//!
++//! So after all that, we use the compiler's #[link_section] feature to place
++//! a callback pointer into the magic section so it ends up being called.
++//!
++//! # What's up with this callback?
++//!
++//! The callback specified receives a number of parameters from... someone!
++//! (the kernel? the runtime? I'm not quite sure!) There are a few events that
++//! this gets invoked for, but we're currently only interested on when a
++//! thread or a process "detaches" (exits). The process part happens for the
++//! last thread and the thread part happens for any normal thread.
++//!
++//! # The article mentions weird stuff about "/INCLUDE"?
++//!
++//! It sure does! Specifically we're talking about this quote:
++//!
++//! ```quote
++//! The Microsoft run-time library facilitates this process by defining a
++//! memory image of the TLS Directory and giving it the special name
++//! “__tls_used” (Intel x86 platforms) or “_tls_used” (other platforms). The
++//! linker looks for this memory image and uses the data there to create the
++//! TLS Directory. Other compilers that support TLS and work with the
++//! Microsoft linker must use this same technique.
++//! ```
++//!
++//! Basically what this means is that if we want support for our TLS
++//! destructors/our hook being called then we need to make sure the linker does
++//! not omit this symbol. Otherwise it will omit it and our callback won't be
++//! wired up.
++//!
++//! We don't actually use the `/INCLUDE` linker flag here like the article
++//! mentions because the Rust compiler doesn't propagate linker flags, but
++//! instead we use a shim function which performs a volatile 1-byte load from
++//! the address of the symbol to ensure it sticks around.
++//!
++//! [1]: https://www.codeproject.com/Articles/8113/Thread-Local-Storage-The-C-Way
++//! [2]: https://github.com/ChromiumWebApps/chromium/blob/master/base/threading/thread_local_storage_win.cc#L42
++
++use crate::ptr;
++use crate::sys::c;
++
++pub fn enable() {
++    // When destructors are used, we don't want LLVM eliminating CALLBACK for any
++    // reason. Once the symbol makes it to the linker, it will do the rest.
++    unsafe { ptr::from_ref(&CALLBACK).read_volatile() };
++}
++
++#[link_section = ".CRT$XLB"]
++#[cfg_attr(miri, used)] // Miri only considers explicitly `#[used]` statics for `lookup_link_section`
++pub static CALLBACK: unsafe extern "system" fn(c::LPVOID, c::DWORD, c::LPVOID) = tls_callback;
++
++unsafe extern "system" fn tls_callback(_h: c::LPVOID, dw_reason: c::DWORD, _pv: c::LPVOID) {
++    // See comments above for what this is doing. Note that we don't need this
++    // trickery on GNU windows, just on MSVC.
++    #[cfg(all(target_env = "msvc", not(target_thread_local)))]
++    {
++        extern "C" {
++            static _tls_used: u8;
++        }
++
++        unsafe {
++            ptr::from_ref(&_tls_used).read_volatile();
++        }
++    }
++
++    if dw_reason == c::DLL_THREAD_DETACH || dw_reason == c::DLL_PROCESS_DETACH {
++        #[cfg(target_thread_local)]
++        unsafe {
++            super::super::destructors::run();
++        }
++        #[cfg(not(target_thread_local))]
++        unsafe {
++            super::super::key::run_dtors();
++        }
++    }
++}
+diff --git a/library/std/src/sys_common/thread_local_key.rs b/library/std/src/sys/thread_local/key/racy.rs
+similarity index 58%
+rename from library/std/src/sys_common/thread_local_key.rs
+rename to library/std/src/sys/thread_local/key/racy.rs
+index a9cd26389cd41..eda8b83bc7f03 100644
+--- a/library/std/src/sys_common/thread_local_key.rs
++++ b/library/std/src/sys/thread_local/key/racy.rs
+@@ -1,61 +1,12 @@
+-//! OS-based thread local storage for non-Windows systems
++//! A `StaticKey` implementation using racy initialization.
+ //!
+-//! This module provides an implementation of OS-based thread local storage,
+-//! using the native OS-provided facilities (think `TlsAlloc` or
+-//! `pthread_setspecific`). The interface of this differs from the other types
+-//! of thread-local-storage provided in this crate in that OS-based TLS can only
+-//! get/set pointer-sized data, possibly with an associated destructor.
+-//!
+-//! This module also provides two flavors of TLS. One is intended for static
+-//! initialization, and does not contain a `Drop` implementation to deallocate
+-//! the OS-TLS key. The other is a type which does implement `Drop` and hence
+-//! has a safe interface.
+-//!
+-//! Windows doesn't use this module at all; `sys::pal::windows::thread_local_key`
+-//! gets imported in its stead.
+-//!
+-//! # Usage
+-//!
+-//! This module should likely not be used directly unless other primitives are
+-//! being built on. Types such as `thread_local::spawn::Key` are likely much
+-//! more useful in practice than this OS-based version which likely requires
+-//! unsafe code to interoperate with.
+-//!
+-//! # Examples
+-//!
+-//! Using a dynamically allocated TLS key. Note that this key can be shared
+-//! among many threads via an `Arc`.
+-//!
+-//! ```ignore (cannot-doctest-private-modules)
+-//! let key = Key::new(None);
+-//! assert!(key.get().is_null());
+-//! key.set(1 as *mut u8);
+-//! assert!(!key.get().is_null());
+-//!
+-//! drop(key); // deallocate this TLS slot.
+-//! ```
+-//!
+-//! Sometimes a statically allocated key is either required or easier to work
+-//! with, however.
+-//!
+-//! ```ignore (cannot-doctest-private-modules)
+-//! static KEY: StaticKey = INIT;
+-//!
+-//! unsafe {
+-//!     assert!(KEY.get().is_null());
+-//!     KEY.set(1 as *mut u8);
+-//! }
+-//! ```
+-
+-#![allow(non_camel_case_types)]
+-#![unstable(feature = "thread_local_internals", issue = "none")]
+-#![allow(dead_code)]
+-
+-#[cfg(test)]
+-mod tests;
++//! Unfortunately, none of the platforms currently supported by `std` allows
++//! creating TLS keys at compile-time. Thus we need a way to lazily create keys.
++//! Instead of blocking API like `OnceLock`, we use racy initialization, which
++//! should be more lightweight and avoids circular dependencies with the rest of
++//! `std`.
+ 
+ use crate::sync::atomic::{self, AtomicUsize, Ordering};
+-use crate::sys::thread_local_key as imp;
+ 
+ /// A type for TLS keys that are statically allocated.
+ ///
+@@ -90,11 +41,6 @@ pub struct StaticKey {
+     dtor: Option<unsafe extern "C" fn(*mut u8)>,
+ }
+ 
+-/// Constant initialization value for static TLS keys.
+-///
+-/// This value specifies no destructor by default.
+-pub const INIT: StaticKey = StaticKey::new(None);
+-
+ // Define a sentinel value that is likely not to be returned
+ // as a TLS key.
+ #[cfg(not(target_os = "nto"))]
+@@ -117,7 +63,7 @@ impl StaticKey {
+     /// been allocated.
+     #[inline]
+     pub unsafe fn get(&self) -> *mut u8 {
+-        imp::get(self.key())
++        unsafe { super::get(self.key()) }
+     }
+ 
+     /// Sets this TLS key to a new value.
+@@ -126,18 +72,18 @@ impl StaticKey {
+     /// been allocated.
+     #[inline]
+     pub unsafe fn set(&self, val: *mut u8) {
+-        imp::set(self.key(), val)
++        unsafe { super::set(self.key(), val) }
+     }
+ 
+     #[inline]
+-    unsafe fn key(&self) -> imp::Key {
++    fn key(&self) -> super::Key {
+         match self.key.load(Ordering::Acquire) {
+-            KEY_SENTVAL => self.lazy_init() as imp::Key,
+-            n => n as imp::Key,
++            KEY_SENTVAL => self.lazy_init() as super::Key,
++            n => n as super::Key,
+         }
+     }
+ 
+-    unsafe fn lazy_init(&self) -> usize {
++    fn lazy_init(&self) -> usize {
+         // POSIX allows the key created here to be KEY_SENTVAL, but the compare_exchange
+         // below relies on using KEY_SENTVAL as a sentinel value to check who won the
+         // race to set the shared TLS key. As far as I know, there is no
+@@ -147,12 +93,14 @@ impl StaticKey {
+         // value of KEY_SENTVAL, but with some gyrations to make sure we have a non-KEY_SENTVAL
+         // value returned from the creation routine.
+         // FIXME: this is clearly a hack, and should be cleaned up.
+-        let key1 = imp::create(self.dtor);
++        let key1 = super::create(self.dtor);
+         let key = if key1 as usize != KEY_SENTVAL {
+             key1
+         } else {
+-            let key2 = imp::create(self.dtor);
+-            imp::destroy(key1);
++            let key2 = super::create(self.dtor);
++            unsafe {
++                super::destroy(key1);
++            }
+             key2
+         };
+         rtassert!(key as usize != KEY_SENTVAL);
+@@ -165,10 +113,10 @@ impl StaticKey {
+             // The CAS succeeded, so we've created the actual key
+             Ok(_) => key as usize,
+             // If someone beat us to the punch, use their key instead
+-            Err(n) => {
+-                imp::destroy(key);
++            Err(n) => unsafe {
++                super::destroy(key);
+                 n
+-            }
++            },
+         }
+     }
+ }
+diff --git a/library/std/src/sys/pal/sgx/thread_local_key.rs b/library/std/src/sys/thread_local/key/sgx.rs
+similarity index 74%
+rename from library/std/src/sys/pal/sgx/thread_local_key.rs
+rename to library/std/src/sys/thread_local/key/sgx.rs
+index c7a57d3a3d47e..4aa2e5afa72ef 100644
+--- a/library/std/src/sys/pal/sgx/thread_local_key.rs
++++ b/library/std/src/sys/thread_local/key/sgx.rs
+@@ -1,9 +1,9 @@
+-use super::abi::tls::{Key as AbiKey, Tls};
++use crate::sys::pal::abi::tls::{Key as AbiKey, Tls};
+ 
+ pub type Key = usize;
+ 
+ #[inline]
+-pub unsafe fn create(dtor: Option<unsafe extern "C" fn(*mut u8)>) -> Key {
++pub fn create(dtor: Option<unsafe extern "C" fn(*mut u8)>) -> Key {
+     Tls::create(dtor).as_usize()
+ }
+ 
+diff --git a/library/std/src/sys/pal/windows/thread_local_key/tests.rs b/library/std/src/sys/thread_local/key/tests.rs
+similarity index 86%
+rename from library/std/src/sys/pal/windows/thread_local_key/tests.rs
+rename to library/std/src/sys/thread_local/key/tests.rs
+index 4119f99096842..24cad396da269 100644
+--- a/library/std/src/sys/pal/windows/thread_local_key/tests.rs
++++ b/library/std/src/sys/thread_local/key/tests.rs
+@@ -1,7 +1,3 @@
+-// This file only tests the thread local key fallback.
+-// Windows targets with native thread local support do not use this.
+-#![cfg(not(target_thread_local))]
+-
+ use super::StaticKey;
+ use crate::ptr;
+ 
+@@ -27,7 +23,7 @@ fn destructors() {
+     use crate::thread;
+ 
+     unsafe extern "C" fn destruct(ptr: *mut u8) {
+-        drop(Arc::from_raw(ptr as *const ()));
++        drop(unsafe { Arc::from_raw(ptr as *const ()) });
+     }
+ 
+     static KEY: StaticKey = StaticKey::new(Some(destruct));
+diff --git a/library/std/src/sys/thread_local/key/unix.rs b/library/std/src/sys/thread_local/key/unix.rs
+new file mode 100644
+index 0000000000000..13522d44b35dc
+--- /dev/null
++++ b/library/std/src/sys/thread_local/key/unix.rs
+@@ -0,0 +1,27 @@
++use crate::mem;
++
++pub type Key = libc::pthread_key_t;
++
++#[inline]
++pub fn create(dtor: Option<unsafe extern "C" fn(*mut u8)>) -> Key {
++    let mut key = 0;
++    assert_eq!(unsafe { libc::pthread_key_create(&mut key, mem::transmute(dtor)) }, 0);
++    key
++}
++
++#[inline]
++pub unsafe fn set(key: Key, value: *mut u8) {
++    let r = unsafe { libc::pthread_setspecific(key, value as *mut _) };
++    debug_assert_eq!(r, 0);
++}
++
++#[inline]
++pub unsafe fn get(key: Key) -> *mut u8 {
++    unsafe { libc::pthread_getspecific(key) as *mut u8 }
++}
++
++#[inline]
++pub unsafe fn destroy(key: Key) {
++    let r = unsafe { libc::pthread_key_delete(key) };
++    debug_assert_eq!(r, 0);
++}
+diff --git a/library/std/src/sys/thread_local/key/windows.rs b/library/std/src/sys/thread_local/key/windows.rs
+new file mode 100644
+index 0000000000000..ad0e72c29edaf
+--- /dev/null
++++ b/library/std/src/sys/thread_local/key/windows.rs
+@@ -0,0 +1,206 @@
++//! Implementation of `StaticKey` for Windows.
++//!
++//! Windows has no native support for running destructors so we manage our own
++//! list of destructors to keep track of how to destroy keys. We then install a
++//! callback later to get invoked whenever a thread exits, running all
++//! appropriate destructors (see the [`guard`](guard) module documentation).
++//!
++//! This will likely need to be improved over time, but this module attempts a
++//! "poor man's" destructor callback system. Once we've got a list of what to
++//! run, we iterate over all keys, check their values, and then run destructors
++//! if the values turn out to be non null (setting them to null just beforehand).
++//! We do this a few times in a loop to basically match Unix semantics. If we
++//! don't reach a fixed point after a short while then we just inevitably leak
++//! something.
++//!
++//! The list is implemented as an atomic single-linked list of `StaticKey`s and
++//! does not support unregistration. Unfortunately, this means that we cannot
++//! use racy initialization for creating the keys in `StaticKey`, as that could
++//! result in destructors being missed. Hence, we synchronize the creation of
++//! keys with destructors through [`INIT_ONCE`](c::INIT_ONCE) (`std`'s
++//! [`Once`](crate::sync::Once) cannot be used since it might use TLS itself).
++//! For keys without destructors, racy initialization suffices.
++
++// FIXME: investigate using a fixed-size array instead, as the maximum number
++//        of keys is [limited to 1088](https://learn.microsoft.com/en-us/windows/win32/ProcThread/thread-local-storage).
++
++use crate::cell::UnsafeCell;
++use crate::ptr;
++use crate::sync::atomic::{
++    AtomicPtr, AtomicU32,
++    Ordering::{AcqRel, Acquire, Relaxed, Release},
++};
++use crate::sys::c;
++use crate::sys::thread_local::guard;
++
++type Key = c::DWORD;
++type Dtor = unsafe extern "C" fn(*mut u8);
++
++pub struct StaticKey {
++    /// The key value shifted up by one. Since TLS_OUT_OF_INDEXES == DWORD::MAX
++    /// is not a valid key value, this allows us to use zero as sentinel value
++    /// without risking overflow.
++    key: AtomicU32,
++    dtor: Option<Dtor>,
++    next: AtomicPtr<StaticKey>,
++    /// Currently, destructors cannot be unregistered, so we cannot use racy
++    /// initialization for keys. Instead, we need synchronize initialization.
++    /// Use the Windows-provided `Once` since it does not require TLS.
++    once: UnsafeCell<c::INIT_ONCE>,
++}
++
++impl StaticKey {
++    #[inline]
++    pub const fn new(dtor: Option<Dtor>) -> StaticKey {
++        StaticKey {
++            key: AtomicU32::new(0),
++            dtor,
++            next: AtomicPtr::new(ptr::null_mut()),
++            once: UnsafeCell::new(c::INIT_ONCE_STATIC_INIT),
++        }
++    }
++
++    #[inline]
++    pub unsafe fn set(&'static self, val: *mut u8) {
++        let r = unsafe { c::TlsSetValue(self.key(), val.cast()) };
++        debug_assert_eq!(r, c::TRUE);
++    }
++
++    #[inline]
++    pub unsafe fn get(&'static self) -> *mut u8 {
++        unsafe { c::TlsGetValue(self.key()).cast() }
++    }
++
++    #[inline]
++    fn key(&'static self) -> Key {
++        match self.key.load(Acquire) {
++            0 => unsafe { self.init() },
++            key => key - 1,
++        }
++    }
++
++    #[cold]
++    unsafe fn init(&'static self) -> Key {
++        if self.dtor.is_some() {
++            let mut pending = c::FALSE;
++            let r = unsafe {
++                c::InitOnceBeginInitialize(self.once.get(), 0, &mut pending, ptr::null_mut())
++            };
++            assert_eq!(r, c::TRUE);
++
++            if pending == c::FALSE {
++                // Some other thread initialized the key, load it.
++                self.key.load(Relaxed) - 1
++            } else {
++                let key = unsafe { c::TlsAlloc() };
++                if key == c::TLS_OUT_OF_INDEXES {
++                    // Wakeup the waiting threads before panicking to avoid deadlock.
++                    unsafe {
++                        c::InitOnceComplete(
++                            self.once.get(),
++                            c::INIT_ONCE_INIT_FAILED,
++                            ptr::null_mut(),
++                        );
++                    }
++                    panic!("out of TLS indexes");
++                }
++
++                unsafe {
++                    register_dtor(self);
++                }
++
++                // Release-storing the key needs to be the last thing we do.
++                // This is because in `fn key()`, other threads will do an acquire load of the key,
++                // and if that sees this write then it will entirely bypass the `InitOnce`. We thus
++                // need to establish synchronization through `key`. In particular that acquire load
++                // must happen-after the register_dtor above, to ensure the dtor actually runs!
++                self.key.store(key + 1, Release);
++
++                let r = unsafe { c::InitOnceComplete(self.once.get(), 0, ptr::null_mut()) };
++                debug_assert_eq!(r, c::TRUE);
++
++                key
++            }
++        } else {
++            // If there is no destructor to clean up, we can use racy initialization.
++
++            let key = unsafe { c::TlsAlloc() };
++            assert_ne!(key, c::TLS_OUT_OF_INDEXES, "out of TLS indexes");
++
++            match self.key.compare_exchange(0, key + 1, AcqRel, Acquire) {
++                Ok(_) => key,
++                Err(new) => unsafe {
++                    // Some other thread completed initialization first, so destroy
++                    // our key and use theirs.
++                    let r = c::TlsFree(key);
++                    debug_assert_eq!(r, c::TRUE);
++                    new - 1
++                },
++            }
++        }
++    }
++}
++
++unsafe impl Send for StaticKey {}
++unsafe impl Sync for StaticKey {}
++
++static DTORS: AtomicPtr<StaticKey> = AtomicPtr::new(ptr::null_mut());
++
++/// Should only be called once per key, otherwise loops or breaks may occur in
++/// the linked list.
++unsafe fn register_dtor(key: &'static StaticKey) {
++    guard::enable();
++
++    let this = <*const StaticKey>::cast_mut(key);
++    // Use acquire ordering to pass along the changes done by the previously
++    // registered keys when we store the new head with release ordering.
++    let mut head = DTORS.load(Acquire);
++    loop {
++        key.next.store(head, Relaxed);
++        match DTORS.compare_exchange_weak(head, this, Release, Acquire) {
++            Ok(_) => break,
++            Err(new) => head = new,
++        }
++    }
++}
++
++/// This will and must only be run by the destructor callback in [`guard`].
++pub unsafe fn run_dtors() {
++    for _ in 0..5 {
++        let mut any_run = false;
++
++        // Use acquire ordering to observe key initialization.
++        let mut cur = DTORS.load(Acquire);
++        while !cur.is_null() {
++            let pre_key = unsafe { (*cur).key.load(Acquire) };
++            let dtor = unsafe { (*cur).dtor.unwrap() };
++            cur = unsafe { (*cur).next.load(Relaxed) };
++
++            // In StaticKey::init, we register the dtor before setting `key`.
++            // So if one thread's `run_dtors` races with another thread executing `init` on the same
++            // `StaticKey`, we can encounter a key of 0 here. That means this key was never
++            // initialized in this thread so we can safely skip it.
++            if pre_key == 0 {
++                continue;
++            }
++            // If this is non-zero, then via the `Acquire` load above we synchronized with
++            // everything relevant for this key. (It's not clear that this is needed, since the
++            // release-acquire pair on DTORS also establishes synchronization, but better safe than
++            // sorry.)
++            let key = pre_key - 1;
++
++            let ptr = unsafe { c::TlsGetValue(key) };
++            if !ptr.is_null() {
++                unsafe {
++                    c::TlsSetValue(key, ptr::null_mut());
++                    dtor(ptr as *mut _);
++                    any_run = true;
++                }
++            }
++        }
++
++        if !any_run {
++            break;
++        }
++    }
++}
+diff --git a/library/std/src/sys/pal/xous/thread_local_key.rs b/library/std/src/sys/thread_local/key/xous.rs
+similarity index 73%
+rename from library/std/src/sys/pal/xous/thread_local_key.rs
+rename to library/std/src/sys/thread_local/key/xous.rs
+index 6c29813c79dfd..a23f6de95f7b5 100644
+--- a/library/std/src/sys/pal/xous/thread_local_key.rs
++++ b/library/std/src/sys/thread_local/key/xous.rs
+@@ -1,3 +1,41 @@
++//! Thread Local Storage
++//!
++//! Currently, we are limited to 1023 TLS entries. The entries
++//! live in a page of memory that's unique per-process, and is
++//! stored in the `$tp` register. If this register is 0, then
++//! TLS has not been initialized and thread cleanup can be skipped.
++//!
++//! The index into this register is the `key`. This key is identical
++//! between all threads, but indexes a different offset within this
++//! pointer.
++//!
++//! # Dtor registration (stolen from Windows)
++//!
++//! Xous has no native support for running destructors so we manage our own
++//! list of destructors to keep track of how to destroy keys. When a thread
++//! or the process exits, `run_dtors` is called, which will iterate through
++//! the list and run the destructors.
++//!
++//! Currently unregistration from this list is not supported. A destructor can be
++//! registered but cannot be unregistered. There's various simplifying reasons
++//! for doing this, the big ones being:
++//!
++//! 1. Currently we don't even support deallocating TLS keys, so normal operation
++//!    doesn't need to deallocate a destructor.
++//! 2. There is no point in time where we know we can unregister a destructor
++//!    because it could always be getting run by some remote thread.
++//!
++//! Typically processes have a statically known set of TLS keys which is pretty
++//! small, and we'd want to keep this memory alive for the whole process anyway
++//! really.
++//!
++//! Perhaps one day we can fold the `Box` here into a static allocation,
++//! expanding the `StaticKey` structure to contain not only a slot for the TLS
++//! key but also a slot for the destructor queue on windows. An optimization for
++//! another day!
++
++// FIXME(joboet): implement support for native TLS instead.
++
+ use crate::mem::ManuallyDrop;
+ use crate::ptr;
+ use crate::sync::atomic::AtomicPtr;
+@@ -7,18 +45,7 @@ use core::arch::asm;
+ 
+ use crate::os::xous::ffi::{map_memory, unmap_memory, MemoryFlags};
+ 
+-/// Thread Local Storage
+-///
+-/// Currently, we are limited to 1023 TLS entries. The entries
+-/// live in a page of memory that's unique per-process, and is
+-/// stored in the `$tp` register. If this register is 0, then
+-/// TLS has not been initialized and thread cleanup can be skipped.
+-///
+-/// The index into this register is the `key`. This key is identical
+-/// between all threads, but indexes a different offset within this
+-/// pointer.
+ pub type Key = usize;
+-
+ pub type Dtor = unsafe extern "C" fn(*mut u8);
+ 
+ const TLS_MEMORY_SIZE: usize = 4096;
+@@ -89,7 +116,7 @@ fn tls_table() -> &'static mut [*mut u8] {
+ }
+ 
+ #[inline]
+-pub unsafe fn create(dtor: Option<Dtor>) -> Key {
++pub fn create(dtor: Option<Dtor>) -> Key {
+     // Allocate a new TLS key. These keys are shared among all threads.
+     #[allow(unused_unsafe)]
+     let key = unsafe { TLS_KEY_INDEX.fetch_add(1, Relaxed) };
+@@ -118,32 +145,6 @@ pub unsafe fn destroy(_key: Key) {
+     // lots of TLS variables, but in practice that's not an issue.
+ }
+ 
+-// -------------------------------------------------------------------------
+-// Dtor registration (stolen from Windows)
+-//
+-// Xous has no native support for running destructors so we manage our own
+-// list of destructors to keep track of how to destroy keys. We then install a
+-// callback later to get invoked whenever a thread exits, running all
+-// appropriate destructors.
+-//
+-// Currently unregistration from this list is not supported. A destructor can be
+-// registered but cannot be unregistered. There's various simplifying reasons
+-// for doing this, the big ones being:
+-//
+-// 1. Currently we don't even support deallocating TLS keys, so normal operation
+-//    doesn't need to deallocate a destructor.
+-// 2. There is no point in time where we know we can unregister a destructor
+-//    because it could always be getting run by some remote thread.
+-//
+-// Typically processes have a statically known set of TLS keys which is pretty
+-// small, and we'd want to keep this memory alive for the whole process anyway
+-// really.
+-//
+-// Perhaps one day we can fold the `Box` here into a static allocation,
+-// expanding the `StaticKey` structure to contain not only a slot for the TLS
+-// key but also a slot for the destructor queue on windows. An optimization for
+-// another day!
+-
+ struct Node {
+     dtor: Dtor,
+     key: Key,
+diff --git a/library/std/src/sys/thread_local/mod.rs b/library/std/src/sys/thread_local/mod.rs
+index 0a78a1a1cf02d..f74fd828cbe50 100644
+--- a/library/std/src/sys/thread_local/mod.rs
++++ b/library/std/src/sys/thread_local/mod.rs
+@@ -1,27 +1,154 @@
+-#![unstable(feature = "thread_local_internals", reason = "should not be necessary", issue = "none")]
+-#![cfg_attr(test, allow(unused))]
++//! Implementation of the `thread_local` macro.
++//!
++//! There are three different thread-local implementations:
++//! * Some targets lack threading support, and hence have only one thread, so
++//!   the TLS data is stored in a normal `static`.
++//! * Some targets support TLS natively via the dynamic linker and C runtime.
++//! * On some targets, the OS provides a library-based TLS implementation. The
++//!   TLS data is heap-allocated and referenced using a TLS key.
++//!
++//! Each implementation provides a macro which generates the `LocalKey` `const`
++//! used to reference the TLS variable, along with the necessary helper structs
++//! to track the initialization/destruction state of the variable.
++//!
++//! Additionally, this module contains abstractions for the OS interfaces used
++//! for these implementations.
+ 
+-// There are three thread-local implementations: "static", "fast", "OS".
+-// The "OS" thread local key type is accessed via platform-specific API calls and is slow, while the
+-// "fast" key type is accessed via code generated via LLVM, where TLS keys are set up by the linker.
+-// "static" is for single-threaded platforms where a global static is sufficient.
++#![cfg_attr(test, allow(unused))]
++#![doc(hidden)]
++#![forbid(unsafe_op_in_unsafe_fn)]
++#![unstable(
++    feature = "thread_local_internals",
++    reason = "internal details of the thread_local macro",
++    issue = "none"
++)]
+ 
+ cfg_if::cfg_if! {
+-    if #[cfg(any(all(target_family = "wasm", not(target_feature = "atomics")), target_os = "uefi"))] {
+-        #[doc(hidden)]
+-        mod static_local;
+-        #[doc(hidden)]
+-        pub use static_local::{EagerStorage, LazyStorage, thread_local_inner};
++    if #[cfg(any(
++        all(target_family = "wasm", not(target_feature = "atomics")),
++        target_os = "uefi",
++        target_os = "zkvm",
++    ))] {
++        mod statik;
++        pub use statik::{EagerStorage, LazyStorage, thread_local_inner};
+     } else if #[cfg(target_thread_local)] {
+-        #[doc(hidden)]
+-        mod fast_local;
+-        #[doc(hidden)]
+-        pub use fast_local::{EagerStorage, LazyStorage, thread_local_inner};
++        mod native;
++        pub use native::{EagerStorage, LazyStorage, thread_local_inner};
+     } else {
+-        #[doc(hidden)]
+-        mod os_local;
+-        #[doc(hidden)]
+-        pub use os_local::{Key, thread_local_inner};
++        mod os;
++        pub use os::{Key, thread_local_inner};
++    }
++}
++
++/// The native TLS implementation needs a way to register destructors for its data.
++/// This module contains platform-specific implementations of that register.
++///
++/// It turns out however that most platforms don't have a way to register a
++/// destructor for each variable. On these platforms, we keep track of the
++/// destructors ourselves and register (through the [`guard`] module) only a
++/// single callback that runs all of the destructors in the list.
++#[cfg(all(target_thread_local, not(all(target_family = "wasm", not(target_feature = "atomics")))))]
++pub(crate) mod destructors {
++    cfg_if::cfg_if! {
++        if #[cfg(any(
++            target_os = "linux",
++            target_os = "android",
++            target_os = "fuchsia",
++            target_os = "redox",
++            target_os = "hurd",
++            target_os = "netbsd",
++            target_os = "dragonfly"
++        ))] {
++            mod linux_like;
++            mod list;
++            pub(super) use linux_like::register;
++            pub(super) use list::run;
++        } else {
++            mod list;
++            pub(super) use list::register;
++            pub(crate) use list::run;
++        }
++    }
++}
++
++/// This module provides a way to schedule the execution of the destructor list
++/// on systems without a per-variable destructor system.
++mod guard {
++    cfg_if::cfg_if! {
++        if #[cfg(all(target_thread_local, target_vendor = "apple"))] {
++            mod apple;
++            pub(super) use apple::enable;
++        } else if #[cfg(target_os = "windows")] {
++            mod windows;
++            pub(super) use windows::enable;
++        } else if #[cfg(any(
++            all(target_family = "wasm", target_feature = "atomics"),
++        ))] {
++            pub(super) fn enable() {
++                // FIXME: Right now there is no concept of "thread exit", but
++                // this is likely going to show up at some point in the form of
++                // an exported symbol that the wasm runtime is going to be
++                // expected to call. For now we just leak everything, but if
++                // such a function starts to exist it will probably need to
++                // iterate the destructor list with this function:
++                #[allow(unused)]
++                use super::destructors::run;
++            }
++        } else if #[cfg(target_os = "hermit")] {
++            pub(super) fn enable() {}
++        } else if #[cfg(target_os = "solid_asp3")] {
++            mod solid;
++            pub(super) use solid::enable;
++        } else if #[cfg(all(target_thread_local, not(target_family = "wasm")))] {
++            mod key;
++            pub(super) use key::enable;
++        }
++    }
++}
++
++/// `const`-creatable TLS keys.
++///
++/// Most OSs without native TLS will provide a library-based way to create TLS
++/// storage. For each TLS variable, we create a key, which can then be used to
++/// reference an entry in a thread-local table. This then associates each key
++/// with a pointer which we can get and set to store our data.
++pub(crate) mod key {
++    cfg_if::cfg_if! {
++        if #[cfg(any(
++            all(
++                not(target_vendor = "apple"),
++                not(target_family = "wasm"),
++                target_family = "unix",
++            ),
++            target_os = "teeos",
++        ))] {
++            mod racy;
++            mod unix;
++            #[cfg(test)]
++            mod tests;
++            pub(super) use racy::StaticKey;
++            use unix::{Key, create, destroy, get, set};
++        } else if #[cfg(all(not(target_thread_local), target_os = "windows"))] {
++            #[cfg(test)]
++            mod tests;
++            mod windows;
++            pub(super) use windows::{StaticKey, run_dtors};
++        } else if #[cfg(all(target_vendor = "fortanix", target_env = "sgx"))] {
++            mod racy;
++            mod sgx;
++            #[cfg(test)]
++            mod tests;
++            pub(super) use racy::StaticKey;
++            use sgx::{Key, create, destroy, get, set};
++        } else if #[cfg(target_os = "xous")] {
++            mod racy;
++            #[cfg(test)]
++            mod tests;
++            mod xous;
++            pub(super) use racy::StaticKey;
++            pub(crate) use xous::destroy_tls;
++            use xous::{Key, create, destroy, get, set};
++        }
+     }
+ }
+ 
+diff --git a/library/std/src/sys/thread_local/fast_local/eager.rs b/library/std/src/sys/thread_local/native/eager.rs
+similarity index 94%
+rename from library/std/src/sys/thread_local/fast_local/eager.rs
+rename to library/std/src/sys/thread_local/native/eager.rs
+index b97bd9cc88cef..99e5ae7fb9687 100644
+--- a/library/std/src/sys/thread_local/fast_local/eager.rs
++++ b/library/std/src/sys/thread_local/native/eager.rs
+@@ -1,7 +1,7 @@
+ use crate::cell::{Cell, UnsafeCell};
+ use crate::ptr::{self, drop_in_place};
+ use crate::sys::thread_local::abort_on_dtor_unwind;
+-use crate::sys::thread_local_dtor::register_dtor;
++use crate::sys::thread_local::destructors;
+ 
+ #[derive(Clone, Copy)]
+ enum State {
+@@ -45,7 +45,7 @@ impl<T> Storage<T> {
+         // SAFETY:
+         // The caller guarantees that `self` will be valid until thread destruction.
+         unsafe {
+-            register_dtor(ptr::from_ref(self).cast_mut().cast(), destroy::<T>);
++            destructors::register(ptr::from_ref(self).cast_mut().cast(), destroy::<T>);
+         }
+ 
+         self.state.set(State::Alive);
+diff --git a/library/std/src/sys/thread_local/fast_local/lazy.rs b/library/std/src/sys/thread_local/native/lazy.rs
+similarity index 95%
+rename from library/std/src/sys/thread_local/fast_local/lazy.rs
+rename to library/std/src/sys/thread_local/native/lazy.rs
+index c1ada35d484d3..9d47e8ef68975 100644
+--- a/library/std/src/sys/thread_local/fast_local/lazy.rs
++++ b/library/std/src/sys/thread_local/native/lazy.rs
+@@ -2,7 +2,7 @@ use crate::cell::UnsafeCell;
+ use crate::hint::unreachable_unchecked;
+ use crate::ptr;
+ use crate::sys::thread_local::abort_on_dtor_unwind;
+-use crate::sys::thread_local_dtor::register_dtor;
++use crate::sys::thread_local::destructors;
+ 
+ pub unsafe trait DestroyedState: Sized {
+     fn register_dtor<T>(s: &Storage<T, Self>);
+@@ -15,7 +15,7 @@ unsafe impl DestroyedState for ! {
+ unsafe impl DestroyedState for () {
+     fn register_dtor<T>(s: &Storage<T, ()>) {
+         unsafe {
+-            register_dtor(ptr::from_ref(s).cast_mut().cast(), destroy::<T>);
++            destructors::register(ptr::from_ref(s).cast_mut().cast(), destroy::<T>);
+         }
+     }
+ }
+diff --git a/library/std/src/sys/thread_local/fast_local/mod.rs b/library/std/src/sys/thread_local/native/mod.rs
+similarity index 99%
+rename from library/std/src/sys/thread_local/fast_local/mod.rs
+rename to library/std/src/sys/thread_local/native/mod.rs
+index 575d60de4ee95..1cc45fe892dee 100644
+--- a/library/std/src/sys/thread_local/fast_local/mod.rs
++++ b/library/std/src/sys/thread_local/native/mod.rs
+@@ -29,8 +29,6 @@
+ //! eliminates the `Destroyed` state for these values, which can allow more niche
+ //! optimizations to occur for the `State` enum. For `Drop` types, `()` is used.
+ 
+-#![deny(unsafe_op_in_unsafe_fn)]
+-
+ mod eager;
+ mod lazy;
+ 
+diff --git a/library/std/src/sys/thread_local/os_local.rs b/library/std/src/sys/thread_local/os.rs
+similarity index 98%
+rename from library/std/src/sys/thread_local/os_local.rs
+rename to library/std/src/sys/thread_local/os.rs
+index ee5adef66eacb..6980c897fdb53 100644
+--- a/library/std/src/sys/thread_local/os_local.rs
++++ b/library/std/src/sys/thread_local/os.rs
+@@ -2,7 +2,7 @@ use super::abort_on_dtor_unwind;
+ use crate::cell::Cell;
+ use crate::marker::PhantomData;
+ use crate::ptr;
+-use crate::sys_common::thread_local_key::StaticKey as OsKey;
++use crate::sys::thread_local::key::StaticKey as OsKey;
+ 
+ #[doc(hidden)]
+ #[allow_internal_unstable(thread_local_internals)]
+diff --git a/library/std/src/sys/thread_local/static_local.rs b/library/std/src/sys/thread_local/statik.rs
+similarity index 100%
+rename from library/std/src/sys/thread_local/static_local.rs
+rename to library/std/src/sys/thread_local/statik.rs
+diff --git a/library/std/src/sys_common/mod.rs b/library/std/src/sys_common/mod.rs
+index 200ea028a08ad..60ee405ecaaa2 100644
+--- a/library/std/src/sys_common/mod.rs
++++ b/library/std/src/sys_common/mod.rs
+@@ -24,18 +24,9 @@ pub mod fs;
+ pub mod io;
+ pub mod lazy_box;
+ pub mod process;
+-pub mod thread_local_dtor;
+ pub mod wstr;
+ pub mod wtf8;
+ 
+-cfg_if::cfg_if! {
+-    if #[cfg(target_os = "windows")] {
+-        pub use crate::sys::thread_local_key;
+-    } else {
+-        pub mod thread_local_key;
+-    }
+-}
+-
+ cfg_if::cfg_if! {
+     if #[cfg(any(
+         all(unix, not(target_os = "l4re")),
+diff --git a/library/std/src/sys_common/thread_local_dtor.rs b/library/std/src/sys_common/thread_local_dtor.rs
+deleted file mode 100644
+index 98382fc6acc23..0000000000000
+--- a/library/std/src/sys_common/thread_local_dtor.rs
++++ /dev/null
+@@ -1,56 +0,0 @@
+-//! Thread-local destructor
+-//!
+-//! Besides thread-local "keys" (pointer-sized non-addressable thread-local store
+-//! with an associated destructor), many platforms also provide thread-local
+-//! destructors that are not associated with any particular data. These are
+-//! often more efficient.
+-//!
+-//! This module provides a fallback implementation for that interface, based
+-//! on the less efficient thread-local "keys". Each platform provides
+-//! a `thread_local_dtor` module which will either re-export the fallback,
+-//! or implement something more efficient.
+-
+-#![unstable(feature = "thread_local_internals", issue = "none")]
+-#![allow(dead_code)]
+-
+-use crate::cell::RefCell;
+-use crate::ptr;
+-use crate::sys_common::thread_local_key::StaticKey;
+-
+-pub unsafe fn register_dtor_fallback(t: *mut u8, dtor: unsafe extern "C" fn(*mut u8)) {
+-    // The fallback implementation uses a vanilla OS-based TLS key to track
+-    // the list of destructors that need to be run for this thread. The key
+-    // then has its own destructor which runs all the other destructors.
+-    //
+-    // The destructor for DTORS is a little special in that it has a `while`
+-    // loop to continuously drain the list of registered destructors. It
+-    // *should* be the case that this loop always terminates because we
+-    // provide the guarantee that a TLS key cannot be set after it is
+-    // flagged for destruction.
+-
+-    static DTORS: StaticKey = StaticKey::new(Some(run_dtors));
+-    // FIXME(joboet): integrate RefCell into pointer to avoid infinite recursion
+-    // when the global allocator tries to register a destructor and just panic
+-    // instead.
+-    type List = RefCell<Vec<(*mut u8, unsafe extern "C" fn(*mut u8))>>;
+-    if DTORS.get().is_null() {
+-        let v: Box<List> = Box::new(RefCell::new(Vec::new()));
+-        DTORS.set(Box::into_raw(v) as *mut u8);
+-    }
+-    let list = &*(DTORS.get() as *const List);
+-    match list.try_borrow_mut() {
+-        Ok(mut dtors) => dtors.push((t, dtor)),
+-        Err(_) => rtabort!("global allocator may not use TLS"),
+-    }
+-
+-    unsafe extern "C" fn run_dtors(mut ptr: *mut u8) {
+-        while !ptr.is_null() {
+-            let list = Box::from_raw(ptr as *mut List).into_inner();
+-            for (ptr, dtor) in list.into_iter() {
+-                dtor(ptr);
+-            }
+-            ptr = DTORS.get();
+-            DTORS.set(ptr::null_mut());
+-        }
+-    }
+-}
+diff --git a/library/std/src/sys_common/thread_local_key/tests.rs b/library/std/src/sys_common/thread_local_key/tests.rs
+deleted file mode 100644
+index 48bed31af517c..0000000000000
+--- a/library/std/src/sys_common/thread_local_key/tests.rs
++++ /dev/null
+@@ -1,17 +0,0 @@
+-use super::StaticKey;
+-use core::ptr;
+-
+-#[test]
+-fn statik() {
+-    static K1: StaticKey = StaticKey::new(None);
+-    static K2: StaticKey = StaticKey::new(None);
+-
+-    unsafe {
+-        assert!(K1.get().is_null());
+-        assert!(K2.get().is_null());
+-        K1.set(ptr::without_provenance_mut(1));
+-        K2.set(ptr::without_provenance_mut(2));
+-        assert_eq!(K1.get() as usize, 1);
+-        assert_eq!(K2.get() as usize, 2);
+-    }
+-}
+diff --git a/src/tools/miri/tests/pass-dep/concurrency/tls_pthread_drop_order.rs b/src/tools/miri/tests/pass-dep/concurrency/tls_pthread_drop_order.rs
+index 0eaab9676429d..52348aad33d72 100644
+--- a/src/tools/miri/tests/pass-dep/concurrency/tls_pthread_drop_order.rs
++++ b/src/tools/miri/tests/pass-dep/concurrency/tls_pthread_drop_order.rs
+@@ -1,9 +1,9 @@
+ //@ignore-target-windows: No pthreads on Windows
+ //! Test that pthread_key destructors are run in the right order.
+ //! Note that these are *not* used by actual `thread_local!` on Linux! Those use
+-//! `thread_local_dtor::register_dtor` from the stdlib instead. In Miri this hits the fallback path
+-//! in `register_dtor_fallback`, which uses a *single* pthread_key to manage a thread-local list of
+-//! dtors to call.
++//! `destructors::register` from the stdlib instead. In Miri this ends up hitting
++//! the fallback path in `guard::key::enable`, which uses a *single* pthread_key
++//! to manage a thread-local list of dtors to call.
+ 
+ use std::mem;
+ use std::ptr;

@@ -50,7 +50,13 @@ def bootstrap_runtime_phase(
 
     try:
         container = podman_utils.safe_container_run(
-            client, setup_image, detach=True, working_dir="/testbed", remove=True
+            client,
+            setup_image,
+            detach=True,
+            working_dir="/testbed",
+            remove=True,
+            environment={"ANTHROPIC_API_KEY": ""},
+            nano_cpus=int(16e9)
         )
 
         # 1. Inject Entrypoint
@@ -68,11 +74,11 @@ def bootstrap_runtime_phase(
                     with open(file_path, "rb") as f:
                         podman_utils.copy_to_container(container, f.read(), f"{target}/{filename}")
 
-        # 3. Inject instance_metadata.json into /rules
-        if metadata is not None:
-            metadata_json = metadata.model_dump_json(indent=2).encode("utf-8")
-            podman_utils.copy_to_container(container, metadata_json, "/rules/instance_metadata.json")
-            logger.info("Injected instance_metadata.json into /rules")
+        # 3. Inject default.semgrepignore into /rules
+        default_semgrepignore = project_root / "assets" / "default.semgrepignore"
+        with open(default_semgrepignore, "rb") as f:
+            podman_utils.copy_to_container(container, f.read(), "/rules/default.semgrepignore")
+        logger.info("Injected default.semgrepignore into /rules")
 
         # 4. Lobotomize git
         git_cmds = [
@@ -96,13 +102,20 @@ def bootstrap_runtime_phase(
             timeout=600,
         )
 
+        podman_utils.podman_timed_exec_bash_logged(
+            container,
+            "sudo chmod -R 777 /home/benchmarker || true",
+            logger,
+            timeout=1200,
+        )
+
         # Commit
         validate_and_commit_container(
             container,
             runtime_image,
+            logger,
             changes=['ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]'],
         )
-        logger.info(f"✅ Saved runtime image: {runtime_image}")
         return runtime_image
 
     finally:

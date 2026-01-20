@@ -1,0 +1,1 @@
+Consolidate listener info into `ListenerInfo` interface and expose in factory contexts

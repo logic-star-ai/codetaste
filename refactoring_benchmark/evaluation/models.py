@@ -2,11 +2,14 @@
 
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Type, TypeVar
 
 from pydantic import BaseModel, Field, computed_field
 
 from refactoring_benchmark.bootstrap.models import ExecutionInstanceMetadata
+from refactoring_benchmark.inference.models import AgentConfig, InferenceMetadata
+
+T = TypeVar("T", bound="EvaluationResult")
 
 
 class TestMetrics(BaseModel):
@@ -83,7 +86,7 @@ class EvaluationConfig(BaseModel):
     agent_id: str
     output_dir: Path = Path("./output")
     nr_workers: int = Field(gt=0, default=4)
-    timeout_test: int = Field(gt=0, default=600)  # 10 minutes
+    timeout_test: int = Field(gt=0, default=1200)  # 20 minutes
     timeout_rule: int = Field(gt=0, default=1200)  # 20 minutes
     force: bool = False
 
@@ -95,9 +98,47 @@ class EvaluationResult(BaseModel):
     """Complete evaluation result for a single instance and agent."""
 
     instance_metadata: ExecutionInstanceMetadata
+    agent_config: AgentConfig
     agent_test_metrics: Optional[TestMetrics] = None
-    agent_rule_metrics: RuleMetrics  # Required, not optional
+    agent_rule_metrics: RuleMetrics
+    inference_metadata: Optional[InferenceMetadata] = None
     evaluation_timestamp: str = Field(default_factory=lambda: datetime.utcnow().isoformat() + "Z")
+    eval_dir: Optional[Path] = Field(default=None, exclude=True)
 
     class Config:
         arbitrary_types_allowed = True
+
+    def save_to_json(self, file_path: str | Path):
+        """Save evaluation result to a JSON file."""
+        path = Path(file_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8") as f:
+            f.write(self.model_dump_json(indent=4))
+
+    @classmethod
+    def load_from_json(cls: Type[T], file_path: str | Path) -> T:
+        """Load evaluation result from a JSON file.
+
+        Also attempts to load inference_metadata.json from the parent directory if it exists.
+        The expected structure is:
+            {output_dir}/{owner}/{repo}/{hash}/{agent_id}/inference_metadata.json
+            {output_dir}/{owner}/{repo}/{hash}/{agent_id}/evaluation/evaluation_result.json
+        """
+        path = Path(file_path)
+        with path.open("r", encoding="utf-8") as f:
+            result = cls.model_validate_json(f.read())
+
+        # Path structure: {output_dir}/{owner}/{repo}/{hash}/{agent_id}/evaluation/evaluation_result.json
+        result.eval_dir = path.parent
+
+        # If no embedded metadata, try to load from standalone file
+        if result.inference_metadata is None:
+            inference_metadata_path = path.parent.parent / "inference_metadata.json"
+            if inference_metadata_path.exists():
+                try:
+                    with inference_metadata_path.open("r", encoding="utf-8") as f:
+                        result.inference_metadata = InferenceMetadata.model_validate_json(f.read())
+                except Exception:
+                    pass
+
+        return result

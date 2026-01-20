@@ -1,0 +1,2244 @@
+diff --git a/src/python/pants/backend/project_info/rules/source_file_validator.py b/src/python/pants/backend/project_info/rules/source_file_validator.py
+index 99574768a3d..e0985ba3c8e 100644
+--- a/src/python/pants/backend/project_info/rules/source_file_validator.py
++++ b/src/python/pants/backend/project_info/rules/source_file_validator.py
+@@ -10,9 +10,8 @@
+ from pants.base.exiter import PANTS_FAILED_EXIT_CODE, PANTS_SUCCEEDED_EXIT_CODE
+ from pants.engine.collection import Collection
+ from pants.engine.console import Console
+-from pants.engine.fs import Digest, FilesContent
++from pants.engine.fs import Digest, FilesContent, SourcesSnapshot, SourcesSnapshots
+ from pants.engine.goal import Goal, GoalSubsystem
+-from pants.engine.legacy.graph import SourcesSnapshot, SourcesSnapshots
+ from pants.engine.rules import goal_rule, rule, subsystem_rule
+ from pants.engine.selectors import Get, MultiGet
+ from pants.subsystem.subsystem import Subsystem
+diff --git a/src/python/pants/bin/BUILD b/src/python/pants/bin/BUILD
+index fd267758906..cd0313d5097 100644
+--- a/src/python/pants/bin/BUILD
++++ b/src/python/pants/bin/BUILD
+@@ -20,9 +20,9 @@ python_library(
+     'src/python/pants/engine/legacy:address_mapper',
+     'src/python/pants/engine/legacy:graph',
+     'src/python/pants/engine/legacy:parser',
++    'src/python/pants/engine/legacy:round_engine',
+     'src/python/pants/engine:build_files',
+     'src/python/pants/engine:fs',
+-    'src/python/pants/engine:legacy_engine',
+     'src/python/pants/engine:mapper',
+     'src/python/pants/engine:native',
+     'src/python/pants/engine:parser',
+diff --git a/src/python/pants/bin/goal_runner.py b/src/python/pants/bin/goal_runner.py
+index fafa28f2ac1..68ceffc6e18 100644
+--- a/src/python/pants/bin/goal_runner.py
++++ b/src/python/pants/bin/goal_runner.py
+@@ -11,7 +11,7 @@
+ from pants.build_graph.build_file_parser import BuildFileParser
+ from pants.engine.addresses import Addresses
+ from pants.engine.legacy.graph import LegacyBuildGraph
+-from pants.engine.round_engine import RoundEngine
++from pants.engine.legacy.round_engine import RoundEngine
+ from pants.engine.selectors import Params
+ from pants.goal.context import Context
+ from pants.goal.goal import Goal
+diff --git a/src/python/pants/core/project_info/BUILD b/src/python/pants/core/project_info/BUILD
+index 22be75c8145..4487ce92d15 100644
+--- a/src/python/pants/core/project_info/BUILD
++++ b/src/python/pants/core/project_info/BUILD
+@@ -16,7 +16,6 @@ python_library(
+     'src/python/pants/engine:selectors',
+     'src/python/pants/engine:target',
+     'src/python/pants/engine:unions',
+-    'src/python/pants/engine/legacy:graph',
+     'src/python/pants/option',
+     'src/python/pants/source',
+     'src/python/pants/util:objects',
+diff --git a/src/python/pants/core/project_info/cloc.py b/src/python/pants/core/project_info/cloc.py
+index 80ca6c0e7ab..f66359fa018 100644
+--- a/src/python/pants/core/project_info/cloc.py
++++ b/src/python/pants/core/project_info/cloc.py
+@@ -15,10 +15,10 @@
+     InputFilesContent,
+     SingleFileExecutable,
+     Snapshot,
++    SourcesSnapshots,
+ )
+ from pants.engine.goal import Goal, GoalSubsystem
+ from pants.engine.isolated_process import Process, ProcessResult
+-from pants.engine.legacy.graph import SourcesSnapshots
+ from pants.engine.rules import goal_rule, rule, subsystem_rule
+ from pants.engine.selectors import Get
+ 
+diff --git a/src/python/pants/engine/BUILD b/src/python/pants/engine/BUILD
+index cb4bef9c020..d883049b33f 100644
+--- a/src/python/pants/engine/BUILD
++++ b/src/python/pants/engine/BUILD
+@@ -24,19 +24,6 @@ python_tests(
+   ],
+ )
+ 
+-python_library(
+-  name = 'legacy_engine',
+-  sources = ['legacy_engine.py', 'round_engine.py', 'round_manager.py'],
+-  dependencies = [
+-    'src/python/pants/base:exceptions',
+-    'src/python/pants/base:workunit',
+-    'src/python/pants/goal',
+-    'src/python/pants/util:logging',
+-    'src/python/pants/util:ordered_set',
+-  ],
+-  tags = {"partially_type_checked"},
+-)
+-
+ python_library(
+   name='addressable',
+   sources=['addressable.py'],
+diff --git a/src/python/pants/engine/fs.py b/src/python/pants/engine/fs.py
+index 6bd200fc18d..649eff5fa7a 100644
+--- a/src/python/pants/engine/fs.py
++++ b/src/python/pants/engine/fs.py
+@@ -318,6 +318,26 @@ def __init__(self, snapshot: Snapshot) -> None:
+         self.directory_digest = snapshot.directory_digest
+ 
+ 
++@dataclass(frozen=True)
++class SourcesSnapshot:
++    """Sources matched by command line specs, either directly via FilesystemSpecs or indirectly via
++    AddressSpecs.
++
++    Note that the resolved sources do not need an owning target. Any source resolvable by
++    `PathGlobs` is valid here.
++    """
++
++    snapshot: Snapshot
++
++
++class SourcesSnapshots(Collection[SourcesSnapshot]):
++    """A collection of sources matched by command line specs.
++
++    `@goal_rule`s may request this when they only need source files to operate and do not need any
++    target information.
++    """
++
++
+ def create_fs_rules():
+     """Creates rules that consume the intrinsic filesystem types."""
+     return [
+diff --git a/src/python/pants/engine/internals/BUILD b/src/python/pants/engine/internals/BUILD
+new file mode 100644
+index 00000000000..a2a983ee76d
+--- /dev/null
++++ b/src/python/pants/engine/internals/BUILD
+@@ -0,0 +1,59 @@
++# Copyright 2020 Pants project contributors (see CONTRIBUTORS.md).
++# Licensed under the Apache License, Version 2.0 (see LICENSE).
++
++python_tests(
++  name='tests',
++  dependencies=[
++    ':graph',
++    ':options_parsing',
++    'src/python/pants/engine:addresses',
++    'src/python/pants/engine:rules',
++    'src/python/pants/engine:selectors',
++    'src/python/pants/engine:target',
++    'src/python/pants/init',
++    'src/python/pants/option',
++    'src/python/pants/testutil:test_base',
++    'src/python/pants/util:logging',
++    'src/python/pants/util:ordered_set',
++  ],
++  tags = {"type_checked"},
++)
++
++python_library(
++  name='graph',
++  sources=['graph.py'],
++  dependencies=[
++    '3rdparty/python:dataclasses',
++    'src/python/pants/base:exceptions',
++    'src/python/pants/base:specs',
++    'src/python/pants/engine/legacy:address_mapper',
++    'src/python/pants/engine/legacy:graph',
++    'src/python/pants/engine/legacy:structs',
++    'src/python/pants/engine:addresses',
++    'src/python/pants/engine:fs',
++    'src/python/pants/engine:parser',
++    'src/python/pants/engine:rules',
++    'src/python/pants/engine:selectors',
++    'src/python/pants/engine:target',
++    'src/python/pants/engine:unions',
++    'src/python/pants/option',
++    'src/python/pants/source',
++    'src/python/pants/util:meta',
++    'src/python/pants/util:ordered_set',
++  ],
++  tags = {"partially_type_checked"},
++)
++
++python_library(
++  name='options_parsing',
++  sources=['options_parsing.py'],
++  dependencies=[
++    '3rdparty/python:dataclasses',
++    'src/python/pants/build_graph',
++    'src/python/pants/engine:fs',
++    'src/python/pants/engine:objects',
++    'src/python/pants/option',
++    'src/python/pants/util:logging',
++  ],
++  tags = {"partially_type_checked"},
++)
+diff --git a/tests/python/pants_test/engine/legacy/__init__.py b/src/python/pants/engine/internals/__init__.py
+similarity index 100%
+rename from tests/python/pants_test/engine/legacy/__init__.py
+rename to src/python/pants/engine/internals/__init__.py
+diff --git a/src/python/pants/engine/internals/graph.py b/src/python/pants/engine/internals/graph.py
+new file mode 100644
+index 00000000000..97535a68223
+--- /dev/null
++++ b/src/python/pants/engine/internals/graph.py
+@@ -0,0 +1,358 @@
++# Copyright 2020 Pants project contributors (see CONTRIBUTORS.md).
++# Licensed under the Apache License, Version 2.0 (see LICENSE).
++
++import os.path
++from collections import defaultdict, deque
++from dataclasses import dataclass
++from pathlib import PurePath
++from typing import DefaultDict, List, Tuple, Union, cast
++
++from pants.base.exceptions import ResolveError, TargetDefinitionException
++from pants.base.specs import (
++    AddressSpecs,
++    AscendantAddresses,
++    FilesystemLiteralSpec,
++    FilesystemMergedSpec,
++    FilesystemResolvedGlobSpec,
++    FilesystemSpecs,
++)
++from pants.engine.addresses import (
++    Address,
++    Addresses,
++    AddressesWithOrigins,
++    AddressWithOrigin,
++    BuildFileAddress,
++)
++from pants.engine.fs import EMPTY_SNAPSHOT, PathGlobs, Snapshot, SourcesSnapshot, SourcesSnapshots
++from pants.engine.legacy.address_mapper import LegacyAddressMapper
++from pants.engine.legacy.graph import HydratedField, HydratedTarget, HydratedTargets, logger
++from pants.engine.legacy.structs import HydrateableField, SourcesField, TargetAdaptor
++from pants.engine.parser import HydratedStruct
++from pants.engine.rules import RootRule, rule
++from pants.engine.selectors import Get, MultiGet
++from pants.engine.target import (
++    Dependencies,
++    RegisteredTargetTypes,
++    Target,
++    Targets,
++    TargetsWithOrigins,
++    TargetWithOrigin,
++    TransitiveTarget,
++    TransitiveTargets,
++    WrappedTarget,
++)
++from pants.engine.unions import UnionMembership
++from pants.option.global_options import GlobalOptions, OwnersNotFoundBehavior
++from pants.source.filespec import any_matches_filespec
++from pants.source.wrapped_globs import EagerFilesetWithSpec
++from pants.util.ordered_set import FrozenOrderedSet, OrderedSet
++
++# -----------------------------------------------------------------------------------------------
++# Struct -> Target(s)
++# -----------------------------------------------------------------------------------------------
++
++
++@rule
++async def resolve_target(
++    hydrated_struct: HydratedStruct,
++    registered_target_types: RegisteredTargetTypes,
++    union_membership: UnionMembership,
++) -> WrappedTarget:
++    kwargs = hydrated_struct.value.kwargs().copy()
++    type_alias = kwargs.pop("type_alias")
++
++    # We special case `address` and the field `name`. The `Target` constructor requires an
++    # `Address`, so we use the value pre-calculated via `build_files.py`'s `hydrate_struct` rule.
++    # We throw away the field `name` because it can be accessed via `tgt.address.target_name`, so
++    # there is no (known) reason to preserve the field.
++    address = cast(Address, kwargs.pop("address"))
++    kwargs.pop("name", None)
++
++    # We convert `source` into `sources` because the Target API has no `Source` field, only
++    # `Sources`.
++    if "source" in kwargs and "sources" in kwargs:
++        raise TargetDefinitionException(
++            address, "Cannot specify both `source` and `sources` fields."
++        )
++    if "source" in kwargs:
++        source = kwargs.pop("source")
++        if not isinstance(source, str):
++            raise TargetDefinitionException(
++                address,
++                f"The `source` field must be a string containing a path relative to the target, "
++                f"but got {source} of type {type(source)}.",
++            )
++        kwargs["sources"] = [source]
++
++    target_type = registered_target_types.aliases_to_types.get(type_alias, None)
++    if target_type is None:
++        raise TargetDefinitionException(
++            address,
++            f"Target type {repr(type_alias)} is not recognized. All valid target types: "
++            f"{sorted(registered_target_types.aliases)}.",
++        )
++
++    # Not every target type has the Dependencies field registered, but the StructWithDependencies
++    # code means that `kwargs` will always have an entry. We must remove `dependencies` from
++    # `kwargs` for target types without the value, otherwise we'll get an "unrecognized field"
++    # error. But, we also need to be careful to error if the user did explicitly specify
++    # `dependencies` in the BUILD file.
++    if kwargs["dependencies"] is None and not target_type.class_has_field(
++        Dependencies, union_membership=union_membership
++    ):
++        kwargs.pop("dependencies")
++
++    return WrappedTarget(target_type(kwargs, address=address))
++
++
++@rule
++async def resolve_targets(addresses: Addresses) -> Targets:
++    wrapped_targets = await MultiGet(Get[WrappedTarget](Address, a) for a in addresses)
++    return Targets(wrapped_target.target for wrapped_target in wrapped_targets)
++
++
++# -----------------------------------------------------------------------------------------------
++# AddressWithOrigin(s) -> TargetWithOrigin(s)
++# -----------------------------------------------------------------------------------------------
++
++
++@rule
++async def resolve_target_with_origin(address_with_origin: AddressWithOrigin) -> TargetWithOrigin:
++    wrapped_target = await Get[WrappedTarget](Address, address_with_origin.address)
++    return TargetWithOrigin(wrapped_target.target, address_with_origin.origin)
++
++
++@rule
++async def resolve_targets_with_origins(
++    addresses_with_origins: AddressesWithOrigins,
++) -> TargetsWithOrigins:
++    targets_with_origins = await MultiGet(
++        Get[TargetWithOrigin](AddressWithOrigin, address_with_origin)
++        for address_with_origin in addresses_with_origins
++    )
++    return TargetsWithOrigins(targets_with_origins)
++
++
++# -----------------------------------------------------------------------------------------------
++# TransitiveTargets
++# -----------------------------------------------------------------------------------------------
++
++
++@rule
++async def transitive_target(wrapped_root: WrappedTarget) -> TransitiveTarget:
++    root = wrapped_root.target
++    dependencies = (
++        await MultiGet(Get[TransitiveTarget](Address, d) for d in root[Dependencies].value or ())
++        if root.has_field(Dependencies)
++        else tuple()
++    )
++    return TransitiveTarget(root, dependencies)
++
++
++@rule
++async def transitive_targets(addresses: Addresses) -> TransitiveTargets:
++    """Given Addresses, kicks off recursion on expansion of TransitiveTargets.
++
++    The TransitiveTarget dataclass represents a structure-shared graph, which we walk and flatten
++    here. The engine memoizes the computation of TransitiveTarget, so when multiple
++    TransitiveTargets objects are being constructed for multiple roots, their structure will be
++    shared.
++    """
++    transitive_targets = await MultiGet(Get[TransitiveTarget](Address, a) for a in addresses)
++
++    closure: OrderedSet[Target] = OrderedSet()
++    to_visit = deque(transitive_targets)
++
++    while to_visit:
++        tt = to_visit.popleft()
++        if tt.root in closure:
++            continue
++        closure.add(tt.root)
++        to_visit.extend(tt.dependencies)
++
++    return TransitiveTargets(tuple(tt.root for tt in transitive_targets), FrozenOrderedSet(closure))
++
++
++# -----------------------------------------------------------------------------------------------
++# Find the owners of a file
++# -----------------------------------------------------------------------------------------------
++
++
++class InvalidOwnersOfArgs(Exception):
++    pass
++
++
++@dataclass(frozen=True)
++class OwnersRequest:
++    """A request for the owners of a set of file paths."""
++
++    sources: Tuple[str, ...]
++
++
++@dataclass(frozen=True)
++class Owners:
++    addresses: Addresses
++
++
++@rule
++async def find_owners(owners_request: OwnersRequest) -> Owners:
++    sources_set = FrozenOrderedSet(owners_request.sources)
++    dirs_set = FrozenOrderedSet(os.path.dirname(source) for source in sources_set)
++
++    # Walk up the buildroot looking for targets that would conceivably claim changed sources.
++    candidate_specs = tuple(AscendantAddresses(directory=d) for d in dirs_set)
++    candidate_targets = await Get[HydratedTargets](AddressSpecs(candidate_specs))
++
++    # Match the source globs against the expanded candidate targets.
++    def owns_any_source(legacy_target: HydratedTarget) -> bool:
++        """Given a `HydratedTarget` instance, check if it owns the given source file."""
++        target_kwargs = legacy_target.adaptor.kwargs()
++
++        # Handle `sources`-declaring targets.
++        # NB: Deleted files can only be matched against the 'filespec' (ie, `PathGlobs`) for a target,
++        # so we don't actually call `fileset.matches` here.
++        # TODO: This matching logic should be implemented using the rust `fs` crate for two reasons:
++        #  1) having two implementations isn't great
++        #  2) we're expanding sources via HydratedTarget, but it isn't necessary to do that to match
++        target_sources = target_kwargs.get("sources", None)
++        return target_sources and any_matches_filespec(
++            paths=sources_set, spec=target_sources.filespec
++        )
++
++    build_file_addresses = await MultiGet(
++        Get[BuildFileAddress](Address, ht.adaptor.address) for ht in candidate_targets
++    )
++    owners = Addresses(
++        ht.adaptor.address
++        for ht, bfa in zip(candidate_targets, build_file_addresses)
++        if LegacyAddressMapper.any_is_declaring_file(bfa, sources_set) or owns_any_source(ht)
++    )
++    return Owners(owners)
++
++
++# -----------------------------------------------------------------------------------------------
++# FilesystemSpecs -> Addresses
++# -----------------------------------------------------------------------------------------------
++
++
++@rule
++async def addresses_with_origins_from_filesystem_specs(
++    filesystem_specs: FilesystemSpecs, global_options: GlobalOptions,
++) -> AddressesWithOrigins:
++    """Find the owner(s) for each FilesystemSpec while preserving the original FilesystemSpec those
++    owners come from.
++
++    This will merge FilesystemSpecs that come from the same owning target into a single
++    FilesystemMergedSpec.
++    """
++    pathglobs_per_include = (
++        filesystem_specs.path_globs_for_spec(
++            spec, global_options.options.owners_not_found_behavior.to_glob_match_error_behavior(),
++        )
++        for spec in filesystem_specs.includes
++    )
++    snapshot_per_include = await MultiGet(
++        Get[Snapshot](PathGlobs, pg) for pg in pathglobs_per_include
++    )
++    owners_per_include = await MultiGet(
++        Get[Owners](OwnersRequest(sources=snapshot.files)) for snapshot in snapshot_per_include
++    )
++    addresses_to_specs: DefaultDict[
++        Address, List[Union[FilesystemLiteralSpec, FilesystemResolvedGlobSpec]]
++    ] = defaultdict(list)
++    for spec, snapshot, owners in zip(
++        filesystem_specs.includes, snapshot_per_include, owners_per_include
++    ):
++        if (
++            global_options.options.owners_not_found_behavior != OwnersNotFoundBehavior.ignore
++            and isinstance(spec, FilesystemLiteralSpec)
++            and not owners.addresses
++        ):
++            file_path = PurePath(spec.to_spec_string())
++            msg = (
++                f"No owning targets could be found for the file `{file_path}`.\n\nPlease check "
++                f"that there is a BUILD file in `{file_path.parent}` with a target whose `sources` field "
++                f"includes `{file_path}`. See https://www.pantsbuild.org/build_files.html."
++            )
++            if global_options.options.owners_not_found_behavior == OwnersNotFoundBehavior.warn:
++                logger.warning(msg)
++            else:
++                raise ResolveError(msg)
++        # We preserve what literal files any globs resolved to. This allows downstream goals to be
++        # more precise in which files they operate on.
++        origin: Union[FilesystemLiteralSpec, FilesystemResolvedGlobSpec] = (
++            spec
++            if isinstance(spec, FilesystemLiteralSpec)
++            else FilesystemResolvedGlobSpec(glob=spec.glob, files=snapshot.files)
++        )
++        for address in owners.addresses:
++            addresses_to_specs[address].append(origin)
++    return AddressesWithOrigins(
++        AddressWithOrigin(
++            address, specs[0] if len(specs) == 1 else FilesystemMergedSpec.create(specs)
++        )
++        for address, specs in addresses_to_specs.items()
++    )
++
++
++# -----------------------------------------------------------------------------------------------
++# SourcesSnapshots
++# -----------------------------------------------------------------------------------------------
++
++
++@rule
++async def hydrate_sources_snapshot(hydrated_struct: HydratedStruct) -> SourcesSnapshot:
++    """Construct a SourcesSnapshot from a TargetAdaptor without hydrating any other fields."""
++    target_adaptor = cast(TargetAdaptor, hydrated_struct.value)
++    sources_field = next(
++        (fa for fa in target_adaptor.field_adaptors if isinstance(fa, SourcesField)), None
++    )
++    if sources_field is None:
++        return SourcesSnapshot(EMPTY_SNAPSHOT)
++    hydrated_sources_field = await Get[HydratedField](HydrateableField, sources_field)
++    efws = cast(EagerFilesetWithSpec, hydrated_sources_field.value)
++    return SourcesSnapshot(efws.snapshot)
++
++
++@rule
++async def sources_snapshots_from_address_specs(address_specs: AddressSpecs) -> SourcesSnapshots:
++    """Request SourcesSnapshots for the given address specs.
++
++    Each address will map to a corresponding SourcesSnapshot. This rule avoids hydrating any other
++    fields.
++    """
++    addresses = await Get[Addresses](AddressSpecs, address_specs)
++    snapshots = await MultiGet(Get[SourcesSnapshot](Address, a) for a in addresses)
++    return SourcesSnapshots(snapshots)
++
++
++@rule
++async def sources_snapshots_from_filesystem_specs(
++    filesystem_specs: FilesystemSpecs, global_options: GlobalOptions,
++) -> SourcesSnapshots:
++    """Resolve the snapshot associated with the provided filesystem specs."""
++    snapshot = await Get[Snapshot](
++        PathGlobs,
++        filesystem_specs.to_path_globs(
++            global_options.options.owners_not_found_behavior.to_glob_match_error_behavior()
++        ),
++    )
++    return SourcesSnapshots([SourcesSnapshot(snapshot)])
++
++
++def rules():
++    return [
++        resolve_target,
++        resolve_targets,
++        resolve_target_with_origin,
++        resolve_targets_with_origins,
++        transitive_target,
++        transitive_targets,
++        find_owners,
++        addresses_with_origins_from_filesystem_specs,
++        hydrate_sources_snapshot,
++        sources_snapshots_from_address_specs,
++        sources_snapshots_from_filesystem_specs,
++        RootRule(FilesystemSpecs),
++        RootRule(OwnersRequest),
++    ]
+diff --git a/src/python/pants/engine/internals/graph_test.py b/src/python/pants/engine/internals/graph_test.py
+new file mode 100644
+index 00000000000..7093fe533d2
+--- /dev/null
++++ b/src/python/pants/engine/internals/graph_test.py
+@@ -0,0 +1,76 @@
++# Copyright 2020 Pants project contributors (see CONTRIBUTORS.md).
++# Licensed under the Apache License, Version 2.0 (see LICENSE).
++
++from textwrap import dedent
++
++from pants.engine.addresses import Address, Addresses
++from pants.engine.rules import RootRule
++from pants.engine.target import (
++    Dependencies,
++    Target,
++    Targets,
++    TransitiveTarget,
++    TransitiveTargets,
++    WrappedTarget,
++)
++from pants.testutil.test_base import TestBase
++from pants.util.ordered_set import FrozenOrderedSet
++
++
++class MockTarget(Target):
++    alias = "target"
++    core_fields = (Dependencies,)
++
++
++class GraphTest(TestBase):
++    @classmethod
++    def rules(cls):
++        return (*super().rules(), RootRule(Addresses), RootRule(WrappedTarget))
++
++    @classmethod
++    def target_types(cls):
++        return (MockTarget,)
++
++    def test_transitive_targets(self) -> None:
++        t1 = MockTarget({}, address=Address.parse(":t1"))
++        t2 = MockTarget({Dependencies.alias: [t1.address]}, address=Address.parse(":t2"))
++        d1 = MockTarget({Dependencies.alias: [t1.address]}, address=Address.parse(":d1"))
++        d2 = MockTarget({Dependencies.alias: [t2.address]}, address=Address.parse(":d2"))
++        d3 = MockTarget({}, address=Address.parse(":d3"))
++        root = MockTarget(
++            {Dependencies.alias: [d1.address, d2.address, d3.address]},
++            address=Address.parse(":root"),
++        )
++
++        # TODO: possibly figure out how to deduplicate this when developing utilities for testing
++        #  with the Target API.
++        self.add_to_build_file(
++            "",
++            dedent(
++                """\
++                target(name='t1')
++                target(name='t2', dependencies=[':t1'])
++                target(name='d1', dependencies=[':t1'])
++                target(name='d2', dependencies=[':t2'])
++                target(name='d3')
++                target(name='root', dependencies=[':d1', ':d2', ':d3'])
++                """
++            ),
++        )
++
++        direct_deps = self.request_single_product(
++            Targets, Addresses(root[Dependencies].value)  # type: ignore[arg-type]
++        )
++        assert direct_deps == Targets([d1, d2, d3])
++
++        transitive_target = self.request_single_product(TransitiveTarget, WrappedTarget(root))
++        assert transitive_target.root == root
++        assert {
++            dep_transitive_target.root for dep_transitive_target in transitive_target.dependencies
++        } == {d1, d2, d3}
++
++        transitive_targets = self.request_single_product(
++            TransitiveTargets, Addresses([root.address, d2.address])
++        )
++        assert transitive_targets.roots == (root, d2)
++        assert transitive_targets.closure == FrozenOrderedSet([root, d2, d1, d3, t2, t1])
+diff --git a/src/python/pants/engine/legacy/options_parsing.py b/src/python/pants/engine/internals/options_parsing.py
+similarity index 97%
+rename from src/python/pants/engine/legacy/options_parsing.py
+rename to src/python/pants/engine/internals/options_parsing.py
+index f34b125a6c2..4a122e08ef7 100644
+--- a/src/python/pants/engine/legacy/options_parsing.py
++++ b/src/python/pants/engine/internals/options_parsing.py
+@@ -41,7 +41,7 @@ def log_level(global_options: GlobalOptions) -> LogLevel:
+     return log_level
+ 
+ 
+-def create_options_parsing_rules():
++def rules():
+     return [
+         scope_options,
+         parse_options,
+diff --git a/tests/python/pants_test/engine/legacy/test_options_parsing.py b/src/python/pants/engine/internals/options_parsing_test.py
+similarity index 100%
+rename from tests/python/pants_test/engine/legacy/test_options_parsing.py
+rename to src/python/pants/engine/internals/options_parsing_test.py
+diff --git a/src/python/pants/engine/legacy/BUILD b/src/python/pants/engine/legacy/BUILD
+index 4c9053d8177..05c4481059d 100644
+--- a/src/python/pants/engine/legacy/BUILD
++++ b/src/python/pants/engine/legacy/BUILD
+@@ -4,8 +4,24 @@
+ python_tests(
+   name='tests',
+   dependencies=[
++    ':address_mapper',
+     ':graph',
++    ':parser',
++    ':round_engine',
++    ':structs',
++    'src/python/pants/base:exceptions',
++    'src/python/pants/base:specs',
++    'src/python/pants/build_graph',
++    'src/python/pants/engine:fs',
++    'src/python/pants/engine:nodes',
++    'src/python/pants/engine:parser',
++    'src/python/pants/goal',
++    'src/python/pants/option',
++    'src/python/pants/task',
++    'src/python/pants/testutil/engine:engine_test_base',
+     'src/python/pants/testutil:test_base',
++    'src/python/pants/util:contextutil',
++    'src/python/pants/util:dirutil',
+   ],
+   tags = {"type_checked"},
+ )
+@@ -15,13 +31,10 @@ python_library(
+   sources=['address_mapper.py'],
+   dependencies=[
+     'src/python/pants/base:build_file',
++    'src/python/pants/base:exceptions',
+     'src/python/pants/base:specs',
+     'src/python/pants/build_graph',
+-    'src/python/pants/engine:build_files',
+-    'src/python/pants/engine:fs',
+-    'src/python/pants/engine:mapper',
+-    'src/python/pants/engine:nodes',
+-    'src/python/pants/engine:selectors',
++    'src/python/pants/engine:addresses',
+     'src/python/pants/util:dirutil',
+   ],
+   tags = {"partially_type_checked"},
+@@ -33,25 +46,13 @@ python_library(
+   dependencies=[
+     ':structs',
+     'src/python/pants/base:build_file_target_factory',
++    'src/python/pants/base:exceptions',
+     'src/python/pants/base:parse_context',
+-    'src/python/pants/engine:mapper',
+-    'src/python/pants/engine:objects',
+-    'src/python/pants/engine:parser',
+-    'src/python/pants/util:memo',
+-  ],
+-  tags = {"partially_type_checked"},
+-)
+-
+-python_library(
+-  name='options_parsing',
+-  sources=['options_parsing.py'],
+-  dependencies=[
+-    '3rdparty/python:dataclasses',
+     'src/python/pants/build_graph',
+-    'src/python/pants/engine:fs',
+     'src/python/pants/engine:objects',
++    'src/python/pants/engine:parser',
+     'src/python/pants/option',
+-    'src/python/pants/util:logging',
++    'src/python/pants/util:memo',
+   ],
+   tags = {"partially_type_checked"},
+ )
+@@ -63,13 +64,14 @@ python_library(
+     '3rdparty/python:dataclasses',
+     'src/python/pants/base:deprecated',
+     'src/python/pants/build_graph',
++    'src/python/pants/engine:addressable',
+     'src/python/pants/engine:fs',
+-    'src/python/pants/engine:nodes',
++    'src/python/pants/engine:objects',
+     'src/python/pants/engine:struct',
+     'src/python/pants/engine:unions',
+     'src/python/pants/source',
++    'src/python/pants/util:collections',
+     'src/python/pants/util:contextutil',
+-    'src/python/pants/util:memo',
+     'src/python/pants/util:meta',
+     'src/python/pants/util:objects',
+   ],
+@@ -81,21 +83,32 @@ python_library(
+   sources=['graph.py'],
+   dependencies=[
+     '3rdparty/python:dataclasses',
+-    ':address_mapper',
+     ':structs',
+     'src/python/pants/base:exceptions',
+     'src/python/pants/base:parse_context',
++    'src/python/pants/base:specs',
+     'src/python/pants/build_graph',
+-    'src/python/pants/engine:build_files',
+-    'src/python/pants/engine:mapper',
+-    'src/python/pants/engine:objects',
++    'src/python/pants/engine:addresses',
++    'src/python/pants/engine:collection',
++    'src/python/pants/engine:fs',
+     'src/python/pants/engine:parser',
++    'src/python/pants/engine:rules',
+     'src/python/pants/engine:selectors',
+-    'src/python/pants/engine:unions',
+     'src/python/pants/option',
+-    'src/python/pants/scm/subsystems:changed',
+     'src/python/pants/source',
+-    'src/python/pants/util:dirutil',
++    'src/python/pants/util:meta',
++    'src/python/pants/util:ordered_set',
++  ],
++  tags = {"partially_type_checked"},
++)
++
++python_library(
++  name = 'round_engine',
++  sources = ['round_engine.py'],
++  dependencies = [
++    'src/python/pants/base:exceptions',
++    'src/python/pants/base:workunit',
++    'src/python/pants/goal',
+     'src/python/pants/util:ordered_set',
+   ],
+   tags = {"partially_type_checked"},
+diff --git a/tests/python/pants_test/engine/legacy/test_address_mapper.py b/src/python/pants/engine/legacy/address_mapper_test.py
+similarity index 100%
+rename from tests/python/pants_test/engine/legacy/test_address_mapper.py
+rename to src/python/pants/engine/legacy/address_mapper_test.py
+diff --git a/src/python/pants/engine/legacy/graph.py b/src/python/pants/engine/legacy/graph.py
+index e07bcb77d9a..afca9e37cc5 100644
+--- a/src/python/pants/engine/legacy/graph.py
++++ b/src/python/pants/engine/legacy/graph.py
+@@ -3,25 +3,14 @@
+ 
+ import dataclasses
+ import logging
+-import os.path
+ from collections import defaultdict, deque
+ from contextlib import contextmanager
+ from dataclasses import dataclass
+-from pathlib import PurePath
+-from typing import Any, DefaultDict, Dict, Iterable, Iterator, List, Set, Tuple, Type, Union, cast
++from typing import Any, Dict, Iterable, Iterator, List, Set, Tuple, Type, cast
+ 
+-from pants.base.exceptions import ResolveError, TargetDefinitionException
++from pants.base.exceptions import TargetDefinitionException
+ from pants.base.parse_context import ParseContext
+-from pants.base.specs import (
+-    AddressSpec,
+-    AddressSpecs,
+-    AscendantAddresses,
+-    FilesystemLiteralSpec,
+-    FilesystemMergedSpec,
+-    FilesystemResolvedGlobSpec,
+-    FilesystemSpecs,
+-    SingleAddress,
+-)
++from pants.base.specs import AddressSpec, AddressSpecs, SingleAddress
+ from pants.build_graph.address import Address, BuildFileAddress
+ from pants.build_graph.address_lookup_error import AddressLookupError
+ from pants.build_graph.app_base import AppBase, Bundle
+@@ -29,10 +18,9 @@
+ from pants.build_graph.build_graph import BuildGraph
+ from pants.build_graph.remote_sources import RemoteSources
+ from pants.build_graph.target import Target as TargetV1
+-from pants.engine.addresses import Addresses, AddressesWithOrigins, AddressWithOrigin
++from pants.engine.addresses import Addresses
+ from pants.engine.collection import Collection
+-from pants.engine.fs import EMPTY_SNAPSHOT, PathGlobs, Snapshot
+-from pants.engine.legacy.address_mapper import LegacyAddressMapper
++from pants.engine.fs import PathGlobs, Snapshot
+ from pants.engine.legacy.structs import (
+     BundleAdaptor,
+     BundlesField,
+@@ -41,26 +29,9 @@
+     TargetAdaptor,
+ )
+ from pants.engine.parser import HydratedStruct
+-from pants.engine.rules import RootRule, rule
++from pants.engine.rules import rule
+ from pants.engine.selectors import Get, MultiGet
+-from pants.engine.target import (
+-    Dependencies,
+-    RegisteredTargetTypes,
+-    Target,
+-    Targets,
+-    TargetsWithOrigins,
+-    TargetWithOrigin,
+-    TransitiveTarget,
+-    TransitiveTargets,
+-    WrappedTarget,
+-)
+-from pants.engine.unions import UnionMembership
+-from pants.option.global_options import (
+-    GlobalOptions,
+-    GlobMatchErrorBehavior,
+-    OwnersNotFoundBehavior,
+-)
+-from pants.source.filespec import any_matches_filespec
++from pants.option.global_options import GlobMatchErrorBehavior
+ from pants.source.wrapped_globs import EagerFilesetWithSpec, FilesetRelPathWrapper, Filespec
+ from pants.util.meta import frozen_after_init
+ from pants.util.ordered_set import FrozenOrderedSet, OrderedSet
+@@ -450,78 +421,6 @@ class LegacyTransitiveHydratedTargets:
+     closure: FrozenOrderedSet[LegacyHydratedTarget]
+ 
+ 
+-@dataclass(frozen=True)
+-class SourcesSnapshot:
+-    """Sources matched by command line specs, either directly via FilesystemSpecs or indirectly via
+-    AddressSpecs.
+-
+-    Note that the resolved sources do not need an owning target. Any source resolvable by
+-    `PathGlobs` is valid here.
+-    """
+-
+-    snapshot: Snapshot
+-
+-
+-class SourcesSnapshots(Collection[SourcesSnapshot]):
+-    """A collection of sources matched by command line specs.
+-
+-    `@goal_rule`s may request this when they only need source files to operate and do not need any
+-    target information.
+-    """
+-
+-
+-class InvalidOwnersOfArgs(Exception):
+-    pass
+-
+-
+-@dataclass(frozen=True)
+-class OwnersRequest:
+-    """A request for the owners of a set of file paths."""
+-
+-    sources: Tuple[str, ...]
+-
+-
+-@dataclass(frozen=True)
+-class Owners:
+-    addresses: Addresses
+-
+-
+-@rule
+-async def find_owners(owners_request: OwnersRequest) -> Owners:
+-    sources_set = FrozenOrderedSet(owners_request.sources)
+-    dirs_set = FrozenOrderedSet(os.path.dirname(source) for source in sources_set)
+-
+-    # Walk up the buildroot looking for targets that would conceivably claim changed sources.
+-    candidate_specs = tuple(AscendantAddresses(directory=d) for d in dirs_set)
+-    candidate_targets = await Get[HydratedTargets](AddressSpecs(candidate_specs))
+-
+-    # Match the source globs against the expanded candidate targets.
+-    def owns_any_source(legacy_target: HydratedTarget) -> bool:
+-        """Given a `HydratedTarget` instance, check if it owns the given source file."""
+-        target_kwargs = legacy_target.adaptor.kwargs()
+-
+-        # Handle `sources`-declaring targets.
+-        # NB: Deleted files can only be matched against the 'filespec' (ie, `PathGlobs`) for a target,
+-        # so we don't actually call `fileset.matches` here.
+-        # TODO: This matching logic should be implemented using the rust `fs` crate for two reasons:
+-        #  1) having two implementations isn't great
+-        #  2) we're expanding sources via HydratedTarget, but it isn't necessary to do that to match
+-        target_sources = target_kwargs.get("sources", None)
+-        return target_sources and any_matches_filespec(
+-            paths=sources_set, spec=target_sources.filespec
+-        )
+-
+-    build_file_addresses = await MultiGet(
+-        Get[BuildFileAddress](Address, ht.adaptor.address) for ht in candidate_targets
+-    )
+-    owners = Addresses(
+-        ht.adaptor.address
+-        for ht, bfa in zip(candidate_targets, build_file_addresses)
+-        if LegacyAddressMapper.any_is_declaring_file(bfa, sources_set) or owns_any_source(ht)
+-    )
+-    return Owners(owners)
+-
+-
+ @rule
+ async def transitive_hydrated_targets(addresses: Addresses) -> TransitiveHydratedTargets:
+     """Given Addresses, kicks off recursion on expansion of TransitiveHydratedTargets.
+@@ -603,117 +502,6 @@ async def hydrate_target(hydrated_struct: HydratedStruct) -> HydratedTarget:
+     return HydratedTarget(adaptor=type(target_adaptor)(**kwargs))
+ 
+ 
+-@rule
+-async def resolve_target(
+-    hydrated_struct: HydratedStruct,
+-    registered_target_types: RegisteredTargetTypes,
+-    union_membership: UnionMembership,
+-) -> WrappedTarget:
+-    kwargs = hydrated_struct.value.kwargs().copy()
+-    type_alias = kwargs.pop("type_alias")
+-
+-    # We special case `address` and the field `name`. The `Target` constructor requires an
+-    # `Address`, so we use the value pre-calculated via `build_files.py`'s `hydrate_struct` rule.
+-    # We throw away the field `name` because it can be accessed via `tgt.address.target_name`, so
+-    # there is no (known) reason to preserve the field.
+-    address = cast(Address, kwargs.pop("address"))
+-    kwargs.pop("name", None)
+-
+-    # We convert `source` into `sources` because the Target API has no `Source` field, only
+-    # `Sources`.
+-    if "source" in kwargs and "sources" in kwargs:
+-        raise TargetDefinitionException(
+-            address, "Cannot specify both `source` and `sources` fields."
+-        )
+-    if "source" in kwargs:
+-        source = kwargs.pop("source")
+-        if not isinstance(source, str):
+-            raise TargetDefinitionException(
+-                address,
+-                f"The `source` field must be a string containing a path relative to the target, "
+-                f"but got {source} of type {type(source)}.",
+-            )
+-        kwargs["sources"] = [source]
+-
+-    target_type = registered_target_types.aliases_to_types.get(type_alias, None)
+-    if target_type is None:
+-        raise TargetDefinitionException(
+-            address,
+-            f"Target type {repr(type_alias)} is not recognized. All valid target types: "
+-            f"{sorted(registered_target_types.aliases)}.",
+-        )
+-
+-    # Not every target type has the Dependencies field registered, but the StructWithDependencies
+-    # code means that `kwargs` will always have an entry. We must remove `dependencies` from
+-    # `kwargs` for target types without the value, otherwise we'll get an "unrecognized field"
+-    # error. But, we also need to be careful to error if the user did explicitly specify
+-    # `dependencies` in the BUILD file.
+-    if kwargs["dependencies"] is None and not target_type.class_has_field(
+-        Dependencies, union_membership=union_membership
+-    ):
+-        kwargs.pop("dependencies")
+-
+-    return WrappedTarget(target_type(kwargs, address=address))
+-
+-
+-@rule
+-async def resolve_target_with_origin(address_with_origin: AddressWithOrigin) -> TargetWithOrigin:
+-    wrapped_target = await Get[WrappedTarget](Address, address_with_origin.address)
+-    return TargetWithOrigin(wrapped_target.target, address_with_origin.origin)
+-
+-
+-@rule
+-async def resolve_targets(addresses: Addresses) -> Targets:
+-    wrapped_targets = await MultiGet(Get[WrappedTarget](Address, a) for a in addresses)
+-    return Targets(wrapped_target.target for wrapped_target in wrapped_targets)
+-
+-
+-@rule
+-async def transitive_target(wrapped_root: WrappedTarget) -> TransitiveTarget:
+-    root = wrapped_root.target
+-    dependencies = (
+-        await MultiGet(Get[TransitiveTarget](Address, d) for d in root[Dependencies].value or ())
+-        if root.has_field(Dependencies)
+-        else tuple()
+-    )
+-    return TransitiveTarget(root, dependencies)
+-
+-
+-@rule
+-async def transitive_targets(addresses: Addresses) -> TransitiveTargets:
+-    """Given Addresses, kicks off recursion on expansion of TransitiveTargets.
+-
+-    The TransitiveTarget dataclass represents a structure-shared graph, which we walk and flatten
+-    here. The engine memoizes the computation of TransitiveTarget, so when multiple
+-    TransitiveTargets objects are being constructed for multiple roots, their structure will be
+-    shared.
+-    """
+-    transitive_targets = await MultiGet(Get[TransitiveTarget](Address, a) for a in addresses)
+-
+-    closure: OrderedSet[Target] = OrderedSet()
+-    to_visit = deque(transitive_targets)
+-
+-    while to_visit:
+-        tt = to_visit.popleft()
+-        if tt.root in closure:
+-            continue
+-        closure.add(tt.root)
+-        to_visit.extend(tt.dependencies)
+-
+-    return TransitiveTargets(tuple(tt.root for tt in transitive_targets), FrozenOrderedSet(closure))
+-
+-
+-@rule
+-async def resolve_targets_with_origins(
+-    addresses_with_origins: AddressesWithOrigins,
+-) -> TargetsWithOrigins:
+-    targets_with_origins = await MultiGet(
+-        Get[TargetWithOrigin](AddressWithOrigin, address_with_origin)
+-        for address_with_origin in addresses_with_origins
+-    )
+-    return TargetsWithOrigins(targets_with_origins)
+-
+-
+ @rule
+ async def hydrated_targets(addresses: Addresses) -> HydratedTargets:
+     targets = await MultiGet(Get[HydratedTarget](Address, a) for a in addresses)
+@@ -804,127 +592,14 @@ async def hydrate_bundles(
+     return HydratedField("bundles", bundles)
+ 
+ 
+-@rule
+-async def hydrate_sources_snapshot(hydrated_struct: HydratedStruct) -> SourcesSnapshot:
+-    """Construct a SourcesSnapshot from a TargetAdaptor without hydrating any other fields."""
+-    target_adaptor = cast(TargetAdaptor, hydrated_struct.value)
+-    sources_field = next(
+-        (fa for fa in target_adaptor.field_adaptors if isinstance(fa, SourcesField)), None
+-    )
+-    if sources_field is None:
+-        return SourcesSnapshot(EMPTY_SNAPSHOT)
+-    hydrated_sources_field = await Get[HydratedField](HydrateableField, sources_field)
+-    efws = cast(EagerFilesetWithSpec, hydrated_sources_field.value)
+-    return SourcesSnapshot(efws.snapshot)
+-
+-
+-@rule
+-async def sources_snapshots_from_address_specs(address_specs: AddressSpecs) -> SourcesSnapshots:
+-    """Request SourcesSnapshots for the given address specs.
+-
+-    Each address will map to a corresponding SourcesSnapshot. This rule avoids hydrating any other
+-    fields.
+-    """
+-    addresses = await Get[Addresses](AddressSpecs, address_specs)
+-    snapshots = await MultiGet(Get[SourcesSnapshot](Address, a) for a in addresses)
+-    return SourcesSnapshots(snapshots)
+-
+-
+-@rule
+-async def sources_snapshots_from_filesystem_specs(
+-    filesystem_specs: FilesystemSpecs, global_options: GlobalOptions,
+-) -> SourcesSnapshots:
+-    """Resolve the snapshot associated with the provided filesystem specs."""
+-    snapshot = await Get[Snapshot](
+-        PathGlobs,
+-        filesystem_specs.to_path_globs(
+-            global_options.options.owners_not_found_behavior.to_glob_match_error_behavior()
+-        ),
+-    )
+-    return SourcesSnapshots([SourcesSnapshot(snapshot)])
+-
+-
+-@rule
+-async def addresses_with_origins_from_filesystem_specs(
+-    filesystem_specs: FilesystemSpecs, global_options: GlobalOptions,
+-) -> AddressesWithOrigins:
+-    """Find the owner(s) for each FilesystemSpec while preserving the original FilesystemSpec those
+-    owners come from.
+-
+-    This will merge FilesystemSpecs that come from the same owning target into a single
+-    FilesystemMergedSpec.
+-    """
+-    pathglobs_per_include = (
+-        filesystem_specs.path_globs_for_spec(
+-            spec, global_options.options.owners_not_found_behavior.to_glob_match_error_behavior(),
+-        )
+-        for spec in filesystem_specs.includes
+-    )
+-    snapshot_per_include = await MultiGet(
+-        Get[Snapshot](PathGlobs, pg) for pg in pathglobs_per_include
+-    )
+-    owners_per_include = await MultiGet(
+-        Get[Owners](OwnersRequest(sources=snapshot.files)) for snapshot in snapshot_per_include
+-    )
+-    addresses_to_specs: DefaultDict[
+-        Address, List[Union[FilesystemLiteralSpec, FilesystemResolvedGlobSpec]]
+-    ] = defaultdict(list)
+-    for spec, snapshot, owners in zip(
+-        filesystem_specs.includes, snapshot_per_include, owners_per_include
+-    ):
+-        if (
+-            global_options.options.owners_not_found_behavior != OwnersNotFoundBehavior.ignore
+-            and isinstance(spec, FilesystemLiteralSpec)
+-            and not owners.addresses
+-        ):
+-            file_path = PurePath(spec.to_spec_string())
+-            msg = (
+-                f"No owning targets could be found for the file `{file_path}`.\n\nPlease check "
+-                f"that there is a BUILD file in `{file_path.parent}` with a target whose `sources` field "
+-                f"includes `{file_path}`. See https://www.pantsbuild.org/build_files.html."
+-            )
+-            if global_options.options.owners_not_found_behavior == OwnersNotFoundBehavior.warn:
+-                logger.warning(msg)
+-            else:
+-                raise ResolveError(msg)
+-        # We preserve what literal files any globs resolved to. This allows downstream goals to be
+-        # more precise in which files they operate on.
+-        origin: Union[FilesystemLiteralSpec, FilesystemResolvedGlobSpec] = (
+-            spec
+-            if isinstance(spec, FilesystemLiteralSpec)
+-            else FilesystemResolvedGlobSpec(glob=spec.glob, files=snapshot.files)
+-        )
+-        for address in owners.addresses:
+-            addresses_to_specs[address].append(origin)
+-    return AddressesWithOrigins(
+-        AddressWithOrigin(
+-            address, specs[0] if len(specs) == 1 else FilesystemMergedSpec.create(specs)
+-        )
+-        for address, specs in addresses_to_specs.items()
+-    )
+-
+-
+ def create_legacy_graph_tasks():
+     """Create tasks to recursively parse the legacy graph."""
+     return [
+         transitive_hydrated_target,
+         transitive_hydrated_targets,
+         legacy_transitive_hydrated_targets,
+-        resolve_target,
+-        resolve_target_with_origin,
+-        resolve_targets,
+-        resolve_targets_with_origins,
+-        transitive_target,
+-        transitive_targets,
+         hydrate_target,
+         hydrated_targets,
+-        find_owners,
+         hydrate_sources,
+         hydrate_bundles,
+-        hydrate_sources_snapshot,
+-        addresses_with_origins_from_filesystem_specs,
+-        sources_snapshots_from_address_specs,
+-        sources_snapshots_from_filesystem_specs,
+-        RootRule(FilesystemSpecs),
+-        RootRule(OwnersRequest),
+     ]
+diff --git a/src/python/pants/engine/legacy/graph_test.py b/src/python/pants/engine/legacy/graph_test.py
+index 9c2ec1ab1cc..0941a3ef2a8 100644
+--- a/src/python/pants/engine/legacy/graph_test.py
++++ b/src/python/pants/engine/legacy/graph_test.py
+@@ -1,77 +1,91 @@
+ # Copyright 2020 Pants project contributors (see CONTRIBUTORS.md).
+ # Licensed under the Apache License, Version 2.0 (see LICENSE).
+ 
+-from textwrap import dedent
+-
+-from pants.build_graph.address import Address
+-from pants.engine.addresses import Addresses
+-from pants.engine.rules import RootRule
+-from pants.engine.target import (
+-    Dependencies,
+-    Target,
+-    Targets,
+-    TransitiveTarget,
+-    TransitiveTargets,
+-    WrappedTarget,
+-)
++import functools
++import os
++from typing import cast
++
++from pants.build_graph.address_lookup_error import AddressLookupError
++from pants.build_graph.build_file_aliases import BuildFileAliases, TargetMacro
++from pants.build_graph.files import Files
+ from pants.testutil.test_base import TestBase
+-from pants.util.ordered_set import FrozenOrderedSet
+ 
+ 
+-class MockTarget(Target):
+-    alias = "target"
+-    core_fields = (Dependencies,)
++# Macro that adds the specified tag.
++def macro(target_cls, tag, parse_context, tags=None, **kwargs):
++    tags = tags or set()
++    tags.add(tag)
++    parse_context.create_object(target_cls, tags=tags, **kwargs)
+ 
+ 
+ class GraphTest(TestBase):
+-    @classmethod
+-    def rules(cls):
+-        return (*super().rules(), RootRule(Addresses), RootRule(WrappedTarget))
+ 
+-    @classmethod
+-    def target_types(cls):
+-        return (MockTarget,)
+-
+-    def test_transitive_targets(self) -> None:
+-        t1 = MockTarget({}, address=Address.parse(":t1"))
+-        t2 = MockTarget({Dependencies.alias: [t1.address]}, address=Address.parse(":t2"))
+-        d1 = MockTarget({Dependencies.alias: [t1.address]}, address=Address.parse(":d1"))
+-        d2 = MockTarget({Dependencies.alias: [t2.address]}, address=Address.parse(":d2"))
+-        d3 = MockTarget({}, address=Address.parse(":d3"))
+-        root = MockTarget(
+-            {Dependencies.alias: [d1.address, d2.address, d3.address]},
+-            address=Address.parse(":root"),
+-        )
++    _TAG = "tag_added_by_macro"
+ 
+-        # TODO: possibly figure out how to deduplicate this when developing utilities for testing
+-        #  with the Target API.
+-        self.add_to_build_file(
+-            "",
+-            dedent(
+-                """\
+-                target(name='t1')
+-                target(name='t2', dependencies=[':t1'])
+-                target(name='d1', dependencies=[':t1'])
+-                target(name='d2', dependencies=[':t2'])
+-                target(name='d3')
+-                target(name='root', dependencies=[':d1', ':d2', ':d3'])
+-                """
++    @classmethod
++    def alias_groups(cls) -> BuildFileAliases:
++        return cast(
++            BuildFileAliases,
++            super()
++            .alias_groups()
++            .merge(
++                BuildFileAliases(
++                    targets={
++                        "files": Files,
++                        "tagged_files": TargetMacro.Factory.wrap(
++                            functools.partial(macro, Files, cls._TAG), Files
++                        ),
++                    }
++                )
+             ),
+         )
+ 
+-        direct_deps = self.request_single_product(
+-            Targets, Addresses(root[Dependencies].value)  # type: ignore[arg-type]
++    def test_with_missing_target_in_existing_build_file(self) -> None:
++        self.create_library(path="3rdparty/python", target_type="target", name="Markdown")
++        self.create_library(path="3rdparty/python", target_type="target", name="Pygments")
++        # When a target is missing,
++        #  the suggestions should be in order
++        #  and there should only be one copy of the error if tracing is off.
++        expected_message = (
++            '"rutabaga" was not found in namespace "3rdparty/python".'
++            ".*Did you mean one of:\n"
++            ".*:Markdown\n"
++            ".*:Pygments\n"
+         )
+-        assert direct_deps == Targets([d1, d2, d3])
++        with self.assertRaisesRegex(AddressLookupError, expected_message):
++            self.targets("3rdparty/python:rutabaga")
++
++    def test_with_missing_directory_fails(self) -> None:
++        with self.assertRaises(AddressLookupError) as cm:
++            self.targets("no-such-path:")
+ 
+-        transitive_target = self.request_single_product(TransitiveTarget, WrappedTarget(root))
+-        assert transitive_target.root == root
+-        assert {
+-            dep_transitive_target.root for dep_transitive_target in transitive_target.dependencies
+-        } == {d1, d2, d3}
++        self.assertIn('Path "no-such-path" does not contain any BUILD files', str(cm.exception))
+ 
+-        transitive_targets = self.request_single_product(
+-            TransitiveTargets, Addresses([root.address, d2.address])
++    def test_invalidate_fsnode(self) -> None:
++        # NB: Invalidation is now more directly tested in unit tests in the `graph` crate.
++        self.create_library(path="src/example", target_type="target", name="things")
++        self.targets("src/example::")
++        invalidated_count = self.invalidate_for("src/example/BUILD")
++        self.assertGreater(invalidated_count, 0)
++
++    def test_sources_ordering(self) -> None:
++        input_sources = ["p", "a", "n", "t", "s", "b", "u", "i", "l", "d"]
++        expected_sources = sorted(input_sources)
++        self.create_library(
++            path="src/example", target_type="files", name="things", sources=input_sources
+         )
+-        assert transitive_targets.roots == (root, d2)
+-        assert transitive_targets.closure == FrozenOrderedSet([root, d2, d1, d3, t2, t1])
++
++        target = self.target("src/example:things")
++        sources = [os.path.basename(s) for s in target.sources_relative_to_buildroot()]
++        self.assertEqual(expected_sources, sources)
++
++    def test_target_macro_override(self) -> None:
++        """Tests that we can "wrap" an existing target type with additional functionality.
++
++        Installs an additional TargetMacro that wraps `target` aliases to add a tag to all
++        definitions.
++        """
++
++        files = self.create_library(path="src/example", target_type="tagged_files", name="things")
++        self.assertIn(self._TAG, files.tags)
++        self.assertEqual(type(files), Files)
+diff --git a/tests/python/pants_test/engine/legacy/test_parser.py b/src/python/pants/engine/legacy/parser_test.py
+similarity index 100%
+rename from tests/python/pants_test/engine/legacy/test_parser.py
+rename to src/python/pants/engine/legacy/parser_test.py
+diff --git a/src/python/pants/engine/round_engine.py b/src/python/pants/engine/legacy/round_engine.py
+similarity index 69%
+rename from src/python/pants/engine/round_engine.py
+rename to src/python/pants/engine/legacy/round_engine.py
+index fa43ef713ef..9af4a389649 100644
+--- a/src/python/pants/engine/round_engine.py
++++ b/src/python/pants/engine/legacy/round_engine.py
+@@ -2,64 +2,45 @@
+ # Licensed under the Apache License, Version 2.0 (see LICENSE).
+ 
+ import os
+-from collections import OrderedDict, namedtuple
++from abc import ABC, abstractmethod
++from collections import OrderedDict, defaultdict, namedtuple
+ 
+ from pants.base.exceptions import TaskError
+ from pants.base.workunit import WorkUnit, WorkUnitLabel
+-from pants.engine.legacy_engine import Engine
+-from pants.engine.round_manager import RoundManager
+-from pants.util.ordered_set import FrozenOrderedSet
++from pants.goal.goal import Goal
++from pants.util.ordered_set import FrozenOrderedSet, OrderedSet
+ 
+ 
+-class GoalExecutor:
+-    def __init__(self, context, goal, tasktypes_by_name):
+-        self._context = context
+-        self._goal = goal
+-        self._tasktypes_by_name = tasktypes_by_name
+-
+-    @property
+-    def goal(self):
+-        return self._goal
++class Engine(ABC):
++    """An engine for running a pants command line."""
+ 
+-    def attempt(self, explain):
+-        """Attempts to execute the goal's tasks in installed order.
++    def execute(self, context, goals) -> int:
++        """Executes the supplied goals and their dependencies against the given context.
+ 
+-        :param bool explain: If ``True`` then the goal plan will be explained instead of being
+-                             executed.
++        :param context: The pants run context.
++        :param list goals: A list of ``Goal`` objects representing the command line goals explicitly
++                           requested.
++        :returns an exit code of 0 upon success and non-zero otherwise.
+         """
+-        goal_workdir = os.path.join(
+-            self._context.options.for_global_scope().pants_workdir, self._goal.name
+-        )
+-        with self._context.new_workunit(name=self._goal.name, labels=[WorkUnitLabel.GOAL]):
+-            for name, task_type in reversed(list(self._tasktypes_by_name.items())):
+-                task_workdir = os.path.join(goal_workdir, name)
+-                task = task_type(self._context, task_workdir)
+-                log_config = WorkUnit.LogConfig(
+-                    log_level=task.get_options().level, colors=task.get_options().colors
+-                )
+-                with self._context.new_workunit(
+-                    name=name, labels=[WorkUnitLabel.TASK], log_config=log_config
+-                ):
+-                    if explain:
+-                        self._context.log.debug(
+-                            "Skipping execution of {} in explain mode".format(name)
+-                        )
+-                    elif task.skip_execution:
+-                        self._context.log.info("Skipping {}".format(name))
+-                    else:
+-                        task.execute()
++        try:
++            self.attempt(context, goals)
++            return 0
++        except TaskError as e:
++            message = str(e)
++            if message:
++                print("\nFAILURE: {0}\n".format(message))
++            else:
++                print("\nFAILURE\n")
++            return e.exit_code
++
++    @abstractmethod
++    def attempt(self, context, goals):
++        """Given the target context and command line goals, attempt to achieve all goals.
+ 
+-            if explain:
+-                reversed_tasktypes_by_name = reversed(list(self._tasktypes_by_name.items()))
+-                goal_to_task = ", ".join(
+-                    "{}->{}".format(name, task_type.__name__)
+-                    for name, task_type in reversed_tasktypes_by_name
+-                )
+-                print(
+-                    "{goal} [{goal_to_task}]".format(
+-                        goal=self._goal.name, goal_to_task=goal_to_task
+-                    )
+-                )
++        :param context: The pants run context.
++        :param list goals: A list of ``Goal`` objects representing the command line goals explicitly
++                           requested.
++        """
+ 
+ 
+ class RoundEngine(Engine):
+@@ -256,3 +237,146 @@ def attempt(self, context, goals):
+         finally:
+             if outer_lock_holder:
+                 context.release_lock()
++
++
++class GoalExecutor:
++    def __init__(self, context, goal, tasktypes_by_name):
++        self._context = context
++        self._goal = goal
++        self._tasktypes_by_name = tasktypes_by_name
++
++    @property
++    def goal(self):
++        return self._goal
++
++    def attempt(self, explain):
++        """Attempts to execute the goal's tasks in installed order.
++
++        :param bool explain: If ``True`` then the goal plan will be explained instead of being
++                             executed.
++        """
++        goal_workdir = os.path.join(
++            self._context.options.for_global_scope().pants_workdir, self._goal.name
++        )
++        with self._context.new_workunit(name=self._goal.name, labels=[WorkUnitLabel.GOAL]):
++            for name, task_type in reversed(list(self._tasktypes_by_name.items())):
++                task_workdir = os.path.join(goal_workdir, name)
++                task = task_type(self._context, task_workdir)
++                log_config = WorkUnit.LogConfig(
++                    log_level=task.get_options().level, colors=task.get_options().colors
++                )
++                with self._context.new_workunit(
++                    name=name, labels=[WorkUnitLabel.TASK], log_config=log_config
++                ):
++                    if explain:
++                        self._context.log.debug(
++                            "Skipping execution of {} in explain mode".format(name)
++                        )
++                    elif task.skip_execution:
++                        self._context.log.info("Skipping {}".format(name))
++                    else:
++                        task.execute()
++
++            if explain:
++                reversed_tasktypes_by_name = reversed(list(self._tasktypes_by_name.items()))
++                goal_to_task = ", ".join(
++                    "{}->{}".format(name, task_type.__name__)
++                    for name, task_type in reversed_tasktypes_by_name
++                )
++                print(
++                    "{goal} [{goal_to_task}]".format(
++                        goal=self._goal.name, goal_to_task=goal_to_task
++                    )
++                )
++
++
++class ProducerInfo(namedtuple("ProducerInfo", ["product_type", "task_type", "goal"])):
++    """Describes the producer of a given product type."""
++
++
++class RoundManager:
++    """
++    :API: public
++    """
++
++    class MissingProductError(KeyError):
++        """Indicates a required product type is provided by non-one."""
++
++    @staticmethod
++    def _index_products():
++        producer_info_by_product_type = defaultdict(OrderedSet)
++        for goal in Goal.all():
++            for task_type in goal.task_types():
++                for product_type in task_type.product_types():
++                    producer_info = ProducerInfo(product_type, task_type, goal)
++                    producer_info_by_product_type[product_type].add(producer_info)
++        return producer_info_by_product_type
++
++    def __init__(self, context):
++        self._dependencies = OrderedSet()
++        self._optional_dependencies = OrderedSet()
++        self._context = context
++        self._producer_infos_by_product_type = None
++
++    def require(self, product_type):
++        """Schedules the tasks that produce product_type to be executed before the requesting task.
++
++        There must be at least one task that produces the required product type, or the
++        dependencies will not be satisfied.
++
++        :API: public
++        """
++        self._dependencies.add(product_type)
++        self._context.products.require(product_type)
++
++    def optional_product(self, product_type):
++        """Schedules tasks, if any, that produce product_type to be executed before the requesting
++        task.
++
++        There need not be any tasks that produce the required product type.  All this method
++        guarantees is that if there are any then they will be executed before the requesting task.
++
++        :API: public
++        """
++        self._optional_dependencies.add(product_type)
++        self.require(product_type)
++
++    def require_data(self, product_type):
++        """Schedules the tasks that produce product_type to be executed before the requesting task.
++
++        There must be at least one task that produces the required product type, or the
++        dependencies will not be satisfied.
++
++        :API: public
++        """
++        self._dependencies.add(product_type)
++        self._context.products.require_data(product_type)
++
++    def optional_data(self, product_type):
++        """Schedules tasks, if any, that produce product_type to be executed before the requesting
++        task.
++
++        There need not be any tasks that produce the required product type.  All this method
++        guarantees is that if there are any then they will be executed before the requesting task.
++
++        :API: public
++        """
++        self._optional_dependencies.add(product_type)
++        self.require_data(product_type)
++
++    def get_dependencies(self):
++        """Returns the set of data dependencies as producer infos corresponding to data
++        requirements."""
++        producer_infos = OrderedSet()
++        for product_type in self._dependencies:
++            producer_infos.update(self._get_producer_infos_by_product_type(product_type))
++        return producer_infos
++
++    def _get_producer_infos_by_product_type(self, product_type):
++        if self._producer_infos_by_product_type is None:
++            self._producer_infos_by_product_type = self._index_products()
++
++        producer_infos = self._producer_infos_by_product_type[product_type]
++        if not producer_infos and product_type not in self._optional_dependencies:
++            raise self.MissingProductError("No producers registered for '{0}'".format(product_type))
++        return producer_infos
+diff --git a/tests/python/pants_test/engine/test_round_engine.py b/src/python/pants/engine/legacy/round_engine_test.py
+similarity index 87%
+rename from tests/python/pants_test/engine/test_round_engine.py
+rename to src/python/pants/engine/legacy/round_engine_test.py
+index 6feff100a39..285c0adb523 100644
+--- a/tests/python/pants_test/engine/test_round_engine.py
++++ b/src/python/pants/engine/legacy/round_engine_test.py
+@@ -3,13 +3,66 @@
+ 
+ import itertools
+ 
+-from pants.engine.round_engine import RoundEngine
++from pants.base.exceptions import TaskError
++from pants.engine.legacy.round_engine import Engine, RoundEngine
+ from pants.goal.goal import Goal
+ from pants.task.task import Task
+ from pants.testutil.engine.base_engine_test import EngineTestBase
+ from pants.testutil.test_base import TestBase
+ 
+ 
++class EngineTest(EngineTestBase):
++    class RecordingEngine(Engine):
++        def __init__(self, action=None):
++            super(EngineTest.RecordingEngine, self).__init__()
++            self._action = action
++            self._attempts = []
++
++        @property
++        def attempts(self):
++            return self._attempts
++
++        def attempt(self, context, goals):
++            self._attempts.append((context, goals))
++            if self._action:
++                self._action()
++
++    def setUp(self):
++        super().setUp()
++        self._context = self.context()
++
++    def assert_attempt(self, engine, *goal_names):
++        self.assertEqual(1, len(engine.attempts))
++
++        context, goals = engine.attempts[0]
++        self.assertEqual(self._context, context)
++        self.assertEqual(self.as_goals(*goal_names), goals)
++
++    def test_execute_success(self):
++        engine = self.RecordingEngine()
++        result = engine.execute(self._context, self.as_goals("one", "two"))
++        self.assertEqual(0, result)
++        self.assert_attempt(engine, "one", "two")
++
++    def _throw(self, error):
++        def throw():
++            raise error
++
++        return throw
++
++    def test_execute_raise(self):
++        engine = self.RecordingEngine(action=self._throw(TaskError()))
++        result = engine.execute(self._context, self.as_goals("three"))
++        self.assertEqual(1, result)
++        self.assert_attempt(engine, "three")
++
++    def test_execute_code(self):
++        engine = self.RecordingEngine(action=self._throw(TaskError(exit_code=42)))
++        result = engine.execute(self._context, self.as_goals("four", "five", "six"))
++        self.assertEqual(42, result)
++        self.assert_attempt(engine, "four", "five", "six")
++
++
+ class RoundEngineTest(EngineTestBase, TestBase):
+     def setUp(self):
+         super().setUp()
+diff --git a/tests/python/pants_test/engine/legacy/test_structs.py b/src/python/pants/engine/legacy/structs_test.py
+similarity index 100%
+rename from tests/python/pants_test/engine/legacy/test_structs.py
+rename to src/python/pants/engine/legacy/structs_test.py
+diff --git a/src/python/pants/engine/legacy_engine.py b/src/python/pants/engine/legacy_engine.py
+deleted file mode 100644
+index 0383ab47603..00000000000
+--- a/src/python/pants/engine/legacy_engine.py
++++ /dev/null
+@@ -1,38 +0,0 @@
+-# Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
+-# Licensed under the Apache License, Version 2.0 (see LICENSE).
+-
+-from abc import ABC, abstractmethod
+-
+-from pants.base.exceptions import TaskError
+-
+-
+-class Engine(ABC):
+-    """An engine for running a pants command line."""
+-
+-    def execute(self, context, goals) -> int:
+-        """Executes the supplied goals and their dependencies against the given context.
+-
+-        :param context: The pants run context.
+-        :param list goals: A list of ``Goal`` objects representing the command line goals explicitly
+-                           requested.
+-        :returns an exit code of 0 upon success and non-zero otherwise.
+-        """
+-        try:
+-            self.attempt(context, goals)
+-            return 0
+-        except TaskError as e:
+-            message = str(e)
+-            if message:
+-                print("\nFAILURE: {0}\n".format(message))
+-            else:
+-                print("\nFAILURE\n")
+-            return e.exit_code
+-
+-    @abstractmethod
+-    def attempt(self, context, goals):
+-        """Given the target context and command line goals, attempt to achieve all goals.
+-
+-        :param context: The pants run context.
+-        :param list goals: A list of ``Goal`` objects representing the command line goals explicitly
+-                           requested.
+-        """
+diff --git a/src/python/pants/engine/round_manager.py b/src/python/pants/engine/round_manager.py
+deleted file mode 100644
+index ca50d230f59..00000000000
+--- a/src/python/pants/engine/round_manager.py
++++ /dev/null
+@@ -1,99 +0,0 @@
+-# Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
+-# Licensed under the Apache License, Version 2.0 (see LICENSE).
+-
+-from collections import defaultdict, namedtuple
+-
+-from pants.goal.goal import Goal
+-from pants.util.ordered_set import OrderedSet
+-
+-
+-class ProducerInfo(namedtuple("ProducerInfo", ["product_type", "task_type", "goal"])):
+-    """Describes the producer of a given product type."""
+-
+-
+-class RoundManager:
+-    """
+-    :API: public
+-    """
+-
+-    class MissingProductError(KeyError):
+-        """Indicates a required product type is provided by non-one."""
+-
+-    @staticmethod
+-    def _index_products():
+-        producer_info_by_product_type = defaultdict(OrderedSet)
+-        for goal in Goal.all():
+-            for task_type in goal.task_types():
+-                for product_type in task_type.product_types():
+-                    producer_info = ProducerInfo(product_type, task_type, goal)
+-                    producer_info_by_product_type[product_type].add(producer_info)
+-        return producer_info_by_product_type
+-
+-    def __init__(self, context):
+-        self._dependencies = OrderedSet()
+-        self._optional_dependencies = OrderedSet()
+-        self._context = context
+-        self._producer_infos_by_product_type = None
+-
+-    def require(self, product_type):
+-        """Schedules the tasks that produce product_type to be executed before the requesting task.
+-
+-        There must be at least one task that produces the required product type, or the
+-        dependencies will not be satisfied.
+-
+-        :API: public
+-        """
+-        self._dependencies.add(product_type)
+-        self._context.products.require(product_type)
+-
+-    def optional_product(self, product_type):
+-        """Schedules tasks, if any, that produce product_type to be executed before the requesting
+-        task.
+-
+-        There need not be any tasks that produce the required product type.  All this method
+-        guarantees is that if there are any then they will be executed before the requesting task.
+-
+-        :API: public
+-        """
+-        self._optional_dependencies.add(product_type)
+-        self.require(product_type)
+-
+-    def require_data(self, product_type):
+-        """Schedules the tasks that produce product_type to be executed before the requesting task.
+-
+-        There must be at least one task that produces the required product type, or the
+-        dependencies will not be satisfied.
+-
+-        :API: public
+-        """
+-        self._dependencies.add(product_type)
+-        self._context.products.require_data(product_type)
+-
+-    def optional_data(self, product_type):
+-        """Schedules tasks, if any, that produce product_type to be executed before the requesting
+-        task.
+-
+-        There need not be any tasks that produce the required product type.  All this method
+-        guarantees is that if there are any then they will be executed before the requesting task.
+-
+-        :API: public
+-        """
+-        self._optional_dependencies.add(product_type)
+-        self.require_data(product_type)
+-
+-    def get_dependencies(self):
+-        """Returns the set of data dependencies as producer infos corresponding to data
+-        requirements."""
+-        producer_infos = OrderedSet()
+-        for product_type in self._dependencies:
+-            producer_infos.update(self._get_producer_infos_by_product_type(product_type))
+-        return producer_infos
+-
+-    def _get_producer_infos_by_product_type(self, product_type):
+-        if self._producer_infos_by_product_type is None:
+-            self._producer_infos_by_product_type = self._index_products()
+-
+-        producer_infos = self._producer_infos_by_product_type[product_type]
+-        if not producer_infos and product_type not in self._optional_dependencies:
+-            raise self.MissingProductError("No producers registered for '{0}'".format(product_type))
+-        return producer_infos
+diff --git a/src/python/pants/init/BUILD b/src/python/pants/init/BUILD
+index 18d3505d617..e93d977ae5f 100644
+--- a/src/python/pants/init/BUILD
++++ b/src/python/pants/init/BUILD
+@@ -15,9 +15,10 @@ python_library(
+     'src/python/pants/binaries',
+     'src/python/pants/build_graph',
+     'src/python/pants/core_tasks',
++    'src/python/pants/engine/internals:graph',
++    'src/python/pants/engine/internals:options_parsing',
+     'src/python/pants/engine/legacy:address_mapper',
+     'src/python/pants/engine/legacy:graph',
+-    'src/python/pants/engine/legacy:options_parsing',
+     'src/python/pants/engine/legacy:parser',
+     'src/python/pants/engine/legacy:structs',
+     'src/python/pants/engine:build_files',
+diff --git a/src/python/pants/init/engine_initializer.py b/src/python/pants/init/engine_initializer.py
+index 836f5329618..d91680a1fa8 100644
+--- a/src/python/pants/init/engine_initializer.py
++++ b/src/python/pants/init/engine_initializer.py
+@@ -27,10 +27,10 @@
+ from pants.engine.fs import Workspace, create_fs_rules
+ from pants.engine.goal import Goal
+ from pants.engine.interactive_runner import InteractiveRunner, create_interactive_runner_rules
++from pants.engine.internals import graph, options_parsing
+ from pants.engine.isolated_process import create_process_rules
+ from pants.engine.legacy.address_mapper import LegacyAddressMapper
+ from pants.engine.legacy.graph import LegacyBuildGraph, create_legacy_graph_tasks
+-from pants.engine.legacy.options_parsing import create_options_parsing_rules
+ from pants.engine.legacy.parser import LegacyPythonCallbacksParser
+ from pants.engine.legacy.structs import (
+     JvmAppAdaptor,
+@@ -420,13 +420,14 @@ def build_root_singleton() -> BuildRoot:
+             registered_target_types_singleton,
+             union_membership_singleton,
+             build_root_singleton,
++            *graph.rules(),
++            *options_parsing.rules(),
+             *create_legacy_graph_tasks(),
+             *create_fs_rules(),
+             *create_interactive_runner_rules(),
+             *create_process_rules(),
+             *create_platform_rules(),
+             *create_graph_rules(address_mapper),
+-            *create_options_parsing_rules(),
+             *structs_rules(),
+             *changed_rules(),
+             *binary_tool_rules(),
+diff --git a/src/python/pants/scm/subsystems/changed.py b/src/python/pants/scm/subsystems/changed.py
+index 59a97ad51f7..2f21afe3368 100644
+--- a/src/python/pants/scm/subsystems/changed.py
++++ b/src/python/pants/scm/subsystems/changed.py
+@@ -8,12 +8,8 @@
+ from pants.base.specs import AddressSpecs, DescendantAddresses
+ from pants.build_graph.build_configuration import BuildConfiguration
+ from pants.engine.addresses import Address, Addresses
+-from pants.engine.legacy.graph import (
+-    Owners,
+-    OwnersRequest,
+-    _DependentGraph,
+-    target_types_from_build_file_aliases,
+-)
++from pants.engine.internals.graph import Owners, OwnersRequest
++from pants.engine.legacy.graph import _DependentGraph, target_types_from_build_file_aliases
+ from pants.engine.mapper import AddressMapper
+ from pants.engine.parser import HydratedStruct
+ from pants.engine.rules import RootRule, rule
+diff --git a/tests/python/pants_test/build_graph/test_source_mapper.py b/tests/python/pants_test/build_graph/test_source_mapper.py
+index 044b892fef9..06a0d6473d6 100644
+--- a/tests/python/pants_test/build_graph/test_source_mapper.py
++++ b/tests/python/pants_test/build_graph/test_source_mapper.py
+@@ -6,7 +6,7 @@
+ # TODO: Create a dummy target type in this test and remove this dep.
+ from pants.backend.jvm.targets.java_library import JavaLibrary
+ from pants.build_graph.build_file_aliases import BuildFileAliases
+-from pants.engine.legacy.graph import Owners, OwnersRequest
++from pants.engine.internals.graph import Owners, OwnersRequest
+ from pants.testutil.test_base import TestBase
+ 
+ 
+diff --git a/tests/python/pants_test/engine/BUILD b/tests/python/pants_test/engine/BUILD
+index 0a4986a716e..6481667f342 100644
+--- a/tests/python/pants_test/engine/BUILD
++++ b/tests/python/pants_test/engine/BUILD
+@@ -1,30 +1,6 @@
+ # Copyright 2015 Pants project contributors (see CONTRIBUTORS.md).
+ # Licensed under the Apache License, Version 2.0 (see LICENSE).
+ 
+-python_tests(
+-  name = 'legacy_engine',
+-  sources = ['test_legacy_engine.py'],
+-  dependencies = [
+-    'src/python/pants/base:exceptions',
+-    'src/python/pants/engine:legacy_engine',
+-    'src/python/pants/testutil/base:context_utils',
+-    'src/python/pants/testutil/engine:engine_test_base',
+-  ],
+-  tags = {"partially_type_checked"},
+-)
+-
+-python_tests(
+-  name='round_engine',
+-  sources=['test_round_engine.py'],
+-  dependencies = [
+-    'src/python/pants/engine:legacy_engine',
+-    'src/python/pants/task',
+-    'src/python/pants/testutil:test_base',
+-    'src/python/pants/testutil/engine:engine_test_base',
+-  ],
+-  tags = {"partially_type_checked"},
+-)
+-
+ python_tests(
+   name='addressable',
+   sources=['test_addressable.py'],
+diff --git a/tests/python/pants_test/engine/legacy/BUILD b/tests/python/pants_test/engine/integration/BUILD
+similarity index 73%
+rename from tests/python/pants_test/engine/legacy/BUILD
+rename to tests/python/pants_test/engine/integration/BUILD
+index a3a8b79b1b5..01e81d68e8b 100644
+--- a/tests/python/pants_test/engine/legacy/BUILD
++++ b/tests/python/pants_test/engine/integration/BUILD
+@@ -1,22 +1,6 @@
+ # Copyright 2016 Pants project contributors (see CONTRIBUTORS.md).
+ # Licensed under the Apache License, Version 2.0 (see LICENSE).
+ 
+-python_tests(
+-  name = 'address_mapper',
+-  sources = ['test_address_mapper.py'],
+-  dependencies = [
+-    'src/python/pants/base:specs',
+-    'src/python/pants/bin',
+-    'src/python/pants/build_graph',
+-    'src/python/pants/engine/legacy:address_mapper',
+-    'src/python/pants/util:contextutil',
+-    'src/python/pants/util:dirutil',
+-    'src/python/pants/testutil/engine:util',
+-    'src/python/pants/testutil:test_base',
+-  ],
+-  tags = {"partially_type_checked"},
+-)
+-
+ python_tests(
+   name = 'build_ignore_integration',
+   sources = [ 'test_build_ignore_integration.py' ],
+@@ -129,20 +113,6 @@ python_tests(
+   timeout = 180,
+ )
+ 
+-python_tests(
+-  name = 'graph',
+-  sources = ['test_graph.py'],
+-  dependencies = [
+-    'src/python/pants/bin',
+-    'src/python/pants/build_graph',
+-    'src/python/pants/engine/legacy:graph',
+-    'src/python/pants/init',
+-    'src/python/pants/testutil/engine:util',
+-    'src/python/pants/testutil:test_base',
+-  ],
+-  tags = {"partially_type_checked"},
+-)
+-
+ python_tests(
+   name='graph_integration',
+   sources=['test_graph_integration.py'],
+@@ -170,37 +140,3 @@ python_tests(
+   tags = {'integration', 'partially_type_checked'},
+   timeout = 180,
+ )
+-
+-python_tests(
+-  name = 'options_parsing',
+-  sources = ['test_options_parsing.py'],
+-  dependencies = [
+-    'src/python/pants/bin',
+-    'src/python/pants/build_graph',
+-    'src/python/pants/init',
+-    'src/python/pants/testutil/engine:util',
+-    'src/python/pants/testutil:test_base',
+-    'src/python/pants/util:logging',
+-  ],
+-  tags = {"partially_type_checked"},
+-)
+-
+-python_tests(
+-  name = 'parser',
+-  sources = ['test_parser.py'],
+-  dependencies = [
+-    'src/python/pants/build_graph',
+-    'src/python/pants/engine/legacy:parser',
+-    'src/python/pants/engine:parser',
+-  ],
+-  tags = {"partially_type_checked"},
+-)
+-
+-python_tests(
+-  name = 'structs',
+-  sources = ['test_structs.py'],
+-  dependencies = [
+-    'src/python/pants/engine/legacy:structs',
+-  ],
+-  tags = {"partially_type_checked"},
+-)
+diff --git a/tests/python/pants_test/engine/integration/__init__.py b/tests/python/pants_test/engine/integration/__init__.py
+new file mode 100644
+index 00000000000..e69de29bb2d
+diff --git a/tests/python/pants_test/engine/legacy/test_build_ignore_integration.py b/tests/python/pants_test/engine/integration/test_build_ignore_integration.py
+similarity index 100%
+rename from tests/python/pants_test/engine/legacy/test_build_ignore_integration.py
+rename to tests/python/pants_test/engine/integration/test_build_ignore_integration.py
+diff --git a/tests/python/pants_test/engine/legacy/test_bundle_integration.py b/tests/python/pants_test/engine/integration/test_bundle_integration.py
+similarity index 100%
+rename from tests/python/pants_test/engine/legacy/test_bundle_integration.py
+rename to tests/python/pants_test/engine/integration/test_bundle_integration.py
+diff --git a/tests/python/pants_test/engine/legacy/test_changed_integration.py b/tests/python/pants_test/engine/integration/test_changed_integration.py
+similarity index 100%
+rename from tests/python/pants_test/engine/legacy/test_changed_integration.py
+rename to tests/python/pants_test/engine/integration/test_changed_integration.py
+diff --git a/tests/python/pants_test/engine/legacy/test_dependees_integration.py b/tests/python/pants_test/engine/integration/test_dependees_integration.py
+similarity index 100%
+rename from tests/python/pants_test/engine/legacy/test_dependees_integration.py
+rename to tests/python/pants_test/engine/integration/test_dependees_integration.py
+diff --git a/tests/python/pants_test/engine/legacy/test_dependencies_integration.py b/tests/python/pants_test/engine/integration/test_dependencies_integration.py
+similarity index 100%
+rename from tests/python/pants_test/engine/legacy/test_dependencies_integration.py
+rename to tests/python/pants_test/engine/integration/test_dependencies_integration.py
+diff --git a/tests/python/pants_test/engine/legacy/test_filedeps_integration.py b/tests/python/pants_test/engine/integration/test_filedeps_integration.py
+similarity index 100%
+rename from tests/python/pants_test/engine/legacy/test_filedeps_integration.py
+rename to tests/python/pants_test/engine/integration/test_filedeps_integration.py
+diff --git a/tests/python/pants_test/engine/legacy/test_filemap_integration.py b/tests/python/pants_test/engine/integration/test_filemap_integration.py
+similarity index 100%
+rename from tests/python/pants_test/engine/legacy/test_filemap_integration.py
+rename to tests/python/pants_test/engine/integration/test_filemap_integration.py
+diff --git a/tests/python/pants_test/engine/legacy/test_filesystem_specs_integration.py b/tests/python/pants_test/engine/integration/test_filesystem_specs_integration.py
+similarity index 100%
+rename from tests/python/pants_test/engine/legacy/test_filesystem_specs_integration.py
+rename to tests/python/pants_test/engine/integration/test_filesystem_specs_integration.py
+diff --git a/tests/python/pants_test/engine/legacy/test_goal_rule_integration.py b/tests/python/pants_test/engine/integration/test_goal_rule_integration.py
+similarity index 100%
+rename from tests/python/pants_test/engine/legacy/test_goal_rule_integration.py
+rename to tests/python/pants_test/engine/integration/test_goal_rule_integration.py
+diff --git a/tests/python/pants_test/engine/legacy/test_graph_integration.py b/tests/python/pants_test/engine/integration/test_graph_integration.py
+similarity index 100%
+rename from tests/python/pants_test/engine/legacy/test_graph_integration.py
+rename to tests/python/pants_test/engine/integration/test_graph_integration.py
+diff --git a/tests/python/pants_test/engine/legacy/test_list_integration.py b/tests/python/pants_test/engine/integration/test_list_integration.py
+similarity index 100%
+rename from tests/python/pants_test/engine/legacy/test_list_integration.py
+rename to tests/python/pants_test/engine/integration/test_list_integration.py
+diff --git a/tests/python/pants_test/engine/legacy/test_graph.py b/tests/python/pants_test/engine/legacy/test_graph.py
+deleted file mode 100644
+index 39efa5c07a0..00000000000
+--- a/tests/python/pants_test/engine/legacy/test_graph.py
++++ /dev/null
+@@ -1,91 +0,0 @@
+-# Copyright 2016 Pants project contributors (see CONTRIBUTORS.md).
+-# Licensed under the Apache License, Version 2.0 (see LICENSE).
+-
+-import functools
+-import os
+-from typing import cast
+-
+-from pants.build_graph.address_lookup_error import AddressLookupError
+-from pants.build_graph.build_file_aliases import BuildFileAliases, TargetMacro
+-from pants.build_graph.files import Files
+-from pants.testutil.test_base import TestBase
+-
+-
+-# Macro that adds the specified tag.
+-def macro(target_cls, tag, parse_context, tags=None, **kwargs):
+-    tags = tags or set()
+-    tags.add(tag)
+-    parse_context.create_object(target_cls, tags=tags, **kwargs)
+-
+-
+-class GraphTest(TestBase):
+-
+-    _TAG = "tag_added_by_macro"
+-
+-    @classmethod
+-    def alias_groups(cls) -> BuildFileAliases:
+-        return cast(
+-            BuildFileAliases,
+-            super()
+-            .alias_groups()
+-            .merge(
+-                BuildFileAliases(
+-                    targets={
+-                        "files": Files,
+-                        "tagged_files": TargetMacro.Factory.wrap(
+-                            functools.partial(macro, Files, cls._TAG), Files
+-                        ),
+-                    }
+-                )
+-            ),
+-        )
+-
+-    def test_with_missing_target_in_existing_build_file(self) -> None:
+-        self.create_library(path="3rdparty/python", target_type="target", name="Markdown")
+-        self.create_library(path="3rdparty/python", target_type="target", name="Pygments")
+-        # When a target is missing,
+-        #  the suggestions should be in order
+-        #  and there should only be one copy of the error if tracing is off.
+-        expected_message = (
+-            '"rutabaga" was not found in namespace "3rdparty/python".'
+-            ".*Did you mean one of:\n"
+-            ".*:Markdown\n"
+-            ".*:Pygments\n"
+-        )
+-        with self.assertRaisesRegex(AddressLookupError, expected_message):
+-            self.targets("3rdparty/python:rutabaga")
+-
+-    def test_with_missing_directory_fails(self) -> None:
+-        with self.assertRaises(AddressLookupError) as cm:
+-            self.targets("no-such-path:")
+-
+-        self.assertIn('Path "no-such-path" does not contain any BUILD files', str(cm.exception))
+-
+-    def test_invalidate_fsnode(self) -> None:
+-        # NB: Invalidation is now more directly tested in unit tests in the `graph` crate.
+-        self.create_library(path="src/example", target_type="target", name="things")
+-        self.targets("src/example::")
+-        invalidated_count = self.invalidate_for("src/example/BUILD")
+-        self.assertGreater(invalidated_count, 0)
+-
+-    def test_sources_ordering(self) -> None:
+-        input_sources = ["p", "a", "n", "t", "s", "b", "u", "i", "l", "d"]
+-        expected_sources = sorted(input_sources)
+-        self.create_library(
+-            path="src/example", target_type="files", name="things", sources=input_sources
+-        )
+-
+-        target = self.target("src/example:things")
+-        sources = [os.path.basename(s) for s in target.sources_relative_to_buildroot()]
+-        self.assertEqual(expected_sources, sources)
+-
+-    def test_target_macro_override(self) -> None:
+-        """Tests that we can "wrap" an existing target type with additional functionality.
+-
+-        Installs an additional TargetMacro that wraps `target` aliases to add a tag to all
+-        definitions.
+-        """
+-
+-        files = self.create_library(path="src/example", target_type="tagged_files", name="things")
+-        self.assertIn(self._TAG, files.tags)
+-        self.assertEqual(type(files), Files)
+diff --git a/tests/python/pants_test/engine/test_legacy_engine.py b/tests/python/pants_test/engine/test_legacy_engine.py
+deleted file mode 100644
+index 222b829f0f2..00000000000
+--- a/tests/python/pants_test/engine/test_legacy_engine.py
++++ /dev/null
+@@ -1,58 +0,0 @@
+-# Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
+-# Licensed under the Apache License, Version 2.0 (see LICENSE).
+-
+-from pants.base.exceptions import TaskError
+-from pants.engine.legacy_engine import Engine
+-from pants.testutil.engine.base_engine_test import EngineTestBase
+-
+-
+-class EngineTest(EngineTestBase):
+-    class RecordingEngine(Engine):
+-        def __init__(self, action=None):
+-            super(EngineTest.RecordingEngine, self).__init__()
+-            self._action = action
+-            self._attempts = []
+-
+-        @property
+-        def attempts(self):
+-            return self._attempts
+-
+-        def attempt(self, context, goals):
+-            self._attempts.append((context, goals))
+-            if self._action:
+-                self._action()
+-
+-    def setUp(self):
+-        super().setUp()
+-        self._context = self.context()
+-
+-    def assert_attempt(self, engine, *goal_names):
+-        self.assertEqual(1, len(engine.attempts))
+-
+-        context, goals = engine.attempts[0]
+-        self.assertEqual(self._context, context)
+-        self.assertEqual(self.as_goals(*goal_names), goals)
+-
+-    def test_execute_success(self):
+-        engine = self.RecordingEngine()
+-        result = engine.execute(self._context, self.as_goals("one", "two"))
+-        self.assertEqual(0, result)
+-        self.assert_attempt(engine, "one", "two")
+-
+-    def _throw(self, error):
+-        def throw():
+-            raise error
+-
+-        return throw
+-
+-    def test_execute_raise(self):
+-        engine = self.RecordingEngine(action=self._throw(TaskError()))
+-        result = engine.execute(self._context, self.as_goals("three"))
+-        self.assertEqual(1, result)
+-        self.assert_attempt(engine, "three")
+-
+-    def test_execute_code(self):
+-        engine = self.RecordingEngine(action=self._throw(TaskError(exit_code=42)))
+-        result = engine.execute(self._context, self.as_goals("four", "five", "six"))
+-        self.assertEqual(42, result)
+-        self.assert_attempt(engine, "four", "five", "six")

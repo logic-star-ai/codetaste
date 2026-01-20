@@ -1,0 +1,1 @@
+Refactor Modal System to Imperative API and Fix Hotkey Scope Race Conditions

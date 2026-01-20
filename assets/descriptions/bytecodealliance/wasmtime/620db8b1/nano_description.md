@@ -1,0 +1,1 @@
+Rename `wasi` crate to `wasip1` in test-programs

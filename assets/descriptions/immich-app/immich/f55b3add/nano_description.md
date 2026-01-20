@@ -1,0 +1,1 @@
+Consolidate guards, decorators, and utilities into cohesive modules

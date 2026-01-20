@@ -1,21 +1,24 @@
 """Executor for running inference on benchmark instances."""
 
+import logging
 import os
+import shutil
+import subprocess
 import signal
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import List, Optional
+import secrets
 
 import podman
 from podman.domain.containers import Container as PodmanContainer
 from tqdm import tqdm
 
-from refactoring_benchmark.inference.models import InferenceConfig
+from refactoring_benchmark.inference.models import InferenceConfig, InferenceMetadata
 from refactoring_benchmark.inference.utils import (
     copy_agent_config,
     create_fallback_inference_metadata,
-    ensure_inference_metadata_exists,
     get_instance_output_dir,
     output_exists,
 )
@@ -23,118 +26,153 @@ from refactoring_benchmark.podman import utils as podman_utils
 from refactoring_benchmark.utils.logger import get_logger
 from refactoring_benchmark.utils.models import InstanceRow
 
+ABSTRACT_HEADER = """Perform the task described below in it's ENTIRETY. You operate completely AUTONOMOUSLY in this sandboxed environment. You must EDIT the codebase DIRECTLY to complete the task.\n"""
+
+def _output_container_logs(container: PodmanContainer, output_path: Path, instance_logger: logging.Logger) -> None:
+    """Helper to output container logs to file and logger."""
+    raw_logs = container.logs(stream=False, follow=False)
+    raw_logs = b"".join(raw_logs) if not isinstance(raw_logs, bytes) else raw_logs
+    stdout = raw_logs.decode("utf-8", errors="replace")
+    instance_logger.error(stdout)
+    output_path.write_text(stdout, encoding="utf-8")
+
+def _cleanup_temp_dir(temp_description_dir: Path, instance_logger: logging.Logger) -> None:
+    """Helper to cleanup temporary description directory."""
+    if temp_description_dir and temp_description_dir.exists():
+        try:
+            shutil.rmtree(temp_description_dir)
+        except Exception as e:
+            try:
+                subprocess.run(["podman", "unshare", "rm", "-rf", str(temp_description_dir)], check=False)
+            except Exception as e2:
+                instance_logger.error(f"Failed to remove temporary description directory: {e}, {e2}")
+
+def _prepare_temp_description(instance: InstanceRow, instance_logger: logging.Logger) -> Path:
+    project_root = Path(__file__).parent.parent.parent
+    source_dir = project_root / instance.asset_dir("descriptions")
+    # don't use tempfile because of sticky bit
+    path = "./.tmp_descriptions/" + instance.id + "-" + secrets.token_hex(8)
+    temp_dir = Path(path)
+    if source_dir.exists():
+        shutil.copytree(source_dir, temp_dir, dirs_exist_ok=True)
+    for abstract_file in temp_dir.rglob("abstract_description.md"):
+        try:
+            content = abstract_file.read_text(encoding="utf-8")
+            abstract_file.write_text(ABSTRACT_HEADER + content, encoding="utf-8")
+        except Exception as e:
+            instance_logger.error(f"Failed to prepend header to {abstract_file}: {e}")   
+    os.chmod(temp_dir, 0o777)
+    for path in temp_dir.rglob('*'):
+        os.chmod(path, 0o777)
+    return temp_dir
 
 def run_single_instance(instance: InstanceRow, config: InferenceConfig) -> bool:
-    """
-    Run inference on a single benchmark instance.
-
-    Args:
-        instance: The benchmark instance to run inference on
-        config: Inference configuration
-
-    Returns:
-        True if successful, False otherwise
-    """
-    instance_logger = get_logger(f"inference-{instance.id}", use_file=True, use_stdout=False)
+    """Run inference on a single benchmark instance with streamlined checks."""
+    instance_logger = get_logger(
+        f"{instance.id}", use_file=True, use_stdout=False, log_subdir=f"{config.sanitized_agent_id}"
+    )
     output_dir = get_instance_output_dir(instance, config.sanitized_agent_id, config.output_dir)
 
-    # Check if output already exists (skip unless force)
+    # 1. Skip if already done
     if output_exists(output_dir) and not config.force:
-        instance_logger.info(f"Skipping {instance.id}, output already exists at {output_dir}")
-        return True
+        instance_logger.info(f"Skipping {instance.id}, output already exists.")
+        try:
+            metadata: InferenceMetadata = InferenceMetadata.load_from_json(output_dir / "inference_metadata.json")
+            is_success = metadata.finish_reason.lower() == "success"
+            if is_success or not config.force_unsuccessful:
+                return is_success
+        except Exception:
+            return False
 
-    # Create output directory
+    # 2. Prepare environment
+    if output_dir.exists():
+        shutil.rmtree(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    copy_agent_config(config.agent_dir, output_dir)
 
-    # Copy metadata files
-    try:
-        copy_agent_config(config.agent_dir, output_dir)
-    except FileNotFoundError as e:
-        instance_logger.error(f"Failed to copy metadata: {e}")
+    client = podman_utils.get_local_client(timeout=config.timeout + 120)
+    if not client:
+        instance_logger.error("Failed to connect to Podman")
         return False
 
     container: Optional[PodmanContainer] = None
-    client = podman_utils.get_local_client()
-
-    if not client:
-        instance_logger.error("Failed to connect to Podman daemon")
-        return False
-
+    temp_description_dir: Path = _prepare_temp_description(instance, instance_logger).resolve()
     try:
-        # Verify runtime image exists
-        try:
-            client.images.get(instance.runtime_image)
-        except podman.errors.ImageNotFound:
-            instance_logger.error(f"Runtime image not found: {instance.runtime_image}")
-            instance_logger.error("Run bootstrap first to create the image")
-            return False
-
-        # Start inference
+        # 3. Execute Container
         instance_logger.info(f"Starting inference for {instance.display_path}")
         instance_logger.info(f"  Image: {instance.runtime_image}")
         instance_logger.info(f"  Output: {output_dir}")
-
-        # Get API key from environment (may be None)
-        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-
-        # Run container in inference mode
-        instance_logger.info("Running container in inference mode...")
+        env = {**config.env_vars, "DESCRIPTION_TYPE": config.description_type}
+        instance_logger.debug(f"  Environment Variables: {[(k, v[:10] if isinstance(v, str) else v) for k, v in env.items()]}")
+        # The run_agent provided is responsible for catching errors and adjusting finish_reason in inference_metadata.json
         container = podman_utils.safe_container_run(
             client,
             instance.runtime_image,
             command=["inference"],
             detach=True,
-            environment={"ANTHROPIC_API_KEY": api_key} if api_key else {},
+            environment=env,
             volumes={
                 str(config.agent_dir): {"bind": "/agent", "mode": "rw"},
                 str(output_dir): {"bind": "/output", "mode": "rw"},
+                str(temp_description_dir): {"bind": "/task_description", "mode": "rw", "extended_mode": ["U", "z"]},
             },
+            network_mode="host",
             working_dir="/testbed",
-            remove=True,
+            remove=False,
+            nano_cpus=int(8e9)
         )
 
-        # Stream container output to log
         try:
-            for log_line in container.logs(stream=True, follow=True):
-                instance_logger.info(log_line.decode("utf-8", errors="replace").rstrip())
-        except Exception as log_error:
-            instance_logger.warning(f"Error streaming logs: {log_error}")
+            container.wait(timeout=config.timeout)
+        except Exception as e:
+            instance_logger.error(f"Execution timed out: {e}")
+            create_fallback_inference_metadata(
+                output_dir, 
+                "timeout", 
+                description_type=config.description_type, 
+                additional={"error": f"Container timed out: {str(e)}"}
+                )
+        
+        _output_container_logs(container, output_dir / "inference.out", instance_logger)
 
-        # Wait for container to finish with timeout
-        try:
-            exit_code = container.wait(timeout=config.timeout)
-        except Exception as timeout_error:
-            instance_logger.error(f"Container execution timed out after {config.timeout}s: {timeout_error}")
-            # Create fallback metadata for timeout
-            create_fallback_inference_metadata(output_dir, finish_reason="timeout")
-            return False
-
-        # Check exit code
+        # 4. Validation
+        metadata_path = output_dir / "inference_metadata.json"
         prediction_path = output_dir / "prediction.diff"
-        if exit_code == 0 and prediction_path.exists():
-            instance_logger.info("Inference completed successfully")
-            ensure_inference_metadata_exists(output_dir)  # TODO : Validate Format
-            return True
-        else:
-            instance_logger.error(f"Container exited with code {exit_code}")
-            # Check if prediction.diff exists to determine fallback reason
-            if prediction_path.exists():
-                # Agent produced output but failed
-                ensure_inference_metadata_exists(output_dir)
-            else:
-                # Agent crashed without producing output
-                create_fallback_inference_metadata(output_dir, finish_reason="crashed")
+
+        # Check A: Metadata exists
+        if not metadata_path.exists():
+            instance_logger.error("Agent failed to create inference_metadata.json")
             return False
+
+        # Check B: Prediction exists
+        if not prediction_path.exists():
+            instance_logger.error("Agent or entrypoint.sh failed to generate / create prediction.diff")
+            return False
+
+        # Check C: Success reason
+        metadata = InferenceMetadata.load_from_json(metadata_path)
+        is_success = metadata.finish_reason.lower() == "success"
+        metadata.description_type = config.description_type
+        metadata.save_to_json(metadata_path)
+        
+        if is_success:
+            instance_logger.info("Inference completed successfully")
+        else:
+            instance_logger.error(f"Inference failed with reason: {metadata.finish_reason} {metadata.additional}")
+            
+        return is_success
 
     except Exception as e:
-        instance_logger.error(f"Unexpected error during inference: {e}")
-        # Create fallback metadata for crash
-        create_fallback_inference_metadata(output_dir, finish_reason="crashed")
+        instance_logger.error(f"Unexpected error: {e}")
         return False
-
     finally:
-        if container is not None:
+        if container:
             podman_utils.stop_container(container)
+            try:
+                container.remove(force=True)
+            except Exception as e:
+                instance_logger.warning(f"Failed to remove container [{instance.id}]. Probably already removed. Error: {e}")
+        _cleanup_temp_dir(temp_description_dir, instance_logger)
         client.close()
 
 

@@ -36,6 +36,7 @@ def get_logger(
     use_file: bool = True,
     use_stdout: bool = True,
     level: int = logging.DEBUG,
+    log_subdir: Optional[str] = None,
 ) -> logging.Logger:
     """
     Get or create a logger with the specified configuration.
@@ -45,6 +46,7 @@ def get_logger(
         name: Name of the logger (typically module name or component name)
         use_file: Whether to add a file handler (default: True)
         level: Logging level (default: INFO)
+        log_subdir: Optional subdirectory within log directory for organizing logs
 
     Returns:
         Configured logger instance
@@ -81,7 +83,12 @@ def get_logger(
 
         # File Handler (optional)
         if use_file:
-            log_file = os.path.join(_LOG_DIR, f"{name}.log")
+            if log_subdir:
+                log_file_dir = os.path.join(_LOG_DIR, log_subdir)
+                os.makedirs(log_file_dir, exist_ok=True)
+                log_file = os.path.join(log_file_dir, f"{name}.log")
+            else:
+                log_file = os.path.join(_LOG_DIR, f"{name}.log")
             fh = logging.FileHandler(log_file)
             fh.setFormatter(file_fmt)
             fh.setLevel(level)

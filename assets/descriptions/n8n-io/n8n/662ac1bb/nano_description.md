@@ -1,0 +1,1 @@
+Refactor: Move `templates` API to `@n8n/rest-api-client` package

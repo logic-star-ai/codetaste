@@ -1,0 +1,1 @@
+Refactor ConsensusV2 to use dedicated variant for single-owner

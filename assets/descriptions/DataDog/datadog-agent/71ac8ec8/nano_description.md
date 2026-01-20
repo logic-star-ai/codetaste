@@ -1,0 +1,1 @@
+Remove global tagger accessor and pass tagger component via dependency injection

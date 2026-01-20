@@ -1,0 +1,1 @@
+Rename `qa` directory to `test`

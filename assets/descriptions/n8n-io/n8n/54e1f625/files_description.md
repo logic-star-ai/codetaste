@@ -1,0 +1,27 @@
+Autonomously identify and execute improvements to the **entire** codebase. Optimize structure, architecture, code quality and/or logic flow. Proceed directly to modifying the actual codebase; do not output analysis, plan, roadmap or similar files.
+Some of the files that look particularly concerning to me are the following:
+- packages/editor-ui/src/views/NodeView.vue
+- packages/editor-ui/src/components/RunData.vue
+- packages/editor-ui/src/components/MfaSetupModal.vue
+- packages/editor-ui/src/components/CredentialEdit/CredentialConfig.vue
+- packages/editor-ui/src/components/WorkflowSettings.vue
+- packages/editor-ui/src/views/ProjectSettings.vue
+- packages/editor-ui/src/components/SettingsLogStreaming/EventSelection.ee.vue
+- packages/editor-ui/src/components/MainSidebar.vue
+- packages/editor-ui/src/components/TagsManager/TagsView/TagsTable.vue
+- packages/editor-ui/src/components/InputPanel.vue
+- packages/editor-ui/src/components/Node/NodeCreator/Panel/NoResults.vue
+- packages/editor-ui/src/views/VariablesView.vue
+- packages/editor-ui/src/components/RunDataAi/RunDataAiContent.vue
+- packages/editor-ui/src/components/ParameterInputList.vue
+- packages/editor-ui/src/components/MainHeader/WorkflowDetails.vue
+- packages/editor-ui/src/views/WorkerView.vue
+- packages/editor-ui/src/components/executions/workflow/WorkflowExecutionAnnotationPanel.ee.vue
+- packages/editor-ui/src/components/NodeSettings.vue
+- packages/editor-ui/src/components/ResourceLocator/ResourceLocatorDropdown.vue
+- packages/editor-ui/src/components/canvas/elements/buttons/CanvasControlButtons.vue
+- packages/editor-ui/src/components/executions/workflow/WorkflowExecutionsInfoAccordion.vue
+- packages/editor-ui/src/components/RunDataAi/RunDataAi.vue
+- packages/editor-ui/src/components/TextEdit.vue
+- packages/editor-ui/src/components/NodeTitle.vue
+- packages/editor-ui/src/components/CanvasControls.vue

@@ -5,6 +5,7 @@ import signal
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+import time
 from typing import List
 
 from tqdm import tqdm
@@ -16,6 +17,7 @@ from refactoring_benchmark.evaluation.parser import (
     parse_test_output,
 )
 from refactoring_benchmark.evaluation.runner import run_rule_evaluation, run_test_evaluation
+from refactoring_benchmark.inference.validation import validate_agent_config
 from refactoring_benchmark.podman import utils as podman_utils
 from refactoring_benchmark.utils.logger import get_logger
 from refactoring_benchmark.utils.models import InstanceRow
@@ -63,17 +65,26 @@ def evaluate_single_instance(instance: InstanceRow, agent_id: str, config: Evalu
     Returns:
         True if successful, False otherwise
     """
-    instance_logger = get_logger(f"evaluation-{instance.id}", use_file=True, use_stdout=False)
+    instance_logger = get_logger(f"{instance.id}", use_file=True, use_stdout=False, log_subdir=f"{agent_id}")
 
     # Determine paths
     agent_output_dir = config.output_dir / instance.owner / instance.repo / instance.short_hash / agent_id
     eval_dir = agent_output_dir / "evaluation"
     prediction_diff = agent_output_dir / "prediction.diff"
+    inference_metadata_path = agent_output_dir / "inference_metadata.json"
     instance_metadata_path = eval_dir / "instance_metadata.json"
+    agent_config_path = agent_output_dir / "agent_config.json"
 
     # Check if prediction.diff exists
     if not prediction_diff.exists():
         instance_logger.warning(f"Skipping {instance.id}, no prediction.diff found at {prediction_diff}")
+        return False
+
+    # Load agent config
+    try:
+        agent_config = validate_agent_config(agent_config_path)
+    except Exception as e:
+        instance_logger.error(f"Failed to load agent config: {e}")
         return False
 
     # Check if evaluation already exists
@@ -92,24 +103,16 @@ def evaluate_single_instance(instance: InstanceRow, agent_id: str, config: Evalu
     with ThreadPoolExecutor(max_workers=2) as executor:
         # Submit both evaluations
         test_future = executor.submit(
-            run_test_evaluation,
-            instance,
-            prediction_diff,
-            eval_dir,
-            config.timeout_test,
+            run_test_evaluation, instance, prediction_diff, eval_dir, config.timeout_test, instance_logger
         )
 
         rule_future = executor.submit(
-            run_rule_evaluation,
-            instance,
-            prediction_diff,
-            eval_dir,
-            config.timeout_rule,
+            run_rule_evaluation, instance, prediction_diff, eval_dir, config.timeout_rule, instance_logger
         )
 
         # Wait for both to complete
-        test_metrics, test_stdout = test_future.result()
         rule_success, rule_stdout = rule_future.result()
+        test_metrics, test_stdout = test_future.result()
 
     # Save raw outputs for debugging
     (eval_dir / "test_output.txt").write_text(test_stdout)
@@ -137,11 +140,22 @@ def evaluate_single_instance(instance: InstanceRow, agent_id: str, config: Evalu
         instance_logger.error(f"Failed to load instance metadata: {e}")
         return False
 
+    inference_metadata = None
+    if inference_metadata_path.exists():
+        try:
+            with inference_metadata_path.open("r", encoding="utf-8") as f:
+                inference_metadata = json.load(f)
+            instance_logger.info("Loaded inference metadata successfully")
+        except Exception as e:
+            instance_logger.error(f"Failed to load inference metadata: {e}")
+
     # Create evaluation result
     evaluation_result = EvaluationResult(
         instance_metadata=instance_metadata,
+        agent_config=agent_config,
         agent_test_metrics=test_metrics,
         agent_rule_metrics=rule_metrics,
+        inference_metadata=inference_metadata,
     )
 
     # Save evaluation result
@@ -154,6 +168,7 @@ def evaluate_single_instance(instance: InstanceRow, agent_id: str, config: Evalu
     instance_logger.info(
         f"  Rule IFR: {rule_metrics.ifr:.3f} (pos: {rule_metrics.positive_ifr:.3f}, neg: {rule_metrics.negative_ifr:.3f})"
     )
+    print(f"✅ [{instance.id}] : Rule IFR: {rule_metrics.ifr:.3f}, Test Metrics: {test_metrics.model_dump() if test_metrics else 'N/A'}")
 
     return True
 
@@ -189,6 +204,7 @@ class EvaluationOrchestrator:
                 self.executor.shutdown(wait=False, cancel_futures=True)
             self._cleanup_containers()
             print(f"Exiting due to {sig_name}")
+            time.sleep(1)
             sys.exit(1)
 
         signal.signal(signal.SIGINT, signal_handler)

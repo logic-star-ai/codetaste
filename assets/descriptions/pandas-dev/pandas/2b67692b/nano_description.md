@@ -1,0 +1,1 @@
+Remove redundant compat definitions for Python 3 builtins

@@ -1,0 +1,1 @@
+Refactor: Rename Scanner interface to Service

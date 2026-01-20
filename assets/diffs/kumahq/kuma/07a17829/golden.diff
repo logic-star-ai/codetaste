@@ -1,0 +1,1498 @@
+diff --git a/pkg/api-server/dataplane_layout_endpoint.go b/pkg/api-server/dataplane_layout_endpoint.go
+index b49165d803e8..734b0a2f14e7 100644
+--- a/pkg/api-server/dataplane_layout_endpoint.go
++++ b/pkg/api-server/dataplane_layout_endpoint.go
+@@ -78,7 +78,7 @@ func (dle *dataplaneLayoutEndpoint) getLayout(request *restful.Request, response
+ 
+ 	inbounds := util_slices.Map(dataplane.Spec.GetNetworking().GetInbound(), func(inbound *v1alpha1.Dataplane_Networking_Inbound) api_common.DataplaneInbound {
+ 		return api_common.DataplaneInbound{
+-			Kri:      kri.From(dataplane, inbound.GetSectionName()).String(),
++			Kri:      kri.WithSectionName(kri.From(dataplane), inbound.GetSectionName()).String(),
+ 			Port:     int32(inbound.GetPort()),
+ 			Protocol: inbound.GetProtocol(),
+ 		}
+@@ -100,7 +100,7 @@ func (dle *dataplaneLayoutEndpoint) getLayout(request *restful.Request, response
+ 
+ 	networkingLayout := types.DataplaneNetworkingLayout{
+ 		Inbounds:  inbounds,
+-		Kri:       kri.From(dataplane, "").String(),
++		Kri:       kri.From(dataplane).String(),
+ 		Labels:    dataplane.GetMeta().GetLabels(),
+ 		Outbounds: outbounds,
+ 	}
+diff --git a/pkg/api-server/resource_endpoints.go b/pkg/api-server/resource_endpoints.go
+index 6affbb5622cd..0eba2c808bdd 100644
+--- a/pkg/api-server/resource_endpoints.go
++++ b/pkg/api-server/resource_endpoints.go
+@@ -1121,7 +1121,7 @@ func policyOriginsToKRIOrigins(policyType core_model.ResourceType, origins []cor
+ }
+ 
+ func originToKRI(origin core_model.ResourceMeta, policyType core_model.ResourceType) api_common.PolicyOrigin {
+-	return api_common.PolicyOrigin{Kri: kri.FromResourceMeta(origin, policyType, "").String()}
++	return api_common.PolicyOrigin{Kri: kri.FromResourceMeta(origin, policyType).String()}
+ }
+ 
+ func (r *resourceEndpoints) rulesForResource() restful.RouteFunction {
+diff --git a/pkg/core/kri/kri.go b/pkg/core/kri/kri.go
+index b0a5b195f140..d4731d89d84d 100644
+--- a/pkg/core/kri/kri.go
++++ b/pkg/core/kri/kri.go
+@@ -33,18 +33,25 @@ func (i Identifier) String() string {
+ 	return fmt.Sprintf("kri_%s_%s_%s_%s_%s_%s", desc.ShortName, i.Mesh, i.Zone, i.Namespace, i.Name, i.SectionName)
+ }
+ 
+-func From(r core_model.Resource, sectionName string) Identifier {
+-	return FromResourceMeta(r.GetMeta(), r.Descriptor().Name, sectionName)
++func (i Identifier) IsEmpty() bool {
++	return i == (Identifier{})
+ }
+ 
+-func FromResourceMeta(rm core_model.ResourceMeta, resourceType core_model.ResourceType, sectionName string) Identifier {
++func From(r core_model.Resource) Identifier {
++	return FromResourceMeta(r.GetMeta(), r.Descriptor().Name)
++}
++
++func FromResourceMeta(rm core_model.ResourceMeta, resourceType core_model.ResourceType) Identifier {
++	if rm == nil {
++		return Identifier{}
++	}
++
+ 	return Identifier{
+ 		ResourceType: resourceType,
+ 		Mesh:         rm.GetMesh(),
+ 		Zone:         rm.GetLabels()[mesh_proto.ZoneTag],
+ 		Namespace:    rm.GetLabels()[mesh_proto.KubeNamespaceTag],
+ 		Name:         core_model.GetDisplayName(rm),
+-		SectionName:  sectionName,
+ 	}
+ }
+ 
+@@ -107,10 +114,9 @@ func (i Identifier) HasSectionName() bool {
+ 
+ func WithSectionName(id Identifier, sectionName string) Identifier {
+ 	// cannot add section name to empty identifier
+-	if id == (Identifier{}) {
++	if id.IsEmpty() {
+ 		return id
+ 	}
+-
+ 	id.SectionName = sectionName
+ 	return id
+ }
+diff --git a/pkg/core/resources/apis/core/destinationname/destinationname.go b/pkg/core/resources/apis/core/destinationname/destinationname.go
+index 18ef82b4c033..498452a0391b 100644
+--- a/pkg/core/resources/apis/core/destinationname/destinationname.go
++++ b/pkg/core/resources/apis/core/destinationname/destinationname.go
+@@ -23,7 +23,7 @@ func Resolve(unifiedNaming bool, dest core.Destination, port core.Port) (string,
+ 	case port == nil:
+ 		return "", errors.New("port is nil: expected a non-nil port implementing core.Port")
+ 	case unifiedNaming:
+-		return kri.From(dest, port.GetName()).String(), nil
++		return kri.WithSectionName(kri.From(dest), port.GetName()).String(), nil
+ 	default:
+ 		return ResolveLegacyFromDestination(dest, port), nil
+ 	}
+@@ -31,7 +31,7 @@ func Resolve(unifiedNaming bool, dest core.Destination, port core.Port) (string,
+ 
+ func ResolveLegacyFromDestination(dest core.Destination, port core.Port) string {
+ 	return ResolveLegacyFromKRI(
+-		kri.From(dest, ""),
++		kri.From(dest),
+ 		dest.Descriptor().ShortName,
+ 		port.GetValue(),
+ 	)
+diff --git a/pkg/core/resources/apis/meshexternalservice/api/v1alpha1/helpers.go b/pkg/core/resources/apis/meshexternalservice/api/v1alpha1/helpers.go
+index 7ab5ffc27790..bc35329588fe 100644
+--- a/pkg/core/resources/apis/meshexternalservice/api/v1alpha1/helpers.go
++++ b/pkg/core/resources/apis/meshexternalservice/api/v1alpha1/helpers.go
+@@ -7,7 +7,6 @@ import (
+ 	"github.com/kumahq/kuma/pkg/core/resources/apis/core/vip"
+ 	core_mesh "github.com/kumahq/kuma/pkg/core/resources/apis/mesh"
+ 	xds_types "github.com/kumahq/kuma/pkg/core/xds/types"
+-	"github.com/kumahq/kuma/pkg/util/pointer"
+ )
+ 
+ func (m *MeshExternalServiceResource) IsReachableFromZone(zone string) bool {
+@@ -34,7 +33,7 @@ func (t *MeshExternalServiceResource) AsOutbounds() xds_types.Outbounds {
+ 		return xds_types.Outbounds{{
+ 			Address:  t.Status.VIP.IP,
+ 			Port:     uint32(t.Spec.Match.Port),
+-			Resource: pointer.To(kri.From(t, "")),
++			Resource: kri.From(t),
+ 		}}
+ 	}
+ 	return nil
+diff --git a/pkg/core/resources/apis/meshmultizoneservice/api/v1alpha1/helpers.go b/pkg/core/resources/apis/meshmultizoneservice/api/v1alpha1/helpers.go
+index 5f3631f9a67c..a6746a7e7d71 100644
+--- a/pkg/core/resources/apis/meshmultizoneservice/api/v1alpha1/helpers.go
++++ b/pkg/core/resources/apis/meshmultizoneservice/api/v1alpha1/helpers.go
+@@ -47,7 +47,7 @@ func (m *MeshMultiZoneServiceResource) AsOutbounds() xds_types.Outbounds {
+ 			outbounds = append(outbounds, &xds_types.Outbound{
+ 				Address:  vip.IP,
+ 				Port:     uint32(port.Port),
+-				Resource: pointer.To(kri.From(m, port.GetName())),
++				Resource: kri.WithSectionName(kri.From(m), port.GetName()),
+ 			})
+ 		}
+ 	}
+diff --git a/pkg/core/resources/apis/meshmultizoneservice/status_updater.go b/pkg/core/resources/apis/meshmultizoneservice/status_updater.go
+index 0898d8f11ad4..63c5dcf36041 100644
+--- a/pkg/core/resources/apis/meshmultizoneservice/status_updater.go
++++ b/pkg/core/resources/apis/meshmultizoneservice/status_updater.go
+@@ -98,7 +98,7 @@ func (s *StatusUpdater) updateStatus(ctx context.Context) error {
+ 		ports := map[int32]meshservice_api.Port{}
+ 		for _, svc := range msList.Items {
+ 			if matchesService(mzSvc, svc) {
+-				ri := kri.From(svc, "")
++				ri := kri.From(svc)
+ 				matched = append(matched, meshmzservice_api.MatchedMeshService{
+ 					Name:      ri.Name,
+ 					Namespace: ri.Namespace,
+diff --git a/pkg/core/resources/apis/meshservice/api/v1alpha1/helpers.go b/pkg/core/resources/apis/meshservice/api/v1alpha1/helpers.go
+index 72d8ffedf536..d86c0224c79d 100644
+--- a/pkg/core/resources/apis/meshservice/api/v1alpha1/helpers.go
++++ b/pkg/core/resources/apis/meshservice/api/v1alpha1/helpers.go
+@@ -82,7 +82,7 @@ func (t *MeshServiceResource) AsOutbounds() xds_types.Outbounds {
+ 			outbounds = append(outbounds, &xds_types.Outbound{
+ 				Address:  vip.IP,
+ 				Port:     uint32(port.Port),
+-				Resource: pointer.To(kri.From(t, port.GetName())),
++				Resource: kri.WithSectionName(kri.From(t), port.GetName()),
+ 			})
+ 		}
+ 	}
+diff --git a/pkg/core/xds/resource.go b/pkg/core/xds/resource.go
+index b6ba1a40076b..6d87dbca69d1 100644
+--- a/pkg/core/xds/resource.go
++++ b/pkg/core/xds/resource.go
+@@ -22,7 +22,7 @@ type Resource struct {
+ 	Name           string
+ 	Origin         string
+ 	Resource       ResourcePayload
+-	ResourceOrigin *kri.Identifier
++	ResourceOrigin kri.Identifier
+ 	Protocol       core_mesh.Protocol
+ }
+ 
+@@ -121,6 +121,9 @@ func (s *ResourceSet) Empty() bool {
+ 
+ func (s *ResourceSet) Add(resources ...*Resource) *ResourceSet {
+ 	for _, resource := range resources {
++		if resource == nil {
++			continue
++		}
+ 		if s.typeToNamesIndex[s.typeName(resource.Resource)] == nil {
+ 			s.typeToNamesIndex[s.typeName(resource.Resource)] = map[string]*Resource{}
+ 		}
+@@ -176,20 +179,16 @@ func (s *ResourceSet) List() ResourceList {
+ }
+ 
+ func NonMeshExternalService(r *Resource) bool {
+-	return r.ResourceOrigin == nil || (r.ResourceOrigin != nil && r.ResourceOrigin.ResourceType != meshexternalservice_api.MeshExternalServiceType)
++	return r.ResourceOrigin.ResourceType != meshexternalservice_api.MeshExternalServiceType
+ }
+ 
+ func NonGatewayResources(r *Resource) bool {
+-	return r.ResourceOrigin == nil || (r.ResourceOrigin != nil && r.Origin != "gateway")
++	return r.ResourceOrigin.IsEmpty() || r.Origin != "gateway"
+ }
+ 
+ func HasAssociatedServiceResource(r *Resource) bool {
+-	if r.ResourceOrigin == nil {
+-		return false
+-	}
+ 	switch r.ResourceOrigin.ResourceType {
+-	case
+-		meshservice_api.MeshServiceType,
++	case meshservice_api.MeshServiceType,
+ 		meshexternalservice_api.MeshExternalServiceType,
+ 		meshmultizoneservice_api.MeshMultiZoneServiceType:
+ 		return true
+@@ -209,11 +208,8 @@ func (s *ResourceSet) IndexByOrigin(filters ...func(*Resource) bool) map[kri.Ide
+ 					add = false
+ 				}
+ 			}
+-			if add {
+-				if resource.ResourceOrigin == nil {
+-					continue
+-				}
+-				resOwner := *resource.ResourceOrigin
++			if add && !resource.ResourceOrigin.IsEmpty() {
++				resOwner := resource.ResourceOrigin
+ 				if byOwner[resOwner] == nil {
+ 					byOwner[resOwner] = map[string][]*Resource{}
+ 				}
+diff --git a/pkg/core/xds/types.go b/pkg/core/xds/types.go
+index 1956e1844046..3a4ebb7b00f5 100644
+--- a/pkg/core/xds/types.go
++++ b/pkg/core/xds/types.go
+@@ -74,7 +74,7 @@ type (
+ 		SANs                     []SAN
+ 		MinTlsVersion            *tlsv3.TlsParameters_TlsProtocol
+ 		MaxTlsVersion            *tlsv3.TlsParameters_TlsProtocol
+-		OwnerResource            *kri.Identifier
++		OwnerResource            kri.Identifier
+ 	}
+ )
+ 
+@@ -250,7 +250,7 @@ type MeshResources struct {
+ func (r MeshResources) Get(id kri.Identifier) core_model.Resource {
+ 	// todo: we can probably optimize it by using indexing on ResourceIdentifier
+ 	list := r.ListOrEmpty(id.ResourceType).GetItems()
+-	if i := slices.IndexFunc(list, func(r core_model.Resource) bool { return kri.From(r, "") == kri.NoSectionName(id) }); i >= 0 {
++	if i := slices.IndexFunc(list, func(r core_model.Resource) bool { return kri.From(r) == kri.NoSectionName(id) }); i >= 0 {
+ 		return list[i]
+ 	}
+ 	return nil
+@@ -361,7 +361,7 @@ func (e Endpoint) IsExternalService() bool {
+ }
+ 
+ func (e Endpoint) IsMeshExternalService() bool {
+-	return e.ExternalService != nil && e.ExternalService.OwnerResource != nil
++	return e.ExternalService != nil && !e.ExternalService.OwnerResource.IsEmpty()
+ }
+ 
+ func (e Endpoint) LocalityString() string {
+diff --git a/pkg/core/xds/types/outbound.go b/pkg/core/xds/types/outbound.go
+index 042f1bbf72eb..7310c559a24a 100644
+--- a/pkg/core/xds/types/outbound.go
++++ b/pkg/core/xds/types/outbound.go
+@@ -11,7 +11,7 @@ type Outbound struct {
+ 
+ 	Address  string
+ 	Port     uint32
+-	Resource *kri.Identifier
++	Resource kri.Identifier
+ }
+ 
+ // AssociatedServiceResource
+@@ -20,10 +20,7 @@ type Outbound struct {
+ //   - if the outbound is defined using the old way with 'kuma.io/service' tag,
+ //     then it returns empty kri.Identifier and false
+ func (o *Outbound) AssociatedServiceResource() (kri.Identifier, bool) {
+-	if o.Resource != nil {
+-		return *o.Resource, true
+-	}
+-	return kri.Identifier{}, false
++	return o.Resource, !o.Resource.IsEmpty()
+ }
+ 
+ func (o *Outbound) GetAddress() string {
+diff --git a/pkg/kds/context/context.go b/pkg/kds/context/context.go
+index 34dc4fdcb9f7..9605a9fd0424 100644
+--- a/pkg/kds/context/context.go
++++ b/pkg/kds/context/context.go
+@@ -306,7 +306,7 @@ func GlobalProvidedFilter(rm manager.ResourceManager) reconcile_v2.ResourceFilte
+ 				// otherwise we're testing the role in Global CP in case Zone had the validation webhook turned off
+ 				role, err := core_model.ComputePolicyRole(policy, core_model.NewNamespace(r.GetMeta().GetLabels()[mesh_proto.KubeNamespaceTag], false))
+ 				if err != nil {
+-					ri := kri.From(r, "")
++					ri := kri.From(r)
+ 					log.V(1).Info(err.Error(), "name", ri.Name, "mesh", ri.Mesh, "zone", ri.Zone, "namespace", ri.Namespace)
+ 					return false
+ 				}
+diff --git a/pkg/plugins/policies/core/matchers/dataplane.go b/pkg/plugins/policies/core/matchers/dataplane.go
+index 748e63f06b79..664e83179eb2 100644
+--- a/pkg/plugins/policies/core/matchers/dataplane.go
++++ b/pkg/plugins/policies/core/matchers/dataplane.go
+@@ -258,7 +258,7 @@ func isSelectedByResourceIdentifier(dpp *core_mesh.DataplaneResource, ref common
+ 	if pointer.Deref(ref.Name) == "" {
+ 		return false
+ 	}
+-	return kri.From(dpp, "") == resolve.TargetRefToKRI(meta, ref)
++	return kri.From(dpp) == resolve.TargetRefToKRI(kri.FromResourceMeta(meta, core_model.ResourceType(ref.Kind)), ref)
+ }
+ 
+ func dppSelectedByNamespace(meta core_model.ResourceMeta, dpp *core_mesh.DataplaneResource) bool {
+diff --git a/pkg/plugins/policies/core/rules/outbound/context.go b/pkg/plugins/policies/core/rules/outbound/context.go
+index 833a77c5798e..b71c5a83f7b4 100644
+--- a/pkg/plugins/policies/core/rules/outbound/context.go
++++ b/pkg/plugins/policies/core/rules/outbound/context.go
+@@ -33,7 +33,7 @@ func AsResourceContext[T any](conf T) *ResourceContext[T] {
+ func RootContext[T any](mesh *core_mesh.MeshResource, rules ResourceRules) *ResourceContext[T] {
+ 	return &ResourceContext[T]{
+ 		ids: []kri.Identifier{
+-			kri.From(mesh, ""),
++			kri.From(mesh),
+ 		},
+ 		rules: rules,
+ 	}
+diff --git a/pkg/plugins/policies/core/rules/outbound/context_test.go b/pkg/plugins/policies/core/rules/outbound/context_test.go
+index 5a775ddecc51..9c47b550ae08 100644
+--- a/pkg/plugins/policies/core/rules/outbound/context_test.go
++++ b/pkg/plugins/policies/core/rules/outbound/context_test.go
+@@ -21,7 +21,7 @@ var _ = Describe("ResourceContext", func() {
+ 		It("should create a ResourceContext with mesh identifier", func() {
+ 			// when
+ 			resourceRules := outbound.ResourceRules{
+-				kri.From(mesh, ""): outbound.ResourceRule{Conf: []interface{}{"mesh-conf"}},
++				kri.From(mesh): outbound.ResourceRule{Conf: []interface{}{"mesh-conf"}},
+ 			}
+ 			rc := outbound.RootContext[string](mesh, resourceRules)
+ 
+@@ -40,8 +40,8 @@ var _ = Describe("ResourceContext", func() {
+ 				Name:         "test-resource",
+ 			}
+ 			resourceRules := outbound.ResourceRules{
+-				kri.From(mesh, ""): outbound.ResourceRule{Conf: []interface{}{"mesh-conf"}},
+-				id:                 outbound.ResourceRule{Conf: []interface{}{"test-conf"}},
++				kri.From(mesh): outbound.ResourceRule{Conf: []interface{}{"mesh-conf"}},
++				id:             outbound.ResourceRule{Conf: []interface{}{"test-conf"}},
+ 			}
+ 			rc := outbound.RootContext[string](mesh, resourceRules)
+ 
+@@ -62,7 +62,7 @@ var _ = Describe("ResourceContext", func() {
+ 				Name:         "test-resource",
+ 			}
+ 			resourceRules := outbound.ResourceRules{
+-				kri.From(mesh, ""): outbound.ResourceRule{Conf: []interface{}{"mesh-conf"}},
++				kri.From(mesh): outbound.ResourceRule{Conf: []interface{}{"mesh-conf"}},
+ 			}
+ 			rc := outbound.RootContext[string](mesh, resourceRules)
+ 
+diff --git a/pkg/plugins/policies/core/rules/outbound/resourcerules.go b/pkg/plugins/policies/core/rules/outbound/resourcerules.go
+index d90790bc0a53..9b976749d37c 100644
+--- a/pkg/plugins/policies/core/rules/outbound/resourcerules.go
++++ b/pkg/plugins/policies/core/rules/outbound/resourcerules.go
+@@ -44,17 +44,17 @@ func (rr ResourceRules) Compute(uri kri.Identifier, reader kri.ResourceReader) *
+ 		}
+ 		// find MeshService's Mesh and compute rules for it
+ 		if mesh := reader.Get(kri.Identifier{ResourceType: core_mesh.MeshType, Name: uri.Mesh}); mesh != nil {
+-			return rr.Compute(kri.From(mesh, ""), reader)
++			return rr.Compute(kri.From(mesh), reader)
+ 		}
+ 	case meshexternalservice_api.MeshExternalServiceType:
+ 		// find MeshExternalService's Mesh and compute rules for it
+ 		if mesh := reader.Get(kri.Identifier{ResourceType: core_mesh.MeshType, Name: uri.Mesh}); mesh != nil {
+-			return rr.Compute(kri.From(mesh, ""), reader)
++			return rr.Compute(kri.From(mesh), reader)
+ 		}
+ 	case meshhttproute_api.MeshHTTPRouteType:
+ 		// find MeshHTTPRoute's Mesh and compute rules for it
+ 		if mesh := reader.Get(kri.Identifier{ResourceType: core_mesh.MeshType, Name: uri.Mesh}); mesh != nil {
+-			return rr.Compute(kri.From(mesh, ""), reader)
++			return rr.Compute(kri.From(mesh), reader)
+ 		}
+ 	}
+ 
+@@ -168,9 +168,9 @@ func (rw *withResolvedResource[T]) isRelevant(other core_model.Resource, section
+ 			return false
+ 		}
+ 		switch {
+-		case kri.From(rw.rs.Resource, rw.rs.SectionName) == kri.From(other, sectionName):
++		case kri.WithSectionName(kri.From(rw.rs.Resource), rw.rs.SectionName) == kri.WithSectionName(kri.From(other), sectionName):
+ 			return true
+-		case kri.From(rw.rs.Resource, "") == kri.From(other, "") && rw.rs.SectionName == "" && sectionName != "":
++		case kri.From(rw.rs.Resource) == kri.From(other) && rw.rs.SectionName == "" && sectionName != "":
+ 			return true
+ 		default:
+ 			return false
+@@ -179,12 +179,12 @@ func (rw *withResolvedResource[T]) isRelevant(other core_model.Resource, section
+ 		if other.Descriptor().Name != itemDescriptorName {
+ 			return false
+ 		}
+-		return kri.From(rw.rs.Resource, "") == kri.From(other, "")
++		return kri.From(rw.rs.Resource) == kri.From(other)
+ 	case meshhttproute_api.MeshHTTPRouteType:
+ 		if other.Descriptor().Name != itemDescriptorName {
+ 			return false
+ 		}
+-		return kri.From(rw.rs.Resource, "") == kri.From(other, "")
++		return kri.From(rw.rs.Resource) == kri.From(other)
+ 	default:
+ 		return false
+ 	}
+diff --git a/pkg/plugins/policies/core/rules/resolve/backendref.go b/pkg/plugins/policies/core/rules/resolve/backendref.go
+index 96dfcd2eeb40..f878ce157add 100644
+--- a/pkg/plugins/policies/core/rules/resolve/backendref.go
++++ b/pkg/plugins/policies/core/rules/resolve/backendref.go
+@@ -4,22 +4,22 @@ import (
+ 	"fmt"
+ 
+ 	common_api "github.com/kumahq/kuma/api/common/v1alpha1"
+-	mesh_proto "github.com/kumahq/kuma/api/mesh/v1alpha1"
+ 	"github.com/kumahq/kuma/pkg/core/kri"
++	core_mesh "github.com/kumahq/kuma/pkg/core/resources/apis/mesh"
+ 	core_model "github.com/kumahq/kuma/pkg/core/resources/model"
+ 	"github.com/kumahq/kuma/pkg/util/pointer"
+ )
+ 
+-type LabelResourceIdentifierResolver func(core_model.ResourceType, map[string]string) *kri.Identifier
++type LabelResourceIdentifierResolver func(core_model.ResourceType, map[string]string) kri.Identifier
+ 
+-func BackendRefOrNil(meta core_model.ResourceMeta, br common_api.BackendRef, resolver LabelResourceIdentifierResolver) *ResolvedBackendRef {
+-	if br, ok := BackendRef(meta, br, resolver); ok {
++func BackendRefOrNil(origin kri.Identifier, br common_api.BackendRef, resolver LabelResourceIdentifierResolver) *ResolvedBackendRef {
++	if br, ok := BackendRef(origin, br, resolver); ok {
+ 		return &br
+ 	}
+ 	return nil
+ }
+ 
+-func BackendRef(meta core_model.ResourceMeta, br common_api.BackendRef, resolver LabelResourceIdentifierResolver) (ResolvedBackendRef, bool) {
++func BackendRef(origin kri.Identifier, br common_api.BackendRef, resolver LabelResourceIdentifierResolver) (ResolvedBackendRef, bool) {
+ 	switch {
+ 	case br.Kind == common_api.MeshService && br.ReferencesRealObject():
+ 	case br.Kind == common_api.MeshExternalService:
+@@ -28,24 +28,25 @@ func BackendRef(meta core_model.ResourceMeta, br common_api.BackendRef, resolver
+ 		return ResolvedBackendRef{Ref: pointer.To(LegacyBackendRef(br))}, true
+ 	}
+ 
+-	rr := RealResourceBackendRef{
+-		Resource: pointer.To(TargetRefToKRI(meta, br.TargetRef)),
++	rr := &RealResourceBackendRef{
++		Resource: TargetRefToKRI(origin, br.TargetRef),
++		Origin:   origin,
+ 		Weight:   pointer.DerefOr(br.Weight, 1),
+ 	}
+ 
+-	if len(pointer.Deref(br.Labels)) > 0 {
+-		ri := resolver(core_model.ResourceType(br.Kind), pointer.Deref(br.Labels))
+-		if ri == nil {
+-			return ResolvedBackendRef{}, false
+-		}
+-		rr.Resource = ri
++	if labels := pointer.Deref(br.Labels); len(labels) > 0 {
++		rr.Resource = resolver(core_model.ResourceType(br.Kind), labels)
++	}
++
++	if rr.Resource.IsEmpty() {
++		return ResolvedBackendRef{}, false
+ 	}
+ 
+ 	if br.Port != nil {
+ 		rr.Resource.SectionName = fmt.Sprintf("%d", *br.Port)
+ 	}
+ 
+-	return ResolvedBackendRef{Ref: &rr}, true
++	return ResolvedBackendRef{Ref: rr}, true
+ }
+ 
+ type IsResolvedBackendRef interface {
+@@ -72,11 +73,11 @@ func (rbr *ResolvedBackendRef) ReferencesRealResource() bool {
+ 	return ok
+ }
+ 
+-func (rbr *ResolvedBackendRef) ResourceOrNil() *kri.Identifier {
++func (rbr *ResolvedBackendRef) Resource() kri.Identifier {
+ 	if rr := rbr.RealResourceBackendRef(); rr != nil {
+ 		return rr.Resource
+ 	}
+-	return nil
++	return kri.Identifier{}
+ }
+ 
+ func (rbr *ResolvedBackendRef) LegacyBackendRef() *LegacyBackendRef {
+@@ -98,32 +99,35 @@ type LegacyBackendRef common_api.BackendRef
+ func (lbr *LegacyBackendRef) isResolvedBackendRef() {}
+ 
+ type RealResourceBackendRef struct {
+-	Resource *kri.Identifier
++	Resource kri.Identifier
++	Origin   kri.Identifier
+ 	Weight   uint
+ }
+ 
+ func (rbr *RealResourceBackendRef) isResolvedBackendRef() {}
+ 
+-func TargetRefToKRI(meta core_model.ResourceMeta, tr common_api.TargetRef) kri.Identifier {
+-	switch tr.Kind {
+-	case common_api.Mesh:
+-		return kri.Identifier{
+-			ResourceType: core_model.ResourceType(tr.Kind),
+-			Name:         meta.GetMesh(),
+-		}
+-	default:
+-		var namespace string
+-		if pointer.Deref(tr.Namespace) != "" {
+-			namespace = pointer.Deref(tr.Namespace)
+-		} else {
+-			namespace = meta.GetLabels()[mesh_proto.KubeNamespaceTag]
+-		}
++func TargetRefToKRI(origin kri.Identifier, ref common_api.TargetRef) kri.Identifier {
++	if origin.IsEmpty() {
++		return kri.Identifier{}
++	}
++
++	if ref.Kind == common_api.Mesh {
+ 		return kri.Identifier{
+-			ResourceType: core_model.ResourceType(tr.Kind),
+-			Mesh:         meta.GetMesh(),
+-			Zone:         meta.GetLabels()[mesh_proto.ZoneTag],
+-			Namespace:    namespace,
+-			Name:         pointer.Deref(tr.Name),
++			ResourceType: core_mesh.MeshType,
++			Name:         origin.Mesh,
+ 		}
+ 	}
++
++	var ns string
++	if ns = pointer.Deref(ref.Namespace); ns == "" {
++		ns = origin.Namespace
++	}
++
++	return kri.Identifier{
++		ResourceType: core_model.ResourceType(ref.Kind),
++		Name:         pointer.Deref(ref.Name),
++		Mesh:         origin.Mesh,
++		Zone:         origin.Zone,
++		Namespace:    ns,
++	}
+ }
+diff --git a/pkg/plugins/policies/core/rules/resolve/targetref.go b/pkg/plugins/policies/core/rules/resolve/targetref.go
+index 85a893b22942..835c83813dfa 100644
+--- a/pkg/plugins/policies/core/rules/resolve/targetref.go
++++ b/pkg/plugins/policies/core/rules/resolve/targetref.go
+@@ -21,7 +21,7 @@ type ResourceSection struct {
+ }
+ 
+ func (rs *ResourceSection) Identifier() kri.Identifier {
+-	return kri.From(rs.Resource, rs.SectionName)
++	return kri.WithSectionName(kri.From(rs.Resource), rs.SectionName)
+ }
+ 
+ type query struct {
+@@ -64,7 +64,7 @@ func TargetRef(targetRef common_api.TargetRef, tMeta core_model.ResourceMeta, re
+ 		}
+ 	default:
+ 		q = query{
+-			byIdentifier: pointer.To(TargetRefToKRI(tMeta, targetRef)),
++			byIdentifier: pointer.To(TargetRefToKRI(kri.FromResourceMeta(tMeta, core_model.ResourceType(targetRef.Kind)), targetRef)),
+ 			sectionName:  pointer.Deref(targetRef.SectionName),
+ 		}
+ 	}
+diff --git a/pkg/plugins/policies/core/xds/meshroute/clusters.go b/pkg/plugins/policies/core/xds/meshroute/clusters.go
+index 91deae1b54a3..9baabf519145 100644
+--- a/pkg/plugins/policies/core/xds/meshroute/clusters.go
++++ b/pkg/plugins/policies/core/xds/meshroute/clusters.go
+@@ -101,7 +101,7 @@ func GenerateClusters(
+ 					if realResourceRef := service.BackendRef().RealResourceBackendRef(); realResourceRef != nil {
+ 						tlsReady = true // tls readiness is only relevant for MeshService
+ 						if common_api.TargetRefKind(realResourceRef.Resource.ResourceType) == common_api.MeshService {
+-							dest := meshCtx.GetServiceByKRI(pointer.Deref(realResourceRef.Resource))
++							dest := meshCtx.GetServiceByKRI(realResourceRef.Resource)
+ 							if dest != nil {
+ 								ms := dest.(*meshservice_api.MeshServiceResource)
+ 								// we only check TLS status for local service
+@@ -136,7 +136,7 @@ func GenerateClusters(
+ 				Name:           clusterName,
+ 				Origin:         generator.OriginOutbound,
+ 				Resource:       edsCluster,
+-				ResourceOrigin: service.BackendRef().ResourceOrNil(),
++				ResourceOrigin: service.BackendRef().Resource(),
+ 				Protocol:       protocol,
+ 			})
+ 		}
+@@ -151,7 +151,7 @@ func SniForBackendRef(
+ 	systemNamespace string,
+ ) string {
+ 	var port int32
+-	dest := meshCtx.GetServiceByKRI(pointer.Deref(backendRef.Resource))
++	dest := meshCtx.GetServiceByKRI(backendRef.Resource)
+ 	if p, ok := dest.FindPortByName(backendRef.Resource.SectionName); ok {
+ 		port = p.GetValue()
+ 	}
+@@ -171,7 +171,7 @@ func ServiceTagIdentities(
+ 	var result []string
+ 	switch common_api.TargetRefKind(backendRef.Resource.ResourceType) {
+ 	case common_api.MeshService:
+-		ms := meshCtx.GetServiceByKRI(pointer.Deref(backendRef.Resource))
++		ms := meshCtx.GetServiceByKRI(backendRef.Resource)
+ 		if ms == nil {
+ 			return result
+ 		}
+@@ -181,7 +181,7 @@ func ServiceTagIdentities(
+ 			}
+ 		}
+ 	case common_api.MeshMultiZoneService:
+-		svc := meshCtx.GetServiceByKRI(pointer.Deref(backendRef.Resource))
++		svc := meshCtx.GetServiceByKRI(backendRef.Resource)
+ 		if svc == nil {
+ 			return result
+ 		}
+diff --git a/pkg/plugins/policies/core/xds/meshroute/endpoints.go b/pkg/plugins/policies/core/xds/meshroute/endpoints.go
+index 363fbd49945f..3ffce1806cbc 100644
+--- a/pkg/plugins/policies/core/xds/meshroute/endpoints.go
++++ b/pkg/plugins/policies/core/xds/meshroute/endpoints.go
+@@ -57,7 +57,7 @@ func GenerateEndpoints(
+ 					Name:           cluster.Name(),
+ 					Origin:         generator.OriginOutbound,
+ 					Resource:       loadAssignment,
+-					ResourceOrigin: service.BackendRef().ResourceOrNil(),
++					ResourceOrigin: service.BackendRef().Resource(),
+ 				})
+ 			}
+ 		}
+diff --git a/pkg/plugins/policies/core/xds/meshroute/listeners.go b/pkg/plugins/policies/core/xds/meshroute/listeners.go
+index 54ef079b4227..6b03a351fb9c 100644
+--- a/pkg/plugins/policies/core/xds/meshroute/listeners.go
++++ b/pkg/plugins/policies/core/xds/meshroute/listeners.go
+@@ -83,7 +83,7 @@ func (ds *DestinationService) ConditionallyResolveKRIWithFallback(condition bool
+ func (ds *DestinationService) DefaultBackendRef() *resolve.ResolvedBackendRef {
+ 	if r, ok := ds.Outbound.AssociatedServiceResource(); ok {
+ 		return resolve.NewResolvedBackendRef(&resolve.RealResourceBackendRef{
+-			Resource: &r,
++			Resource: r,
+ 			Weight:   100,
+ 		})
+ 	} else {
+@@ -141,7 +141,7 @@ func CollectServices(proxy *core_xds.Proxy, meshCtx xds_context.MeshContext) []D
+ 		// TODO: Add a clear way to pass warnings up when needed. Right now
+ 		//  we skip logging to avoid too much noise, and there’s no system
+ 		//  for handling warnings yet
+-		if svc = meshCtx.GetServiceByKRI(pointer.Deref(outbound.Resource)); svc == nil {
++		if svc = meshCtx.GetServiceByKRI(outbound.Resource); svc == nil {
+ 			continue
+ 		}
+ 
+@@ -176,7 +176,7 @@ func DestinationPortFromRef(
+ 	var port core.Port
+ 	var ok bool
+ 
+-	if dest = meshCtx.GetServiceByKRI(pointer.Deref(ref.Resource)); dest == nil {
++	if dest = meshCtx.GetServiceByKRI(ref.Resource); dest == nil {
+ 		return dest, port, false
+ 	}
+ 
+diff --git a/pkg/plugins/policies/meshaccesslog/plugin/v1alpha1/plugin.go b/pkg/plugins/policies/meshaccesslog/plugin/v1alpha1/plugin.go
+index 1b27f1e74c24..afd47b64d430 100644
+--- a/pkg/plugins/policies/meshaccesslog/plugin/v1alpha1/plugin.go
++++ b/pkg/plugins/policies/meshaccesslog/plugin/v1alpha1/plugin.go
+@@ -88,8 +88,8 @@ func (p plugin) Apply(rs *core_xds.ResourceSet, ctx xds_context.Context, proxy *
+ 	rctx := outbound.RootContext[api.Conf](ctx.Mesh.Resource, policies.ToRules.ResourceRules)
+ 	for _, r := range util_slices.Filter(rs.List(), core_xds.HasAssociatedServiceResource) {
+ 		svcCtx := rctx.
+-			WithID(kri.NoSectionName(*r.ResourceOrigin)).
+-			WithID(*r.ResourceOrigin)
++			WithID(kri.NoSectionName(r.ResourceOrigin)).
++			WithID(r.ResourceOrigin)
+ 		if err := applyToRealResource(svcCtx, r, proxy, endpoints, accessLogSocketPath); err != nil {
+ 			return err
+ 		}
+diff --git a/pkg/plugins/policies/meshaccesslog/plugin/v1alpha1/plugin_test.go b/pkg/plugins/policies/meshaccesslog/plugin/v1alpha1/plugin_test.go
+index 38a619b302b4..b489fd0d3c26 100644
+--- a/pkg/plugins/policies/meshaccesslog/plugin/v1alpha1/plugin_test.go
++++ b/pkg/plugins/policies/meshaccesslog/plugin/v1alpha1/plugin_test.go
+@@ -902,7 +902,7 @@ func outboundRealServiceHTTPListener(serviceResourceKRI kri.Identifier, port int
+ 			Outbound: &xds_types.Outbound{
+ 				Address:  "127.0.0.1",
+ 				Port:     uint32(port),
+-				Resource: &serviceResourceKRI,
++				Resource: serviceResourceKRI,
+ 			},
+ 			Protocol:            core_mesh.ProtocolHTTP,
+ 			KumaServiceTagValue: serviceName(serviceResourceKRI, port),
+diff --git a/pkg/plugins/policies/meshcircuitbreaker/plugin/v1alpha1/plugin.go b/pkg/plugins/policies/meshcircuitbreaker/plugin/v1alpha1/plugin.go
+index 7ace02e3370a..6fa7caf07c94 100644
+--- a/pkg/plugins/policies/meshcircuitbreaker/plugin/v1alpha1/plugin.go
++++ b/pkg/plugins/policies/meshcircuitbreaker/plugin/v1alpha1/plugin.go
+@@ -172,12 +172,12 @@ func applyToGateways(
+ 					if dest.BackendRef == nil {
+ 						continue
+ 					}
+-					if realRef := dest.BackendRef.ResourceOrNil(); realRef != nil {
+-						resources := resourcesByOrigin[*realRef]
++					if realRef := dest.BackendRef.Resource(); !realRef.IsEmpty() {
++						resources := resourcesByOrigin[realRef]
+ 						if err := applyToRealResource(
+ 							meshCtx,
+ 							rules.ResourceRules,
+-							*realRef,
++							realRef,
+ 							resources,
+ 						); err != nil {
+ 							return err
+diff --git a/pkg/plugins/policies/meshcircuitbreaker/plugin/v1alpha1/plugin_test.go b/pkg/plugins/policies/meshcircuitbreaker/plugin/v1alpha1/plugin_test.go
+index 04b04033b882..6a86d48543d4 100644
+--- a/pkg/plugins/policies/meshcircuitbreaker/plugin/v1alpha1/plugin_test.go
++++ b/pkg/plugins/policies/meshcircuitbreaker/plugin/v1alpha1/plugin_test.go
+@@ -457,7 +457,7 @@ var _ = Describe("MeshCircuitBreaker", func() {
+ 					Name:           "outbound",
+ 					Origin:         generator.OriginOutbound,
+ 					Resource:       test_xds.ClusterWithName("backend"),
+-					ResourceOrigin: &backendMeshServiceIdentifier,
++					ResourceOrigin: backendMeshServiceIdentifier,
+ 				},
+ 			},
+ 			toRules: core_rules.ToRules{
+diff --git a/pkg/plugins/policies/meshhealthcheck/plugin/v1alpha1/plugin.go b/pkg/plugins/policies/meshhealthcheck/plugin/v1alpha1/plugin.go
+index 92097e79a36e..21cd970ce775 100644
+--- a/pkg/plugins/policies/meshhealthcheck/plugin/v1alpha1/plugin.go
++++ b/pkg/plugins/policies/meshhealthcheck/plugin/v1alpha1/plugin.go
+@@ -135,13 +135,13 @@ func applyToGateways(
+ 					if dest.BackendRef == nil {
+ 						continue
+ 					}
+-					if realRef := dest.BackendRef.ResourceOrNil(); realRef != nil {
+-						resources := resourcesByOrigin[*realRef]
++					if realRef := dest.BackendRef.Resource(); !realRef.IsEmpty() {
++						resources := resourcesByOrigin[realRef]
+ 						if err := applyToRealResource(
+ 							meshCtx,
+ 							rules.ResourceRules,
+ 							proxy.Dataplane.Spec.TagSet(),
+-							*realRef,
++							realRef,
+ 							resources,
+ 						); err != nil {
+ 							return err
+diff --git a/pkg/plugins/policies/meshhttproute/plugin/v1alpha1/gateway_routes.go b/pkg/plugins/policies/meshhttproute/plugin/v1alpha1/gateway_routes.go
+index 16dc7edfd6f8..ae32653be38b 100644
+--- a/pkg/plugins/policies/meshhttproute/plugin/v1alpha1/gateway_routes.go
++++ b/pkg/plugins/policies/meshhttproute/plugin/v1alpha1/gateway_routes.go
+@@ -8,6 +8,7 @@ import (
+ 
+ 	common_api "github.com/kumahq/kuma/api/common/v1alpha1"
+ 	mesh_proto "github.com/kumahq/kuma/api/mesh/v1alpha1"
++	"github.com/kumahq/kuma/pkg/core/kri"
+ 	"github.com/kumahq/kuma/pkg/core/resources/apis/core/destinationname"
+ 	core_mesh "github.com/kumahq/kuma/pkg/core/resources/apis/mesh"
+ 	"github.com/kumahq/kuma/pkg/core/resources/model"
+@@ -234,14 +235,14 @@ func makeHttpRouteEntry(
+ 		var dest map[string]string
+ 		var ref *resolve.ResolvedBackendRef
+ 		if origin, ok := backendRefToOrigin[api.HashMatches(rule.Matches)]; ok {
+-			ref = resolve.BackendRefOrNil(origin, b, resolver)
++			ref = resolve.BackendRefOrNil(kri.FromResourceMeta(origin, api.MeshHTTPRouteType), b, resolver)
+ 			if ref.ReferencesRealResource() {
+ 				if d, port, ok := meshroute.DestinationPortFromRef(meshCtx, ref.RealResourceBackendRef()); ok {
+ 					dest = map[string]string{mesh_proto.ServiceTag: destinationname.MustResolve(false, d, port)}
+ 				}
+ 			}
+ 		}
+-		if ref == nil || ref.ResourceOrNil() == nil {
++		if ref == nil || ref.Resource().IsEmpty() {
+ 			// We have a legacy backendRef
+ 			if !b.ReferencesRealObject() {
+ 				var ok bool
+diff --git a/pkg/plugins/policies/meshhttproute/plugin/v1alpha1/listeners.go b/pkg/plugins/policies/meshhttproute/plugin/v1alpha1/listeners.go
+index e07f28771594..652b4b50b2cc 100644
+--- a/pkg/plugins/policies/meshhttproute/plugin/v1alpha1/listeners.go
++++ b/pkg/plugins/policies/meshhttproute/plugin/v1alpha1/listeners.go
+@@ -217,7 +217,7 @@ func prepareRoutes(toRules rules.ToRules, svc meshroute_xds.DestinationService,
+ 
+ 	getRouteName := func(ms []api.Match) string {
+ 		if _, ok := svc.Outbound.AssociatedServiceResource(); ok {
+-			return kri.FromResourceMeta(getOrigin(ms), api.MeshHTTPRouteType, "").String()
++			return kri.FromResourceMeta(getOrigin(ms), api.MeshHTTPRouteType).String()
+ 		}
+ 		return string(api.HashMatches(ms))
+ 	}
+@@ -232,7 +232,11 @@ func prepareRoutes(toRules rules.ToRules, svc meshroute_xds.DestinationService,
+ 				BackendRefs: util_slices.FilterMap(
+ 					pointer.Deref(rule.Default.BackendRefs),
+ 					func(br common_api.BackendRef) (resolve.ResolvedBackendRef, bool) {
+-						return resolve.BackendRef(getOrigin(rule.Matches), br, meshCtx.ResolveResourceIdentifier)
++						return resolve.BackendRef(
++							kri.FromResourceMeta(getOrigin(rule.Matches), api.MeshHTTPRouteType),
++							br,
++							meshCtx.ResolveResourceIdentifier,
++						)
+ 					},
+ 				),
+ 			})
+diff --git a/pkg/plugins/policies/meshhttproute/plugin/v1alpha1/plugin_test.go b/pkg/plugins/policies/meshhttproute/plugin/v1alpha1/plugin_test.go
+index 3b2959c03ceb..dd8a18fd85e9 100644
+--- a/pkg/plugins/policies/meshhttproute/plugin/v1alpha1/plugin_test.go
++++ b/pkg/plugins/policies/meshhttproute/plugin/v1alpha1/plugin_test.go
+@@ -252,7 +252,7 @@ var _ = Describe("MeshHTTPRoute", func() {
+ 							},
+ 						}},
+ 						{
+-							Resource: pointer.To(kri.From(&meshSvc, "80")),
++							Resource: kri.WithSectionName(kri.From(&meshSvc), "80"),
+ 							Address:  "10.0.0.1",
+ 							Port:     80,
+ 						},
+@@ -349,7 +349,7 @@ var _ = Describe("MeshHTTPRoute", func() {
+ 			proxy.Outbounds = xds_types.Outbounds{{
+ 				Address:  "10.0.0.2",
+ 				Port:     80,
+-				Resource: pointer.To(kri.From(&meshMZSvc, "80")),
++				Resource: kri.WithSectionName(kri.From(&meshMZSvc), "80"),
+ 			}}
+ 
+ 			return outboundsTestCase{
+@@ -816,7 +816,7 @@ var _ = Describe("MeshHTTPRoute", func() {
+ 					WithOutbounds(xds_types.Outbounds{
+ 						{
+ 							Port:     builders.FirstOutboundPort,
+-							Resource: pointer.To(kri.From(&meshSvc, "test-port")),
++							Resource: kri.WithSectionName(kri.From(&meshSvc), "test-port"),
+ 						},
+ 					}).
+ 					WithRouting(xds_builders.Routing().WithOutboundTargets(outboundTargets)).
+@@ -986,7 +986,7 @@ var _ = Describe("MeshHTTPRoute", func() {
+ 					WithOutbounds(xds_types.Outbounds{
+ 						{
+ 							Port:     builders.FirstOutboundPort,
+-							Resource: pointer.To(kri.From(&meshSvc, "test-port")),
++							Resource: kri.WithSectionName(kri.From(&meshSvc), "test-port"),
+ 						},
+ 					}).
+ 					WithSecretsTracker(envoy.NewSecretsTracker("default", nil)).
+@@ -1149,7 +1149,7 @@ var _ = Describe("MeshHTTPRoute", func() {
+ 					WithOutbounds(xds_types.Outbounds{
+ 						{
+ 							Port:     builders.FirstOutboundPort,
+-							Resource: pointer.To(kri.From(&meshSvc, "test-port")),
++							Resource: kri.WithSectionName(kri.From(&meshSvc), "test-port"),
+ 						},
+ 					}).
+ 					WithSecretsTracker(envoy.NewSecretsTracker("default", nil)).
+@@ -2611,7 +2611,7 @@ func dppForMeshExternalService(mes *meshexternalservice_api.MeshExternalServiceR
+ 			{
+ 				Address:  "10.20.20.1",
+ 				Port:     9090,
+-				Resource: pointer.To(kri.From(mes, "")),
++				Resource: kri.From(mes),
+ 			},
+ 		}).
+ 		WithSecretsTracker(envoy.NewSecretsTracker("default", nil)).
+diff --git a/pkg/plugins/policies/meshloadbalancingstrategy/plugin/v1alpha1/plugin.go b/pkg/plugins/policies/meshloadbalancingstrategy/plugin/v1alpha1/plugin.go
+index d2d45058f2f7..091437301879 100644
+--- a/pkg/plugins/policies/meshloadbalancingstrategy/plugin/v1alpha1/plugin.go
++++ b/pkg/plugins/policies/meshloadbalancingstrategy/plugin/v1alpha1/plugin.go
+@@ -163,8 +163,8 @@ func (p plugin) configureDPP(
+ 	rctx := rules_outbound.RootContext[api.Conf](meshCtx.Resource, toRules.ResourceRules)
+ 	for _, r := range util_slices.Filter(rs.List(), core_xds.HasAssociatedServiceResource) {
+ 		svcCtx := rctx.
+-			WithID(kri.NoSectionName(*r.ResourceOrigin)).
+-			WithID(*r.ResourceOrigin)
++			WithID(kri.NoSectionName(r.ResourceOrigin)).
++			WithID(r.ResourceOrigin)
+ 		if err := p.applyToRealResource(svcCtx, r, proxy); err != nil {
+ 			return err
+ 		}
+@@ -438,11 +438,11 @@ func (p plugin) configureGateway(
+ 					if dest.BackendRef == nil {
+ 						continue
+ 					}
+-					if realRef := dest.BackendRef.ResourceOrNil(); realRef != nil {
++					if realRef := dest.BackendRef.Resource(); !realRef.IsEmpty() {
+ 						svcCtx := rctx.
+-							WithID(kri.NoSectionName(*realRef)).
+-							WithID(*realRef)
+-						for _, rs := range resourcesByOrigin[*realRef] {
++							WithID(kri.NoSectionName(realRef)).
++							WithID(realRef)
++						for _, rs := range resourcesByOrigin[realRef] {
+ 							for _, r := range rs {
+ 								if err := p.applyToRealResource(svcCtx, r, proxy); err != nil {
+ 									return err
+diff --git a/pkg/plugins/policies/meshloadbalancingstrategy/plugin/v1alpha1/plugin_test.go b/pkg/plugins/policies/meshloadbalancingstrategy/plugin/v1alpha1/plugin_test.go
+index ae1cd00258ad..bee158311c0e 100644
+--- a/pkg/plugins/policies/meshloadbalancingstrategy/plugin/v1alpha1/plugin_test.go
++++ b/pkg/plugins/policies/meshloadbalancingstrategy/plugin/v1alpha1/plugin_test.go
+@@ -1835,7 +1835,7 @@ func outboundRealServiceHTTPListener(serviceResourceKRI kri.Identifier, port int
+ 			Outbound: &xds_types.Outbound{
+ 				Address:  "127.0.0.1",
+ 				Port:     uint32(port),
+-				Resource: &serviceResourceKRI,
++				Resource: serviceResourceKRI,
+ 			},
+ 			Protocol:            core_mesh.ProtocolHTTP,
+ 			KumaServiceTagValue: serviceName(serviceResourceKRI, port),
+diff --git a/pkg/plugins/policies/meshmetric/plugin/v1alpha1/plugin.go b/pkg/plugins/policies/meshmetric/plugin/v1alpha1/plugin.go
+index 2e06fc550e82..87f660260bff 100644
+--- a/pkg/plugins/policies/meshmetric/plugin/v1alpha1/plugin.go
++++ b/pkg/plugins/policies/meshmetric/plugin/v1alpha1/plugin.go
+@@ -65,11 +65,11 @@ func (p plugin) Apply(rs *core_xds.ResourceSet, ctx xds_context.Context, proxy *
+ 	}
+ 
+ 	conf := policies.SingleItemRules.Rules[0].Conf.(api.Conf)
+-	var kriWithoutSection *kri.Identifier
++	var kriWithoutSection kri.Identifier
+ 	// we only handle a case where there is one origin because
+ 	// we do not yet have a mechanism to name resources that have more than one origin https://github.com/kumahq/kuma/issues/13886
+ 	if len(policies.SingleItemRules.Rules[0].Origin) == 1 {
+-		kriWithoutSection = pointer.To(kri.FromResourceMeta(policies.SingleItemRules.Rules[0].Origin[0], api.MeshMetricType, ""))
++		kriWithoutSection = kri.FromResourceMeta(policies.SingleItemRules.Rules[0].Origin[0], api.MeshMetricType)
+ 	}
+ 
+ 	if len(pointer.Deref(conf.Backends)) == 0 {
+@@ -107,15 +107,15 @@ func removeResourcesConfiguredByMesh(rs *core_xds.ResourceSet, listener *envoy_l
+ 	}
+ }
+ 
+-func configurePrometheus(rs *core_xds.ResourceSet, proxy *core_xds.Proxy, prometheusBackends []*api.PrometheusBackend, kriWithoutSection *kri.Identifier) error {
++func configurePrometheus(rs *core_xds.ResourceSet, proxy *core_xds.Proxy, prometheusBackends []*api.PrometheusBackend, kriWithoutSection kri.Identifier) error {
+ 	if len(prometheusBackends) == 0 {
+ 		return nil
+ 	}
+ 
+ 	for _, backend := range prometheusBackends {
+-		getNameOrDefault := core_system_names.GetNameOrDefault(proxy.Metadata.HasFeature(types.FeatureUnifiedResourceNaming) && kriWithoutSection != nil)
++		getNameOrDefault := core_system_names.GetNameOrDefault(proxy.Metadata.HasFeature(types.FeatureUnifiedResourceNaming) && !kriWithoutSection.IsEmpty())
+ 		backendName := pointer.DerefOr(backend.ClientId, DefaultBackendName)
+-		systemName := core_system_names.AsSystemName(kri.WithSectionName(pointer.Deref(kriWithoutSection), backendName))
++		systemName := core_system_names.AsSystemName(kri.WithSectionName(kriWithoutSection, backendName))
+ 
+ 		configurer := &plugin_xds.PrometheusConfigurer{
+ 			Backend: backend,
+@@ -155,7 +155,7 @@ func configurePrometheus(rs *core_xds.ResourceSet, proxy *core_xds.Proxy, promet
+ 	return nil
+ }
+ 
+-func configureOpenTelemetry(rs *core_xds.ResourceSet, proxy *core_xds.Proxy, openTelemetryBackends []*api.OpenTelemetryBackend, kriWithoutSection *kri.Identifier) error {
++func configureOpenTelemetry(rs *core_xds.ResourceSet, proxy *core_xds.Proxy, openTelemetryBackends []*api.OpenTelemetryBackend, kriWithoutSection kri.Identifier) error {
+ 	for _, openTelemetryBackend := range openTelemetryBackends {
+ 		err := configureOpenTelemetryBackend(rs, proxy, openTelemetryBackend, kriWithoutSection)
+ 		if err != nil {
+@@ -165,12 +165,12 @@ func configureOpenTelemetry(rs *core_xds.ResourceSet, proxy *core_xds.Proxy, ope
+ 	return nil
+ }
+ 
+-func configureOpenTelemetryBackend(rs *core_xds.ResourceSet, proxy *core_xds.Proxy, openTelemetryBackend *api.OpenTelemetryBackend, kriWithoutSection *kri.Identifier) error {
++func configureOpenTelemetryBackend(rs *core_xds.ResourceSet, proxy *core_xds.Proxy, openTelemetryBackend *api.OpenTelemetryBackend, kriWithoutSection kri.Identifier) error {
+ 	if openTelemetryBackend == nil {
+ 		return nil
+ 	}
+-	getNameOrDefault := core_system_names.GetNameOrDefault(proxy.Metadata.HasFeature(types.FeatureUnifiedResourceNaming) && kriWithoutSection != nil)
+-	systemName := core_system_names.AsSystemName(kri.WithSectionName(pointer.Deref(kriWithoutSection), core_system_names.CleanName(openTelemetryBackend.Endpoint)))
++	getNameOrDefault := core_system_names.GetNameOrDefault(proxy.Metadata.HasFeature(types.FeatureUnifiedResourceNaming) && !kriWithoutSection.IsEmpty())
++	systemName := core_system_names.AsSystemName(kri.WithSectionName(kriWithoutSection, core_system_names.CleanName(openTelemetryBackend.Endpoint)))
+ 	endpoint := endpointForOpenTelemetry(openTelemetryBackend.Endpoint)
+ 	backendName := backendNameFrom(openTelemetryBackend.Endpoint)
+ 
+diff --git a/pkg/plugins/policies/meshretry/plugin/v1alpha1/plugin.go b/pkg/plugins/policies/meshretry/plugin/v1alpha1/plugin.go
+index 821419aca59f..25230b0a277c 100644
+--- a/pkg/plugins/policies/meshretry/plugin/v1alpha1/plugin.go
++++ b/pkg/plugins/policies/meshretry/plugin/v1alpha1/plugin.go
+@@ -57,8 +57,8 @@ func (p plugin) Apply(rs *core_xds.ResourceSet, ctx xds_context.Context, proxy *
+ 	rctx := outbound.RootContext[api.Conf](ctx.Mesh.Resource, policies.ToRules.ResourceRules)
+ 	for _, r := range util_slices.Filter(rs.List(), core_xds.HasAssociatedServiceResource) {
+ 		svcCtx := rctx.
+-			WithID(kri.NoSectionName(*r.ResourceOrigin)).
+-			WithID(*r.ResourceOrigin)
++			WithID(kri.NoSectionName(r.ResourceOrigin)).
++			WithID(r.ResourceOrigin)
+ 
+ 		if err := applyToRealResource(svcCtx, r); err != nil {
+ 			return err
+diff --git a/pkg/plugins/policies/meshretry/plugin/v1alpha1/plugin_test.go b/pkg/plugins/policies/meshretry/plugin/v1alpha1/plugin_test.go
+index e873fac62f63..c5d9391c5242 100644
+--- a/pkg/plugins/policies/meshretry/plugin/v1alpha1/plugin_test.go
++++ b/pkg/plugins/policies/meshretry/plugin/v1alpha1/plugin_test.go
+@@ -354,20 +354,20 @@ var _ = Describe("MeshRetry", func() {
+ 				{
+ 					Name:           "outbound",
+ 					Origin:         generator.OriginOutbound,
+-					Resource:       httpListenerWithSeveralMeshHTTPRoutes(10001, kri.FromResourceMeta(testMeshHTTPRouteMeta(), meshhttproute_api.MeshHTTPRouteType, "")),
+-					ResourceOrigin: pointer.To(kri.FromResourceMeta(testMeshServiceMeta(), meshservice_api.MeshServiceType, "")),
++					Resource:       httpListenerWithSeveralMeshHTTPRoutes(10001, kri.FromResourceMeta(testMeshHTTPRouteMeta(), meshhttproute_api.MeshHTTPRouteType)),
++					ResourceOrigin: kri.FromResourceMeta(testMeshServiceMeta(), meshservice_api.MeshServiceType),
+ 					Protocol:       core_mesh.ProtocolHTTP,
+ 				},
+ 			},
+ 			toRules: core_rules.ToRules{
+ 				ResourceRules: map[kri.Identifier]outbound.ResourceRule{
+-					kri.FromResourceMeta(testMeshHTTPRouteMeta(), meshhttproute_api.MeshHTTPRouteType, ""): {
++					kri.FromResourceMeta(testMeshHTTPRouteMeta(), meshhttproute_api.MeshHTTPRouteType): {
+ 						Resource: testMeshHTTPRouteMeta(),
+ 						Conf: []interface{}{
+ 							testFirstHTTPRetryConf(),
+ 						},
+ 					},
+-					kri.FromResourceMeta(testMeshServiceMeta(), meshservice_api.MeshServiceType, ""): {
++					kri.FromResourceMeta(testMeshServiceMeta(), meshservice_api.MeshServiceType): {
+ 						Resource: testMeshServiceMeta(),
+ 						Conf: []interface{}{
+ 							testSecondHTTPRetryConf(),
+@@ -382,7 +382,7 @@ var _ = Describe("MeshRetry", func() {
+ 				Name:           "outbound",
+ 				Origin:         generator.OriginOutbound,
+ 				Resource:       httpListenerWithSimpleRoute(10001),
+-				ResourceOrigin: &backendMeshServiceIdentifier,
++				ResourceOrigin: backendMeshServiceIdentifier,
+ 				Protocol:       core_mesh.ProtocolHTTP,
+ 			}},
+ 			toRules: core_rules.ToRules{
+@@ -401,7 +401,7 @@ var _ = Describe("MeshRetry", func() {
+ 				Name:           "outbound",
+ 				Origin:         generator.OriginOutbound,
+ 				Resource:       httpListenerWithSimpleRoute(10001),
+-				ResourceOrigin: &backendMeshExternalServiceIdentifier,
++				ResourceOrigin: backendMeshExternalServiceIdentifier,
+ 				Protocol:       core_mesh.ProtocolHTTP,
+ 			}},
+ 			toRules: core_rules.ToRules{
+diff --git a/pkg/plugins/policies/meshtcproute/plugin/v1alpha1/gateway.go b/pkg/plugins/policies/meshtcproute/plugin/v1alpha1/gateway.go
+index 94d76626cc51..23549f9965b6 100644
+--- a/pkg/plugins/policies/meshtcproute/plugin/v1alpha1/gateway.go
++++ b/pkg/plugins/policies/meshtcproute/plugin/v1alpha1/gateway.go
+@@ -8,6 +8,7 @@ import (
+ 	"github.com/pkg/errors"
+ 
+ 	mesh_proto "github.com/kumahq/kuma/api/mesh/v1alpha1"
++	"github.com/kumahq/kuma/pkg/core/kri"
+ 	"github.com/kumahq/kuma/pkg/core/resources/apis/core/destinationname"
+ 	core_mesh "github.com/kumahq/kuma/pkg/core/resources/apis/mesh"
+ 	core_model "github.com/kumahq/kuma/pkg/core/resources/model"
+@@ -110,13 +111,13 @@ func makeTcpRouteEntry(
+ 
+ 	for _, b := range pointer.Deref(rule.Default.BackendRefs) {
+ 		var dest map[string]string
+-		ref := resolve.BackendRefOrNil(origin, b, resolver)
++		ref := resolve.BackendRefOrNil(kri.FromResourceMeta(origin, api.MeshTCPRouteType), b, resolver)
+ 		if ref.ReferencesRealResource() {
+ 			if d, port, ok := meshroute.DestinationPortFromRef(meshCtx, ref.RealResourceBackendRef()); ok {
+ 				dest = map[string]string{mesh_proto.ServiceTag: destinationname.MustResolve(false, d, port)}
+ 			}
+ 		}
+-		if ref == nil || ref.ResourceOrNil() == nil {
++		if ref == nil || ref.Resource().IsEmpty() {
+ 			var ok bool
+ 			dest, ok = tags.FromLegacyTargetRef(b.TargetRef)
+ 			if !ok {
+diff --git a/pkg/plugins/policies/meshtcproute/plugin/v1alpha1/listeners_backendrefs.go b/pkg/plugins/policies/meshtcproute/plugin/v1alpha1/listeners_backendrefs.go
+index 60c531f5b8f6..7facdc69b419 100644
+--- a/pkg/plugins/policies/meshtcproute/plugin/v1alpha1/listeners_backendrefs.go
++++ b/pkg/plugins/policies/meshtcproute/plugin/v1alpha1/listeners_backendrefs.go
+@@ -1,6 +1,7 @@
+ package v1alpha1
+ 
+ import (
++	"github.com/kumahq/kuma/pkg/core/kri"
+ 	core_mesh "github.com/kumahq/kuma/pkg/core/resources/apis/mesh"
+ 	core_model "github.com/kumahq/kuma/pkg/core/resources/model"
+ 	core_xds "github.com/kumahq/kuma/pkg/plugins/policies/core/rules"
+@@ -77,7 +78,11 @@ func getBackendRefs(
+ 	var backendRefs []resolve.ResolvedBackendRef
+ 	if tcpConf != nil {
+ 		for _, br := range pointer.Deref(tcpConf.Default.BackendRefs) {
+-			if resolved := resolve.BackendRefOrNil(origin, br, meshCtx.ResolveResourceIdentifier); resolved != nil {
++			if resolved := resolve.BackendRefOrNil(
++				kri.FromResourceMeta(origin, api.MeshTCPRouteType),
++				br,
++				meshCtx.ResolveResourceIdentifier,
++			); resolved != nil {
+ 				backendRefs = append(backendRefs, *resolved)
+ 			}
+ 		}
+diff --git a/pkg/plugins/policies/meshtcproute/plugin/v1alpha1/plugin_test.go b/pkg/plugins/policies/meshtcproute/plugin/v1alpha1/plugin_test.go
+index d5d59a39d5f2..de6297c68f2a 100644
+--- a/pkg/plugins/policies/meshtcproute/plugin/v1alpha1/plugin_test.go
++++ b/pkg/plugins/policies/meshtcproute/plugin/v1alpha1/plugin_test.go
+@@ -585,7 +585,7 @@ var _ = Describe("MeshTCPRoute", func() {
+ 					WithOutbounds(xds_types.Outbounds{
+ 						{
+ 							Port:     builders.FirstOutboundPort,
+-							Resource: pointer.To(kri.From(&meshSvc, "test-port")),
++							Resource: kri.WithSectionName(kri.From(&meshSvc), "test-port"),
+ 						},
+ 					}).
+ 					WithPolicies(
+@@ -1179,7 +1179,7 @@ func dppForMeshExternalService(mesList ...*meshexternalservice_api.MeshExternalS
+ 		outbounds = append(outbounds, &xds_types.Outbound{
+ 			Address:  mes.Status.VIP.IP,
+ 			Port:     uint32(mes.Spec.Match.Port),
+-			Resource: pointer.To(kri.From(mes, "")),
++			Resource: kri.From(mes),
+ 		})
+ 	}
+ 	dp := builders.Dataplane().
+diff --git a/pkg/plugins/policies/meshtimeout/plugin/v1alpha1/plugin.go b/pkg/plugins/policies/meshtimeout/plugin/v1alpha1/plugin.go
+index 4506f492f7c3..9e69c6938b19 100644
+--- a/pkg/plugins/policies/meshtimeout/plugin/v1alpha1/plugin.go
++++ b/pkg/plugins/policies/meshtimeout/plugin/v1alpha1/plugin.go
+@@ -75,8 +75,8 @@ func (p plugin) Apply(rs *core_xds.ResourceSet, ctx xds_context.Context, proxy *
+ 
+ 	for _, r := range util_slices.Filter(rs.List(), core_xds.HasAssociatedServiceResource) {
+ 		svcCtx := rctx.
+-			WithID(kri.NoSectionName(*r.ResourceOrigin)).
+-			WithID(*r.ResourceOrigin)
++			WithID(kri.NoSectionName(r.ResourceOrigin)).
++			WithID(r.ResourceOrigin)
+ 		if err := applyToRealResource(svcCtx, r); err != nil {
+ 			return err
+ 		}
+diff --git a/pkg/plugins/policies/meshtimeout/plugin/v1alpha1/plugin_test.go b/pkg/plugins/policies/meshtimeout/plugin/v1alpha1/plugin_test.go
+index 9eef5f5f1409..ee7dc05143cd 100644
+--- a/pkg/plugins/policies/meshtimeout/plugin/v1alpha1/plugin_test.go
++++ b/pkg/plugins/policies/meshtimeout/plugin/v1alpha1/plugin_test.go
+@@ -510,14 +510,14 @@ var _ = Describe("MeshTimeout", func() {
+ 				{
+ 					Name:           "outbound",
+ 					Origin:         generator.OriginOutbound,
+-					Resource:       httpListenerWithSeveralMeshHTTPRoutes("test-service-1", kri.FromResourceMeta(testMeshHTTPRouteMeta(), meshhttproute_api.MeshHTTPRouteType, "")),
+-					ResourceOrigin: pointer.To(kri.FromResourceMeta(testMeshServiceMeta(), meshservice_api.MeshServiceType, "")),
++					Resource:       httpListenerWithSeveralMeshHTTPRoutes("test-service-1", kri.FromResourceMeta(testMeshHTTPRouteMeta(), meshhttproute_api.MeshHTTPRouteType)),
++					ResourceOrigin: kri.FromResourceMeta(testMeshServiceMeta(), meshservice_api.MeshServiceType),
+ 					Protocol:       core_mesh.ProtocolHTTP,
+ 				},
+ 			},
+ 			toRules: core_rules.ToRules{
+ 				ResourceRules: map[kri.Identifier]outbound.ResourceRule{
+-					kri.FromResourceMeta(testMeshHTTPRouteMeta(), meshhttproute_api.MeshHTTPRouteType, ""): {
++					kri.FromResourceMeta(testMeshHTTPRouteMeta(), meshhttproute_api.MeshHTTPRouteType): {
+ 						Resource: testMeshHTTPRouteMeta(),
+ 						Conf: []interface{}{
+ 							api.Conf{
+@@ -528,7 +528,7 @@ var _ = Describe("MeshTimeout", func() {
+ 							},
+ 						},
+ 					},
+-					kri.FromResourceMeta(testMeshServiceMeta(), meshservice_api.MeshServiceType, ""): {
++					kri.FromResourceMeta(testMeshServiceMeta(), meshservice_api.MeshServiceType): {
+ 						Resource: testMeshServiceMeta(),
+ 						Conf: []interface{}{
+ 							api.Conf{
+@@ -550,14 +550,14 @@ var _ = Describe("MeshTimeout", func() {
+ 					Origin:         generator.OriginOutbound,
+ 					Resource:       httpOutboundListener(),
+ 					Protocol:       core_mesh.ProtocolHTTP,
+-					ResourceOrigin: &backendMeshServiceIdentifier,
++					ResourceOrigin: backendMeshServiceIdentifier,
+ 				},
+ 				{
+ 					Name:           "outbound",
+ 					Origin:         generator.OriginOutbound,
+ 					Resource:       test_xds.ClusterWithName("backend"),
+ 					Protocol:       core_mesh.ProtocolHTTP,
+-					ResourceOrigin: &backendMeshServiceIdentifier,
++					ResourceOrigin: backendMeshServiceIdentifier,
+ 				},
+ 			},
+ 			toRules: core_rules.ToRules{
+@@ -588,14 +588,14 @@ var _ = Describe("MeshTimeout", func() {
+ 					Origin:         generator.OriginOutbound,
+ 					Resource:       httpOutboundListener(),
+ 					Protocol:       core_mesh.ProtocolHTTP,
+-					ResourceOrigin: &backendMeshExternalServiceIdentifier,
++					ResourceOrigin: backendMeshExternalServiceIdentifier,
+ 				},
+ 				{
+ 					Name:           "outbound",
+ 					Origin:         generator.OriginOutbound,
+ 					Resource:       test_xds.ClusterWithName("backend"),
+ 					Protocol:       core_mesh.ProtocolHTTP,
+-					ResourceOrigin: &backendMeshExternalServiceIdentifier,
++					ResourceOrigin: backendMeshExternalServiceIdentifier,
+ 				},
+ 			},
+ 			toRules: core_rules.ToRules{
+diff --git a/pkg/plugins/policies/meshtls/plugin/v1alpha1/plugin_test.go b/pkg/plugins/policies/meshtls/plugin/v1alpha1/plugin_test.go
+index 55b0dd00f0f6..2892274232a1 100644
+--- a/pkg/plugins/policies/meshtls/plugin/v1alpha1/plugin_test.go
++++ b/pkg/plugins/policies/meshtls/plugin/v1alpha1/plugin_test.go
+@@ -303,7 +303,7 @@ func getMeshServiceResources(secretsTracker core_xds.SecretsTracker, mesh *build
+ 				Configure(clusters.ClientSideMTLS(secretsTracker, mesh.Build(), "outgoing", true, nil)).
+ 				MustBuild(),
+ 			Protocol: core_mesh.ProtocolHTTP,
+-			ResourceOrigin: &kri.Identifier{
++			ResourceOrigin: kri.Identifier{
+ 				ResourceType: "MeshService",
+ 				Mesh:         "default",
+ 				Zone:         "zone-1",
+diff --git a/pkg/plugins/policies/meshtrace/plugin/v1alpha1/plugin.go b/pkg/plugins/policies/meshtrace/plugin/v1alpha1/plugin.go
+index 55020643902f..1d9037ae6ec3 100644
+--- a/pkg/plugins/policies/meshtrace/plugin/v1alpha1/plugin.go
++++ b/pkg/plugins/policies/meshtrace/plugin/v1alpha1/plugin.go
+@@ -152,7 +152,7 @@ func applyToRealResources(
+ ) error {
+ 	for uri, resType := range rs.IndexByOrigin(xds.NonMeshExternalService) {
+ 		service, port, found := meshroute.DestinationPortFromRef(ctx.Mesh, &resolve.RealResourceBackendRef{
+-			Resource: &uri,
++			Resource: uri,
+ 		})
+ 		if !found {
+ 			continue
+diff --git a/pkg/plugins/policies/meshtrace/plugin/v1alpha1/plugin_test.go b/pkg/plugins/policies/meshtrace/plugin/v1alpha1/plugin_test.go
+index 0240c69af43e..f363556a4424 100644
+--- a/pkg/plugins/policies/meshtrace/plugin/v1alpha1/plugin_test.go
++++ b/pkg/plugins/policies/meshtrace/plugin/v1alpha1/plugin_test.go
+@@ -97,7 +97,7 @@ var _ = Describe("MeshTrace", func() {
+ 					Configure(FilterChain(NewFilterChainBuilder(envoy_common.APIV3, envoy_common.AnonymousResource).
+ 						Configure(HttpConnectionManager("127.0.0.1:27777", false, nil)),
+ 					)).MustBuild(),
+-				ResourceOrigin: &backendMeshServiceIdentifier,
++				ResourceOrigin: backendMeshServiceIdentifier,
+ 			},
+ 		}
+ 	}
+@@ -145,7 +145,7 @@ var _ = Describe("MeshTrace", func() {
+ 				{
+ 					Address:  "127.0.0.1",
+ 					Port:     27777,
+-					Resource: &backendMeshServiceIdentifier,
++					Resource: backendMeshServiceIdentifier,
+ 				},
+ 			},
+ 			singleItemRules: core_rules.SingleItemRules{
+diff --git a/pkg/plugins/policies/meshtrafficpermission/graph/backends/reachable_backend_refs_graph.go b/pkg/plugins/policies/meshtrafficpermission/graph/backends/reachable_backend_refs_graph.go
+index a5d944d9d03a..be39499dc593 100644
+--- a/pkg/plugins/policies/meshtrafficpermission/graph/backends/reachable_backend_refs_graph.go
++++ b/pkg/plugins/policies/meshtrafficpermission/graph/backends/reachable_backend_refs_graph.go
+@@ -34,7 +34,7 @@ func BuildRules(meshServices []*ms_api.MeshServiceResource, mtps []*mtp_api.Mesh
+ 		if !ok {
+ 			continue
+ 		}
+-		rules[kri.From(ms, "")] = rl
++		rules[kri.From(ms)] = rl
+ 	}
+ 	return rules
+ }
+diff --git a/pkg/plugins/policies/meshtrafficpermission/graph/reachable_backend_refs_graph_test.go b/pkg/plugins/policies/meshtrafficpermission/graph/reachable_backend_refs_graph_test.go
+index 9f4677295707..71c8c28e80ad 100644
+--- a/pkg/plugins/policies/meshtrafficpermission/graph/reachable_backend_refs_graph_test.go
++++ b/pkg/plugins/policies/meshtrafficpermission/graph/reachable_backend_refs_graph_test.go
+@@ -58,7 +58,7 @@ var _ = Describe("Reachable Backends Graph", func() {
+ 					_, conn := given.expectedConnections[from.Meta.GetName()][to.Meta.GetName()]
+ 					Expect(g.CanReachBackend(
+ 						map[string]string{"app": from.Meta.GetName()},
+-						kri.From(to, ""),
++						kri.From(to),
+ 					)).To(Equal(fromAll || conn))
+ 				}
+ 			}
+diff --git a/pkg/xds/context/context.go b/pkg/xds/context/context.go
+index a69720e5e2c6..a82103c3f736 100644
+--- a/pkg/xds/context/context.go
++++ b/pkg/xds/context/context.go
+@@ -100,7 +100,7 @@ type ReachableBackends map[kri.Identifier]bool
+ // ResolveResourceIdentifier resolves one resource identifier based on the labels.
+ // If multiple resources match the labels, the oldest one is returned.
+ // The reason is that picking the oldest one is the less likely to break existing traffic after introducing new resources.
+-func (mc *MeshContext) ResolveResourceIdentifier(resType core_model.ResourceType, labels map[string]string) *kri.Identifier {
++func (mc *MeshContext) ResolveResourceIdentifier(resType core_model.ResourceType, labels map[string]string) kri.Identifier {
+ 	return mc.BaseMeshContext.DestinationIndex.ResolveResourceIdentifier(resType, labels)
+ }
+ 
+diff --git a/pkg/xds/context/destination_index.go b/pkg/xds/context/destination_index.go
+index 3819777829d6..696a471afcb5 100644
+--- a/pkg/xds/context/destination_index.go
++++ b/pkg/xds/context/destination_index.go
+@@ -31,7 +31,7 @@ func NewDestinationIndex(resources ...[]core_model.Resource) *DestinationIndex {
+ 	destinationsByLabelByValue := labelsToValuesToResourceIdentifier{}
+ 	for _, destinations := range resources {
+ 		for _, item := range destinations {
+-			ri := kri.From(item, "")
++			ri := kri.From(item)
+ 			destinationByIdentifier[ri] = item.(core.Destination)
+ 			buildLabelValueToServiceNames(ri, destinationsByLabelByValue, item.GetMeta().GetLabels())
+ 		}
+@@ -60,11 +60,11 @@ func (di *DestinationIndex) GetReachableBackends(dataplane *core_mesh.DataplaneR
+ 				},
+ 				Port: pointer.To(outbound.BackendRef.Port),
+ 			}
+-			ref, ok := resolve.BackendRef(dataplane.GetMeta(), backendRef, di.ResolveResourceIdentifier)
++			ref, ok := resolve.BackendRef(kri.From(dataplane), backendRef, di.ResolveResourceIdentifier)
+ 			if !ok || !ref.ReferencesRealResource() {
+ 				continue
+ 			}
+-			outboundKri := pointer.Deref(ref.ResourceOrNil())
++			outboundKri := ref.Resource()
+ 			dest, ok := di.destinationByIdentifier[kri.NoSectionName(outboundKri)]
+ 			if !ok {
+ 				continue
+@@ -110,7 +110,7 @@ func (di *DestinationIndex) GetReachableBackends(dataplane *core_mesh.DataplaneR
+ 				}
+ 			}
+ 		} else {
+-			destinationKri := resolve.TargetRefToKRI(dataplane.GetMeta(), common_api.TargetRef{
++			destinationKri := resolve.TargetRefToKRI(kri.From(dataplane), common_api.TargetRef{
+ 				Kind:      common_api.TargetRefKind(reachableBackend.Kind),
+ 				Name:      &reachableBackend.Name,
+ 				Namespace: &reachableBackend.Namespace,
+@@ -143,19 +143,19 @@ func (di *DestinationIndex) GetDestinationByKri(id kri.Identifier) core.Destinat
+ // ResolveResourceIdentifier resolves one resource identifier based on the labels.
+ // If multiple resources match the labels, the oldest one is returned.
+ // The reason is that picking the oldest one is the less likely to break existing traffic after introducing new resources.
+-func (di *DestinationIndex) ResolveResourceIdentifier(resType core_model.ResourceType, labels map[string]string) *kri.Identifier {
++func (di *DestinationIndex) ResolveResourceIdentifier(resType core_model.ResourceType, labels map[string]string) kri.Identifier {
+ 	if len(labels) == 0 {
+-		return nil
++		return kri.Identifier{}
+ 	}
+ 	var oldestCreationTime *time.Time
+-	var oldestKri *kri.Identifier
++	var oldestKri kri.Identifier
+ 	for _, resourceKri := range di.resolveResourceIdentifiersForLabels(resType, labels) {
+ 		resource := di.destinationByIdentifier[kri.NoSectionName(resourceKri)].(core_model.Resource)
+ 		if resource != nil {
+ 			resCreationTime := resource.GetMeta().GetCreationTime()
+ 			if oldestCreationTime == nil || resCreationTime.Before(*oldestCreationTime) {
+ 				oldestCreationTime = &resCreationTime
+-				oldestKri = &resourceKri
++				oldestKri = resourceKri
+ 			}
+ 		}
+ 	}
+diff --git a/pkg/xds/context/resources.go b/pkg/xds/context/resources.go
+index 8b938df098ae..40146bd84044 100644
+--- a/pkg/xds/context/resources.go
++++ b/pkg/xds/context/resources.go
+@@ -54,7 +54,7 @@ func NewResources() Resources {
+ func (r Resources) Get(id kri.Identifier) core_model.Resource {
+ 	// todo: we can probably optimize it by using indexing on ResourceIdentifier
+ 	list := r.ListOrEmpty(id.ResourceType).GetItems()
+-	if i := slices.IndexFunc(list, func(r core_model.Resource) bool { return kri.From(r, "") == kri.NoSectionName(id) }); i >= 0 {
++	if i := slices.IndexFunc(list, func(r core_model.Resource) bool { return kri.From(r) == kri.NoSectionName(id) }); i >= 0 {
+ 		return list[i]
+ 	}
+ 	return nil
+diff --git a/pkg/xds/generator/zoneproxy/destinations.go b/pkg/xds/generator/zoneproxy/destinations.go
+index 79c987d98671..32a5cde82e10 100644
+--- a/pkg/xds/generator/zoneproxy/destinations.go
++++ b/pkg/xds/generator/zoneproxy/destinations.go
+@@ -74,7 +74,7 @@ func buildMeshServiceDestinations(
+ 				DestinationName: destinationname.MustResolve(false, ms, port),
+ 				SNI:             sni,
+ 				Resource: resolve.BackendRefOrNil(
+-					ms.Meta,
++					kri.From(ms),
+ 					resourceToBackendRef(ms, meshservice_api.MeshServiceType, port.Port),
+ 					resolveResourceIdentifier,
+ 				),
+@@ -85,7 +85,7 @@ func buildMeshServiceDestinations(
+ }
+ 
+ func resourceToBackendRef(r core_model.Resource, resType core_model.ResourceType, port int32) common_api.BackendRef {
+-	id := kri.From(r, "")
++	id := kri.From(r)
+ 	return common_api.BackendRef{
+ 		TargetRef: common_api.TargetRef{
+ 			Kind:      common_api.TargetRefKind(resType),
+@@ -114,7 +114,7 @@ func buildMeshExternalServiceDestinations(
+ 			DestinationName: destinationname.MustResolve(false, mes, mes.Spec.Match),
+ 			SNI:             sni,
+ 			Resource: resolve.BackendRefOrNil(
+-				mes.Meta,
++				kri.From(mes),
+ 				resourceToBackendRef(mes, meshexternalservice_api.MeshExternalServiceType, mes.Spec.Match.Port),
+ 				resolveResourceIdentifier,
+ 			),
+@@ -134,7 +134,7 @@ func buildMeshMultiZoneServiceDestinations(
+ 				Mesh:            ms.GetMeta().GetMesh(),
+ 				DestinationName: destinationname.MustResolve(false, ms, port),
+ 				Resource: resolve.BackendRefOrNil(
+-					ms.Meta,
++					kri.From(ms),
+ 					resourceToBackendRef(ms, meshexternalservice_api.MeshExternalServiceType, port.Port),
+ 					resolveResourceIdentifier,
+ 				),
+diff --git a/pkg/xds/sync/dataplane_proxy_builder.go b/pkg/xds/sync/dataplane_proxy_builder.go
+index 70653b540c5d..501a631f3308 100644
+--- a/pkg/xds/sync/dataplane_proxy_builder.go
++++ b/pkg/xds/sync/dataplane_proxy_builder.go
+@@ -176,8 +176,8 @@ func (p *DataplaneProxyBuilder) resolveVIPOutbounds(
+ 
+ 			if onlySelectedBackends {
+ 				// check if there is an entry with specific port or without port
+-				_, selected := reachableBackends[pointer.Deref(outbound.Resource)]
+-				_, selectedBySectionName := reachableBackends[kri.NoSectionName(pointer.Deref(outbound.Resource))]
++				_, selected := reachableBackends[outbound.Resource]
++				_, selectedBySectionName := reachableBackends[kri.NoSectionName(outbound.Resource)]
+ 				if !selected && !selectedBySectionName {
+ 					// ignore VIP outbound if reachableServices is defined and not specified
+ 					// Reachable services takes precedence over reachable services graph.
+@@ -187,7 +187,7 @@ func (p *DataplaneProxyBuilder) resolveVIPOutbounds(
+ 				// TODO: https://github.com/kumahq/kuma/issues/11077
+ 			} else if outbound.Resource.ResourceType != meshextenralservice_api.MeshExternalServiceType {
+ 				// static reachable services takes precedence over the graph
+-				if !xds_context.CanReachBackendFromAny(meshContext.ReachableServicesGraph, dpTagSets, *outbound.Resource) {
++				if !xds_context.CanReachBackendFromAny(meshContext.ReachableServicesGraph, dpTagSets, outbound.Resource) {
+ 					continue
+ 				}
+ 			}
+@@ -260,7 +260,7 @@ func asOutbounds(dataplane *core_mesh.DataplaneResource, resolver resolve.LabelR
+ 				},
+ 				Port: pointer.To(o.BackendRef.Port),
+ 			}
+-			ref, ok := resolve.BackendRef(dataplane.GetMeta(), backendRef, resolver)
++			ref, ok := resolve.BackendRef(kri.From(dataplane), backendRef, resolver)
+ 			if !ok {
+ 				continue
+ 			}
+@@ -268,7 +268,7 @@ func asOutbounds(dataplane *core_mesh.DataplaneResource, resolver resolve.LabelR
+ 				outbounds = append(outbounds, &xds_types.Outbound{
+ 					Address:  o.Address,
+ 					Port:     o.Port,
+-					Resource: ref.RealResourceBackendRef().Resource,
++					Resource: ref.Resource(),
+ 				})
+ 			}
+ 		} else {
+diff --git a/pkg/xds/topology/outbound.go b/pkg/xds/topology/outbound.go
+index 62f04db747b6..cfbd1768fe81 100644
+--- a/pkg/xds/topology/outbound.go
++++ b/pkg/xds/topology/outbound.go
+@@ -111,7 +111,7 @@ func BuildEdsEndpointMap(
+ 
+ 	meshServicesByKri := make(map[kri.Identifier]*meshservice_api.MeshServiceResource, len(meshServices))
+ 	for _, ms := range meshServices {
+-		meshServicesByKri[kri.From(ms, "")] = ms
++		meshServicesByKri[kri.From(ms)] = ms
+ 	}
+ 
+ 	fillLocalMeshServices(outbound, meshServices, dataplanes, mesh, localZone)
+@@ -626,7 +626,7 @@ func createMeshExternalServiceEndpoint(
+ ) error {
+ 	es := &core_xds.ExternalService{
+ 		Protocol:      mes.Spec.Match.Protocol,
+-		OwnerResource: pointer.To(kri.From(mes, "")),
++		OwnerResource: kri.From(mes),
+ 	}
+ 	tags := maps.Clone(mes.Meta.GetLabels())
+ 	if tags == nil {
+@@ -789,7 +789,7 @@ func fillExternalServicesOutboundsThroughEgress(
+ 		tls := mes.Spec.Tls
+ 		es := &core_xds.ExternalService{
+ 			Protocol:      mes.Spec.Match.Protocol,
+-			OwnerResource: pointer.To(kri.From(mes, "")),
++			OwnerResource: kri.From(mes),
+ 		}
+ 		if tls != nil && tls.Enabled {
+ 			err := setTlsConfiguration(ctx, tls, es, mes.Meta.GetMesh(), loader)
+diff --git a/pkg/xds/topology/outbound_test.go b/pkg/xds/topology/outbound_test.go
+index 3ac8d4171b83..7a7cfa69e635 100644
+--- a/pkg/xds/topology/outbound_test.go
++++ b/pkg/xds/topology/outbound_test.go
+@@ -1423,7 +1423,7 @@ var _ = Describe("TrafficRoute", func() {
+ 								FallbackToSystemCa:       true,
+ 								SkipHostnameVerification: true,
+ 								SANs:                     []core_xds.SAN{},
+-								OwnerResource: &kri.Identifier{
++								OwnerResource: kri.Identifier{
+ 									ResourceType: meshexternalservice_api.MeshExternalServiceType,
+ 									Mesh:         "default",
+ 									Name:         "another-mes",
+@@ -1459,7 +1459,7 @@ var _ = Describe("TrafficRoute", func() {
+ 								},
+ 								MinTlsVersion: pointer.To(tlsv3.TlsParameters_TLSv1_2),
+ 								MaxTlsVersion: pointer.To(tlsv3.TlsParameters_TLSv1_3),
+-								OwnerResource: &kri.Identifier{
++								OwnerResource: kri.Identifier{
+ 									ResourceType: meshexternalservice_api.MeshExternalServiceType,
+ 									Mesh:         "default",
+ 									Name:         "example-mes",
+@@ -1542,8 +1542,8 @@ var _ = Describe("TrafficRoute", func() {
+ 				},
+ 				meshMultiZoneService: []*meshmzservice_api.MeshMultiZoneServiceResource{
+ 					samples.MeshMultiZoneServiceBackendBuilder().
+-						AddMatchedMeshServiceName(kri.From(samples.MeshServiceBackend(), "")).
+-						AddMatchedMeshServiceName(kri.From(samples.MeshServiceSyncedBackend(), "")).
++						AddMatchedMeshServiceName(kri.From(samples.MeshServiceBackend())).
++						AddMatchedMeshServiceName(kri.From(samples.MeshServiceSyncedBackend())).
+ 						Build(),
+ 				},
+ 				mesh: defaultMeshWithMTLS,
+@@ -1715,7 +1715,7 @@ var _ = Describe("TrafficRoute", func() {
+ 								ExternalService: &core_xds.ExternalService{
+ 									TLSEnabled: false,
+ 									Protocol:   core_mesh.ProtocolTCP,
+-									OwnerResource: &kri.Identifier{
++									OwnerResource: kri.Identifier{
+ 										ResourceType: "MeshExternalService",
+ 										Mesh:         "default",
+ 										Name:         "example",
+@@ -1785,7 +1785,7 @@ var _ = Describe("TrafficRoute", func() {
+ 								ExternalService: &core_xds.ExternalService{
+ 									TLSEnabled: false,
+ 									Protocol:   core_mesh.ProtocolTCP,
+-									OwnerResource: &kri.Identifier{
++									OwnerResource: kri.Identifier{
+ 										ResourceType: "MeshExternalService",
+ 										Mesh:         "default",
+ 										Name:         "example",

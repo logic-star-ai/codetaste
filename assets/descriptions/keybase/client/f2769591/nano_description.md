@@ -1,0 +1,1 @@
+Refactor message wrapper for improved rendering performance

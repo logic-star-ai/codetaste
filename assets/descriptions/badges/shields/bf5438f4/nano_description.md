@@ -1,0 +1,1 @@
+Refactor route functions in BaseService

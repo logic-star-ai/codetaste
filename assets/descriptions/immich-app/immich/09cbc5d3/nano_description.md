@@ -1,0 +1,1 @@
+Refactor: Consolidate database types and remove auto-generated schema

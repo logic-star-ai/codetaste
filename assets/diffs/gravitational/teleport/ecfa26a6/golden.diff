@@ -1,0 +1,2061 @@
+diff --git a/e2e/aws/databases_test.go b/e2e/aws/databases_test.go
+index 97c0ad4df3d2e..a03fabf2df509 100644
+--- a/e2e/aws/databases_test.go
++++ b/e2e/aws/databases_test.go
+@@ -43,7 +43,7 @@ import (
+ 	"github.com/gravitational/teleport/api/utils/keys"
+ 	"github.com/gravitational/teleport/integration/helpers"
+ 	"github.com/gravitational/teleport/lib/auth"
+-	"github.com/gravitational/teleport/lib/client"
++	"github.com/gravitational/teleport/lib/cryptosuites"
+ 	"github.com/gravitational/teleport/lib/service"
+ 	"github.com/gravitational/teleport/lib/srv/alpnproxy"
+ 	alpncommon "github.com/gravitational/teleport/lib/srv/alpnproxy/common"
+@@ -269,7 +269,7 @@ func startLocalALPNProxy(t *testing.T, ctx context.Context, user string, cluster
+ // generateClientDBCert creates a test db cert for the given user and database.
+ func generateClientDBCert(t *testing.T, authSrv *auth.Server, user string, route tlsca.RouteToDatabase) tls.Certificate {
+ 	t.Helper()
+-	key, err := client.GenerateRSAKey()
++	key, err := cryptosuites.GenerateKeyWithAlgorithm(cryptosuites.ECDSAP256)
+ 	require.NoError(t, err)
+ 
+ 	clusterName, err := authSrv.GetClusterName()
+@@ -287,7 +287,7 @@ func generateClientDBCert(t *testing.T, authSrv *auth.Server, user string, route
+ 		})
+ 	require.NoError(t, err)
+ 
+-	tlsCert, err := key.TLSCertificate(clientCert)
++	tlsCert, err := keys.TLSCertificateForSigner(key, clientCert)
+ 	require.NoError(t, err)
+ 	return tlsCert
+ }
+diff --git a/integration/helpers/helpers.go b/integration/helpers/helpers.go
+index 9c9bd8e231ff3..08208883b55c6 100644
+--- a/integration/helpers/helpers.go
++++ b/integration/helpers/helpers.go
+@@ -141,7 +141,7 @@ func ExternalSSHCommand(o CommandOptions) (*exec.Cmd, error) {
+ // CreateAgent creates a SSH agent with the passed in private key and
+ // certificate that can be used in tests. This is useful so tests don't
+ // clobber your system agent.
+-func CreateAgent(me *user.User, key *client.Key) (*teleagent.AgentServer, string, string, error) {
++func CreateAgent(me *user.User, key *client.KeyRing) (*teleagent.AgentServer, string, string, error) {
+ 	// create a path to the unix socket
+ 	sockDirName := "int-test"
+ 	sockName := "agent.sock"
+@@ -189,13 +189,13 @@ func CloseAgent(teleAgent *teleagent.AgentServer, socketDirPath string) error {
+ 	return nil
+ }
+ 
+-func MustCreateUserKey(t *testing.T, tc *TeleInstance, username string, ttl time.Duration) *client.Key {
++func MustCreateUserKey(t *testing.T, tc *TeleInstance, username string, ttl time.Duration) *client.KeyRing {
+ 	key, err := client.GenerateRSAKey()
+ 	require.NoError(t, err)
+ 	key.ClusterName = tc.Secrets.SiteName
+ 
+ 	sshCert, tlsCert, err := tc.Process.GetAuthServer().GenerateUserTestCerts(auth.GenerateUserTestCertsRequest{
+-		Key:            key.MarshalSSHPublicKey(),
++		Key:            key.PrivateKey.MarshalSSHPublicKey(),
+ 		Username:       username,
+ 		TTL:            ttl,
+ 		Compatibility:  constants.CertificateFormatStandard,
+diff --git a/integration/helpers/instance.go b/integration/helpers/instance.go
+index 7ab4b201f8248..bfe0832f4f11f 100644
+--- a/integration/helpers/instance.go
++++ b/integration/helpers/instance.go
+@@ -84,10 +84,10 @@ func fatalIf(err error) {
+ }
+ 
+ type User struct {
+-	Username      string       `json:"username"`
+-	AllowedLogins []string     `json:"logins"`
+-	Key           *client.Key  `json:"key"`
+-	Roles         []types.Role `json:"-"`
++	Username      string          `json:"username"`
++	AllowedLogins []string        `json:"logins"`
++	Key           *client.KeyRing `json:"key"`
++	Roles         []types.Role    `json:"-"`
+ }
+ 
+ type InstanceSecrets struct {
+diff --git a/integration/helpers/usercreds.go b/integration/helpers/usercreds.go
+index 9ba27c011ba6b..c10ed41c6df45 100644
+--- a/integration/helpers/usercreds.go
++++ b/integration/helpers/usercreds.go
+@@ -37,7 +37,7 @@ import (
+ // UserCreds holds user client credentials
+ type UserCreds struct {
+ 	// Key is user client key and certificate
+-	Key client.Key
++	Key client.KeyRing
+ 	// HostCA is a trusted host certificate authority
+ 	HostCA types.CertAuthority
+ }
+@@ -145,7 +145,7 @@ func GenerateUserCreds(req UserCredsRequest) (*UserCreds, error) {
+ 
+ 	return &UserCreds{
+ 		HostCA: ca,
+-		Key: client.Key{
++		Key: client.KeyRing{
+ 			PrivateKey: priv,
+ 			Cert:       sshCert,
+ 			TLSCert:    x509Cert,
+diff --git a/integrations/terraform/testlib/main_test.go b/integrations/terraform/testlib/main_test.go
+index c714f234d2b33..c6434a8c20cf2 100644
+--- a/integrations/terraform/testlib/main_test.go
++++ b/integrations/terraform/testlib/main_test.go
+@@ -35,11 +35,13 @@ import (
+ 	"github.com/gravitational/teleport/api/constants"
+ 	"github.com/gravitational/teleport/api/types"
+ 	"github.com/gravitational/teleport/api/utils"
++	"github.com/gravitational/teleport/api/utils/keys"
+ 	"github.com/gravitational/teleport/integrations/lib"
+ 	"github.com/gravitational/teleport/integrations/lib/testing/integration"
+ 	"github.com/gravitational/teleport/lib/auth/authclient"
+ 	libclient "github.com/gravitational/teleport/lib/client"
+ 	"github.com/gravitational/teleport/lib/client/identityfile"
++	"github.com/gravitational/teleport/lib/cryptosuites"
+ 
+ 	"github.com/gravitational/teleport/integrations/terraform/provider"
+ )
+@@ -166,27 +168,33 @@ func (s *TerraformBaseSuite) SetupSuite() {
+ func (s *TerraformBaseSuite) getTLSCreds(ctx context.Context, user types.User, outputPath string) {
+ 	s.T().Helper()
+ 
+-	key, err := libclient.GenerateRSAKey()
++	signer, err := cryptosuites.GenerateKeyWithAlgorithm(cryptosuites.ECDSAP256)
+ 	require.NoError(s.T(), err)
++	privateKeyPEM, err := keys.MarshalPrivateKey(signer)
++	require.NoError(s.T(), err)
++	publicKeyPEM, err := keys.MarshalPublicKey(signer.Public())
++	require.NoError(s.T(), err)
++	privateKey, err := keys.NewPrivateKey(signer, privateKeyPEM)
++	require.NoError(s.T(), err)
++	keyRing := libclient.NewKey(privateKey)
+ 
+ 	certs, err := s.client.GenerateUserCerts(ctx, proto.UserCertsRequest{
+-		PublicKey: key.MarshalSSHPublicKey(),
+-		Username:  user.GetName(),
+-		Expires:   time.Now().Add(time.Hour),
+-		Format:    constants.CertificateFormatStandard,
++		TLSPublicKey: publicKeyPEM,
++		Username:     user.GetName(),
++		Expires:      time.Now().Add(time.Hour),
++		Format:       constants.CertificateFormatStandard,
+ 	})
+ 	require.NoError(s.T(), err)
+-	key.Cert = certs.SSH
+-	key.TLSCert = certs.TLS
++	keyRing.TLSCert = certs.TLS
+ 
+ 	hostCAs, err := s.client.GetCertAuthorities(ctx, types.HostCA, false)
+ 	require.NoError(s.T(), err)
+-	key.TrustedCerts = authclient.AuthoritiesToTrustedCerts(hostCAs)
++	keyRing.TrustedCerts = authclient.AuthoritiesToTrustedCerts(hostCAs)
+ 
+ 	// write the cert+private key to the output:
+ 	_, err = identityfile.Write(ctx, identityfile.WriteConfig{
+ 		OutputPath:           outputPath,
+-		Key:                  key,
++		Key:                  keyRing,
+ 		Format:               identityfile.FormatTLS,
+ 		OverwriteDestination: false,
+ 		Writer:               &identityfile.StandardConfigWriter{},
+diff --git a/lib/benchmark/kube.go b/lib/benchmark/kube.go
+index 48769f2f25044..c14004d9aaf20 100644
+--- a/lib/benchmark/kube.go
++++ b/lib/benchmark/kube.go
+@@ -86,7 +86,7 @@ func newKubernetesRestConfig(ctx context.Context, tc *client.TeleportClient) (*r
+ // getKubeTLSClientConfig returns a TLS client config for the kubernetes cluster
+ // that the client wants to connected to.
+ func getKubeTLSClientConfig(ctx context.Context, tc *client.TeleportClient) (rest.TLSClientConfig, error) {
+-	var k *client.Key
++	var k *client.KeyRing
+ 	err := client.RetryWithRelogin(ctx, tc, func() error {
+ 		var err error
+ 		k, err = tc.IssueUserCertsWithMFA(ctx, client.ReissueParams{
+diff --git a/lib/client/alpn.go b/lib/client/alpn.go
+index 62323b3670b47..3f5f6c9e37f0e 100644
+--- a/lib/client/alpn.go
++++ b/lib/client/alpn.go
+@@ -120,7 +120,7 @@ func getUserCerts(ctx context.Context, client ALPNAuthClient, mfaResponse *proto
+ 		return tls.Certificate{}, trace.Wrap(err)
+ 	}
+ 
+-	publicKeyPEM, err := keys.MarshalPublicKey(key.Public())
++	publicKeyPEM, err := keys.MarshalPublicKey(key.PrivateKey.Public())
+ 	if err != nil {
+ 		return tls.Certificate{}, trace.Wrap(err)
+ 	}
+@@ -142,7 +142,7 @@ func getUserCerts(ctx context.Context, client ALPNAuthClient, mfaResponse *proto
+ 		return tls.Certificate{}, trace.Wrap(err)
+ 	}
+ 
+-	tlsCert, err := keys.X509KeyPair(certs.TLS, key.PrivateKeyPEM())
++	tlsCert, err := keys.X509KeyPair(certs.TLS, key.PrivateKey.PrivateKeyPEM())
+ 	if err != nil {
+ 		return tls.Certificate{}, trace.BadParameter("failed to parse private key: %v", err)
+ 	}
+diff --git a/lib/client/api.go b/lib/client/api.go
+index 5886995e24f38..962124243beda 100644
+--- a/lib/client/api.go
++++ b/lib/client/api.go
+@@ -1449,7 +1449,7 @@ func (tc *TeleportClient) ReissueUserCerts(ctx context.Context, cachePolicy Cert
+ // (according to RBAC), IssueCertsWithMFA will:
+ // - for SSH certs, return the existing Key from the keystore.
+ // - for TLS certs, fall back to ReissueUserCerts.
+-func (tc *TeleportClient) IssueUserCertsWithMFA(ctx context.Context, params ReissueParams, mfaPromptOpts ...mfa.PromptOpt) (*Key, error) {
++func (tc *TeleportClient) IssueUserCertsWithMFA(ctx context.Context, params ReissueParams, mfaPromptOpts ...mfa.PromptOpt) (*KeyRing, error) {
+ 	ctx, span := tc.Tracer.Start(
+ 		ctx,
+ 		"teleportClient/IssueUserCertsWithMFA",
+@@ -3223,7 +3223,7 @@ func (tc *TeleportClient) GetWebConfig(ctx context.Context) (*webclient.WebConfi
+ // If the initial login fails due to a private key policy not being met, Login
+ // will automatically retry login with a private key that meets the required policy.
+ // This will initiate the same login flow again, aka prompt for password/otp/sso/mfa.
+-func (tc *TeleportClient) Login(ctx context.Context) (*Key, error) {
++func (tc *TeleportClient) Login(ctx context.Context) (*KeyRing, error) {
+ 	ctx, span := tc.Tracer.Start(
+ 		ctx,
+ 		"teleportClient/Login",
+@@ -3311,7 +3311,7 @@ func (tc *TeleportClient) LoginWeb(ctx context.Context) (*WebClient, types.WebSe
+ // successful, as skipping the ceremony is valid for various reasons (Teleport
+ // cluster doesn't support device authn, device wasn't enrolled, etc).
+ // Use [TeleportClient.DeviceLogin] if you want more control over process.
+-func (tc *TeleportClient) AttemptDeviceLogin(ctx context.Context, key *Key, rootAuthClient authclient.ClientI) error {
++func (tc *TeleportClient) AttemptDeviceLogin(ctx context.Context, key *KeyRing, rootAuthClient authclient.ClientI) error {
+ 	ctx, span := tc.Tracer.Start(
+ 		ctx,
+ 		"teleportClient/AttemptDeviceLogin",
+@@ -3662,7 +3662,7 @@ type SSHLoginFunc func(context.Context, *keys.PrivateKey) (*authclient.SSHLoginR
+ 
+ // SSHLogin uses the given login function to login the client. This function handles
+ // private key logic and parsing the resulting auth response.
+-func (tc *TeleportClient) SSHLogin(ctx context.Context, sshLoginFunc SSHLoginFunc) (*Key, error) {
++func (tc *TeleportClient) SSHLogin(ctx context.Context, sshLoginFunc SSHLoginFunc) (*KeyRing, error) {
+ 	ctx, span := tc.Tracer.Start(
+ 		ctx,
+ 		"teleportClient/SSHLogin",
+@@ -4048,7 +4048,7 @@ func (tc *TeleportClient) SAMLSingleLogout(ctx context.Context, SAMLSingleLogout
+ 
+ // ConnectToRootCluster activates the provided key and connects to the
+ // root cluster with its credentials.
+-func (tc *TeleportClient) ConnectToRootCluster(ctx context.Context, key *Key) (*ClusterClient, authclient.ClientI, error) {
++func (tc *TeleportClient) ConnectToRootCluster(ctx context.Context, key *KeyRing) (*ClusterClient, authclient.ClientI, error) {
+ 	ctx, span := tc.Tracer.Start(
+ 		ctx,
+ 		"teleportClient/ConnectToRootCluster",
+@@ -4079,7 +4079,7 @@ func (tc *TeleportClient) ConnectToRootCluster(ctx context.Context, key *Key) (*
+ 
+ // activateKey saves the target session cert into the local
+ // keystore (and into the ssh-agent) for future use.
+-func (tc *TeleportClient) activateKey(ctx context.Context, key *Key) error {
++func (tc *TeleportClient) activateKey(ctx context.Context, key *KeyRing) error {
+ 	_, span := tc.Tracer.Start(
+ 		ctx,
+ 		"teleportClient/activateKey",
+@@ -4473,7 +4473,7 @@ func (tc *TeleportClient) AddTrustedCA(ctx context.Context, ca types.CertAuthori
+ }
+ 
+ // AddKey adds a key to the client's local agent, used in tests.
+-func (tc *TeleportClient) AddKey(key *Key) error {
++func (tc *TeleportClient) AddKey(key *KeyRing) error {
+ 	if tc.localAgent == nil {
+ 		return trace.BadParameter("TeleportClient.AddKey called on a client without localAgent")
+ 	}
+@@ -4847,7 +4847,7 @@ func isFIPS() bool {
+ 	return modules.GetModules().IsBoringBinary()
+ }
+ 
+-func findActiveDatabases(key *Key) ([]tlsca.RouteToDatabase, error) {
++func findActiveDatabases(key *KeyRing) ([]tlsca.RouteToDatabase, error) {
+ 	dbCerts, err := key.DBTLSCertificates()
+ 	if err != nil {
+ 		return nil, trace.Wrap(err)
+@@ -4870,7 +4870,7 @@ func findActiveDatabases(key *Key) ([]tlsca.RouteToDatabase, error) {
+ 	return databases, nil
+ }
+ 
+-func findActiveApps(key *Key) ([]tlsca.RouteToApp, error) {
++func findActiveApps(key *KeyRing) ([]tlsca.RouteToApp, error) {
+ 	appCerts, err := key.AppTLSCertificates()
+ 	if err != nil {
+ 		return nil, trace.Wrap(err)
+diff --git a/lib/client/client.go b/lib/client/client.go
+index 8c002675c013b..dd5da6b2d659d 100644
+--- a/lib/client/client.go
++++ b/lib/client/client.go
+@@ -130,7 +130,7 @@ type ReissueParams struct {
+ 	//
+ 	// TODO(awly): refactor lib/web to use a Keystore implementation that
+ 	// mimics LocalKeystore and remove this.
+-	ExistingCreds *Key
++	ExistingCreds *KeyRing
+ 
+ 	// MFACheck is optional parameter passed if MFA check was already done.
+ 	// It can be nil.
+@@ -205,7 +205,7 @@ const (
+ // makeDatabaseClientPEM returns appropriate client PEM file contents for the
+ // specified database type. Some databases only need certificate in the PEM
+ // file, others both certificate and key.
+-func makeDatabaseClientPEM(proto string, cert []byte, pk *Key) ([]byte, error) {
++func makeDatabaseClientPEM(proto string, cert []byte, pk *KeyRing) ([]byte, error) {
+ 	// MongoDB expects certificate and key pair in the same pem file.
+ 	if proto == defaults.ProtocolMongoDB {
+ 		keyPEM, err := pk.PrivateKey.SoftwarePrivateKeyPEM()
+diff --git a/lib/client/client_store.go b/lib/client/client_store.go
+index 5c0919c078340..b20341b1c9123 100644
+--- a/lib/client/client_store.go
++++ b/lib/client/client_store.go
+@@ -72,7 +72,7 @@ func NewMemClientStore() *Store {
+ 
+ // AddKey adds the given key to the key store. The key's trusted certificates are
+ // added to the trusted certs store.
+-func (s *Store) AddKey(key *Key) error {
++func (s *Store) AddKey(key *KeyRing) error {
+ 	if err := s.KeyStore.AddKey(key); err != nil {
+ 		return trace.Wrap(err)
+ 	}
+@@ -103,7 +103,7 @@ func IsNoCredentialsError(err error) bool {
+ // trusted certs will be retrieved from the trusted certs store. If the key is not
+ // found or is missing data (certificates, etc.), then an ErrNoCredentials error
+ // is returned.
+-func (s *Store) GetKey(idx KeyIndex, opts ...CertOption) (*Key, error) {
++func (s *Store) GetKey(idx KeyIndex, opts ...CertOption) (*KeyRing, error) {
+ 	key, err := s.KeyStore.GetKey(idx, opts...)
+ 	if trace.IsNotFound(err) {
+ 		return nil, trace.Wrap(ErrNoCredentials, err.Error())
+diff --git a/lib/client/client_store_test.go b/lib/client/client_store_test.go
+index 58caf77b88122..25228b80171bf 100644
+--- a/lib/client/client_store_test.go
++++ b/lib/client/client_store_test.go
+@@ -61,7 +61,7 @@ func newTestAuthority(t *testing.T) testAuthority {
+ }
+ 
+ // makeSignedKey helper returns a new user key signed by CAPriv key.
+-func (s *testAuthority) makeSignedKey(t *testing.T, idx KeyIndex, makeExpired bool) *Key {
++func (s *testAuthority) makeSignedKey(t *testing.T, idx KeyIndex, makeExpired bool) *KeyRing {
+ 	priv, err := s.keygen.GeneratePrivateKey()
+ 	require.NoError(t, err)
+ 
+diff --git a/lib/client/cluster_client.go b/lib/client/cluster_client.go
+index 3129546c12c37..e52cc65e23903 100644
+--- a/lib/client/cluster_client.go
++++ b/lib/client/cluster_client.go
+@@ -170,7 +170,7 @@ func (c *ClusterClient) ReissueUserCerts(ctx context.Context, cachePolicy CertCa
+ 	return trace.Wrap(c.tc.localAgent.AddKey(key))
+ }
+ 
+-func (c *ClusterClient) generateUserCerts(ctx context.Context, cachePolicy CertCachePolicy, params ReissueParams) (*Key, error) {
++func (c *ClusterClient) generateUserCerts(ctx context.Context, cachePolicy CertCachePolicy, params ReissueParams) (*KeyRing, error) {
+ 	if params.RouteToCluster == "" {
+ 		params.RouteToCluster = c.cluster
+ 	}
+@@ -325,7 +325,7 @@ func (c *ClusterClient) SessionSSHConfig(ctx context.Context, user string, targe
+ 
+ // prepareUserCertsRequest creates a [proto.UserCertsRequest] with the fields
+ // set accordingly from the provided ReissueParams.
+-func (c *ClusterClient) prepareUserCertsRequest(params ReissueParams, key *Key) (*proto.UserCertsRequest, error) {
++func (c *ClusterClient) prepareUserCertsRequest(params ReissueParams, key *KeyRing) (*proto.UserCertsRequest, error) {
+ 	tlsCert, err := key.TeleportTLSCertificate()
+ 	if err != nil {
+ 		return nil, trace.Wrap(err)
+@@ -344,8 +344,8 @@ func (c *ClusterClient) prepareUserCertsRequest(params ReissueParams, key *Key)
+ 	}
+ 
+ 	// TODO(nklaassen): split the SSH and TLS key.
+-	sshPublicKey := key.MarshalSSHPublicKey()
+-	tlsPublicKey, err := keys.MarshalPublicKey(key.Public())
++	sshPublicKey := key.PrivateKey.MarshalSSHPublicKey()
++	tlsPublicKey, err := keys.MarshalPublicKey(key.PrivateKey.Public())
+ 	if err != nil {
+ 		return nil, trace.Wrap(err)
+ 	}
+@@ -372,8 +372,8 @@ func (c *ClusterClient) prepareUserCertsRequest(params ReissueParams, key *Key)
+ }
+ 
+ // performMFACeremony runs the mfa ceremony to completion.
+-// If successful the returned [Key] will be authorized to connect to the target.
+-func (c *ClusterClient) performMFACeremony(ctx context.Context, rootClient *ClusterClient, params ReissueParams, key *Key, mfaPrompt mfa.Prompt) (*Key, error) {
++// If successful the returned [KeyRing] will be authorized to connect to the target.
++func (c *ClusterClient) performMFACeremony(ctx context.Context, rootClient *ClusterClient, params ReissueParams, key *KeyRing, mfaPrompt mfa.Prompt) (*KeyRing, error) {
+ 	certsReq, err := rootClient.prepareUserCertsRequest(params, key)
+ 	if err != nil {
+ 		return nil, trace.Wrap(err)
+@@ -396,7 +396,7 @@ func (c *ClusterClient) performMFACeremony(ctx context.Context, rootClient *Clus
+ 
+ // IssueUserCertsWithMFA generates a single-use certificate for the user. If MFA is required
+ // to access the resource the provided [mfa.Prompt] will be used to perform the MFA ceremony.
+-func (c *ClusterClient) IssueUserCertsWithMFA(ctx context.Context, params ReissueParams, mfaPrompt mfa.Prompt) (*Key, proto.MFARequired, error) {
++func (c *ClusterClient) IssueUserCertsWithMFA(ctx context.Context, params ReissueParams, mfaPrompt mfa.Prompt) (*KeyRing, proto.MFARequired, error) {
+ 	ctx, span := c.Tracer.Start(
+ 		ctx,
+ 		"ClusterClient/IssueUserCertsWithMFA",
+@@ -539,7 +539,7 @@ type PerformMFACeremonyParams struct {
+ 
+ 	// Key is the client key to add the new certificates to.
+ 	// Optional.
+-	Key *Key
++	Key *KeyRing
+ }
+ 
+ // PerformMFACeremony issues single-use certificates via GenerateUserCerts,
+@@ -558,7 +558,7 @@ type PerformMFACeremonyParams struct {
+ //  4. Call RootAuthClient.GenerateUserCerts
+ //
+ // Returns the modified params.Key and the GenerateUserCertsResponse, or an error.
+-func PerformMFACeremony(ctx context.Context, params PerformMFACeremonyParams) (*Key, *proto.Certs, error) {
++func PerformMFACeremony(ctx context.Context, params PerformMFACeremonyParams) (*KeyRing, *proto.Certs, error) {
+ 	rootClient := params.RootAuthClient
+ 	currentClient := params.CurrentAuthClient
+ 
+diff --git a/lib/client/cluster_client_test.go b/lib/client/cluster_client_test.go
+index ea5ce1b06a65e..e4214fcdd1b74 100644
+--- a/lib/client/cluster_client_test.go
++++ b/lib/client/cluster_client_test.go
+@@ -129,13 +129,13 @@ func TestIssueUserCertsWithMFA(t *testing.T) {
+ 		agent       *LocalKeyAgent
+ 		params      ReissueParams
+ 		prompt      fakePrompt
+-		assertion   func(t *testing.T, key *Key, mfaRequired proto.MFARequired, err error)
++		assertion   func(t *testing.T, key *KeyRing, mfaRequired proto.MFARequired, err error)
+ 	}{
+ 		{
+ 			name:        "ssh no mfa",
+ 			mfaRequired: proto.MFARequired_MFA_REQUIRED_NO,
+ 			params:      ReissueParams{NodeName: "test"},
+-			assertion: func(t *testing.T, key *Key, mfaRequired proto.MFARequired, err error) {
++			assertion: func(t *testing.T, key *KeyRing, mfaRequired proto.MFARequired, err error) {
+ 				require.NoError(t, err)
+ 				require.NotNil(t, key)
+ 				require.Equal(t, proto.MFARequired_MFA_REQUIRED_NO, mfaRequired)
+@@ -145,7 +145,7 @@ func TestIssueUserCertsWithMFA(t *testing.T) {
+ 			name:        "ssh mfa success",
+ 			mfaRequired: proto.MFARequired_MFA_REQUIRED_YES,
+ 			params:      ReissueParams{NodeName: "test"},
+-			assertion: func(t *testing.T, key *Key, mfaRequired proto.MFARequired, err error) {
++			assertion: func(t *testing.T, key *KeyRing, mfaRequired proto.MFARequired, err error) {
+ 				require.NoError(t, err)
+ 				require.NotNil(t, key)
+ 				require.Equal(t, proto.MFARequired_MFA_REQUIRED_YES, mfaRequired)
+@@ -156,7 +156,7 @@ func TestIssueUserCertsWithMFA(t *testing.T) {
+ 			mfaRequired: proto.MFARequired_MFA_REQUIRED_YES,
+ 			params:      ReissueParams{NodeName: "test"},
+ 			prompt:      failedPrompt,
+-			assertion: func(t *testing.T, key *Key, mfaRequired proto.MFARequired, err error) {
++			assertion: func(t *testing.T, key *KeyRing, mfaRequired proto.MFARequired, err error) {
+ 				require.Error(t, err)
+ 				require.Nil(t, key)
+ 				require.Equal(t, proto.MFARequired_MFA_REQUIRED_YES, mfaRequired)
+@@ -166,7 +166,7 @@ func TestIssueUserCertsWithMFA(t *testing.T) {
+ 			name:        "kube no mfa",
+ 			mfaRequired: proto.MFARequired_MFA_REQUIRED_NO,
+ 			params:      ReissueParams{KubernetesCluster: "test"},
+-			assertion: func(t *testing.T, key *Key, mfaRequired proto.MFARequired, err error) {
++			assertion: func(t *testing.T, key *KeyRing, mfaRequired proto.MFARequired, err error) {
+ 				require.NoError(t, err)
+ 				require.NotNil(t, key)
+ 				require.Equal(t, proto.MFARequired_MFA_REQUIRED_NO, mfaRequired)
+@@ -176,7 +176,7 @@ func TestIssueUserCertsWithMFA(t *testing.T) {
+ 			name:        "kube mfa success",
+ 			mfaRequired: proto.MFARequired_MFA_REQUIRED_YES,
+ 			params:      ReissueParams{KubernetesCluster: "test"},
+-			assertion: func(t *testing.T, key *Key, mfaRequired proto.MFARequired, err error) {
++			assertion: func(t *testing.T, key *KeyRing, mfaRequired proto.MFARequired, err error) {
+ 				require.NoError(t, err)
+ 				require.NotNil(t, key)
+ 				require.Equal(t, proto.MFARequired_MFA_REQUIRED_YES, mfaRequired)
+@@ -187,7 +187,7 @@ func TestIssueUserCertsWithMFA(t *testing.T) {
+ 			mfaRequired: proto.MFARequired_MFA_REQUIRED_YES,
+ 			params:      ReissueParams{KubernetesCluster: "test"},
+ 			prompt:      failedPrompt,
+-			assertion: func(t *testing.T, key *Key, mfaRequired proto.MFARequired, err error) {
++			assertion: func(t *testing.T, key *KeyRing, mfaRequired proto.MFARequired, err error) {
+ 				require.Error(t, err)
+ 				require.Nil(t, key)
+ 				require.Equal(t, proto.MFARequired_MFA_REQUIRED_YES, mfaRequired)
+@@ -201,7 +201,7 @@ func TestIssueUserCertsWithMFA(t *testing.T) {
+ 					Database: "test",
+ 				},
+ 			},
+-			assertion: func(t *testing.T, key *Key, mfaRequired proto.MFARequired, err error) {
++			assertion: func(t *testing.T, key *KeyRing, mfaRequired proto.MFARequired, err error) {
+ 				require.NoError(t, err)
+ 				require.NotNil(t, key)
+ 				require.Equal(t, proto.MFARequired_MFA_REQUIRED_NO, mfaRequired)
+@@ -216,7 +216,7 @@ func TestIssueUserCertsWithMFA(t *testing.T) {
+ 					Database: "test",
+ 				},
+ 			},
+-			assertion: func(t *testing.T, key *Key, mfaRequired proto.MFARequired, err error) {
++			assertion: func(t *testing.T, key *KeyRing, mfaRequired proto.MFARequired, err error) {
+ 				require.NoError(t, err)
+ 				require.NotNil(t, key)
+ 				require.Equal(t, proto.MFARequired_MFA_REQUIRED_YES, mfaRequired)
+@@ -232,7 +232,7 @@ func TestIssueUserCertsWithMFA(t *testing.T) {
+ 				},
+ 			},
+ 			prompt: failedPrompt,
+-			assertion: func(t *testing.T, key *Key, mfaRequired proto.MFARequired, err error) {
++			assertion: func(t *testing.T, key *KeyRing, mfaRequired proto.MFARequired, err error) {
+ 				require.Error(t, err)
+ 				require.Nil(t, key)
+ 				require.Equal(t, proto.MFARequired_MFA_REQUIRED_YES, mfaRequired)
+@@ -243,7 +243,7 @@ func TestIssueUserCertsWithMFA(t *testing.T) {
+ 			agent: &LocalKeyAgent{
+ 				clientStore: NewMemClientStore(),
+ 			},
+-			assertion: func(t *testing.T, key *Key, mfaRequired proto.MFARequired, err error) {
++			assertion: func(t *testing.T, key *KeyRing, mfaRequired proto.MFARequired, err error) {
+ 				require.Error(t, err)
+ 				require.Nil(t, key)
+ 				require.Equal(t, proto.MFARequired_MFA_REQUIRED_UNSPECIFIED, mfaRequired)
+@@ -252,7 +252,7 @@ func TestIssueUserCertsWithMFA(t *testing.T) {
+ 		{
+ 			name:   "existing credentials used",
+ 			params: ReissueParams{NodeName: "test", ExistingCreds: key},
+-			assertion: func(t *testing.T, key *Key, mfaRequired proto.MFARequired, err error) {
++			assertion: func(t *testing.T, key *KeyRing, mfaRequired proto.MFARequired, err error) {
+ 				require.Error(t, err)
+ 				require.Nil(t, key)
+ 				require.Equal(t, proto.MFARequired_MFA_REQUIRED_UNSPECIFIED, mfaRequired)
+@@ -262,7 +262,7 @@ func TestIssueUserCertsWithMFA(t *testing.T) {
+ 			name:        "mfa unknown",
+ 			mfaRequired: proto.MFARequired_MFA_REQUIRED_UNSPECIFIED,
+ 			params:      ReissueParams{NodeName: "test"},
+-			assertion: func(t *testing.T, key *Key, mfaRequired proto.MFARequired, err error) {
++			assertion: func(t *testing.T, key *KeyRing, mfaRequired proto.MFARequired, err error) {
+ 				require.Error(t, err)
+ 				require.Nil(t, key)
+ 				require.Equal(t, proto.MFARequired_MFA_REQUIRED_UNSPECIFIED, mfaRequired)
+@@ -280,7 +280,7 @@ func TestIssueUserCertsWithMFA(t *testing.T) {
+ 					},
+ 				},
+ 			},
+-			assertion: func(t *testing.T, key *Key, mfaRequired proto.MFARequired, err error) {
++			assertion: func(t *testing.T, key *KeyRing, mfaRequired proto.MFARequired, err error) {
+ 				require.NoError(t, err)
+ 				require.NotNil(t, key)
+ 				require.Equal(t, proto.MFARequired_MFA_REQUIRED_NO, mfaRequired)
+@@ -298,7 +298,7 @@ func TestIssueUserCertsWithMFA(t *testing.T) {
+ 					},
+ 				},
+ 			},
+-			assertion: func(t *testing.T, key *Key, mfaRequired proto.MFARequired, err error) {
++			assertion: func(t *testing.T, key *KeyRing, mfaRequired proto.MFARequired, err error) {
+ 				require.NoError(t, err)
+ 				require.NotNil(t, key)
+ 				require.Equal(t, proto.MFARequired_MFA_REQUIRED_YES, mfaRequired)
+diff --git a/lib/client/conntest/kube.go b/lib/client/conntest/kube.go
+index 38f3c347799fa..24f8ec6d5476f 100644
+--- a/lib/client/conntest/kube.go
++++ b/lib/client/conntest/kube.go
+@@ -37,6 +37,7 @@ import (
+ 	"github.com/gravitational/teleport/api/utils/keys"
+ 	"github.com/gravitational/teleport/lib/auth/authclient"
+ 	"github.com/gravitational/teleport/lib/client"
++	"github.com/gravitational/teleport/lib/cryptosuites"
+ )
+ 
+ // KubeConnectionTesterConfig defines the config fields for KubeConnectionTester.
+@@ -157,11 +158,15 @@ func (s *KubeConnectionTester) TestConnection(ctx context.Context, req TestConne
+ // the given Kubernetes cluster name.
+ func (s KubeConnectionTester) genKubeRestTLSClientConfig(ctx context.Context, mfaResponse *proto.MFAAuthenticateResponse, connectionDiagnosticID, clusterName, userName string) (rest.TLSClientConfig, error) {
+ 	// TODO(nklaassen): support configurable key algorithms.
+-	key, err := client.GenerateRSAKey()
++	key, err := cryptosuites.GenerateKeyWithAlgorithm(cryptosuites.RSA2048)
+ 	if err != nil {
+ 		return rest.TLSClientConfig{}, trace.Wrap(err)
+ 	}
+ 
++	privateKeyPEM, err := keys.MarshalPrivateKey(key)
++	if err != nil {
++		return rest.TLSClientConfig{}, trace.Wrap(err)
++	}
+ 	publicKeyPEM, err := keys.MarshalPublicKey(key.Public())
+ 	if err != nil {
+ 		return rest.TLSClientConfig{}, trace.Wrap(err)
+@@ -179,8 +184,6 @@ func (s KubeConnectionTester) genKubeRestTLSClientConfig(ctx context.Context, mf
+ 		return rest.TLSClientConfig{}, trace.Wrap(err)
+ 	}
+ 
+-	key.TLSCert = certs.TLS
+-
+ 	ca, err := s.cfg.UserClient.GetClusterCACert(ctx)
+ 	if err != nil {
+ 		return rest.TLSClientConfig{}, trace.Wrap(err)
+@@ -188,8 +191,8 @@ func (s KubeConnectionTester) genKubeRestTLSClientConfig(ctx context.Context, mf
+ 
+ 	return rest.TLSClientConfig{
+ 		CAData:   ca.TLSCA,
+-		CertData: key.TLSCert,
+-		KeyData:  key.PrivateKeyPEM(),
++		CertData: certs.TLS,
++		KeyData:  privateKeyPEM,
+ 	}, nil
+ }
+ 
+diff --git a/lib/client/conntest/ssh.go b/lib/client/conntest/ssh.go
+index cf1aca41902cb..b30d6fad6eb40 100644
+--- a/lib/client/conntest/ssh.go
++++ b/lib/client/conntest/ssh.go
+@@ -113,7 +113,7 @@ func (s *SSHConnectionTester) TestConnection(ctx context.Context, req TestConnec
+ 		return nil, trace.Wrap(err)
+ 	}
+ 
+-	publicKeyPEM, err := keys.MarshalPublicKey(key.Public())
++	publicKeyPEM, err := keys.MarshalPublicKey(key.PrivateKey.Public())
+ 	if err != nil {
+ 		return nil, trace.Wrap(err)
+ 	}
+@@ -129,7 +129,7 @@ func (s *SSHConnectionTester) TestConnection(ctx context.Context, req TestConnec
+ 	}
+ 
+ 	certs, err := s.cfg.UserClient.GenerateUserCerts(ctx, proto.UserCertsRequest{
+-		SSHPublicKey:           key.MarshalSSHPublicKey(),
++		SSHPublicKey:           key.PrivateKey.MarshalSSHPublicKey(),
+ 		TLSPublicKey:           publicKeyPEM,
+ 		Username:               currentUser.GetName(),
+ 		Expires:                time.Now().Add(time.Minute).UTC(),
+diff --git a/lib/client/db/database_certificates.go b/lib/client/db/database_certificates.go
+index 74482927db76a..ed718261c1e1d 100644
+--- a/lib/client/db/database_certificates.go
++++ b/lib/client/db/database_certificates.go
+@@ -50,7 +50,7 @@ type GenerateDatabaseCertificatesRequest struct {
+ 	OutputLocation     string
+ 	IdentityFileWriter identityfile.ConfigWriter
+ 	TTL                time.Duration
+-	Key                *client.Key
++	Key                *client.KeyRing
+ 	// Password is used to generate JKS keystore used for cassandra format or Oracle wallet.
+ 	Password string
+ }
+diff --git a/lib/client/db/oracle/oracle.go b/lib/client/db/oracle/oracle.go
+index b7f8976262b21..ab54efce4467e 100644
+--- a/lib/client/db/oracle/oracle.go
++++ b/lib/client/db/oracle/oracle.go
+@@ -42,7 +42,7 @@ import (
+ // wallet.jks   - Java Wallet format used by JDBC Drivers.
+ // sqlnet.ora   - Generic Oracle Client Configuration File allowing to specify Wallet Location.
+ // tnsnames.ora - Oracle Net Service mapped to connections descriptors.
+-func GenerateClientConfiguration(key *client.Key, db tlsca.RouteToDatabase, profile *client.ProfileStatus) error {
++func GenerateClientConfiguration(key *client.KeyRing, db tlsca.RouteToDatabase, profile *client.ProfileStatus) error {
+ 	walletPath := profile.OracleWalletDir(key.ClusterName, db.ServiceName)
+ 	if err := os.MkdirAll(walletPath, teleport.PrivateDirMode); err != nil {
+ 		return trace.Wrap(err)
+@@ -73,8 +73,8 @@ func GenerateClientConfiguration(key *client.Key, db tlsca.RouteToDatabase, prof
+ 	return nil
+ }
+ 
+-func createClientWallet(key *client.Key, certPem []byte, password string, walletPath string) (string, error) {
+-	buff, err := createJKSWallet(key.PrivateKeyPEM(), certPem, certPem, password)
++func createClientWallet(key *client.KeyRing, certPem []byte, password string, walletPath string) (string, error) {
++	buff, err := createJKSWallet(key.PrivateKey.PrivateKeyPEM(), certPem, certPem, password)
+ 	if err != nil {
+ 		return "", trace.Wrap(err)
+ 	}
+diff --git a/lib/client/identityfile/identity.go b/lib/client/identityfile/identity.go
+index 59760cddd575b..77e63576af86c 100644
+--- a/lib/client/identityfile/identity.go
++++ b/lib/client/identityfile/identity.go
+@@ -181,7 +181,7 @@ type WriteConfig struct {
+ 	// and use OutputPath as a prefix.
+ 	OutputPath string
+ 	// Key contains the credentials to write to the identity file.
+-	Key *client.Key
++	Key *client.KeyRing
+ 	// Format is the output format for the identity file.
+ 	Format Format
+ 	// KubeProxyAddr is the public address of the proxy with its kubernetes
+@@ -230,7 +230,7 @@ func Write(ctx context.Context, cfg WriteConfig) (filesWritten []string, err err
+ 		}
+ 
+ 		idFile := &identityfile.IdentityFile{
+-			PrivateKey: cfg.Key.PrivateKeyPEM(),
++			PrivateKey: cfg.Key.PrivateKey.PrivateKeyPEM(),
+ 			Certs: identityfile.Certs{
+ 				SSH: cfg.Key.Cert,
+ 				TLS: cfg.Key.TLSCert,
+@@ -277,7 +277,7 @@ func Write(ctx context.Context, cfg WriteConfig) (filesWritten []string, err err
+ 			return nil, trace.Wrap(err)
+ 		}
+ 
+-		err = writer.WriteFile(keyPath, cfg.Key.PrivateKeyPEM(), identityfile.FilePermissions)
++		err = writer.WriteFile(keyPath, cfg.Key.PrivateKey.PrivateKeyPEM(), identityfile.FilePermissions)
+ 		if err != nil {
+ 			return nil, trace.Wrap(err)
+ 		}
+@@ -314,7 +314,7 @@ func Write(ctx context.Context, cfg WriteConfig) (filesWritten []string, err err
+ 			return nil, trace.Wrap(err)
+ 		}
+ 
+-		err = writer.WriteFile(keyPath, cfg.Key.PrivateKeyPEM(), identityfile.FilePermissions)
++		err = writer.WriteFile(keyPath, cfg.Key.PrivateKey.PrivateKeyPEM(), identityfile.FilePermissions)
+ 		if err != nil {
+ 			return nil, trace.Wrap(err)
+ 		}
+@@ -354,7 +354,7 @@ func Write(ctx context.Context, cfg WriteConfig) (filesWritten []string, err err
+ 			return nil, trace.Wrap(err)
+ 		}
+ 
+-		err = writer.WriteFile(keyPath, cfg.Key.PrivateKeyPEM(), identityfile.FilePermissions)
++		err = writer.WriteFile(keyPath, cfg.Key.PrivateKey.PrivateKeyPEM(), identityfile.FilePermissions)
+ 		if err != nil {
+ 			return nil, trace.Wrap(err)
+ 		}
+@@ -377,7 +377,7 @@ func Write(ctx context.Context, cfg WriteConfig) (filesWritten []string, err err
+ 		if err := checkOverwrite(ctx, writer, cfg.OverwriteDestination, filesWritten...); err != nil {
+ 			return nil, trace.Wrap(err)
+ 		}
+-		err = writer.WriteFile(certPath, append(cfg.Key.TLSCert, cfg.Key.PrivateKeyPEM()...), identityfile.FilePermissions)
++		err = writer.WriteFile(certPath, append(cfg.Key.TLSCert, cfg.Key.PrivateKey.PrivateKeyPEM()...), identityfile.FilePermissions)
+ 		if err != nil {
+ 			return nil, trace.Wrap(err)
+ 		}
+@@ -517,7 +517,7 @@ func writeOracleFormat(cfg WriteConfig, writer ConfigWriter) ([]string, error) {
+ 	if err != nil {
+ 		return nil, trace.Wrap(err)
+ 	}
+-	keyK, err := keys.ParsePrivateKey(cfg.Key.PrivateKeyPEM())
++	keyK, err := keys.ParsePrivateKey(cfg.Key.PrivateKey.PrivateKeyPEM())
+ 	if err != nil {
+ 		return nil, trace.Wrap(err)
+ 	}
+@@ -660,7 +660,7 @@ func prepareCassandraTruststore(cfg WriteConfig) (*bytes.Buffer, error) {
+ 
+ func prepareCassandraKeystore(cfg WriteConfig) (*bytes.Buffer, error) {
+ 	certBlock, _ := pem.Decode(cfg.Key.TLSCert)
+-	privBlock, _ := pem.Decode(cfg.Key.PrivateKeyPEM())
++	privBlock, _ := pem.Decode(cfg.Key.PrivateKey.PrivateKeyPEM())
+ 
+ 	privKey, err := x509.ParsePKCS1PrivateKey(privBlock.Bytes)
+ 	if err != nil {
+@@ -725,7 +725,7 @@ func checkOverwrite(ctx context.Context, writer ConfigWriter, force bool, paths
+ }
+ 
+ // KeyFromIdentityFile loads client key from identity file.
+-func KeyFromIdentityFile(identityPath, proxyHost, clusterName string) (*client.Key, error) {
++func KeyFromIdentityFile(identityPath, proxyHost, clusterName string) (*client.KeyRing, error) {
+ 	if proxyHost == "" {
+ 		return nil, trace.BadParameter("proxyHost must be provided to parse identity file")
+ 	}
+diff --git a/lib/client/identityfile/identity_test.go b/lib/client/identityfile/identity_test.go
+index 924563b1e4afc..0c8fc5d8ac6e7 100644
+--- a/lib/client/identityfile/identity_test.go
++++ b/lib/client/identityfile/identity_test.go
+@@ -73,7 +73,7 @@ func newSelfSignedCA(priv crypto.Signer) (*tlsca.CertAuthority, authclient.Trust
+ 	}, nil
+ }
+ 
+-func newClientKey(t *testing.T, modifiers ...func(*tlsca.Identity)) *client.Key {
++func newClientKey(t *testing.T, modifiers ...func(*tlsca.Identity)) *client.KeyRing {
+ 	privateKey, err := testauthority.New().GeneratePrivateKey()
+ 	require.NoError(t, err)
+ 
+@@ -143,7 +143,7 @@ func TestWrite(t *testing.T) {
+ 	// key is OK:
+ 	out, err := os.ReadFile(cfg.OutputPath)
+ 	require.NoError(t, err)
+-	require.Equal(t, string(out), string(key.PrivateKeyPEM()))
++	require.Equal(t, string(out), string(key.PrivateKey.PrivateKeyPEM()))
+ 
+ 	// cert is OK:
+ 	out, err = os.ReadFile(keypaths.IdentitySSHCertPath(cfg.OutputPath))
+@@ -168,7 +168,7 @@ func TestWrite(t *testing.T) {
+ 	require.NoError(t, err)
+ 
+ 	wantArr := [][]byte{
+-		key.PrivateKeyPEM(),
++		key.PrivateKey.PrivateKeyPEM(),
+ 		key.Cert,
+ 		key.TLSCert,
+ 		[]byte(knownHosts),
+diff --git a/lib/client/interfaces.go b/lib/client/interfaces.go
+index 06b7dc47bdc49..11bacf6906d1c 100644
+--- a/lib/client/interfaces.go
++++ b/lib/client/interfaces.go
+@@ -80,12 +80,15 @@ func (idx KeyIndex) Match(matchKey KeyIndex) bool {
+ 		(matchKey.Username == "" || matchKey.Username == idx.Username)
+ }
+ 
+-// Key describes a complete (signed) client key
+-type Key struct {
++// KeyRing describes a set of client keys and certifcates for a specific cluster.
++type KeyRing struct {
+ 	KeyIndex
+ 
+-	// PrivateKey is a private key used for cryptographical operations.
+-	*keys.PrivateKey
++	// PrivateKey represents the single cryptographic key associated with all
++	// certificates in the KeyRing. This will soon be deprecated and replaced
++	// with unique keys for each certificate, as part of the implementation of
++	// RFD 136.
++	PrivateKey *keys.PrivateKey
+ 
+ 	// Cert is an SSH client certificate
+ 	Cert []byte `json:"Cert,omitempty"`
+@@ -109,7 +112,7 @@ type Key struct {
+ }
+ 
+ // Copy returns a shallow copy of k, or nil if k is nil.
+-func (k *Key) Copy() *Key {
++func (k *KeyRing) Copy() *KeyRing {
+ 	if k == nil {
+ 		return nil
+ 	}
+@@ -118,7 +121,7 @@ func (k *Key) Copy() *Key {
+ }
+ 
+ // GenerateRSAKey generates a new unsigned key.
+-func GenerateRSAKey() (*Key, error) {
++func GenerateRSAKey() (*KeyRing, error) {
+ 	priv, err := native.GeneratePrivateKey()
+ 	if err != nil {
+ 		return nil, trace.Wrap(err)
+@@ -127,8 +130,8 @@ func GenerateRSAKey() (*Key, error) {
+ }
+ 
+ // NewKey creates a new Key for the given private key.
+-func NewKey(priv *keys.PrivateKey) *Key {
+-	return &Key{
++func NewKey(priv *keys.PrivateKey) *KeyRing {
++	return &KeyRing{
+ 		PrivateKey:          priv,
+ 		KubeTLSCerts:        make(map[string][]byte),
+ 		DBTLSCerts:          make(map[string][]byte),
+@@ -138,7 +141,7 @@ func NewKey(priv *keys.PrivateKey) *Key {
+ }
+ 
+ // RootClusterCAs returns root cluster CAs.
+-func (k *Key) RootClusterCAs() ([][]byte, error) {
++func (k *KeyRing) RootClusterCAs() ([][]byte, error) {
+ 	rootClusterName, err := k.RootClusterName()
+ 	if err != nil {
+ 		return nil, trace.Wrap(err)
+@@ -162,14 +165,14 @@ func (k *Key) RootClusterCAs() ([][]byte, error) {
+ }
+ 
+ // TLSCAs returns all TLS CA certificates from this key
+-func (k *Key) TLSCAs() (result [][]byte) {
++func (k *KeyRing) TLSCAs() (result [][]byte) {
+ 	for _, ca := range k.TrustedCerts {
+ 		result = append(result, ca.TLSCertificates...)
+ 	}
+ 	return result
+ }
+ 
+-func (k *Key) KubeClientTLSConfig(cipherSuites []uint16, kubeClusterName string) (*tls.Config, error) {
++func (k *KeyRing) KubeClientTLSConfig(cipherSuites []uint16, kubeClusterName string) (*tls.Config, error) {
+ 	rootCluster, err := k.RootClusterName()
+ 	if err != nil {
+ 		return nil, trace.Wrap(err)
+@@ -193,7 +196,7 @@ func (k *Key) KubeClientTLSConfig(cipherSuites []uint16, kubeClusterName string)
+ // If not CAs are present in the Key, the returned ssh.HostKeyCallback is nil.
+ // This causes golang.org/x/crypto/ssh to prompt the user to verify host key
+ // fingerprint (same as OpenSSH does for an unknown host).
+-func (k *Key) HostKeyCallback(hostnames ...string) (ssh.HostKeyCallback, error) {
++func (k *KeyRing) HostKeyCallback(hostnames ...string) (ssh.HostKeyCallback, error) {
+ 	trustedHostKeys, err := k.authorizedHostKeys(hostnames...)
+ 	if err != nil {
+ 		return nil, trace.Wrap(err)
+@@ -203,7 +206,7 @@ func (k *Key) HostKeyCallback(hostnames ...string) (ssh.HostKeyCallback, error)
+ 
+ // authorizedHostKeys returns all authorized host keys from this key. If any host
+ // names are provided, only matching host keys will be returned.
+-func (k *Key) authorizedHostKeys(hostnames ...string) ([]ssh.PublicKey, error) {
++func (k *KeyRing) authorizedHostKeys(hostnames ...string) ([]ssh.PublicKey, error) {
+ 	var hostKeys []ssh.PublicKey
+ 	for _, ca := range k.TrustedCerts {
+ 		// Mirror the hosts we would find in a known_hosts entry.
+@@ -224,15 +227,15 @@ func (k *Key) authorizedHostKeys(hostnames ...string) ([]ssh.PublicKey, error) {
+ 
+ // TeleportClientTLSConfig returns client TLS configuration used
+ // to authenticate against API servers.
+-func (k *Key) TeleportClientTLSConfig(cipherSuites []uint16, clusters []string) (*tls.Config, error) {
++func (k *KeyRing) TeleportClientTLSConfig(cipherSuites []uint16, clusters []string) (*tls.Config, error) {
+ 	if len(k.TLSCert) == 0 {
+ 		return nil, trace.NotFound("TLS certificate not found")
+ 	}
+ 	return k.clientTLSConfig(cipherSuites, k.TLSCert, clusters)
+ }
+ 
+-func (k *Key) clientTLSConfig(cipherSuites []uint16, tlsCertRaw []byte, clusters []string) (*tls.Config, error) {
+-	tlsCert, err := k.TLSCertificate(tlsCertRaw)
++func (k *KeyRing) clientTLSConfig(cipherSuites []uint16, tlsCertRaw []byte, clusters []string) (*tls.Config, error) {
++	tlsCert, err := k.PrivateKey.TLSCertificate(tlsCertRaw)
+ 	if err != nil {
+ 		return nil, trace.Wrap(err)
+ 	}
+@@ -256,7 +259,7 @@ func (k *Key) clientTLSConfig(cipherSuites []uint16, tlsCertRaw []byte, clusters
+ }
+ 
+ // ClientCertPool returns x509.CertPool containing trusted CA.
+-func (k *Key) clientCertPool(clusters ...string) (*x509.CertPool, error) {
++func (k *KeyRing) clientCertPool(clusters ...string) (*x509.CertPool, error) {
+ 	pool := x509.NewCertPool()
+ 	for _, caPEM := range k.TLSCAs() {
+ 		cert, err := tlsca.ParseCertificatePEM(caPEM)
+@@ -279,13 +282,13 @@ func (k *Key) clientCertPool(clusters ...string) (*x509.CertPool, error) {
+ //
+ // The config is set up to authenticate to proxy with the first available principal
+ // and ( if keyStore != nil ) trust local SSH CAs without asking for public keys.
+-func (k *Key) ProxyClientSSHConfig(hostname string) (*ssh.ClientConfig, error) {
++func (k *KeyRing) ProxyClientSSHConfig(hostname string) (*ssh.ClientConfig, error) {
+ 	sshCert, err := k.SSHCert()
+ 	if err != nil {
+ 		return nil, trace.Wrap(err, "failed to extract username from SSH certificate")
+ 	}
+ 
+-	sshConfig, err := sshutils.ProxyClientSSHConfig(sshCert, k)
++	sshConfig, err := sshutils.ProxyClientSSHConfig(sshCert, k.PrivateKey.Signer)
+ 	if err != nil {
+ 		return nil, trace.Wrap(err)
+ 	}
+@@ -299,7 +302,7 @@ func (k *Key) ProxyClientSSHConfig(hostname string) (*ssh.ClientConfig, error) {
+ }
+ 
+ // CertUsername returns the name of the Teleport user encoded in the SSH certificate.
+-func (k *Key) CertUsername() (string, error) {
++func (k *KeyRing) CertUsername() (string, error) {
+ 	cert, err := k.SSHCert()
+ 	if err != nil {
+ 		return "", trace.Wrap(err)
+@@ -308,7 +311,7 @@ func (k *Key) CertUsername() (string, error) {
+ }
+ 
+ // CertPrincipals returns the principals listed on the SSH certificate.
+-func (k *Key) CertPrincipals() ([]string, error) {
++func (k *KeyRing) CertPrincipals() ([]string, error) {
+ 	cert, err := k.SSHCert()
+ 	if err != nil {
+ 		return nil, trace.Wrap(err)
+@@ -316,7 +319,7 @@ func (k *Key) CertPrincipals() ([]string, error) {
+ 	return cert.ValidPrincipals, nil
+ }
+ 
+-func (k *Key) CertRoles() ([]string, error) {
++func (k *KeyRing) CertRoles() ([]string, error) {
+ 	cert, err := k.SSHCert()
+ 	if err != nil {
+ 		return nil, trace.Wrap(err)
+@@ -375,14 +378,14 @@ func isTeleportAgentKey(key *agent.Key) bool {
+ // can be added to a local agent (keyring), nut non-standard keys cannot be added
+ // to an SSH system agent through the ssh agent protocol. Check canAddToSystemAgent
+ // before adding this key to an SSH system agent.
+-func (k *Key) AsAgentKey() (agent.AddedKey, error) {
++func (k *KeyRing) AsAgentKey() (agent.AddedKey, error) {
+ 	sshCert, err := k.SSHCert()
+ 	if err != nil {
+ 		return agent.AddedKey{}, trace.Wrap(err)
+ 	}
+ 
+ 	return agent.AddedKey{
+-		PrivateKey:       k.Signer,
++		PrivateKey:       k.PrivateKey.Signer,
+ 		Certificate:      sshCert,
+ 		Comment:          teleportAgentKeyComment(k.KeyIndex),
+ 		LifetimeSecs:     0,
+@@ -403,7 +406,7 @@ func canAddToSystemAgent(agentKey agent.AddedKey) bool {
+ 
+ // TeleportTLSCertificate returns the parsed x509 certificate for
+ // authentication against Teleport APIs.
+-func (k *Key) TeleportTLSCertificate() (*x509.Certificate, error) {
++func (k *KeyRing) TeleportTLSCertificate() (*x509.Certificate, error) {
+ 	if len(k.TLSCert) == 0 {
+ 		return nil, trace.NotFound("TLS certificate not found")
+ 	}
+@@ -412,7 +415,7 @@ func (k *Key) TeleportTLSCertificate() (*x509.Certificate, error) {
+ 
+ // KubeX509Cert returns the parsed x509 certificate for authentication against
+ // a named kubernetes cluster.
+-func (k *Key) KubeX509Cert(kubeClusterName string) (*x509.Certificate, error) {
++func (k *KeyRing) KubeX509Cert(kubeClusterName string) (*x509.Certificate, error) {
+ 	tlsCert, ok := k.KubeTLSCerts[kubeClusterName]
+ 	if !ok {
+ 		return nil, trace.NotFound("TLS certificate for kubernetes cluster %q not found", kubeClusterName)
+@@ -422,7 +425,7 @@ func (k *Key) KubeX509Cert(kubeClusterName string) (*x509.Certificate, error) {
+ 
+ // KubeTLSCert returns the tls.Certificate for authentication against a named
+ // kubernetes cluster.
+-func (k *Key) KubeTLSCert(kubeClusterName string) (tls.Certificate, error) {
++func (k *KeyRing) KubeTLSCert(kubeClusterName string) (tls.Certificate, error) {
+ 	certPem, ok := k.KubeTLSCerts[kubeClusterName]
+ 	if !ok {
+ 		return tls.Certificate{}, trace.NotFound("TLS certificate for kubernetes cluster %q not found", kubeClusterName)
+@@ -435,7 +438,7 @@ func (k *Key) KubeTLSCert(kubeClusterName string) (tls.Certificate, error) {
+ }
+ 
+ // DBTLSCert returns the tls.Certificate for authentication against a named database.
+-func (k *Key) DBTLSCert(dbName string) (tls.Certificate, error) {
++func (k *KeyRing) DBTLSCert(dbName string) (tls.Certificate, error) {
+ 	certPem, ok := k.DBTLSCerts[dbName]
+ 	if !ok {
+ 		return tls.Certificate{}, trace.NotFound("TLS certificate for database %q not found", dbName)
+@@ -448,7 +451,7 @@ func (k *Key) DBTLSCert(dbName string) (tls.Certificate, error) {
+ }
+ 
+ // DBTLSCertificates returns all parsed x509 database access certificates.
+-func (k *Key) DBTLSCertificates() (certs []x509.Certificate, err error) {
++func (k *KeyRing) DBTLSCertificates() (certs []x509.Certificate, err error) {
+ 	for _, bytes := range k.DBTLSCerts {
+ 		cert, err := tlsca.ParseCertificatePEM(bytes)
+ 		if err != nil {
+@@ -460,7 +463,7 @@ func (k *Key) DBTLSCertificates() (certs []x509.Certificate, err error) {
+ }
+ 
+ // AppTLSCert returns the tls.Certificate for authentication against a named app.
+-func (k *Key) AppTLSCert(appName string) (tls.Certificate, error) {
++func (k *KeyRing) AppTLSCert(appName string) (tls.Certificate, error) {
+ 	certPem, ok := k.AppTLSCerts[appName]
+ 	if !ok {
+ 		return tls.Certificate{}, trace.NotFound("TLS certificate for application %q not found", appName)
+@@ -473,7 +476,7 @@ func (k *Key) AppTLSCert(appName string) (tls.Certificate, error) {
+ }
+ 
+ // AppTLSCertificates returns all parsed x509 app access certificates.
+-func (k *Key) AppTLSCertificates() (certs []x509.Certificate, err error) {
++func (k *KeyRing) AppTLSCertificates() (certs []x509.Certificate, err error) {
+ 	for _, bytes := range k.AppTLSCerts {
+ 		cert, err := tlsca.ParseCertificatePEM(bytes)
+ 		if err != nil {
+@@ -485,7 +488,7 @@ func (k *Key) AppTLSCertificates() (certs []x509.Certificate, err error) {
+ }
+ 
+ // TeleportTLSCertValidBefore returns the time of the TLS cert expiration
+-func (k *Key) TeleportTLSCertValidBefore() (t time.Time, err error) {
++func (k *KeyRing) TeleportTLSCertValidBefore() (t time.Time, err error) {
+ 	cert, err := k.TeleportTLSCertificate()
+ 	if err != nil {
+ 		return t, trace.Wrap(err)
+@@ -494,7 +497,7 @@ func (k *Key) TeleportTLSCertValidBefore() (t time.Time, err error) {
+ }
+ 
+ // CertValidBefore returns the time of the cert expiration
+-func (k *Key) CertValidBefore() (t time.Time, err error) {
++func (k *KeyRing) CertValidBefore() (t time.Time, err error) {
+ 	cert, err := k.SSHCert()
+ 	if err != nil {
+ 		return t, trace.Wrap(err)
+@@ -505,25 +508,25 @@ func (k *Key) CertValidBefore() (t time.Time, err error) {
+ // AsAuthMethod returns an "auth method" interface, a common abstraction
+ // used by Golang SSH library. This is how you actually use a Key to feed
+ // it into the SSH lib.
+-func (k *Key) AsAuthMethod() (ssh.AuthMethod, error) {
++func (k *KeyRing) AsAuthMethod() (ssh.AuthMethod, error) {
+ 	cert, err := k.SSHCert()
+ 	if err != nil {
+ 		return nil, trace.Wrap(err)
+ 	}
+-	return sshutils.AsAuthMethod(cert, k)
++	return sshutils.AsAuthMethod(cert, k.PrivateKey)
+ }
+ 
+ // SSHSigner returns an ssh.Signer using the SSH certificate in this key.
+-func (k *Key) SSHSigner() (ssh.Signer, error) {
++func (k *KeyRing) SSHSigner() (ssh.Signer, error) {
+ 	cert, err := k.SSHCert()
+ 	if err != nil {
+ 		return nil, trace.Wrap(err)
+ 	}
+-	return sshutils.SSHSigner(cert, k)
++	return sshutils.SSHSigner(cert, k.PrivateKey)
+ }
+ 
+ // SSHCert returns parsed SSH certificate
+-func (k *Key) SSHCert() (*ssh.Certificate, error) {
++func (k *KeyRing) SSHCert() (*ssh.Certificate, error) {
+ 	if k.Cert == nil {
+ 		return nil, trace.NotFound("SSH cert not found")
+ 	}
+@@ -531,7 +534,7 @@ func (k *Key) SSHCert() (*ssh.Certificate, error) {
+ }
+ 
+ // ActiveRequests gets the active requests associated with this key.
+-func (k *Key) ActiveRequests() (services.RequestIDs, error) {
++func (k *KeyRing) ActiveRequests() (services.RequestIDs, error) {
+ 	var activeRequests services.RequestIDs
+ 	sshCert, err := k.SSHCert()
+ 	if err != nil {
+@@ -547,7 +550,7 @@ func (k *Key) ActiveRequests() (services.RequestIDs, error) {
+ }
+ 
+ // CheckCert makes sure the key's SSH certificate is valid.
+-func (k *Key) CheckCert() error {
++func (k *KeyRing) CheckCert() error {
+ 	cert, err := k.SSHCert()
+ 	if err != nil {
+ 		return trace.Wrap(err)
+@@ -561,10 +564,10 @@ func (k *Key) CheckCert() error {
+ }
+ 
+ // checkCert makes sure the given SSH certificate is valid.
+-func (k *Key) checkCert(sshCert *ssh.Certificate) error {
++func (k *KeyRing) checkCert(sshCert *ssh.Certificate) error {
+ 	// Check that the certificate was for the current public key. If not, the
+ 	// public/private key pair may have been rotated.
+-	if !sshutils.KeysEqual(sshCert.Key, k.SSHPublicKey()) {
++	if !sshutils.KeysEqual(sshCert.Key, k.PrivateKey.SSHPublicKey()) {
+ 		return trace.CompareFailed("public key in profile does not match the public key in SSH certificate")
+ 	}
+ 
+@@ -584,7 +587,7 @@ func (k *Key) checkCert(sshCert *ssh.Certificate) error {
+ 
+ // RootClusterName extracts the root cluster name from the issuer
+ // of the Teleport TLS certificate.
+-func (k *Key) RootClusterName() (string, error) {
++func (k *KeyRing) RootClusterName() (string, error) {
+ 	cert, err := k.TeleportTLSCertificate()
+ 	if err != nil {
+ 		return "", trace.Wrap(err)
+@@ -597,12 +600,12 @@ func (k *Key) RootClusterName() (string, error) {
+ }
+ 
+ // EqualPrivateKey returns whether this key and the given key have the same PrivateKey.
+-func (k *Key) EqualPrivateKey(other *Key) bool {
++func (k *KeyRing) EqualPrivateKey(other *KeyRing) bool {
+ 	// Compare both private and public key PEM, since hardware keys
+ 	// may not be uniquely identifiable by their private key PEM alone.
+ 	// For example, for PIV keys, the private key PEM only uniquely
+ 	// identifies a PIV slot, so we can use the public key to verify
+ 	// that the private key on the slot hasn't changed.
+-	return subtle.ConstantTimeCompare(k.PrivateKeyPEM(), other.PrivateKeyPEM()) == 1 &&
+-		bytes.Equal(k.MarshalSSHPublicKey(), other.MarshalSSHPublicKey())
++	return subtle.ConstantTimeCompare(k.PrivateKey.PrivateKeyPEM(), other.PrivateKey.PrivateKeyPEM()) == 1 &&
++		bytes.Equal(k.PrivateKey.MarshalSSHPublicKey(), other.PrivateKey.MarshalSSHPublicKey())
+ }
+diff --git a/lib/client/keyagent.go b/lib/client/keyagent.go
+index fc7381c6599c5..9a49870a79d48 100644
+--- a/lib/client/keyagent.go
++++ b/lib/client/keyagent.go
+@@ -183,7 +183,7 @@ func (a *LocalKeyAgent) LoadKeyForCluster(clusterName string) error {
+ // Some agent keys are only supported by the local agent, such as those
+ // for a YubiKeyPrivateKey. Any failures to add the key will be aggregated
+ // into the returned error to be handled by the caller if necessary.
+-func (a *LocalKeyAgent) LoadKey(key Key) error {
++func (a *LocalKeyAgent) LoadKey(key KeyRing) error {
+ 	// convert key into a format understood by x/crypto/ssh/agent
+ 	agentKey, err := key.AsAgentKey()
+ 	if err != nil {
+@@ -296,7 +296,7 @@ func (a *LocalKeyAgent) UnloadKeys() error {
+ 
+ // GetKey returns the key for the given cluster of the proxy from
+ // the backing keystore.
+-func (a *LocalKeyAgent) GetKey(clusterName string, opts ...CertOption) (*Key, error) {
++func (a *LocalKeyAgent) GetKey(clusterName string, opts ...CertOption) (*KeyRing, error) {
+ 	idx := KeyIndex{a.proxyHost, a.username, clusterName}
+ 	key, err := a.clientStore.GetKey(idx, opts...)
+ 	if err != nil {
+@@ -312,7 +312,7 @@ func (a *LocalKeyAgent) GetKey(clusterName string, opts ...CertOption) (*Key, er
+ 
+ // GetCoreKey returns the key without any cluster-dependent certificates,
+ // i.e. including only the private key and the Teleport TLS certificate.
+-func (a *LocalKeyAgent) GetCoreKey() (*Key, error) {
++func (a *LocalKeyAgent) GetCoreKey() (*KeyRing, error) {
+ 	return a.GetKey("")
+ }
+ 
+@@ -492,7 +492,7 @@ func (a *LocalKeyAgent) defaultHostPromptFunc(host string, key ssh.PublicKey, wr
+ 
+ // AddKey activates a new signed session key by adding it into the keystore and also
+ // by loading it into the SSH agent.
+-func (a *LocalKeyAgent) AddKey(key *Key) error {
++func (a *LocalKeyAgent) AddKey(key *KeyRing) error {
+ 	if err := a.addKey(key); err != nil {
+ 		return trace.Wrap(err)
+ 	}
+@@ -505,7 +505,7 @@ func (a *LocalKeyAgent) AddKey(key *Key) error {
+ 
+ // AddDatabaseKey activates a new signed database key by adding it into the keystore.
+ // key must contain at least one db cert. ssh cert is not required.
+-func (a *LocalKeyAgent) AddDatabaseKey(key *Key) error {
++func (a *LocalKeyAgent) AddDatabaseKey(key *KeyRing) error {
+ 	if len(key.DBTLSCerts) == 0 {
+ 		return trace.BadParameter("key must contains at least one database access certificate")
+ 	}
+@@ -514,7 +514,7 @@ func (a *LocalKeyAgent) AddDatabaseKey(key *Key) error {
+ 
+ // AddKubeKey activates a new signed Kubernetes key by adding it into the keystore.
+ // key must contain at least one Kubernetes cert. ssh cert is not required.
+-func (a *LocalKeyAgent) AddKubeKey(key *Key) error {
++func (a *LocalKeyAgent) AddKubeKey(key *KeyRing) error {
+ 	if len(key.KubeTLSCerts) == 0 {
+ 		return trace.BadParameter("key must contains at least one Kubernetes access certificate")
+ 	}
+@@ -523,7 +523,7 @@ func (a *LocalKeyAgent) AddKubeKey(key *Key) error {
+ 
+ // AddAppKey activates a new signed app key by adding it into the keystore.
+ // key must contain at least one app cert. ssh cert is not required.
+-func (a *LocalKeyAgent) AddAppKey(key *Key) error {
++func (a *LocalKeyAgent) AddAppKey(key *KeyRing) error {
+ 	if len(key.AppTLSCerts) == 0 {
+ 		return trace.BadParameter("key must contains at least one App access certificate")
+ 	}
+@@ -531,7 +531,7 @@ func (a *LocalKeyAgent) AddAppKey(key *Key) error {
+ }
+ 
+ // addKey activates a new signed session key by adding it into the keystore.
+-func (a *LocalKeyAgent) addKey(key *Key) error {
++func (a *LocalKeyAgent) addKey(key *KeyRing) error {
+ 	if key == nil {
+ 		return trace.BadParameter("key is nil")
+ 	}
+@@ -627,7 +627,7 @@ func (a *LocalKeyAgent) Signers() ([]ssh.Signer, error) {
+ 			if err := k.checkCert(cert); err != nil {
+ 				return nil, trace.Wrap(err)
+ 			}
+-			signer, err := sshutils.SSHSigner(cert, k)
++			signer, err := sshutils.SSHSigner(cert, k.PrivateKey.Signer)
+ 			if err != nil {
+ 				return nil, trace.Wrap(err)
+ 			}
+diff --git a/lib/client/keyagent_test.go b/lib/client/keyagent_test.go
+index 3d7d3250bbc62..b183406a12578 100644
+--- a/lib/client/keyagent_test.go
++++ b/lib/client/keyagent_test.go
+@@ -54,7 +54,7 @@ import (
+ 
+ type KeyAgentTestSuite struct {
+ 	keyDir      string
+-	key         *Key
++	key         *KeyRing
+ 	username    string
+ 	hostname    string
+ 	clusterName string
+@@ -203,7 +203,7 @@ func TestLoadKey(t *testing.T) {
+ 	require.NoError(t, err)
+ 
+ 	// Create 3 separate keys, with overlapping user and cluster names
+-	keys := []*Key{
++	keys := []*KeyRing{
+ 		s.key,
+ 		s.genKey(t, s.key.Username, "other-proxy-host"),
+ 		s.genKey(t, "other-user", s.key.ProxyHost),
+@@ -716,7 +716,7 @@ func TestLocalKeyAgent_AddDatabaseKey(t *testing.T) {
+ 	})
+ }
+ 
+-func (s *KeyAgentTestSuite) makeKey(t *testing.T, username, proxyHost string, priv *keys.PrivateKey) *Key {
++func (s *KeyAgentTestSuite) makeKey(t *testing.T, username, proxyHost string, priv *keys.PrivateKey) *KeyRing {
+ 	keygen := testauthority.New()
+ 	ttl := time.Minute
+ 
+@@ -754,7 +754,7 @@ func (s *KeyAgentTestSuite) makeKey(t *testing.T, username, proxyHost string, pr
+ 	})
+ 	require.NoError(t, err)
+ 
+-	return &Key{
++	return &KeyRing{
+ 		PrivateKey: priv,
+ 		Cert:       certificate,
+ 		TLSCert:    tlsCert,
+@@ -766,7 +766,7 @@ func (s *KeyAgentTestSuite) makeKey(t *testing.T, username, proxyHost string, pr
+ 	}
+ }
+ 
+-func (s *KeyAgentTestSuite) genKey(t *testing.T, username, proxyHost string) *Key {
++func (s *KeyAgentTestSuite) genKey(t *testing.T, username, proxyHost string) *KeyRing {
+ 	priv, err := native.GeneratePrivateKey()
+ 	require.NoError(t, err)
+ 	return s.makeKey(t, username, proxyHost, priv)
+diff --git a/lib/client/keystore.go b/lib/client/keystore.go
+index ae8dca55b0168..27940187d0eca 100644
+--- a/lib/client/keystore.go
++++ b/lib/client/keystore.go
+@@ -59,11 +59,11 @@ const (
+ // KeyStore is a storage interface for client session keys and certificates.
+ type KeyStore interface {
+ 	// AddKey adds the given key to the store.
+-	AddKey(key *Key) error
++	AddKey(key *KeyRing) error
+ 
+ 	// GetKey returns the user's key including the specified certs. The key's
+ 	// TrustedCerts will be nil and should be filled in using a TrustedCertsStore.
+-	GetKey(idx KeyIndex, opts ...CertOption) (*Key, error)
++	GetKey(idx KeyIndex, opts ...CertOption) (*KeyRing, error)
+ 
+ 	// DeleteKey deletes the user's key with all its certs.
+ 	DeleteKey(idx KeyIndex) error
+@@ -153,16 +153,16 @@ func (fs *FSKeyStore) kubeCertPath(idx KeyIndex, kubename string) string {
+ }
+ 
+ // AddKey adds the given key to the store.
+-func (fs *FSKeyStore) AddKey(key *Key) error {
++func (fs *FSKeyStore) AddKey(key *KeyRing) error {
+ 	if err := key.KeyIndex.Check(); err != nil {
+ 		return trace.Wrap(err)
+ 	}
+ 
+-	if err := fs.writeBytes(key.PrivateKeyPEM(), fs.userKeyPath(key.KeyIndex)); err != nil {
++	if err := fs.writeBytes(key.PrivateKey.PrivateKeyPEM(), fs.userKeyPath(key.KeyIndex)); err != nil {
+ 		return trace.Wrap(err)
+ 	}
+ 
+-	if err := fs.writeBytes(key.MarshalSSHPublicKey(), fs.publicKeyPath(key.KeyIndex)); err != nil {
++	if err := fs.writeBytes(key.PrivateKey.MarshalSSHPublicKey(), fs.publicKeyPath(key.KeyIndex)); err != nil {
+ 		return trace.Wrap(err)
+ 	}
+ 
+@@ -173,7 +173,7 @@ func (fs *FSKeyStore) AddKey(key *Key) error {
+ 
+ 	// We only generate PPK files for use by PuTTY when running tsh on Windows.
+ 	if runtime.GOOS == constants.WindowsOS {
+-		ppkFile, err := key.PPKFile()
++		ppkFile, err := key.PrivateKey.PPKFile()
+ 		// PPKFile can only be generated from an RSA private key. If the key is in a different
+ 		// format, a BadParameter error is returned and we can skip PPK generation.
+ 		if err != nil && !trace.IsBadParameter(err) {
+@@ -308,7 +308,7 @@ func (fs *FSKeyStore) DeleteKeys() error {
+ 
+ // GetKey returns the user's key including the specified certs.
+ // If the key is not found, returns trace.NotFound error.
+-func (fs *FSKeyStore) GetKey(idx KeyIndex, opts ...CertOption) (*Key, error) {
++func (fs *FSKeyStore) GetKey(idx KeyIndex, opts ...CertOption) (*KeyRing, error) {
+ 	if len(opts) > 0 {
+ 		if err := idx.Check(); err != nil {
+ 			return nil, trace.Wrap(err, "GetKey with CertOptions requires a fully specified KeyIndex")
+@@ -347,7 +347,7 @@ func (fs *FSKeyStore) GetKey(idx KeyIndex, opts ...CertOption) (*Key, error) {
+ 	return key, nil
+ }
+ 
+-func (fs *FSKeyStore) updateKeyWithCerts(o CertOption, key *Key) error {
++func (fs *FSKeyStore) updateKeyWithCerts(o CertOption, key *KeyRing) error {
+ 	certPath := o.certPath(fs.KeyDir, key.KeyIndex)
+ 	info, err := os.Stat(certPath)
+ 	if err != nil {
+@@ -412,11 +412,11 @@ type CertOption interface {
+ 	// within the given key dir. For use with FSLocalKeyStore.
+ 	certPath(keyDir string, idx KeyIndex) string
+ 	// updateKeyWithBytes adds the cert bytes to the key and performs related checks.
+-	updateKeyWithBytes(key *Key, certBytes []byte) error
++	updateKeyWithBytes(key *KeyRing, certBytes []byte) error
+ 	// updateKeyWithMap adds the cert data map to the key and performs related checks.
+-	updateKeyWithMap(key *Key, certMap map[string][]byte) error
++	updateKeyWithMap(key *KeyRing, certMap map[string][]byte) error
+ 	// deleteFromKey deletes the cert data from the key.
+-	deleteFromKey(key *Key)
++	deleteFromKey(key *KeyRing)
+ }
+ 
+ // WithAllCerts lists all known CertOptions.
+@@ -432,16 +432,16 @@ func (o WithSSHCerts) certPath(keyDir string, idx KeyIndex) string {
+ 	return keypaths.SSHCertPath(keyDir, idx.ProxyHost, idx.Username, idx.ClusterName)
+ }
+ 
+-func (o WithSSHCerts) updateKeyWithBytes(key *Key, certBytes []byte) error {
++func (o WithSSHCerts) updateKeyWithBytes(key *KeyRing, certBytes []byte) error {
+ 	key.Cert = certBytes
+ 	return nil
+ }
+ 
+-func (o WithSSHCerts) updateKeyWithMap(key *Key, certMap map[string][]byte) error {
++func (o WithSSHCerts) updateKeyWithMap(key *KeyRing, certMap map[string][]byte) error {
+ 	return trace.NotImplemented("WithSSHCerts does not implement updateKeyWithMap")
+ }
+ 
+-func (o WithSSHCerts) deleteFromKey(key *Key) {
++func (o WithSSHCerts) deleteFromKey(key *KeyRing) {
+ 	key.Cert = nil
+ }
+ 
+@@ -455,16 +455,16 @@ func (o WithKubeCerts) certPath(keyDir string, idx KeyIndex) string {
+ 	return keypaths.KubeCertDir(keyDir, idx.ProxyHost, idx.Username, idx.ClusterName)
+ }
+ 
+-func (o WithKubeCerts) updateKeyWithBytes(key *Key, certBytes []byte) error {
++func (o WithKubeCerts) updateKeyWithBytes(key *KeyRing, certBytes []byte) error {
+ 	return trace.NotImplemented("WithKubeCerts does not implement updateKeyWithBytes")
+ }
+ 
+-func (o WithKubeCerts) updateKeyWithMap(key *Key, certMap map[string][]byte) error {
++func (o WithKubeCerts) updateKeyWithMap(key *KeyRing, certMap map[string][]byte) error {
+ 	key.KubeTLSCerts = certMap
+ 	return nil
+ }
+ 
+-func (o WithKubeCerts) deleteFromKey(key *Key) {
++func (o WithKubeCerts) deleteFromKey(key *KeyRing) {
+ 	key.KubeTLSCerts = make(map[string][]byte)
+ }
+ 
+@@ -483,16 +483,16 @@ func (o WithDBCerts) certPath(keyDir string, idx KeyIndex) string {
+ 	return keypaths.DatabaseCertPath(keyDir, idx.ProxyHost, idx.Username, idx.ClusterName, o.dbName)
+ }
+ 
+-func (o WithDBCerts) updateKeyWithBytes(key *Key, certBytes []byte) error {
++func (o WithDBCerts) updateKeyWithBytes(key *KeyRing, certBytes []byte) error {
+ 	return trace.NotImplemented("WithDBCerts does not implement updateKeyWithBytes")
+ }
+ 
+-func (o WithDBCerts) updateKeyWithMap(key *Key, certMap map[string][]byte) error {
++func (o WithDBCerts) updateKeyWithMap(key *KeyRing, certMap map[string][]byte) error {
+ 	key.DBTLSCerts = certMap
+ 	return nil
+ }
+ 
+-func (o WithDBCerts) deleteFromKey(key *Key) {
++func (o WithDBCerts) deleteFromKey(key *KeyRing) {
+ 	key.DBTLSCerts = make(map[string][]byte)
+ }
+ 
+@@ -511,16 +511,16 @@ func (o WithAppCerts) certPath(keyDir string, idx KeyIndex) string {
+ 	return keypaths.AppCertPath(keyDir, idx.ProxyHost, idx.Username, idx.ClusterName, o.appName)
+ }
+ 
+-func (o WithAppCerts) updateKeyWithBytes(key *Key, certBytes []byte) error {
++func (o WithAppCerts) updateKeyWithBytes(key *KeyRing, certBytes []byte) error {
+ 	return trace.NotImplemented("WithAppCerts does not implement updateKeyWithBytes")
+ }
+ 
+-func (o WithAppCerts) updateKeyWithMap(key *Key, certMap map[string][]byte) error {
++func (o WithAppCerts) updateKeyWithMap(key *KeyRing, certMap map[string][]byte) error {
+ 	key.AppTLSCerts = certMap
+ 	return nil
+ }
+ 
+-func (o WithAppCerts) deleteFromKey(key *Key) {
++func (o WithAppCerts) deleteFromKey(key *KeyRing) {
+ 	key.AppTLSCerts = make(map[string][]byte)
+ }
+ 
+@@ -530,7 +530,7 @@ type MemKeyStore struct {
+ }
+ 
+ // keyMap is a three-dimensional map indexed by [proxyHost][username][clusterName]
+-type keyMap map[string]map[string]map[string]*Key
++type keyMap map[string]map[string]map[string]*KeyRing
+ 
+ func NewMemKeyStore() *MemKeyStore {
+ 	return &MemKeyStore{
+@@ -539,17 +539,17 @@ func NewMemKeyStore() *MemKeyStore {
+ }
+ 
+ // AddKey writes a key to the underlying key store.
+-func (ms *MemKeyStore) AddKey(key *Key) error {
++func (ms *MemKeyStore) AddKey(key *KeyRing) error {
+ 	if err := key.KeyIndex.Check(); err != nil {
+ 		return trace.Wrap(err)
+ 	}
+ 	_, ok := ms.keys[key.ProxyHost]
+ 	if !ok {
+-		ms.keys[key.ProxyHost] = map[string]map[string]*Key{}
++		ms.keys[key.ProxyHost] = map[string]map[string]*KeyRing{}
+ 	}
+ 	_, ok = ms.keys[key.ProxyHost][key.Username]
+ 	if !ok {
+-		ms.keys[key.ProxyHost][key.Username] = map[string]*Key{}
++		ms.keys[key.ProxyHost][key.Username] = map[string]*KeyRing{}
+ 	}
+ 	keyCopy := key.Copy()
+ 
+@@ -563,7 +563,7 @@ func (ms *MemKeyStore) AddKey(key *Key) error {
+ }
+ 
+ // GetKey returns the user's key including the specified certs.
+-func (ms *MemKeyStore) GetKey(idx KeyIndex, opts ...CertOption) (*Key, error) {
++func (ms *MemKeyStore) GetKey(idx KeyIndex, opts ...CertOption) (*KeyRing, error) {
+ 	if len(opts) > 0 {
+ 		if err := idx.Check(); err != nil {
+ 			return nil, trace.Wrap(err, "GetKey with CertOptions requires a fully specified KeyIndex")
+@@ -573,7 +573,7 @@ func (ms *MemKeyStore) GetKey(idx KeyIndex, opts ...CertOption) (*Key, error) {
+ 	// If clusterName is not specified then the cluster-dependent fields
+ 	// are not considered relevant and we may simply return any key
+ 	// associated with any cluster name whatsoever.
+-	var key *Key
++	var key *KeyRing
+ 	if idx.ClusterName == "" {
+ 		for _, k := range ms.keys[idx.ProxyHost][idx.Username] {
+ 			key = k
+@@ -630,15 +630,15 @@ func (ms *MemKeyStore) DeleteKeys() error {
+ // Useful when needing to log out of a specific service, like a particular
+ // database proxy.
+ func (ms *MemKeyStore) DeleteUserCerts(idx KeyIndex, opts ...CertOption) error {
+-	var keys []*Key
++	var keys []*KeyRing
+ 	if idx.ClusterName != "" {
+ 		key, ok := ms.keys[idx.ProxyHost][idx.Username][idx.ClusterName]
+ 		if !ok {
+ 			return nil
+ 		}
+-		keys = []*Key{key}
++		keys = []*KeyRing{key}
+ 	} else {
+-		keys = make([]*Key, 0, len(ms.keys[idx.ProxyHost][idx.Username]))
++		keys = make([]*KeyRing, 0, len(ms.keys[idx.ProxyHost][idx.Username]))
+ 		for _, key := range ms.keys[idx.ProxyHost][idx.Username] {
+ 			keys = append(keys, key)
+ 		}
+diff --git a/lib/client/keystore_test.go b/lib/client/keystore_test.go
+index 77ef869044cc3..23da1d9fa836d 100644
+--- a/lib/client/keystore_test.go
++++ b/lib/client/keystore_test.go
+@@ -111,7 +111,7 @@ func TestListKeys(t *testing.T) {
+ 		const keyNum = 5
+ 
+ 		// add 5 keys for "bob"
+-		keys := make([]Key, keyNum)
++		keys := make([]KeyRing, keyNum)
+ 		for i := 0; i < keyNum; i++ {
+ 			idx := KeyIndex{fmt.Sprintf("host-%v", i), "bob", "root"}
+ 			key := auth.makeSignedKey(t, idx, false)
+@@ -135,7 +135,7 @@ func TestListKeys(t *testing.T) {
+ 		skey, err := keyStore.GetKey(samIdx, WithSSHCerts{})
+ 		require.NoError(t, err)
+ 		require.Equal(t, samKey.Cert, skey.Cert)
+-		require.Equal(t, samKey.MarshalSSHPublicKey(), skey.MarshalSSHPublicKey())
++		require.Equal(t, samKey.PrivateKey.MarshalSSHPublicKey(), skey.PrivateKey.MarshalSSHPublicKey())
+ 	})
+ }
+ 
+@@ -147,7 +147,7 @@ func TestGetCertificates(t *testing.T) {
+ 		const keyNum = 3
+ 
+ 		// add keys for 3 different clusters with the same user and proxy.
+-		keys := make([]Key, keyNum)
++		keys := make([]KeyRing, keyNum)
+ 		certs := make([]*ssh.Certificate, keyNum)
+ 		var proxy = "proxy.example.com"
+ 		var user = "bob"
+diff --git a/lib/client/kube/kube.go b/lib/client/kube/kube.go
+index b27fd59eff0b4..80e6e83ad5014 100644
+--- a/lib/client/kube/kube.go
++++ b/lib/client/kube/kube.go
+@@ -34,7 +34,7 @@ var log = logrus.WithFields(logrus.Fields{
+ // defined. If not, it returns an error.
+ // This is a safety check in order to print a better message to the user even
+ // before hitting Teleport Kubernetes Proxy.
+-func CheckIfCertsAreAllowedToAccessCluster(k *client.Key, rootCluster, teleportCluster, kubeCluster string) error {
++func CheckIfCertsAreAllowedToAccessCluster(k *client.KeyRing, rootCluster, teleportCluster, kubeCluster string) error {
+ 	// This is a safety check in order to print a better message to the user even
+ 	// before hitting Teleport Kubernetes Proxy.
+ 	// We only enforce this check for root clusters, since we don't have knowledge
+diff --git a/lib/client/local_proxy_middleware.go b/lib/client/local_proxy_middleware.go
+index f3251f62b284a..fa1beaf2f3c36 100644
+--- a/lib/client/local_proxy_middleware.go
++++ b/lib/client/local_proxy_middleware.go
+@@ -187,7 +187,7 @@ func (c *DBCertIssuer) IssueCert(ctx context.Context) (tls.Certificate, error) {
+ 		accessRequests = profile.ActiveRequests.AccessRequests
+ 	}
+ 
+-	var key *Key
++	var key *KeyRing
+ 	if err := RetryWithRelogin(ctx, c.Client, func() error {
+ 		dbCertParams := ReissueParams{
+ 			RouteToCluster: c.Client.SiteName,
+@@ -253,7 +253,7 @@ func (c *AppCertIssuer) IssueCert(ctx context.Context) (tls.Certificate, error)
+ 		accessRequests = profile.ActiveRequests.AccessRequests
+ 	}
+ 
+-	var key *Key
++	var key *KeyRing
+ 	if err := RetryWithRelogin(ctx, c.Client, func() error {
+ 		appCertParams := ReissueParams{
+ 			RouteToCluster: c.Client.SiteName,
+diff --git a/lib/client/profile.go b/lib/client/profile.go
+index 43b1565a2b804..accb473a8e390 100644
+--- a/lib/client/profile.go
++++ b/lib/client/profile.go
+@@ -258,7 +258,7 @@ type profileOptions struct {
+ }
+ 
+ // profileFromkey returns a ProfileStatus for the given key and options.
+-func profileStatusFromKey(key *Key, opts profileOptions) (*ProfileStatus, error) {
++func profileStatusFromKey(key *KeyRing, opts profileOptions) (*ProfileStatus, error) {
+ 	sshCert, err := key.SSHCert()
+ 	if err != nil {
+ 		return nil, trace.Wrap(err)
+diff --git a/lib/client/weblogin_test.go b/lib/client/weblogin_test.go
+index f5677229e8618..72ecac47ce9a9 100644
+--- a/lib/client/weblogin_test.go
++++ b/lib/client/weblogin_test.go
+@@ -213,7 +213,7 @@ func TestSSHAgentPasswordlessLogin(t *testing.T) {
+ 		req := client.SSHLoginPasswordless{
+ 			SSHLogin: client.SSHLogin{
+ 				ProxyAddr:         tc.WebProxyAddr,
+-				PubKey:            key.MarshalSSHPublicKey(),
++				PubKey:            key.PrivateKey.MarshalSSHPublicKey(),
+ 				TTL:               tc.KeyTTL,
+ 				Insecure:          tc.InsecureSkipVerify,
+ 				Compatibility:     tc.CertificateFormat,
+diff --git a/lib/kube/kubeconfig/kubeconfig.go b/lib/kube/kubeconfig/kubeconfig.go
+index 4d29c285258e9..5093e99281f46 100644
+--- a/lib/kube/kubeconfig/kubeconfig.go
++++ b/lib/kube/kubeconfig/kubeconfig.go
+@@ -58,7 +58,7 @@ type Values struct {
+ 	ClusterAddr string
+ 	// Credentials are user credentials to use for authentication the
+ 	// ClusterAddr. Only TLS fields (key/cert/CA) from Credentials are used.
+-	Credentials *client.Key
++	Credentials *client.KeyRing
+ 	// Exec contains optional values to use, when configuring tsh as an exec
+ 	// auth plugin in kubeconfig.
+ 	//
+diff --git a/lib/kube/kubeconfig/kubeconfig_test.go b/lib/kube/kubeconfig/kubeconfig_test.go
+index d5bcc74080b69..580f724145c83 100644
+--- a/lib/kube/kubeconfig/kubeconfig_test.go
++++ b/lib/kube/kubeconfig/kubeconfig_test.go
+@@ -197,7 +197,7 @@ func TestUpdate(t *testing.T) {
+ 	}
+ 	wantConfig.AuthInfos[clusterName] = &clientcmdapi.AuthInfo{
+ 		ClientCertificateData: creds.TLSCert,
+-		ClientKeyData:         creds.PrivateKeyPEM(),
++		ClientKeyData:         creds.PrivateKey.PrivateKeyPEM(),
+ 		LocationOfOrigin:      kubeconfigPath,
+ 		Extensions:            map[string]runtime.Object{},
+ 	}
+@@ -551,7 +551,7 @@ func TestRemoveByServerAddr(t *testing.T) {
+ 	require.Equal(t, wantConfig, config)
+ }
+ 
+-func genUserKey(hostname string) (*client.Key, []byte, error) {
++func genUserKey(hostname string) (*client.KeyRing, []byte, error) {
+ 	caKey, caCert, err := tlsca.GenerateSelfSignedCA(pkix.Name{
+ 		CommonName:   hostname,
+ 		Organization: []string{hostname},
+@@ -583,7 +583,7 @@ func genUserKey(hostname string) (*client.Key, []byte, error) {
+ 		return nil, nil, trace.Wrap(err)
+ 	}
+ 
+-	return &client.Key{
++	return &client.KeyRing{
+ 		PrivateKey: priv,
+ 		TLSCert:    tlsCert,
+ 		TrustedCerts: []authclient.TrustedCerts{{
+diff --git a/lib/srv/db/access_test.go b/lib/srv/db/access_test.go
+index 1b663cc827838..b6d312c6df438 100644
+--- a/lib/srv/db/access_test.go
++++ b/lib/srv/db/access_test.go
+@@ -60,7 +60,6 @@ import (
+ 	"github.com/gravitational/teleport/lib/auth/authclient"
+ 	"github.com/gravitational/teleport/lib/auth/native"
+ 	"github.com/gravitational/teleport/lib/authz"
+-	"github.com/gravitational/teleport/lib/client"
+ 	clients "github.com/gravitational/teleport/lib/cloud"
+ 	"github.com/gravitational/teleport/lib/cloud/mocks"
+ 	"github.com/gravitational/teleport/lib/defaults"
+@@ -1944,7 +1943,7 @@ func (c *testContext) cassandraClientWithAddr(ctx context.Context, proxyAddress,
+ 
+ // startLocalALPNProxy starts local ALPN proxy for the specified database.
+ func (c *testContext) startLocalALPNProxy(ctx context.Context, proxyAddr, teleportUser string, route tlsca.RouteToDatabase) (*alpnproxy.LocalProxy, error) {
+-	key, err := client.GenerateRSAKey()
++	key, err := keys.ParsePrivateKey(fixtures.PEMBytes["rsa"])
+ 	if err != nil {
+ 		return nil, trace.Wrap(err)
+ 	}
+diff --git a/lib/srv/db/common/test.go b/lib/srv/db/common/test.go
+index 2b0419bbbba62..65b6cddb9a695 100644
+--- a/lib/srv/db/common/test.go
++++ b/lib/srv/db/common/test.go
+@@ -34,7 +34,7 @@ import (
+ 	"github.com/gravitational/teleport/lib/auth"
+ 	"github.com/gravitational/teleport/lib/auth/authclient"
+ 	"github.com/gravitational/teleport/lib/auth/testauthority"
+-	"github.com/gravitational/teleport/lib/client"
++	"github.com/gravitational/teleport/lib/fixtures"
+ 	"github.com/gravitational/teleport/lib/services"
+ 	"github.com/gravitational/teleport/lib/tlsca"
+ )
+@@ -182,7 +182,7 @@ type TestClientConfig struct {
+ // MakeTestClientTLSCert returns TLS certificate suitable for configuring test
+ // database Postgres/MySQL clients.
+ func MakeTestClientTLSCert(config TestClientConfig) (*tls.Certificate, error) {
+-	key, err := client.GenerateRSAKey()
++	key, err := keys.ParsePrivateKey(fixtures.PEMBytes["rsa"])
+ 	if err != nil {
+ 		return nil, trace.Wrap(err)
+ 	}
+diff --git a/lib/tbot/output_utils.go b/lib/tbot/output_utils.go
+index c9c8c53088b67..f4e8ddbdd2943 100644
+--- a/lib/tbot/output_utils.go
++++ b/lib/tbot/output_utils.go
+@@ -104,13 +104,13 @@ func (b *BotConfigWriter) ReadFile(name string) ([]byte, error) {
+ var _ identityfile.ConfigWriter = (*BotConfigWriter)(nil)
+ 
+ // NewClientKey returns a sane client.Key for the given bot identity.
+-func NewClientKey(ident *identity.Identity, hostCAs []types.CertAuthority) (*client.Key, error) {
++func NewClientKey(ident *identity.Identity, hostCAs []types.CertAuthority) (*client.KeyRing, error) {
+ 	pk, err := keys.ParsePrivateKey(ident.PrivateKeyBytes)
+ 	if err != nil {
+ 		return nil, trace.Wrap(err)
+ 	}
+ 
+-	return &client.Key{
++	return &client.KeyRing{
+ 		KeyIndex: client.KeyIndex{
+ 			ClusterName: ident.ClusterName,
+ 		},
+@@ -128,7 +128,7 @@ func NewClientKey(ident *identity.Identity, hostCAs []types.CertAuthority) (*cli
+ }
+ 
+ func writeIdentityFile(
+-	ctx context.Context, log *slog.Logger, key *client.Key, dest bot.Destination,
++	ctx context.Context, log *slog.Logger, key *client.KeyRing, dest bot.Destination,
+ ) error {
+ 	ctx, span := tracer.Start(
+ 		ctx,
+@@ -160,7 +160,7 @@ func writeIdentityFile(
+ // useful when writing out TLS certificates with alternative prefix and file
+ // extensions for application compatibility reasons.
+ func writeIdentityFileTLS(
+-	ctx context.Context, log *slog.Logger, key *client.Key, dest bot.Destination,
++	ctx context.Context, log *slog.Logger, key *client.KeyRing, dest bot.Destination,
+ ) error {
+ 	ctx, span := tracer.Start(
+ 		ctx,
+diff --git a/lib/tbot/service_kubernetes_output.go b/lib/tbot/service_kubernetes_output.go
+index bf0be90e10bb8..ab939606f4635 100644
+--- a/lib/tbot/service_kubernetes_output.go
++++ b/lib/tbot/service_kubernetes_output.go
+@@ -289,7 +289,7 @@ type kubernetesStatus struct {
+ 	teleportClusterName   string
+ 	kubernetesClusterName string
+ 	tlsServerName         string
+-	credentials           *client.Key
++	credentials           *client.KeyRing
+ }
+ 
+ func generateKubeConfigWithoutPlugin(ks *kubernetesStatus) (*clientcmdapi.Config, error) {
+@@ -313,7 +313,7 @@ func generateKubeConfigWithoutPlugin(ks *kubernetesStatus) (*clientcmdapi.Config
+ 
+ 	config.AuthInfos[contextName] = &clientcmdapi.AuthInfo{
+ 		ClientCertificateData: ks.credentials.TLSCert,
+-		ClientKeyData:         ks.credentials.PrivateKeyPEM(),
++		ClientKeyData:         ks.credentials.PrivateKey.PrivateKeyPEM(),
+ 	}
+ 
+ 	// Last, create a context linking the cluster to the auth info.
+diff --git a/lib/tbot/service_ssh_host_output.go b/lib/tbot/service_ssh_host_output.go
+index 116a96268d988..e482de0593527 100644
+--- a/lib/tbot/service_ssh_host_output.go
++++ b/lib/tbot/service_ssh_host_output.go
+@@ -129,7 +129,7 @@ func (s *SSHHostOutputService) generate(ctx context.Context) error {
+ 	// For now, we'll reuse the bot's regular TTL, and hostID and nodeName are
+ 	// left unset.
+ 	res, err := impersonatedClient.TrustClient().GenerateHostCert(ctx, &trustpb.GenerateHostCertRequest{
+-		Key:         key.MarshalSSHPublicKey(),
++		Key:         key.PrivateKey.MarshalSSHPublicKey(),
+ 		HostId:      "",
+ 		NodeName:    "",
+ 		Principals:  s.cfg.Principals,
+diff --git a/lib/tbot/ssh_proxy.go b/lib/tbot/ssh_proxy.go
+index 0ffd88ef001e3..2269f4be48ae3 100644
+--- a/lib/tbot/ssh_proxy.go
++++ b/lib/tbot/ssh_proxy.go
+@@ -262,8 +262,8 @@ func parseIdentity(destPath, proxy, cluster string, insecure, fips bool) (*ident
+ 	}
+ 
+ 	i, err := identity.ReadIdentityFromStore(&identity.LoadIdentityParams{
+-		PrivateKeyBytes: key.PrivateKeyPEM(),
+-		PublicKeyBytes:  key.MarshalSSHPublicKey(),
++		PrivateKeyBytes: key.PrivateKey.PrivateKeyPEM(),
++		PublicKeyBytes:  key.PrivateKey.MarshalSSHPublicKey(),
+ 	}, &proto.Certs{
+ 		SSH:        key.Cert,
+ 		TLS:        key.TLSCert,
+diff --git a/tool/tctl/common/auth_command.go b/tool/tctl/common/auth_command.go
+index ba998caa130d0..4e002ced36d34 100644
+--- a/tool/tctl/common/auth_command.go
++++ b/tool/tctl/common/auth_command.go
+@@ -364,7 +364,7 @@ func (a *AuthCommand) generateWindowsCert(ctx context.Context, clusterAPI certif
+ 
+ 	_, err = identityfile.Write(ctx, identityfile.WriteConfig{
+ 		OutputPath: a.output,
+-		Key: &client.Key{
++		Key: &client.KeyRing{
+ 			// the godocs say the map key is the desktop server name,
+ 			// but in this case we're just generating a cert that's not
+ 			// specific to a particular desktop
+@@ -508,7 +508,7 @@ func (a *AuthCommand) generateHostKeys(ctx context.Context, clusterAPI certifica
+ 	clusterName := cn.GetClusterName()
+ 
+ 	res, err := clusterAPI.TrustClient().GenerateHostCert(ctx, &trustpb.GenerateHostCertRequest{
+-		Key:         key.MarshalSSHPublicKey(),
++		Key:         key.PrivateKey.MarshalSSHPublicKey(),
+ 		HostId:      "",
+ 		NodeName:    "",
+ 		Principals:  principals,
+@@ -561,7 +561,7 @@ func (a *AuthCommand) generateDatabaseKeys(ctx context.Context, clusterAPI certi
+ 
+ // generateDatabaseKeysForKey signs the provided unsigned key with Teleport CA
+ // for database access.
+-func (a *AuthCommand) generateDatabaseKeysForKey(ctx context.Context, clusterAPI certificateSigner, key *client.Key) error {
++func (a *AuthCommand) generateDatabaseKeysForKey(ctx context.Context, clusterAPI certificateSigner, key *client.KeyRing) error {
+ 	principals := strings.Split(a.genHost, ",")
+ 
+ 	dbCertReq := db.GenerateDatabaseCertificatesRequest{
+@@ -921,8 +921,8 @@ func (a *AuthCommand) generateUserKeys(ctx context.Context, clusterAPI certifica
+ 		certUsage = proto.UserCertsRequest_Database
+ 	}
+ 
+-	sshPublicKey := key.MarshalSSHPublicKey()
+-	tlsPublicKey, err := keys.MarshalPublicKey(key.Public())
++	sshPublicKey := key.PrivateKey.MarshalSSHPublicKey()
++	tlsPublicKey, err := keys.MarshalPublicKey(key.PrivateKey.Public())
+ 	if err != nil {
+ 		return trace.Wrap(err)
+ 	}
+diff --git a/tool/tctl/common/auth_command_test.go b/tool/tctl/common/auth_command_test.go
+index 813c9e81e16ff..c1f70483c1086 100644
+--- a/tool/tctl/common/auth_command_test.go
++++ b/tool/tctl/common/auth_command_test.go
+@@ -627,7 +627,7 @@ func TestGenerateDatabaseKeys(t *testing.T) {
+ 			outSubject:     pkix.Name{CommonName: "postgres.example.com"},
+ 			outServerNames: []string{"postgres.example.com"},
+ 			wantFiles: map[string][]byte{
+-				"db.key": key.PrivateKeyPEM(),
++				"db.key": key.PrivateKey.PrivateKeyPEM(),
+ 				"db.crt": certBytes,
+ 				"db.cas": dbClientCABytes,
+ 			},
+@@ -641,7 +641,7 @@ func TestGenerateDatabaseKeys(t *testing.T) {
+ 			outSubject:     pkix.Name{CommonName: "mysql.external.net"},
+ 			outServerNames: []string{"mysql.external.net", "mysql.internal.net", "192.168.1.1"},
+ 			wantFiles: map[string][]byte{
+-				"db.key": key.PrivateKeyPEM(),
++				"db.key": key.PrivateKey.PrivateKeyPEM(),
+ 				"db.crt": certBytes,
+ 				"db.cas": dbClientCABytes,
+ 			},
+@@ -655,7 +655,7 @@ func TestGenerateDatabaseKeys(t *testing.T) {
+ 			outSubject:     pkix.Name{CommonName: "mongo.example.com", Organization: []string{"example.com"}},
+ 			outServerNames: []string{"mongo.example.com"},
+ 			wantFiles: map[string][]byte{
+-				"mongo.crt": append(certBytes, key.PrivateKeyPEM()...),
++				"mongo.crt": append(certBytes, key.PrivateKey.PrivateKeyPEM()...),
+ 				"mongo.cas": dbClientCABytes,
+ 			},
+ 		},
+@@ -667,7 +667,7 @@ func TestGenerateDatabaseKeys(t *testing.T) {
+ 			outSubject:     pkix.Name{CommonName: "node"},
+ 			outServerNames: []string{"node", "localhost", "roach1"}, // "node" principal should always be added
+ 			wantFiles: map[string][]byte{
+-				"node.key":      key.PrivateKeyPEM(),
++				"node.key":      key.PrivateKey.PrivateKeyPEM(),
+ 				"node.crt":      certBytes,
+ 				"ca.crt":        dbServerCABytes,
+ 				"ca-client.crt": dbClientCABytes,
+@@ -682,7 +682,7 @@ func TestGenerateDatabaseKeys(t *testing.T) {
+ 			outSubject:     pkix.Name{CommonName: "localhost"},
+ 			outServerNames: []string{"localhost", "redis1", "172.0.0.1"},
+ 			wantFiles: map[string][]byte{
+-				"db.key": key.PrivateKeyPEM(),
++				"db.key": key.PrivateKey.PrivateKeyPEM(),
+ 				"db.crt": certBytes,
+ 				"db.cas": dbClientCABytes,
+ 			},
+diff --git a/tool/tctl/sso/tester/command.go b/tool/tctl/sso/tester/command.go
+index 65c72e8f28fad..70a82bf3c6081 100644
+--- a/tool/tctl/sso/tester/command.go
++++ b/tool/tctl/sso/tester/command.go
+@@ -28,11 +28,13 @@ import (
+ 
+ 	"github.com/alecthomas/kingpin/v2"
+ 	"github.com/gravitational/trace"
++	"golang.org/x/crypto/ssh"
+ 	kyaml "k8s.io/apimachinery/pkg/util/yaml"
+ 
+ 	"github.com/gravitational/teleport/api/types"
+ 	"github.com/gravitational/teleport/lib/auth/authclient"
+ 	"github.com/gravitational/teleport/lib/client"
++	"github.com/gravitational/teleport/lib/cryptosuites"
+ 	"github.com/gravitational/teleport/lib/defaults"
+ 	"github.com/gravitational/teleport/lib/service/servicecfg"
+ 	"github.com/gravitational/teleport/lib/services"
+@@ -171,7 +173,12 @@ type AuthRequestInfo struct {
+ }
+ 
+ func (cmd *SSOTestCommand) runSSOLoginFlow(ctx context.Context, protocol string, c *authclient.Client, config *client.RedirectorConfig) (*authclient.SSHLoginResponse, error) {
+-	key, err := client.GenerateRSAKey()
++	// TODO(nklaassen): support configurable key algorithms.
++	key, err := cryptosuites.GenerateKeyWithAlgorithm(cryptosuites.RSA2048)
++	if err != nil {
++		return nil, trace.Wrap(err)
++	}
++	sshPub, err := ssh.NewPublicKey(key.Public())
+ 	if err != nil {
+ 		return nil, trace.Wrap(err)
+ 	}
+@@ -197,7 +204,7 @@ func (cmd *SSOTestCommand) runSSOLoginFlow(ctx context.Context, protocol string,
+ 	return client.SSHAgentSSOLogin(ctx, client.SSHLoginSSO{
+ 		SSHLogin: client.SSHLogin{
+ 			ProxyAddr:         tc.WebProxyAddr,
+-			PubKey:            key.MarshalSSHPublicKey(),
++			PubKey:            ssh.MarshalAuthorizedKey(sshPub),
+ 			TTL:               tc.KeyTTL,
+ 			Insecure:          tc.InsecureSkipVerify,
+ 			Pool:              nil,
+diff --git a/tool/tsh/common/app.go b/tool/tsh/common/app.go
+index 0e868afda628b..ffa0e3cf243f7 100644
+--- a/tool/tsh/common/app.go
++++ b/tool/tsh/common/app.go
+@@ -96,7 +96,7 @@ func appLogin(
+ 	clusterClient *client.ClusterClient,
+ 	rootClient authclient.ClientI,
+ 	appCertParams client.ReissueParams,
+-) (*client.Key, error) {
++) (*client.KeyRing, error) {
+ 	// TODO (Joerger): DELETE IN v17.0.0
+ 	var err error
+ 	appCertParams.RouteToApp.SessionID, err = authclient.TryCreateAppSessionForClientCertV15(ctx, rootClient, tc.Username, appCertParams.RouteToApp)
+diff --git a/tool/tsh/common/db.go b/tool/tsh/common/db.go
+index 3e13fd7c9045a..3c1e51e6eef5a 100644
+--- a/tool/tsh/common/db.go
++++ b/tool/tsh/common/db.go
+@@ -302,7 +302,7 @@ func databaseLogin(cf *CLIConf, tc *client.TeleportClient, dbInfo *databaseInfo)
+ 		return trace.Wrap(err)
+ 	}
+ 
+-	var key *client.Key
++	var key *client.KeyRing
+ 	// Identity files themselves act as the database credentials (if any), so
+ 	// don't bother fetching new certs.
+ 	if profile.IsVirtual {
+diff --git a/tool/tsh/common/kube.go b/tool/tsh/common/kube.go
+index f817b1bb9f0c5..f9fc0c3cfb0a0 100644
+--- a/tool/tsh/common/kube.go
++++ b/tool/tsh/common/kube.go
+@@ -147,7 +147,7 @@ func (c *kubeJoinCommand) run(cf *CLIConf) error {
+ 
+ 	cluster := meta.GetClusterName()
+ 	kubeCluster := meta.GetKubeCluster()
+-	var k *client.Key
++	var k *client.KeyRing
+ 
+ 	// Try loading existing keys.
+ 	k, err = tc.LocalAgent().GetKey(cluster, client.WithKubeCerts{})
+@@ -791,7 +791,7 @@ func (c *kubeCredentialsCommand) checkLocalProxyRequirement(profile *profile.Pro
+ 	return nil
+ }
+ 
+-func (c *kubeCredentialsCommand) writeKeyResponse(output io.Writer, key *client.Key, kubeClusterName string) error {
++func (c *kubeCredentialsCommand) writeKeyResponse(output io.Writer, key *client.KeyRing, kubeClusterName string) error {
+ 	crt, err := key.KubeX509Cert(kubeClusterName)
+ 	if err != nil {
+ 		return trace.Wrap(err)
+@@ -1439,7 +1439,7 @@ type kubernetesStatus struct {
+ 	clusterAddr         string
+ 	teleportClusterName string
+ 	kubeClusters        []types.KubeCluster
+-	credentials         *client.Key
++	credentials         *client.KeyRing
+ 	tlsServerName       string
+ }
+ 
+diff --git a/tool/tsh/common/kube_proxy.go b/tool/tsh/common/kube_proxy.go
+index 59149360903f2..2072ce52cf40c 100644
+--- a/tool/tsh/common/kube_proxy.go
++++ b/tool/tsh/common/kube_proxy.go
+@@ -507,8 +507,8 @@ func loadKubeUserCerts(ctx context.Context, tc *client.TeleportClient, clusters
+ 	return certs, nil
+ }
+ 
+-func loadKubeKeys(tc *client.TeleportClient, teleportClusters []string) (map[string]*client.Key, error) {
+-	kubeKeys := map[string]*client.Key{}
++func loadKubeKeys(tc *client.TeleportClient, teleportClusters []string) (map[string]*client.KeyRing, error) {
++	kubeKeys := map[string]*client.KeyRing{}
+ 	for _, teleportCluster := range teleportClusters {
+ 		key, err := tc.LocalAgent().GetKey(teleportCluster, client.WithKubeCerts{})
+ 		if err != nil && !trace.IsNotFound(err) {
+@@ -519,7 +519,7 @@ func loadKubeKeys(tc *client.TeleportClient, teleportClusters []string) (map[str
+ 	return kubeKeys, nil
+ }
+ 
+-func kubeCertFromKey(key *client.Key, kubeCluster string) (tls.Certificate, error) {
++func kubeCertFromKey(key *client.KeyRing, kubeCluster string) (tls.Certificate, error) {
+ 	x509cert, err := key.KubeX509Cert(kubeCluster)
+ 	if err != nil {
+ 		return tls.Certificate{}, trace.Wrap(err)
+@@ -678,8 +678,8 @@ kubectl version
+ var proxyKubeHeadlessTemplate = template.Must(template.New("").
+ 	Parse(fmt.Sprintf(`Started local proxy for Kubernetes Access in the background.
+ 
+-%v Teleport will initiate a new shell configured with kubectl for local proxy access. 
+-To conclude the session, simply use the "exit" command. Upon exiting, your original shell will be restored, 
++%v Teleport will initiate a new shell configured with kubectl for local proxy access.
++To conclude the session, simply use the "exit" command. Upon exiting, your original shell will be restored,
+ the local proxy will be closed, and future access through this headless session won't be possible.
+ 
+ {{ if .multipleContexts}} To work with different contexts use "kubectl --context", for example:
+diff --git a/tool/tsh/common/kubectl_test.go b/tool/tsh/common/kubectl_test.go
+index 5f15b70aef731..78246e134876d 100644
+--- a/tool/tsh/common/kubectl_test.go
++++ b/tool/tsh/common/kubectl_test.go
+@@ -272,7 +272,7 @@ func mustSetupKubeconfig(t *testing.T, tshHome, kubeCluster string) string {
+ 		TeleportClusterName: "localhost",
+ 		ClusterAddr:         "https://localhost:443",
+ 		KubeClusters:        []string{kubeCluster},
+-		Credentials: &client.Key{
++		Credentials: &client.KeyRing{
+ 			PrivateKey: priv,
+ 			TLSCert:    []byte(fixtures.TLSCACertPEM),
+ 			TrustedCerts: []authclient.TrustedCerts{{
+diff --git a/tool/tsh/common/proxy.go b/tool/tsh/common/proxy.go
+index 79b652434e00b..73d81e2953a32 100644
+--- a/tool/tsh/common/proxy.go
++++ b/tool/tsh/common/proxy.go
+@@ -616,7 +616,7 @@ func makeBasicLocalProxyConfig(ctx context.Context, tc *libclient.TeleportClient
+ 	}
+ }
+ 
+-func generateDBLocalProxyCert(key *libclient.Key, profile *libclient.ProfileStatus) error {
++func generateDBLocalProxyCert(key *libclient.KeyRing, profile *libclient.ProfileStatus) error {
+ 	path := profile.DatabaseLocalCAPath()
+ 	if utils.FileExists(path) {
+ 		return nil
+@@ -626,7 +626,7 @@ func generateDBLocalProxyCert(key *libclient.Key, profile *libclient.ProfileStat
+ 			CommonName:   "localhost",
+ 			Organization: []string{"Teleport"},
+ 		},
+-		Signer:      key,
++		Signer:      key.PrivateKey.Signer,
+ 		DNSNames:    []string{"localhost"},
+ 		IPAddresses: []net.IP{net.ParseIP(defaults.Localhost)},
+ 		TTL:         defaults.CATTL,
+diff --git a/tool/tsh/common/proxy_test.go b/tool/tsh/common/proxy_test.go
+index 65643cfdeb8f8..c193ba1837131 100644
+--- a/tool/tsh/common/proxy_test.go
++++ b/tool/tsh/common/proxy_test.go
+@@ -1520,7 +1520,7 @@ func TestProxyAppWithIdentity(t *testing.T) {
+ 	// which are not usage restricted to apps only; this is required for tsh to
+ 	// make other auth API calls beyond just accessing the app.
+ 	sshCert, tlsCert, err := authServer.GenerateUserTestCerts(auth.GenerateUserTestCertsRequest{
+-		Key:            key.MarshalSSHPublicKey(),
++		Key:            key.PrivateKey.MarshalSSHPublicKey(),
+ 		Username:       userName,
+ 		TTL:            time.Hour,
+ 		Compatibility:  constants.CertificateFormatStandard,
+diff --git a/tool/tsh/common/tsh.go b/tool/tsh/common/tsh.go
+index 3e9d2f1258d34..475ea9762ac00 100644
+--- a/tool/tsh/common/tsh.go
++++ b/tool/tsh/common/tsh.go
+@@ -4406,8 +4406,8 @@ func onShow(cf *CLIConf) error {
+ 		return trace.Wrap(err)
+ 	}
+ 
+-	fmt.Printf("Cert: %#v\nPriv: %#v\nPub: %#v\n", cert, key.Signer, key.MarshalSSHPublicKey())
+-	fmt.Printf("Fingerprint: %s\n", ssh.FingerprintSHA256(key.SSHPublicKey()))
++	fmt.Printf("Cert: %#v\nPriv: %#v\nPub: %#v\n", cert, key.PrivateKey.Signer, key.PrivateKey.MarshalSSHPublicKey())
++	fmt.Printf("Fingerprint: %s\n", ssh.FingerprintSHA256(key.PrivateKey.SSHPublicKey()))
+ 	return nil
+ }
+ 
+diff --git a/tool/tsh/common/tsh_test.go b/tool/tsh/common/tsh_test.go
+index f5b01bcc21b74..782b6e0e1ca0d 100644
+--- a/tool/tsh/common/tsh_test.go
++++ b/tool/tsh/common/tsh_test.go
+@@ -2976,7 +2976,7 @@ func TestEnvFlags(t *testing.T) {
+ func TestKubeConfigUpdate(t *testing.T) {
+ 	t.Parallel()
+ 	// don't need real creds for this test, just something to compare against
+-	creds := &client.Key{KeyIndex: client.KeyIndex{ProxyHost: "a.example.com"}}
++	creds := &client.KeyRing{KeyIndex: client.KeyIndex{ProxyHost: "a.example.com"}}
+ 	tests := []struct {
+ 		desc           string
+ 		cf             *CLIConf
+@@ -5369,7 +5369,7 @@ func TestLogout(t *testing.T) {
+ 	require.NoError(t, err)
+ 	privateKey, err := keys.NewPrivateKey(key, privPEM)
+ 	require.NoError(t, err)
+-	clientKey := &client.Key{
++	clientKey := &client.KeyRing{
+ 		KeyIndex: client.KeyIndex{
+ 			ProxyHost:   "proxy",
+ 			Username:    "user",

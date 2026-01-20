@@ -1,0 +1,1 @@
+Extract `@prisma/dmmf` and `@prisma/generator` packages for better modularity

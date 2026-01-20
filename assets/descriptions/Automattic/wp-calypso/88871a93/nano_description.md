@@ -1,0 +1,1 @@
+Rename `@automattic/data` package to `@automattic/api-core`

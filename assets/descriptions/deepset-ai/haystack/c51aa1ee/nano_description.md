@@ -1,0 +1,1 @@
+Rename `Document` fields: `text` → `content` and `metadata` → `meta`

@@ -1,0 +1,1 @@
+Extract `fluent_messages!` macro into separate `rustc_fluent_macro` crate

@@ -1,0 +1,1 @@
+Replace `Factory<PatternSet>` with dedicated `PatternSetFactory` service

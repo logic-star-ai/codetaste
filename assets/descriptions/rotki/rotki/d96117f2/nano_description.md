@@ -1,0 +1,1 @@
+Refactor Vuetify interface to ease Vuetify 3 migration

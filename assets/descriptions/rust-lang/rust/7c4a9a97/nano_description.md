@@ -1,0 +1,1 @@
+Migrate `rustc_incremental` diagnostics to translatable structs

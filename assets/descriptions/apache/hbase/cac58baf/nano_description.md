@@ -1,0 +1,1 @@
+Refactor diagnostic tools from test packaging to new hbase-diagnostics module

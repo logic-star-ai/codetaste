@@ -1,0 +1,1 @@
+Refactor hotkeys into dedicated lib folder with scoped enums

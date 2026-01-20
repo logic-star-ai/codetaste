@@ -1,0 +1,1 @@
+Refactor statistics class naming

@@ -1,0 +1,1 @@
+Refactor `db.DefaultContext` usage in template-accessible functions

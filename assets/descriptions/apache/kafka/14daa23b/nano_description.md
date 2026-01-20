@@ -1,0 +1,1 @@
+Eliminate `share` module and relocate classes to `server` and `server-common`

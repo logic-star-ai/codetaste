@@ -1,0 +1,1 @@
+Reorganize LINQ standard query operators documentation

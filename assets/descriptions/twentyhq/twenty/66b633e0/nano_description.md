@@ -1,0 +1,1 @@
+Replace hotkey scopes with focus stack (Part 5)

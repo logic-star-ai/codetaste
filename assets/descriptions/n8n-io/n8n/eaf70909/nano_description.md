@@ -1,0 +1,1 @@
+Enforce consistent type imports across FE packages

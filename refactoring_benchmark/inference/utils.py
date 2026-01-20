@@ -49,15 +49,17 @@ def create_fallback_inference_metadata(
     finish_reason: str,
     cost_usd: float = -1.0,
     additional: Optional[dict] = None,
+    description_type: Optional[str] = None,
 ) -> None:
     """
     Create a fallback inference_metadata.json file for crashed or incomplete runs.
 
     Args:
         output_dir: Output directory where metadata should be saved
-        finish_reason: Reason for inference ending (e.g., "crashed", "unknown", "timeout")
+        finish_reason: Reason for inference ending (e.g., "timeout")
         cost_usd: Cost in USD (default: -1.0 for unknown)
         additional: Optional additional metadata
+        description_type: Optional description type to include in metadata
     """
     metadata = InferenceMetadata(
         cost_usd=cost_usd,
@@ -67,35 +69,14 @@ def create_fallback_inference_metadata(
     )
 
     output_path = output_dir / "inference_metadata.json"
+    metadata_dict = metadata.model_dump(by_alias=True)
+
+    # Add description_type if provided
+    if description_type is not None:
+        metadata_dict["description_type"] = description_type
+
     with open(output_path, "w") as f:
-        json.dump(metadata.model_dump(by_alias=True), f, indent=2)
-
-
-def ensure_inference_metadata_exists(output_dir: Path) -> None:
-    """
-    Check if inference_metadata.json exists, create fallback if missing.
-
-    This handles cases where the agent produced prediction.diff but failed
-    to create the metadata file.
-
-    Args:
-        output_dir: Output directory to check
-    """
-    metadata_path = output_dir / "inference_metadata.json"
-    prediction_path = output_dir / "prediction.diff"
-
-    # If metadata already exists, nothing to do
-    if metadata_path.exists():
-        return
-
-    # If prediction exists but metadata doesn't, create fallback
-    if prediction_path.exists():
-        create_fallback_inference_metadata(
-            output_dir,
-            finish_reason="unknown",
-            cost_usd=-1.0,
-            additional={"note": "Metadata file was missing, created as fallback"},
-        )
+        json.dump(metadata_dict, f, indent=2)
 
 
 def output_exists(output_dir: Path) -> bool:
@@ -109,4 +90,5 @@ def output_exists(output_dir: Path) -> bool:
         True if prediction.diff exists, False otherwise
     """
     prediction_path = output_dir / "prediction.diff"
-    return prediction_path.exists()
+    return prediction_path.exists() and prediction_path.stat().st_size > 3
+

@@ -1,0 +1,4837 @@
+diff --git a/changelog/config.yaml b/changelog/config.yaml
+index 4747904cf460..d2ec39231370 100644
+--- a/changelog/config.yaml
++++ b/changelog/config.yaml
+@@ -4,7 +4,7 @@ types:
+   chore: "Miscellaneous"
+ scopes:
+   auto: [dotnet, go, java, nodejs, python, yaml]
+-  backend: [filestate, service]
++  backend: [diy, service]
+   build: []
+   ci: []
+   cli: [about, config, display, engine, import, new, plugin, package, state]
+diff --git a/cmd/pulumi-test-language/interface.go b/cmd/pulumi-test-language/interface.go
+index 143b70ac00d9..59e473d2e62b 100644
+--- a/cmd/pulumi-test-language/interface.go
++++ b/cmd/pulumi-test-language/interface.go
+@@ -33,7 +33,7 @@ import (
+ 	"github.com/hexops/gotextdiff/span"
+ 	"github.com/pulumi/pulumi/pkg/v3/backend"
+ 	backendDisplay "github.com/pulumi/pulumi/pkg/v3/backend/display"
+-	"github.com/pulumi/pulumi/pkg/v3/backend/filestate"
++	"github.com/pulumi/pulumi/pkg/v3/backend/diy"
+ 	"github.com/pulumi/pulumi/pkg/v3/codegen/schema"
+ 	"github.com/pulumi/pulumi/pkg/v3/engine"
+ 	"github.com/pulumi/pulumi/pkg/v3/resource/deploy"
+@@ -802,15 +802,15 @@ func (eng *languageTestServer) RunLanguageTest(
+ 	}
+ 	// TODO(https://github.com/pulumi/pulumi/issues/13942): This should only add new things, don't modify
+ 
+-	// Create a temp dir for the a filestate backend to run in for the test
++	// Create a temp dir for the a diy backend to run in for the test
+ 	backendDir := filepath.Join(token.TemporaryDirectory, "backends", req.Test)
+ 	err = os.MkdirAll(backendDir, 0o755)
+ 	if err != nil {
+ 		return nil, fmt.Errorf("create temp backend dir: %w", err)
+ 	}
+-	testBackend, err := filestate.New(ctx, snk, "file://"+backendDir, project)
++	testBackend, err := diy.New(ctx, snk, "file://"+backendDir, project)
+ 	if err != nil {
+-		return nil, fmt.Errorf("create filestate backend: %w", err)
++		return nil, fmt.Errorf("create diy backend: %w", err)
+ 	}
+ 
+ 	// Create a new stack for the test
+diff --git a/pkg/backend/backend.go b/pkg/backend/backend.go
+index a8b66bc5ff96..080f1282f026 100644
+--- a/pkg/backend/backend.go
++++ b/pkg/backend/backend.go
+@@ -76,7 +76,7 @@ type StackReference interface {
+ 	Name() tokens.StackName
+ 
+ 	// Project is the project name that this stack belongs to.
+-	// For old filestate backends this will return false.
++	// For old diy backends this will return false.
+ 	Project() (tokens.Name, bool)
+ 
+ 	// Fully qualified name of the stack, including any organization, project, or other information.
+diff --git a/pkg/backend/diy/backend.go b/pkg/backend/diy/backend.go
+new file mode 100644
+index 000000000000..a9ad257f04e0
+--- /dev/null
++++ b/pkg/backend/diy/backend.go
+@@ -0,0 +1,1297 @@
++// Copyright 2016-2023, Pulumi Corporation.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package diy
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"net/url"
++	"os"
++	"path"
++	"path/filepath"
++	"sort"
++	"strings"
++	"sync"
++	"sync/atomic"
++	"time"
++
++	"github.com/gofrs/uuid"
++
++	user "github.com/tweekmonster/luser"
++	"gocloud.dev/blob"
++	_ "gocloud.dev/blob/azureblob" // driver for azblob://
++	_ "gocloud.dev/blob/fileblob"  // driver for file://
++	"gocloud.dev/blob/gcsblob"     // driver for gs://
++	_ "gocloud.dev/blob/s3blob"    // driver for s3://
++	"gocloud.dev/gcerrors"
++
++	"github.com/pulumi/pulumi/pkg/v3/authhelpers"
++	"github.com/pulumi/pulumi/pkg/v3/backend"
++	"github.com/pulumi/pulumi/pkg/v3/backend/display"
++	sdkDisplay "github.com/pulumi/pulumi/pkg/v3/display"
++	"github.com/pulumi/pulumi/pkg/v3/engine"
++	"github.com/pulumi/pulumi/pkg/v3/operations"
++	"github.com/pulumi/pulumi/pkg/v3/resource/deploy"
++	"github.com/pulumi/pulumi/pkg/v3/resource/edit"
++	"github.com/pulumi/pulumi/pkg/v3/resource/stack"
++	"github.com/pulumi/pulumi/pkg/v3/secrets"
++	"github.com/pulumi/pulumi/sdk/v3/go/common/apitype"
++	"github.com/pulumi/pulumi/sdk/v3/go/common/diag"
++	"github.com/pulumi/pulumi/sdk/v3/go/common/diag/colors"
++	"github.com/pulumi/pulumi/sdk/v3/go/common/encoding"
++	"github.com/pulumi/pulumi/sdk/v3/go/common/env"
++	"github.com/pulumi/pulumi/sdk/v3/go/common/resource/config"
++	"github.com/pulumi/pulumi/sdk/v3/go/common/slice"
++	"github.com/pulumi/pulumi/sdk/v3/go/common/tokens"
++	"github.com/pulumi/pulumi/sdk/v3/go/common/util/cmdutil"
++	"github.com/pulumi/pulumi/sdk/v3/go/common/util/contract"
++	"github.com/pulumi/pulumi/sdk/v3/go/common/util/result"
++	"github.com/pulumi/pulumi/sdk/v3/go/common/workspace"
++)
++
++// UpgradeOptions customizes the behavior of the upgrade operation.
++type UpgradeOptions struct {
++	// ProjectsForDetachedStacks is an optional function that is able to
++	// backfill project names for stacks that have no project specified otherwise.
++	//
++	// It is called with a list of stack names that have no project specified.
++	// It should return a list of project names to use for each stack name
++	// in the same order.
++	// If a returned name is blank, the stack at that position will be skipped
++	// in the upgrade process.
++	//
++	// The length of 'projects' MUST match the length of 'stacks'.
++	// If it does not, the upgrade will panic.
++	//
++	// If this function is not specified,
++	// stacks without projects will be skipped during the upgrade.
++	ProjectsForDetachedStacks func(stacks []tokens.StackName) (projects []tokens.Name, err error)
++}
++
++// Backend extends the base backend interface with specific information about diy backends.
++type Backend interface {
++	backend.Backend
++	diy() // at the moment, no diy specific info, so just use a marker function.
++
++	// Upgrade to the latest state store version.
++	Upgrade(ctx context.Context, opts *UpgradeOptions) error
++}
++
++type diyBackend struct {
++	d diag.Sink
++
++	// originalURL is the URL provided when the diyBackend was initialized, for example
++	// "file://~". url is a canonicalized version that should be used when persisting data.
++	// (For example, replacing ~ with the home directory, making an absolute path, etc.)
++	originalURL string
++	url         string
++
++	bucket Bucket
++	mutex  sync.Mutex
++
++	lockID string
++
++	gzip bool
++
++	Env env.Env
++
++	// The current project, if any.
++	currentProject atomic.Pointer[workspace.Project]
++
++	// The store controls the layout of stacks in the backend.
++	// We use different layouts based on the version of the backend
++	// specified in the metadata file.
++	// If the metadata file is missing, we use the legacy layout.
++	store referenceStore
++}
++
++type diyBackendReference struct {
++	name    tokens.StackName
++	project tokens.Name
++
++	// A thread-safe way to get the current project.
++	// The function reference or the pointer returned by the function may be nil.
++	currentProject func() *workspace.Project
++
++	// referenceStore that created this reference.
++	//
++	// This is necessary because
++	// the referenceStore for a backend may change over time,
++	// but the store for this reference should not.
++	store referenceStore
++}
++
++func (r *diyBackendReference) String() string {
++	// If project is blank this is a legacy non-project scoped stack reference, just return the name.
++	if r.project == "" {
++		return r.name.String()
++	}
++
++	if r.currentProject != nil {
++		proj := r.currentProject()
++		// For project scoped references when stringifying backend references,
++		// we take the current project (if present) into account.
++		// If the project names match, we can elide them.
++		if proj != nil && string(r.project) == string(proj.Name) {
++			return r.name.String()
++		}
++	}
++
++	// Else return a new style fully qualified reference.
++	return fmt.Sprintf("organization/%s/%s", r.project, r.name)
++}
++
++func (r *diyBackendReference) Name() tokens.StackName {
++	return r.name
++}
++
++func (r *diyBackendReference) Project() (tokens.Name, bool) {
++	return r.project, r.project != ""
++}
++
++func (r *diyBackendReference) FullyQualifiedName() tokens.QName {
++	if r.project == "" {
++		return r.name.Q()
++	}
++	return tokens.QName(fmt.Sprintf("organization/%s/%s", r.project, r.name))
++}
++
++// Helper methods that delegate to the underlying referenceStore.
++func (r *diyBackendReference) Validate() error       { return r.store.ValidateReference(r) }
++func (r *diyBackendReference) StackBasePath() string { return r.store.StackBasePath(r) }
++func (r *diyBackendReference) HistoryDir() string    { return r.store.HistoryDir(r) }
++func (r *diyBackendReference) BackupDir() string     { return r.store.BackupDir(r) }
++
++func IsDIYBackendURL(urlstr string) bool {
++	u, err := url.Parse(urlstr)
++	if err != nil {
++		return false
++	}
++
++	return blob.DefaultURLMux().ValidBucketScheme(u.Scheme)
++}
++
++const FilePathPrefix = "file://"
++
++// New constructs a new diy backend,
++// using the given URL as the root for storage.
++// The URL must use one of the schemes supported by the go-cloud blob package.
++// Thes inclue: file, s3, gs, azblob.
++func New(ctx context.Context, d diag.Sink, originalURL string, project *workspace.Project) (Backend, error) {
++	return newDIYBackend(ctx, d, originalURL, project, nil)
++}
++
++type diyBackendOptions struct {
++	// Env specifies how to get environment variables.
++	//
++	// Defaults to env.Global
++	Env env.Env
++}
++
++// newDIYBackend builds a diy backend implementation
++// with the given options.
++func newDIYBackend(
++	ctx context.Context, d diag.Sink, originalURL string, project *workspace.Project,
++	opts *diyBackendOptions,
++) (*diyBackend, error) {
++	if opts == nil {
++		opts = &diyBackendOptions{}
++	}
++	if opts.Env == nil {
++		opts.Env = env.Global()
++	}
++
++	if !IsDIYBackendURL(originalURL) {
++		return nil, fmt.Errorf("diy URL %s has an illegal prefix; expected one of: %s",
++			originalURL, strings.Join(blob.DefaultURLMux().BucketSchemes(), ", "))
++	}
++
++	u, err := massageBlobPath(originalURL)
++	if err != nil {
++		return nil, err
++	}
++
++	p, err := url.Parse(u)
++	if err != nil {
++		return nil, err
++	}
++
++	blobmux := blob.DefaultURLMux()
++
++	// for gcp we want to support additional credentials
++	// schemes on top of go-cloud's default credentials mux.
++	if p.Scheme == gcsblob.Scheme {
++		blobmux, err = authhelpers.GoogleCredentialsMux(ctx)
++		if err != nil {
++			return nil, err
++		}
++	}
++
++	bucket, err := blobmux.OpenBucket(ctx, u)
++	if err != nil {
++		return nil, fmt.Errorf("unable to open bucket %s: %w", u, err)
++	}
++
++	if !strings.HasPrefix(u, FilePathPrefix) {
++		bucketSubDir := strings.TrimLeft(p.Path, "/")
++		if bucketSubDir != "" {
++			if !strings.HasSuffix(bucketSubDir, "/") {
++				bucketSubDir += "/"
++			}
++
++			bucket = blob.PrefixedBucket(bucket, bucketSubDir)
++		}
++	}
++
++	// Allocate a unique lock ID for this backend instance.
++	lockID, err := uuid.NewV4()
++	if err != nil {
++		return nil, err
++	}
++
++	gzipCompression := opts.Env.GetBool(env.DIYBackendGzip)
++
++	wbucket := &wrappedBucket{bucket: bucket}
++	bucket = nil // prevent accidental use of unwrapped bucket
++
++	backend := &diyBackend{
++		d:           d,
++		originalURL: originalURL,
++		url:         u,
++		bucket:      wbucket,
++		lockID:      lockID.String(),
++		gzip:        gzipCompression,
++		Env:         opts.Env,
++	}
++	backend.currentProject.Store(project)
++
++	// Read the Pulumi state metadata
++	// and ensure that it is compatible with this version of the CLI.
++	// The version in the metadata file informs which store we use.
++	meta, err := ensurePulumiMeta(ctx, wbucket, opts.Env)
++	if err != nil {
++		return nil, err
++	}
++
++	// projectMode tracks whether the current state supports project-scoped stacks.
++	// Historically, the diy backend did not support this.
++	// To avoid breaking old stacks, we use legacy mode for existing states.
++	// We use project mode only if one of the following is true:
++	//
++	//  - The state has a single .pulumi/meta.yaml file
++	//    and the version is 1 or greater.
++	//  - The state is entirely new
++	//    so there's no risk of breaking old stacks.
++	//
++	// All actual logic of project mode vs legacy mode is handled by the referenceStore.
++	// This boolean just helps us warn users about unmigrated stacks.
++	var projectMode bool
++	switch meta.Version {
++	case 0:
++		backend.store = newLegacyReferenceStore(wbucket)
++	case 1:
++		backend.store = newProjectReferenceStore(wbucket, backend.currentProject.Load)
++		projectMode = true
++	default:
++		return nil, fmt.Errorf(
++			"state store unsupported: 'meta.yaml' version (%d) is not supported "+
++				"by this version of the Pulumi CLI", meta.Version)
++	}
++
++	// If we're not in project mode, or we've disabled the warning, we're done.
++	if !projectMode || opts.Env.GetBool(env.DIYBackendNoLegacyWarning) {
++		return backend, nil
++	}
++	// Otherwise, warn about any old stack files.
++	// This is possible if a user creates a new stack with a new CLI,
++	// or migrates it to project mode with `pulumi state upgrade`,
++	// but someone else interacts with the same state with an old CLI.
++
++	refs, err := newLegacyReferenceStore(wbucket).ListReferences(ctx)
++	if err != nil {
++		// If there's an error listing don't fail, just don't print the warnings
++		return backend, nil
++	}
++	if len(refs) == 0 {
++		return backend, nil
++	}
++
++	var msg strings.Builder
++	msg.WriteString("Found legacy stack files in state store:\n")
++	for _, ref := range refs {
++		fmt.Fprintf(&msg, "  - %s\n", ref.Name())
++	}
++	msg.WriteString("Please run 'pulumi state upgrade' to migrate them to the new format.\n")
++	msg.WriteString("Set PULUMI_DIY_BACKEND_NO_LEGACY_WARNING=1 to disable this warning.")
++	d.Warningf(diag.Message("", msg.String()))
++	return backend, nil
++}
++
++func (b *diyBackend) Upgrade(ctx context.Context, opts *UpgradeOptions) error {
++	if opts == nil {
++		opts = &UpgradeOptions{}
++	}
++
++	// We don't use the existing b.store because
++	// this may already be a projectReferenceStore
++	// with new legacy files introduced to it accidentally.
++	olds, err := newLegacyReferenceStore(b.bucket).ListReferences(ctx)
++	if err != nil {
++		return fmt.Errorf("read old references: %w", err)
++	}
++	sort.Slice(olds, func(i, j int) bool {
++		return olds[i].Name().String() < olds[j].Name().String()
++	})
++
++	// There's no limit to the number of stacks we need to upgrade.
++	// We don't want to overload the system with too many concurrent upgrades.
++	// We'll run a fixed pool of goroutines to upgrade stacks.
++	pool := newWorkerPool(0 /* numWorkers */, len(olds) /* numTasks */)
++	defer pool.Close()
++
++	// Projects for each stack in `olds` in the same order.
++	// projects[i] is the project name for olds[i].
++	projects := make([]tokens.Name, len(olds))
++	for idx, old := range olds {
++		idx, old := idx, old
++		pool.Enqueue(func() error {
++			project, err := b.guessProject(ctx, old)
++			if err != nil {
++				return fmt.Errorf("guess stack %s project: %w", old.Name(), err)
++			}
++
++			// No lock necessary;
++			// projects is pre-allocated.
++			projects[idx] = project
++			return nil
++		})
++	}
++
++	if err := pool.Wait(); err != nil {
++		return err
++	}
++
++	// If there are any stacks without projects
++	// and the user provided a callback to fill them,
++	// use it to fill in the missing projects.
++	if opts.ProjectsForDetachedStacks != nil {
++		var (
++			// Names of stacks in 'olds' that don't have a project
++			detached []tokens.StackName
++
++			// reverseIdx[i] is the index of detached[i]
++			// in olds and projects.
++			//
++			// In other words:
++			//
++			//   detached[i] == olds[reverseIdx[i]].Name()
++			//   projects[reverseIdx[i]] == ""
++			reverseIdx []int
++		)
++		for i, ref := range olds {
++			if projects[i] == "" {
++				detached = append(detached, ref.Name())
++				reverseIdx = append(reverseIdx, i)
++			}
++		}
++
++		if len(detached) != 0 {
++			detachedProjects, err := opts.ProjectsForDetachedStacks(detached)
++			if err != nil {
++				return err
++			}
++			contract.Assertf(len(detached) == len(detachedProjects),
++				"ProjectsForDetachedStacks returned the wrong number of projects: "+
++					"expected %d, got %d", len(detached), len(detachedProjects))
++
++			for i, project := range detachedProjects {
++				projects[reverseIdx[i]] = project
++			}
++		}
++	}
++
++	// It's important that we attempt to write the new metadata file
++	// before we attempt the upgrade.
++	// This ensures that if permissions are borked for any reason,
++	// (e.g., we can write to .pulumi/*/*" but not ".pulumi/*.")
++	// we don't leave the bucket in a completely inaccessible state.
++	meta := pulumiMeta{Version: 1}
++	if err := meta.WriteTo(ctx, b.bucket); err != nil {
++		var s strings.Builder
++		fmt.Fprintf(&s, "Could not write new state metadata file: %v\n", err)
++		fmt.Fprintf(&s, "Please verify that the storage is writable, and try again.")
++		b.d.Errorf(diag.RawMessage("", s.String()))
++		return errors.New("state upgrade failed")
++	}
++
++	newStore := newProjectReferenceStore(b.bucket, b.currentProject.Load)
++
++	var upgraded atomic.Int64 // number of stacks successfully upgraded
++	for idx, old := range olds {
++		idx, old := idx, old
++		pool.Enqueue(func() error {
++			project := projects[idx]
++			if project == "" {
++				b.d.Warningf(diag.Message("", "Skipping stack %q: no project name found"), old)
++				return nil
++			}
++
++			if err := b.upgradeStack(ctx, newStore, project, old); err != nil {
++				b.d.Warningf(diag.Message("", "Skipping stack %q: %v"), old, err)
++			} else {
++				upgraded.Add(1)
++			}
++			return nil
++		})
++	}
++
++	// We log all errors above. This should never fail.
++	err = pool.Wait()
++	contract.AssertNoErrorf(err, "pool.Wait should never return an error")
++
++	b.store = newStore
++	b.d.Infoerrf(diag.Message("", "Upgraded %d stack(s) to project mode"), upgraded.Load())
++	return nil
++}
++
++// guessProject inspects the checkpoint for the given stack and attempts to
++// guess the project name for it.
++// Returns an empty string if the project name cannot be determined.
++func (b *diyBackend) guessProject(ctx context.Context, old *diyBackendReference) (tokens.Name, error) {
++	contract.Requiref(old.project == "", "old.project", "must be empty")
++
++	chk, err := b.getCheckpoint(ctx, old)
++	if err != nil {
++		return "", fmt.Errorf("read checkpoint: %w", err)
++	}
++
++	// Try and find the project name from _any_ resource URN
++	if chk.Latest != nil {
++		for _, res := range chk.Latest.Resources {
++			return tokens.Name(res.URN.Project()), nil
++		}
++	}
++	return "", nil
++}
++
++// upgradeStack upgrades a single stack to use the provided projectReferenceStore.
++func (b *diyBackend) upgradeStack(
++	ctx context.Context,
++	newStore *projectReferenceStore,
++	project tokens.Name,
++	old *diyBackendReference,
++) error {
++	contract.Requiref(old.project == "", "old.project", "must be empty")
++	contract.Requiref(project != "", "project", "must not be empty")
++
++	new := newStore.newReference(project, old.Name())
++	if err := b.renameStack(ctx, old, new); err != nil {
++		return fmt.Errorf("rename to %v: %w", new, err)
++	}
++
++	return nil
++}
++
++// massageBlobPath takes the path the user provided and converts it to an appropriate form go-cloud
++// can support.  Importantly, s3/azblob/gs paths should not be be touched. This will only affect
++// file:// paths which have a few oddities around them that we want to ensure work properly.
++func massageBlobPath(path string) (string, error) {
++	if !strings.HasPrefix(path, FilePathPrefix) {
++		// Not a file:// path.  Keep this untouched and pass directly to gocloud.
++		return path, nil
++	}
++
++	// Strip off the "file://" portion so we can examine and determine what to do with the rest.
++	path = strings.TrimPrefix(path, FilePathPrefix)
++
++	// We need to specially handle ~.  The shell doesn't take care of this for us, and later
++	// functions we run into can't handle this either.
++	//
++	// From https://stackoverflow.com/questions/17609732/expand-tilde-to-home-directory
++	if strings.HasPrefix(path, "~") {
++		usr, err := user.Current()
++		if err != nil {
++			return "", fmt.Errorf("Could not determine current user to resolve `file://~` path.: %w", err)
++		}
++
++		if path == "~" {
++			path = usr.HomeDir
++		} else {
++			path = filepath.Join(usr.HomeDir, path[2:])
++		}
++	}
++
++	// For file:// backend, ensure a relative path is resolved. fileblob only supports absolute paths.
++	path, err := filepath.Abs(path)
++	if err != nil {
++		return "", fmt.Errorf("An IO error occurred while building the absolute path: %w", err)
++	}
++
++	// Using example from https://godoc.org/gocloud.dev/blob/fileblob#example-package--OpenBucket
++	// On Windows, convert "\" to "/" and add a leading "/". (See https://gocloud.dev/howto/blob/#local)
++	path = filepath.ToSlash(path)
++	if os.PathSeparator != '/' && !strings.HasPrefix(path, "/") {
++		path = "/" + path
++	}
++
++	return FilePathPrefix + path, nil
++}
++
++func Login(ctx context.Context, d diag.Sink, url string, project *workspace.Project) (Backend, error) {
++	be, err := New(ctx, d, url, project)
++	if err != nil {
++		return nil, err
++	}
++	return be, workspace.StoreAccount(be.URL(), workspace.Account{}, true)
++}
++
++func (b *diyBackend) getReference(ref backend.StackReference) (*diyBackendReference, error) {
++	stackRef, ok := ref.(*diyBackendReference)
++	if !ok {
++		return nil, errors.New("bad stack reference type")
++	}
++	return stackRef, stackRef.Validate()
++}
++
++func (b *diyBackend) diy() {}
++
++func (b *diyBackend) Name() string {
++	name, err := os.Hostname()
++	contract.IgnoreError(err)
++	if name == "" {
++		name = "diy"
++	}
++	return name
++}
++
++func (b *diyBackend) URL() string {
++	return b.originalURL
++}
++
++func (b *diyBackend) SetCurrentProject(project *workspace.Project) {
++	b.currentProject.Store(project)
++}
++
++func (b *diyBackend) GetPolicyPack(ctx context.Context, policyPack string,
++	d diag.Sink,
++) (backend.PolicyPack, error) {
++	return nil, errors.New("DIY backend does not support resource policy")
++}
++
++func (b *diyBackend) ListPolicyGroups(ctx context.Context, orgName string, _ backend.ContinuationToken) (
++	apitype.ListPolicyGroupsResponse, backend.ContinuationToken, error,
++) {
++	return apitype.ListPolicyGroupsResponse{}, nil, errors.New("DIY backend does not support resource policy")
++}
++
++func (b *diyBackend) ListPolicyPacks(ctx context.Context, orgName string, _ backend.ContinuationToken) (
++	apitype.ListPolicyPacksResponse, backend.ContinuationToken, error,
++) {
++	return apitype.ListPolicyPacksResponse{}, nil, errors.New("DIY backend does not support resource policy")
++}
++
++func (b *diyBackend) SupportsTags() bool {
++	return false
++}
++
++func (b *diyBackend) SupportsOrganizations() bool {
++	return false
++}
++
++func (b *diyBackend) SupportsProgress() bool {
++	return false
++}
++
++func (b *diyBackend) ParseStackReference(stackRef string) (backend.StackReference, error) {
++	return b.parseStackReference(stackRef)
++}
++
++func (b *diyBackend) parseStackReference(stackRef string) (*diyBackendReference, error) {
++	return b.store.ParseReference(stackRef)
++}
++
++// ValidateStackName verifies the stack name is valid for the diy backend.
++func (b *diyBackend) ValidateStackName(stackRef string) error {
++	_, err := b.ParseStackReference(stackRef)
++	return err
++}
++
++func (b *diyBackend) DoesProjectExist(ctx context.Context, _ string, projectName string) (bool, error) {
++	projStore, ok := b.store.(*projectReferenceStore)
++	if !ok {
++		// Legacy stores don't have projects
++		// so the project does not exist.
++		return false, nil
++	}
++
++	return projStore.ProjectExists(ctx, projectName)
++}
++
++// Confirm the specified stack's project doesn't contradict the meta.yaml of the current project.
++// If the CWD is not in a Pulumi project, does not contradict.
++// If the project name in Pulumi.yaml is "foo", a stack with a name of bar/foo should not work.
++func currentProjectContradictsWorkspace(stack *diyBackendReference) bool {
++	contract.Requiref(stack != nil, "stack", "is nil")
++
++	if stack.project == "" {
++		return false
++	}
++
++	projPath, err := workspace.DetectProjectPath()
++	if err != nil {
++		return false
++	}
++
++	if projPath == "" {
++		return false
++	}
++
++	proj, err := workspace.LoadProject(projPath)
++	if err != nil {
++		return false
++	}
++
++	return proj.Name.String() != stack.project.String()
++}
++
++func (b *diyBackend) CreateStack(ctx context.Context, stackRef backend.StackReference,
++	root string, opts *backend.CreateStackOptions,
++) (backend.Stack, error) {
++	if opts != nil && len(opts.Teams) > 0 {
++		return nil, backend.ErrTeamsNotSupported
++	}
++
++	diyStackRef, err := b.getReference(stackRef)
++	if err != nil {
++		return nil, err
++	}
++
++	err = b.Lock(ctx, stackRef)
++	if err != nil {
++		return nil, err
++	}
++	defer b.Unlock(ctx, stackRef)
++
++	if currentProjectContradictsWorkspace(diyStackRef) {
++		return nil, fmt.Errorf("provided project name %q doesn't match Pulumi.yaml", diyStackRef.project)
++	}
++
++	stackName := diyStackRef.FullyQualifiedName()
++	if stackName == "" {
++		return nil, errors.New("invalid empty stack name")
++	}
++
++	if _, err := b.stackExists(ctx, diyStackRef); err == nil {
++		return nil, &backend.StackAlreadyExistsError{StackName: string(stackName)}
++	}
++
++	_, err = b.saveStack(ctx, diyStackRef, nil, nil)
++	if err != nil {
++		return nil, err
++	}
++
++	stack := newStack(diyStackRef, b)
++	b.d.Infof(diag.Message("", "Created stack '%s'"), stack.Ref())
++
++	return stack, nil
++}
++
++func (b *diyBackend) GetStack(ctx context.Context, stackRef backend.StackReference) (backend.Stack, error) {
++	diyStackRef, err := b.getReference(stackRef)
++	if err != nil {
++		return nil, err
++	}
++
++	_, err = b.stackExists(ctx, diyStackRef)
++	if err != nil {
++		if errors.Is(err, errCheckpointNotFound) {
++			return nil, nil
++		}
++		return nil, err
++	}
++
++	return newStack(diyStackRef, b), nil
++}
++
++func (b *diyBackend) ListStacks(
++	ctx context.Context, filter backend.ListStacksFilter, _ backend.ContinuationToken) (
++	[]backend.StackSummary, backend.ContinuationToken, error,
++) {
++	stacks, err := b.getStacks(ctx)
++	if err != nil {
++		return nil, nil, err
++	}
++
++	// Note that the provided stack filter is only partially honored, since fields like organizations and tags
++	// aren't persisted in the diy backend.
++	results := slice.Prealloc[backend.StackSummary](len(stacks))
++	for _, stackRef := range stacks {
++		// We can check for project name filter here, but be careful about legacy stores where project is always blank.
++		stackProject, hasProject := stackRef.Project()
++		if filter.Project != nil && hasProject && string(stackProject) != *filter.Project {
++			continue
++		}
++
++		chk, err := b.getCheckpoint(ctx, stackRef)
++		if err != nil {
++			return nil, nil, err
++		}
++		results = append(results, newDIYStackSummary(stackRef, chk))
++	}
++
++	return results, nil, nil
++}
++
++func (b *diyBackend) RemoveStack(ctx context.Context, stack backend.Stack, force bool) (bool, error) {
++	diyStackRef, err := b.getReference(stack.Ref())
++	if err != nil {
++		return false, err
++	}
++
++	err = b.Lock(ctx, diyStackRef)
++	if err != nil {
++		return false, err
++	}
++	defer b.Unlock(ctx, diyStackRef)
++
++	checkpoint, err := b.getCheckpoint(ctx, diyStackRef)
++	if err != nil {
++		return false, err
++	}
++
++	// Don't remove stacks that still have resources.
++	if !force && checkpoint != nil && checkpoint.Latest != nil && len(checkpoint.Latest.Resources) > 0 {
++		return true, errors.New("refusing to remove stack because it still contains resources")
++	}
++
++	return false, b.removeStack(ctx, diyStackRef)
++}
++
++func (b *diyBackend) RenameStack(ctx context.Context, stack backend.Stack,
++	newName tokens.QName,
++) (backend.StackReference, error) {
++	diyStackRef, err := b.getReference(stack.Ref())
++	if err != nil {
++		return nil, err
++	}
++
++	// Ensure the new stack name is valid.
++	newRef, err := b.parseStackReference(string(newName))
++	if err != nil {
++		return nil, err
++	}
++
++	err = b.renameStack(ctx, diyStackRef, newRef)
++	if err != nil {
++		return nil, err
++	}
++
++	return newRef, nil
++}
++
++func (b *diyBackend) renameStack(ctx context.Context, oldRef *diyBackendReference,
++	newRef *diyBackendReference,
++) error {
++	err := b.Lock(ctx, oldRef)
++	if err != nil {
++		return err
++	}
++	defer b.Unlock(ctx, oldRef)
++
++	// Ensure the destination stack does not already exist.
++	hasExisting, err := b.bucket.Exists(ctx, b.stackPath(ctx, newRef))
++	if err != nil {
++		return err
++	}
++	if hasExisting {
++		return fmt.Errorf("a stack named %s already exists", newRef.String())
++	}
++
++	// Get the current state from the stack to be renamed.
++	chk, err := b.getCheckpoint(ctx, oldRef)
++	if err != nil {
++		return fmt.Errorf("failed to load checkpoint: %w", err)
++	}
++
++	// If we have a checkpoint, we need to rename the URNs inside it to use the new stack name.
++	if chk != nil && chk.Latest != nil {
++		project, has := newRef.Project()
++		contract.Assertf(has || project == "", "project should be blank for legacy stacks")
++		if err = edit.RenameStack(chk.Latest, newRef.name, tokens.PackageName(project)); err != nil {
++			return err
++		}
++	}
++
++	chkJSON, err := encoding.JSON.Marshal(chk)
++	if err != nil {
++		return fmt.Errorf("marshalling checkpoint: %w", err)
++	}
++
++	versionedCheckpoint := &apitype.VersionedCheckpoint{
++		Version:    apitype.DeploymentSchemaVersionCurrent,
++		Checkpoint: json.RawMessage(chkJSON),
++	}
++
++	// Now save the snapshot with a new name (we pass nil to re-use the existing secrets manager from the snapshot).
++	if _, _, err = b.saveCheckpoint(ctx, newRef, versionedCheckpoint); err != nil {
++		return err
++	}
++
++	// To remove the old stack, just make a backup of the file and don't write out anything new.
++	file := b.stackPath(ctx, oldRef)
++	backupTarget(ctx, b.bucket, file, false)
++
++	// And rename the history folder as well.
++	if err = b.renameHistory(ctx, oldRef, newRef); err != nil {
++		return err
++	}
++	return err
++}
++
++func (b *diyBackend) GetLatestConfiguration(ctx context.Context,
++	stack backend.Stack,
++) (config.Map, error) {
++	hist, err := b.GetHistory(ctx, stack.Ref(), 1 /*pageSize*/, 1 /*page*/)
++	if err != nil {
++		return nil, err
++	}
++	if len(hist) == 0 {
++		return nil, backend.ErrNoPreviousDeployment
++	}
++
++	return hist[0].Config, nil
++}
++
++func (b *diyBackend) PackPolicies(
++	ctx context.Context, policyPackRef backend.PolicyPackReference,
++	cancellationScopes backend.CancellationScopeSource,
++	callerEventsOpt chan<- engine.Event,
++) result.Result {
++	return result.Error("DIY backend does not support resource policy")
++}
++
++func (b *diyBackend) Preview(ctx context.Context, stack backend.Stack,
++	op backend.UpdateOperation, events chan<- engine.Event,
++) (*deploy.Plan, sdkDisplay.ResourceChanges, result.Result) {
++	// We can skip PreviewThenPromptThenExecute and just go straight to Execute.
++	opts := backend.ApplierOptions{
++		DryRun:   true,
++		ShowLink: true,
++	}
++	return b.apply(ctx, apitype.PreviewUpdate, stack, op, opts, events)
++}
++
++func (b *diyBackend) Update(ctx context.Context, stack backend.Stack,
++	op backend.UpdateOperation,
++) (sdkDisplay.ResourceChanges, result.Result) {
++	err := b.Lock(ctx, stack.Ref())
++	if err != nil {
++		return nil, result.FromError(err)
++	}
++	defer b.Unlock(ctx, stack.Ref())
++
++	return backend.PreviewThenPromptThenExecute(ctx, apitype.UpdateUpdate, stack, op, b.apply)
++}
++
++func (b *diyBackend) Import(ctx context.Context, stack backend.Stack,
++	op backend.UpdateOperation, imports []deploy.Import,
++) (sdkDisplay.ResourceChanges, result.Result) {
++	err := b.Lock(ctx, stack.Ref())
++	if err != nil {
++		return nil, result.FromError(err)
++	}
++	defer b.Unlock(ctx, stack.Ref())
++
++	op.Imports = imports
++	return backend.PreviewThenPromptThenExecute(ctx, apitype.ResourceImportUpdate, stack, op, b.apply)
++}
++
++func (b *diyBackend) Refresh(ctx context.Context, stack backend.Stack,
++	op backend.UpdateOperation,
++) (sdkDisplay.ResourceChanges, result.Result) {
++	err := b.Lock(ctx, stack.Ref())
++	if err != nil {
++		return nil, result.FromError(err)
++	}
++	defer b.Unlock(ctx, stack.Ref())
++
++	return backend.PreviewThenPromptThenExecute(ctx, apitype.RefreshUpdate, stack, op, b.apply)
++}
++
++func (b *diyBackend) Destroy(ctx context.Context, stack backend.Stack,
++	op backend.UpdateOperation,
++) (sdkDisplay.ResourceChanges, result.Result) {
++	err := b.Lock(ctx, stack.Ref())
++	if err != nil {
++		return nil, result.FromError(err)
++	}
++	defer b.Unlock(ctx, stack.Ref())
++
++	return backend.PreviewThenPromptThenExecute(ctx, apitype.DestroyUpdate, stack, op, b.apply)
++}
++
++func (b *diyBackend) Query(ctx context.Context, op backend.QueryOperation) error {
++	return b.query(ctx, op, nil /*events*/)
++}
++
++func (b *diyBackend) Watch(ctx context.Context, stk backend.Stack,
++	op backend.UpdateOperation, paths []string,
++) result.Result {
++	return backend.Watch(ctx, b, stk, op, b.apply, paths)
++}
++
++// apply actually performs the provided type of update on a diy hosted stack.
++func (b *diyBackend) apply(
++	ctx context.Context, kind apitype.UpdateKind, stack backend.Stack,
++	op backend.UpdateOperation, opts backend.ApplierOptions,
++	events chan<- engine.Event,
++) (*deploy.Plan, sdkDisplay.ResourceChanges, result.Result) {
++	stackRef := stack.Ref()
++	diyStackRef, err := b.getReference(stackRef)
++	if err != nil {
++		return nil, nil, result.FromError(err)
++	}
++
++	if currentProjectContradictsWorkspace(diyStackRef) {
++		return nil, nil, result.Errorf("provided project name %q doesn't match Pulumi.yaml", diyStackRef.project)
++	}
++
++	actionLabel := backend.ActionLabel(kind, opts.DryRun)
++
++	if !(op.Opts.Display.JSONDisplay || op.Opts.Display.Type == display.DisplayWatch) {
++		// Print a banner so it's clear this is a diy deployment.
++		fmt.Printf(op.Opts.Display.Color.Colorize(
++			colors.SpecHeadline+"%s (%s):"+colors.Reset+"\n"), actionLabel, stackRef)
++	}
++
++	// Start the update.
++	update, err := b.newUpdate(ctx, op.SecretsProvider, diyStackRef, op)
++	if err != nil {
++		return nil, nil, result.FromError(err)
++	}
++
++	// Spawn a display loop to show events on the CLI.
++	displayEvents := make(chan engine.Event)
++	displayDone := make(chan bool)
++	go display.ShowEvents(
++		strings.ToLower(actionLabel), kind, stackRef.Name(), op.Proj.Name, "",
++		displayEvents, displayDone, op.Opts.Display, opts.DryRun)
++
++	// Create a separate event channel for engine events that we'll pipe to both listening streams.
++	engineEvents := make(chan engine.Event)
++
++	scope := op.Scopes.NewScope(engineEvents, opts.DryRun)
++	eventsDone := make(chan bool)
++	go func() {
++		// Pull in all events from the engine and send them to the two listeners.
++		for e := range engineEvents {
++			displayEvents <- e
++
++			// If the caller also wants to see the events, stream them there also.
++			if events != nil {
++				events <- e
++			}
++		}
++
++		close(eventsDone)
++	}()
++
++	// Create the management machinery.
++	persister := b.newSnapshotPersister(ctx, diyStackRef)
++	manager := backend.NewSnapshotManager(persister, op.SecretsManager, update.GetTarget().Snapshot)
++	engineCtx := &engine.Context{
++		Cancel:          scope.Context(),
++		Events:          engineEvents,
++		SnapshotManager: manager,
++		BackendClient:   backend.NewBackendClient(b, op.SecretsProvider),
++	}
++
++	// Perform the update
++	start := time.Now().Unix()
++	var plan *deploy.Plan
++	var changes sdkDisplay.ResourceChanges
++	var updateErr error
++	switch kind {
++	case apitype.PreviewUpdate:
++		plan, changes, updateErr = engine.Update(update, engineCtx, op.Opts.Engine, true)
++	case apitype.UpdateUpdate:
++		_, changes, updateErr = engine.Update(update, engineCtx, op.Opts.Engine, opts.DryRun)
++	case apitype.ResourceImportUpdate:
++		_, changes, updateErr = engine.Import(update, engineCtx, op.Opts.Engine, op.Imports, opts.DryRun)
++	case apitype.RefreshUpdate:
++		_, changes, updateErr = engine.Refresh(update, engineCtx, op.Opts.Engine, opts.DryRun)
++	case apitype.DestroyUpdate:
++		_, changes, updateErr = engine.Destroy(update, engineCtx, op.Opts.Engine, opts.DryRun)
++	case apitype.StackImportUpdate, apitype.RenameUpdate:
++		contract.Failf("unexpected %s event", kind)
++	default:
++		contract.Failf("Unrecognized update kind: %s", kind)
++	}
++	updateRes := result.WrapIfNonNil(updateErr)
++	end := time.Now().Unix()
++
++	// Wait for the display to finish showing all the events.
++	<-displayDone
++	scope.Close() // Don't take any cancellations anymore, we're shutting down.
++	close(engineEvents)
++	err = manager.Close()
++	// Historically we ignored this error (using IgnoreClose so it would log to the V11 log).
++	// To minimize the immediate blast radius of this to start with we're just going to write an error to the user.
++	if err != nil {
++		cmdutil.Diag().Errorf(diag.Message("", "Snapshot write failed: %v"), err)
++	}
++
++	// Make sure the goroutine writing to displayEvents and events has exited before proceeding.
++	<-eventsDone
++	close(displayEvents)
++
++	// Save update results.
++	backendUpdateResult := backend.SucceededResult
++	if updateRes != nil {
++		backendUpdateResult = backend.FailedResult
++	}
++	info := backend.UpdateInfo{
++		Kind:        kind,
++		StartTime:   start,
++		Message:     op.M.Message,
++		Environment: op.M.Environment,
++		Config:      update.GetTarget().Config,
++		Result:      backendUpdateResult,
++		EndTime:     end,
++		// IDEA: it would be nice to populate the *Deployment, so that addToHistory below doesn't need to
++		//     rudely assume it knows where the checkpoint file is on disk as it makes a copy of it.  This isn't
++		//     trivial to achieve today given the event driven nature of plan-walking, however.
++		ResourceChanges: changes,
++	}
++
++	var saveErr error
++	var backupErr error
++	if !opts.DryRun {
++		saveErr = b.addToHistory(ctx, diyStackRef, info)
++		backupErr = b.backupStack(ctx, diyStackRef)
++	}
++
++	if updateRes != nil {
++		// We swallow saveErr and backupErr as they are less important than the updateErr.
++		return plan, changes, updateRes
++	}
++
++	if saveErr != nil {
++		// We swallow backupErr as it is less important than the saveErr.
++		return plan, changes, result.FromError(fmt.Errorf("saving update info: %w", saveErr))
++	}
++
++	if backupErr != nil {
++		return plan, changes, result.FromError(fmt.Errorf("saving backup: %w", backupErr))
++	}
++
++	// Make sure to print a link to the stack's checkpoint before exiting.
++	if !op.Opts.Display.SuppressPermalink && opts.ShowLink && !op.Opts.Display.JSONDisplay {
++		// Note we get a real signed link for aws/azure/gcp links.  But no such option exists for
++		// file:// links so we manually create the link ourselves.
++		var link string
++		if strings.HasPrefix(b.url, FilePathPrefix) {
++			u, _ := url.Parse(b.url)
++			u.Path = filepath.ToSlash(path.Join(u.Path, b.stackPath(ctx, diyStackRef)))
++			link = u.String()
++		} else {
++			link, err = b.bucket.SignedURL(ctx, b.stackPath(ctx, diyStackRef), nil)
++			if err != nil {
++				// set link to be empty to when there is an error to hide use of Permalinks
++				link = ""
++
++				// we log a warning here rather then returning an error to avoid exiting
++				// pulumi with an error code.
++				// printing a statefile perma link happens after all the providers have finished
++				// deploying the infrastructure, failing the pulumi update because there was a
++				// problem printing a statefile perma link can be missleading in automated CI environments.
++				cmdutil.Diag().Warningf(diag.Message("", "Unable to create signed url for current backend to "+
++					"create a Permalink. Please visit https://www.pulumi.com/docs/troubleshooting/ "+
++					"for more information\n"))
++			}
++		}
++
++		if link != "" {
++			fmt.Printf(op.Opts.Display.Color.Colorize(
++				colors.SpecHeadline+"Permalink: "+
++					colors.Underline+colors.BrightBlue+"%s"+colors.Reset+"\n"), link)
++		}
++	}
++
++	return plan, changes, nil
++}
++
++// query executes a query program against the resource outputs of a diy hosted stack.
++func (b *diyBackend) query(ctx context.Context, op backend.QueryOperation,
++	callerEventsOpt chan<- engine.Event,
++) error {
++	return backend.RunQuery(ctx, b, op, callerEventsOpt, b.newQuery)
++}
++
++func (b *diyBackend) GetHistory(
++	ctx context.Context,
++	stackRef backend.StackReference,
++	pageSize int,
++	page int,
++) ([]backend.UpdateInfo, error) {
++	diyStackRef, err := b.getReference(stackRef)
++	if err != nil {
++		return nil, err
++	}
++	updates, err := b.getHistory(ctx, diyStackRef, pageSize, page)
++	if err != nil {
++		return nil, err
++	}
++	return updates, nil
++}
++
++func (b *diyBackend) GetLogs(ctx context.Context,
++	secretsProvider secrets.Provider, stack backend.Stack, cfg backend.StackConfiguration,
++	query operations.LogQuery,
++) ([]operations.LogEntry, error) {
++	diyStackRef, err := b.getReference(stack.Ref())
++	if err != nil {
++		return nil, err
++	}
++
++	target, err := b.getTarget(ctx, secretsProvider, diyStackRef, cfg.Config, cfg.Decrypter)
++	if err != nil {
++		return nil, err
++	}
++
++	return GetLogsForTarget(target, query)
++}
++
++// GetLogsForTarget fetches stack logs using the config, decrypter, and checkpoint in the given target.
++func GetLogsForTarget(target *deploy.Target, query operations.LogQuery) ([]operations.LogEntry, error) {
++	contract.Requiref(target != nil, "target", "must not be nil")
++
++	if target.Snapshot == nil {
++		// If the stack has not been deployed yet, return no logs.
++		return nil, nil
++	}
++
++	config, err := target.Config.Decrypt(target.Decrypter)
++	if err != nil {
++		return nil, err
++	}
++
++	components := operations.NewResourceTree(target.Snapshot.Resources)
++	ops := components.OperationsProvider(config)
++	logs, err := ops.GetLogs(query)
++	if logs == nil {
++		return nil, err
++	}
++	return *logs, err
++}
++
++func (b *diyBackend) ExportDeployment(ctx context.Context,
++	stk backend.Stack,
++) (*apitype.UntypedDeployment, error) {
++	diyStackRef, err := b.getReference(stk.Ref())
++	if err != nil {
++		return nil, err
++	}
++
++	chk, err := b.getCheckpoint(ctx, diyStackRef)
++	if err != nil {
++		return nil, fmt.Errorf("failed to load checkpoint: %w", err)
++	}
++
++	data, err := encoding.JSON.Marshal(chk.Latest)
++	if err != nil {
++		return nil, err
++	}
++
++	return &apitype.UntypedDeployment{
++		Version:    3,
++		Deployment: json.RawMessage(data),
++	}, nil
++}
++
++func (b *diyBackend) ImportDeployment(ctx context.Context, stk backend.Stack,
++	deployment *apitype.UntypedDeployment,
++) error {
++	diyStackRef, err := b.getReference(stk.Ref())
++	if err != nil {
++		return err
++	}
++
++	err = b.Lock(ctx, diyStackRef)
++	if err != nil {
++		return err
++	}
++	defer b.Unlock(ctx, diyStackRef)
++
++	stackName := diyStackRef.FullyQualifiedName()
++	chk, err := stack.MarshalUntypedDeploymentToVersionedCheckpoint(stackName, deployment)
++	if err != nil {
++		return err
++	}
++
++	_, _, err = b.saveCheckpoint(ctx, diyStackRef, chk)
++	return err
++}
++
++func (b *diyBackend) CurrentUser() (string, []string, *workspace.TokenInformation, error) {
++	user, err := user.Current()
++	if err != nil {
++		return "", nil, nil, err
++	}
++	return user.Username, nil, nil, nil
++}
++
++func (b *diyBackend) getStacks(ctx context.Context) ([]*diyBackendReference, error) {
++	return b.store.ListReferences(ctx)
++}
++
++// UpdateStackTags updates the stacks's tags, replacing all existing tags.
++func (b *diyBackend) UpdateStackTags(ctx context.Context,
++	stack backend.Stack, tags map[apitype.StackTagName]string,
++) error {
++	// The diy backend does not currently persist tags.
++	return errors.New("stack tags not supported in diy mode")
++}
++
++func (b *diyBackend) CancelCurrentUpdate(ctx context.Context, stackRef backend.StackReference) error {
++	// Try to delete ALL the lock files
++	allFiles, err := listBucket(ctx, b.bucket, stackLockDir(stackRef.FullyQualifiedName()))
++	if err != nil {
++		// Don't error if it just wasn't found
++		if gcerrors.Code(err) == gcerrors.NotFound {
++			return nil
++		}
++		return err
++	}
++
++	for _, file := range allFiles {
++		if file.IsDir {
++			continue
++		}
++
++		err := b.bucket.Delete(ctx, file.Key)
++		if err != nil {
++			// Race condition, don't error if the file was delete between us calling list and now
++			if gcerrors.Code(err) == gcerrors.NotFound {
++				return nil
++			}
++			return err
++		}
++	}
++
++	return nil
++}
+diff --git a/pkg/backend/filestate/backend_legacy_test.go b/pkg/backend/diy/backend_legacy_test.go
+similarity index 92%
+rename from pkg/backend/filestate/backend_legacy_test.go
+rename to pkg/backend/diy/backend_legacy_test.go
+index fcb25ccde4fe..71d4127e4ed1 100644
+--- a/pkg/backend/filestate/backend_legacy_test.go
++++ b/pkg/backend/diy/backend_legacy_test.go
+@@ -1,4 +1,4 @@
+-package filestate
++package diy
+ 
+ import (
+ 	"context"
+@@ -28,7 +28,7 @@ import (
+ 
+ //nolint:paralleltest // mutates environment variables
+ func TestListStacksWithMultiplePassphrases_legacy(t *testing.T) {
+-	// Login to a temp dir filestate backend
++	// Login to a temp dir diy backend
+ 	tmpDir := markLegacyStore(t, t.TempDir())
+ 	ctx := context.Background()
+ 	b, err := New(ctx, diagtest.LogSink(t), "file://"+filepath.ToSlash(tmpDir), nil)
+@@ -88,7 +88,7 @@ func TestListStacksWithMultiplePassphrases_legacy(t *testing.T) {
+ func TestDrillError_legacy(t *testing.T) {
+ 	t.Parallel()
+ 
+-	// Login to a temp dir filestate backend
++	// Login to a temp dir diy backend
+ 	tmpDir := markLegacyStore(t, t.TempDir())
+ 	ctx := context.Background()
+ 	b, err := New(ctx, diagtest.LogSink(t), "file://"+filepath.ToSlash(tmpDir), nil)
+@@ -106,7 +106,7 @@ func TestDrillError_legacy(t *testing.T) {
+ func TestCancel_legacy(t *testing.T) {
+ 	t.Parallel()
+ 
+-	// Login to a temp dir filestate backend
++	// Login to a temp dir diy backend
+ 	tmpDir := markLegacyStore(t, t.TempDir())
+ 	ctx := context.Background()
+ 	b, err := New(ctx, diagtest.LogSink(t), "file://"+filepath.ToSlash(tmpDir), nil)
+@@ -126,7 +126,7 @@ func TestCancel_legacy(t *testing.T) {
+ 	assert.NoError(t, err)
+ 
+ 	// Locking and lock checks are only part of the internal interface
+-	lb, ok := b.(*localBackend)
++	lb, ok := b.(*diyBackend)
+ 	assert.True(t, ok)
+ 	assert.NotNil(t, lb)
+ 
+@@ -145,10 +145,10 @@ func TestCancel_legacy(t *testing.T) {
+ 	assert.NoError(t, err)
+ 	assert.False(t, lockExists)
+ 
+-	// Make another filestate backend which will have a different lockId
++	// Make another diy backend which will have a different lockId
+ 	ob, err := New(ctx, diagtest.LogSink(t), "file://"+filepath.ToSlash(tmpDir), nil)
+ 	assert.NoError(t, err)
+-	otherBackend, ok := ob.(*localBackend)
++	otherBackend, ok := ob.(*diyBackend)
+ 	assert.True(t, ok)
+ 	assert.NotNil(t, lb)
+ 
+@@ -167,14 +167,14 @@ func TestCancel_legacy(t *testing.T) {
+ func TestRemoveMakesBackups_legacy(t *testing.T) {
+ 	t.Parallel()
+ 
+-	// Login to a temp dir filestate backend
++	// Login to a temp dir diy backend
+ 	tmpDir := markLegacyStore(t, t.TempDir())
+ 	ctx := context.Background()
+ 	b, err := New(ctx, diagtest.LogSink(t), "file://"+filepath.ToSlash(tmpDir), nil)
+ 	assert.NoError(t, err)
+ 
+ 	// Grab the bucket interface to test with
+-	lb, ok := b.(*localBackend)
++	lb, ok := b.(*diyBackend)
+ 	assert.True(t, ok)
+ 	assert.NotNil(t, lb)
+ 
+@@ -210,14 +210,14 @@ func TestRemoveMakesBackups_legacy(t *testing.T) {
+ func TestRenameWorks_legacy(t *testing.T) {
+ 	t.Parallel()
+ 
+-	// Login to a temp dir filestate backend
++	// Login to a temp dir diy backend
+ 	tmpDir := markLegacyStore(t, t.TempDir())
+ 	ctx := context.Background()
+ 	b, err := New(ctx, diagtest.LogSink(t), "file://"+filepath.ToSlash(tmpDir), nil)
+ 	assert.NoError(t, err)
+ 
+ 	// Grab the bucket interface to test with
+-	lb, ok := b.(*localBackend)
++	lb, ok := b.(*diyBackend)
+ 	assert.True(t, ok)
+ 	assert.NotNil(t, lb)
+ 
+@@ -244,7 +244,7 @@ func TestRenameWorks_legacy(t *testing.T) {
+ 	bStackRefI, err := b.RenameStack(ctx, aStack, "b")
+ 	assert.NoError(t, err)
+ 	assert.Equal(t, "b", bStackRefI.String())
+-	bStackRef := bStackRefI.(*localBackendReference)
++	bStackRef := bStackRefI.(*diyBackendReference)
+ 
+ 	// Check the new stack file now exists and the old one is gone
+ 	stackFileExists, err = lb.bucket.Exists(ctx, lb.stackPath(ctx, bStackRef))
+@@ -260,7 +260,7 @@ func TestRenameWorks_legacy(t *testing.T) {
+ 	cStackRefI, err := b.RenameStack(ctx, bStack, "c")
+ 	assert.NoError(t, err)
+ 	assert.Equal(t, "c", cStackRefI.String())
+-	cStackRef := cStackRefI.(*localBackendReference)
++	cStackRef := cStackRefI.(*diyBackendReference)
+ 
+ 	// Check the new stack file now exists and the old one is gone
+ 	stackFileExists, err = lb.bucket.Exists(ctx, lb.stackPath(ctx, cStackRef))
+@@ -309,7 +309,7 @@ func TestHtmlEscaping_legacy(t *testing.T) {
+ 		Deployment: json.RawMessage(data),
+ 	}
+ 
+-	// Login to a temp dir filestate backend
++	// Login to a temp dir diy backend
+ 	tmpDir := markLegacyStore(t, t.TempDir())
+ 	ctx := context.Background()
+ 	b, err := New(ctx, diagtest.LogSink(t), "file://"+filepath.ToSlash(tmpDir), nil)
+@@ -327,18 +327,18 @@ func TestHtmlEscaping_legacy(t *testing.T) {
+ 	// Ensure the file has the string contents "<html@tags>"", not "\u003chtml\u0026tags\u003e"
+ 
+ 	// Grab the bucket interface to read the file with
+-	lb, ok := b.(*localBackend)
++	lb, ok := b.(*diyBackend)
+ 	assert.True(t, ok)
+ 	assert.NotNil(t, lb)
+ 
+-	chkpath := lb.stackPath(ctx, aStackRef.(*localBackendReference))
++	chkpath := lb.stackPath(ctx, aStackRef.(*diyBackendReference))
+ 	bytes, err := lb.bucket.ReadAll(context.Background(), chkpath)
+ 	assert.NoError(t, err)
+ 	state := string(bytes)
+ 	assert.Contains(t, state, "<html@tags>")
+ }
+ 
+-func TestLocalBackendRejectsStackInitOptions_legacy(t *testing.T) {
++func TestDIYBackendRejectsStackInitOptions_legacy(t *testing.T) {
+ 	t.Parallel()
+ 
+ 	// Here, we provide options that illegally specify a team on a
+@@ -346,17 +346,17 @@ func TestLocalBackendRejectsStackInitOptions_legacy(t *testing.T) {
+ 	// an error later when we call CreateStack.
+ 	illegalOptions := &backend.CreateStackOptions{Teams: []string{"red-team"}}
+ 
+-	// • Create a mock local backend
++	// • Create a mock diy backend
+ 	tmpDir := markLegacyStore(t, t.TempDir())
+ 	dirURI := "file://" + filepath.ToSlash(tmpDir)
+-	local, err := New(context.Background(), diagtest.LogSink(t), dirURI, nil)
++	diy, err := New(context.Background(), diagtest.LogSink(t), dirURI, nil)
+ 	assert.NoError(t, err)
+ 	ctx := context.Background()
+ 
+ 	// • Simulate `pulumi stack init`, passing non-nil init options
+-	fakeStackRef, err := local.ParseStackReference("foobar")
++	fakeStackRef, err := diy.ParseStackReference("foobar")
+ 	assert.NoError(t, err)
+-	_, err = local.CreateStack(ctx, fakeStackRef, "", illegalOptions)
++	_, err = diy.CreateStack(ctx, fakeStackRef, "", illegalOptions)
+ 	assert.ErrorIs(t, err, backend.ErrTeamsNotSupported)
+ }
+ 
+diff --git a/pkg/backend/filestate/backend_test.go b/pkg/backend/diy/backend_test.go
+similarity index 95%
+rename from pkg/backend/filestate/backend_test.go
+rename to pkg/backend/diy/backend_test.go
+index 4b606c33c94c..55e18c5908e2 100644
+--- a/pkg/backend/filestate/backend_test.go
++++ b/pkg/backend/diy/backend_test.go
+@@ -1,4 +1,4 @@
+-package filestate
++package diy
+ 
+ import (
+ 	"bytes"
+@@ -166,7 +166,7 @@ func makeUntypedDeploymentTimestamp(
+ 
+ //nolint:paralleltest // mutates environment variables
+ func TestListStacksWithMultiplePassphrases(t *testing.T) {
+-	// Login to a temp dir filestate backend
++	// Login to a temp dir diy backend
+ 	tmpDir := t.TempDir()
+ 	ctx := context.Background()
+ 	b, err := New(ctx, diagtest.LogSink(t), "file://"+filepath.ToSlash(tmpDir), nil)
+@@ -226,7 +226,7 @@ func TestListStacksWithMultiplePassphrases(t *testing.T) {
+ func TestDrillError(t *testing.T) {
+ 	t.Parallel()
+ 
+-	// Login to a temp dir filestate backend
++	// Login to a temp dir diy backend
+ 	tmpDir := t.TempDir()
+ 	ctx := context.Background()
+ 	b, err := New(ctx, diagtest.LogSink(t), "file://"+filepath.ToSlash(tmpDir), nil)
+@@ -244,7 +244,7 @@ func TestDrillError(t *testing.T) {
+ func TestCancel(t *testing.T) {
+ 	t.Parallel()
+ 
+-	// Login to a temp dir filestate backend
++	// Login to a temp dir diy backend
+ 	tmpDir := t.TempDir()
+ 	ctx := context.Background()
+ 	b, err := New(ctx, diagtest.LogSink(t), "file://"+filepath.ToSlash(tmpDir), nil)
+@@ -264,7 +264,7 @@ func TestCancel(t *testing.T) {
+ 	assert.NoError(t, err)
+ 
+ 	// Locking and lock checks are only part of the internal interface
+-	lb, ok := b.(*localBackend)
++	lb, ok := b.(*diyBackend)
+ 	assert.True(t, ok)
+ 	assert.NotNil(t, lb)
+ 
+@@ -283,10 +283,10 @@ func TestCancel(t *testing.T) {
+ 	assert.NoError(t, err)
+ 	assert.False(t, lockExists)
+ 
+-	// Make another filestate backend which will have a different lockId
++	// Make another diy backend which will have a different lockId
+ 	ob, err := New(ctx, diagtest.LogSink(t), "file://"+filepath.ToSlash(tmpDir), nil)
+ 	assert.NoError(t, err)
+-	otherBackend, ok := ob.(*localBackend)
++	otherBackend, ok := ob.(*diyBackend)
+ 	assert.True(t, ok)
+ 	assert.NotNil(t, lb)
+ 
+@@ -305,14 +305,14 @@ func TestCancel(t *testing.T) {
+ func TestRemoveMakesBackups(t *testing.T) {
+ 	t.Parallel()
+ 
+-	// Login to a temp dir filestate backend
++	// Login to a temp dir diy backend
+ 	tmpDir := t.TempDir()
+ 	ctx := context.Background()
+ 	b, err := New(ctx, diagtest.LogSink(t), "file://"+filepath.ToSlash(tmpDir), nil)
+ 	assert.NoError(t, err)
+ 
+ 	// Grab the bucket interface to test with
+-	lb, ok := b.(*localBackend)
++	lb, ok := b.(*diyBackend)
+ 	assert.True(t, ok)
+ 	assert.NotNil(t, lb)
+ 
+@@ -348,14 +348,14 @@ func TestRemoveMakesBackups(t *testing.T) {
+ func TestRenameWorks(t *testing.T) {
+ 	t.Parallel()
+ 
+-	// Login to a temp dir filestate backend
++	// Login to a temp dir diy backend
+ 	tmpDir := t.TempDir()
+ 	ctx := context.Background()
+ 	b, err := New(ctx, diagtest.LogSink(t), "file://"+filepath.ToSlash(tmpDir), nil)
+ 	assert.NoError(t, err)
+ 
+ 	// Grab the bucket interface to test with
+-	lb, ok := b.(*localBackend)
++	lb, ok := b.(*diyBackend)
+ 	assert.True(t, ok)
+ 	assert.NotNil(t, lb)
+ 
+@@ -382,7 +382,7 @@ func TestRenameWorks(t *testing.T) {
+ 	bStackRefI, err := b.RenameStack(ctx, aStack, "organization/project/b")
+ 	assert.NoError(t, err)
+ 	assert.Equal(t, "organization/project/b", bStackRefI.String())
+-	bStackRef := bStackRefI.(*localBackendReference)
++	bStackRef := bStackRefI.(*diyBackendReference)
+ 
+ 	// Check the new stack file now exists and the old one is gone
+ 	stackFileExists, err = lb.bucket.Exists(ctx, lb.stackPath(ctx, bStackRef))
+@@ -398,7 +398,7 @@ func TestRenameWorks(t *testing.T) {
+ 	cStackRefI, err := b.RenameStack(ctx, bStack, "organization/project/c")
+ 	assert.NoError(t, err)
+ 	assert.Equal(t, "organization/project/c", cStackRefI.String())
+-	cStackRef := cStackRefI.(*localBackendReference)
++	cStackRef := cStackRefI.(*diyBackendReference)
+ 
+ 	// Check the new stack file now exists and the old one is gone
+ 	stackFileExists, err = lb.bucket.Exists(ctx, lb.stackPath(ctx, cStackRef))
+@@ -418,14 +418,14 @@ func TestRenameWorks(t *testing.T) {
+ func TestRenameProjectWorks(t *testing.T) {
+ 	t.Parallel()
+ 
+-	// Login to a temp dir filestate backend
++	// Login to a temp dir diy backend
+ 	tmpDir := t.TempDir()
+ 	ctx := context.Background()
+ 	b, err := New(ctx, diagtest.LogSink(t), "file://"+filepath.ToSlash(tmpDir), nil)
+ 	assert.NoError(t, err)
+ 
+ 	// Grab the bucket interface to test with
+-	lb, ok := b.(*localBackend)
++	lb, ok := b.(*diyBackend)
+ 	assert.True(t, ok)
+ 	assert.NotNil(t, lb)
+ 
+@@ -452,7 +452,7 @@ func TestRenameProjectWorks(t *testing.T) {
+ 	bStackRefI, err := b.RenameStack(ctx, aStack, "organization/newProject/b")
+ 	assert.NoError(t, err)
+ 	assert.Equal(t, "organization/newProject/b", bStackRefI.String())
+-	bStackRef := bStackRefI.(*localBackendReference)
++	bStackRef := bStackRefI.(*diyBackendReference)
+ 
+ 	// Check the new stack file now exists and the old one is gone
+ 	stackFileExists, err = lb.bucket.Exists(ctx, lb.stackPath(ctx, bStackRef))
+@@ -524,7 +524,7 @@ func TestHtmlEscaping(t *testing.T) {
+ 		Deployment: json.RawMessage(data),
+ 	}
+ 
+-	// Login to a temp dir filestate backend
++	// Login to a temp dir diy backend
+ 	tmpDir := t.TempDir()
+ 	ctx := context.Background()
+ 	b, err := New(ctx, diagtest.LogSink(t), "file://"+filepath.ToSlash(tmpDir), nil)
+@@ -542,35 +542,35 @@ func TestHtmlEscaping(t *testing.T) {
+ 	// Ensure the file has the string contents "<html@tags>"", not "\u003chtml\u0026tags\u003e"
+ 
+ 	// Grab the bucket interface to read the file with
+-	lb, ok := b.(*localBackend)
++	lb, ok := b.(*diyBackend)
+ 	assert.True(t, ok)
+ 	assert.NotNil(t, lb)
+ 
+-	chkpath := lb.stackPath(ctx, aStackRef.(*localBackendReference))
++	chkpath := lb.stackPath(ctx, aStackRef.(*diyBackendReference))
+ 	bytes, err := lb.bucket.ReadAll(context.Background(), chkpath)
+ 	assert.NoError(t, err)
+ 	state := string(bytes)
+ 	assert.Contains(t, state, "<html@tags>")
+ }
+ 
+-func TestLocalBackendRejectsStackInitOptions(t *testing.T) {
++func TestDIYBackendRejectsStackInitOptions(t *testing.T) {
+ 	t.Parallel()
+ 	// Here, we provide options that illegally specify a team on a
+ 	// backend that does not support teams. We expect this to create
+ 	// an error later when we call CreateStack.
+ 	illegalOptions := &backend.CreateStackOptions{Teams: []string{"red-team"}}
+ 
+-	// • Create a mock local backend
++	// • Create a mock diy backend
+ 	tmpDir := t.TempDir()
+ 	dirURI := "file://" + filepath.ToSlash(tmpDir)
+-	local, err := New(context.Background(), diagtest.LogSink(t), dirURI, nil)
++	diy, err := New(context.Background(), diagtest.LogSink(t), dirURI, nil)
+ 	assert.NoError(t, err)
+ 	ctx := context.Background()
+ 
+ 	// • Simulate `pulumi stack init`, passing non-nil init options
+-	fakeStackRef, err := local.ParseStackReference("organization/b/foobar")
++	fakeStackRef, err := diy.ParseStackReference("organization/b/foobar")
+ 	assert.NoError(t, err)
+-	_, err = local.CreateStack(ctx, fakeStackRef, "", illegalOptions)
++	_, err = diy.CreateStack(ctx, fakeStackRef, "", illegalOptions)
+ 	assert.ErrorIs(t, err, backend.ErrTeamsNotSupported)
+ }
+ 
+@@ -584,12 +584,12 @@ func TestLegacyFolderStructure(t *testing.T) {
+ 	err = os.WriteFile(path.Join(tmpDir, ".pulumi", "stacks", "a.json"), []byte("{}"), os.ModePerm)
+ 	require.NoError(t, err)
+ 
+-	// Login to a temp dir filestate backend
++	// Login to a temp dir diy backend
+ 	ctx := context.Background()
+ 	b, err := New(ctx, diagtest.LogSink(t), "file://"+filepath.ToSlash(tmpDir), nil)
+ 	require.NoError(t, err)
+ 	// Check the backend says it's NOT in project mode
+-	lb, ok := b.(*localBackend)
++	lb, ok := b.(*diyBackend)
+ 	assert.True(t, ok)
+ 	assert.NotNil(t, lb)
+ 	assert.IsType(t, &legacyReferenceStore{}, lb.store)
+@@ -614,7 +614,7 @@ func TestLegacyFolderStructure(t *testing.T) {
+ func TestListStacksFilter(t *testing.T) {
+ 	t.Parallel()
+ 
+-	// Login to a temp dir filestate backend
++	// Login to a temp dir diy backend
+ 	ctx := context.Background()
+ 	tmpDir := t.TempDir()
+ 	b, err := New(ctx, diagtest.LogSink(t), "file://"+filepath.ToSlash(tmpDir), nil)
+@@ -648,9 +648,9 @@ func TestOptIntoLegacyFolderStructure(t *testing.T) {
+ 	tmpDir := t.TempDir()
+ 	ctx := context.Background()
+ 	s := make(env.MapStore)
+-	s[env.SelfManagedStateLegacyLayout.Var().Name()] = "true"
+-	b, err := newLocalBackend(ctx, diagtest.LogSink(t), "file://"+filepath.ToSlash(tmpDir), nil,
+-		&localBackendOptions{Env: env.NewEnv(s)},
++	s[env.DIYBackendLegacyLayout.Var().Name()] = "true"
++	b, err := newDIYBackend(ctx, diagtest.LogSink(t), "file://"+filepath.ToSlash(tmpDir), nil,
++		&diyBackendOptions{Env: env.NewEnv(s)},
+ 	)
+ 	require.NoError(t, err)
+ 
+@@ -693,7 +693,7 @@ func TestStackReferenceString_currentProjectChange(t *testing.T) {
+ }
+ 
+ // Verifies that there's no data race in calling StackReference.String
+-// and localBackend.SetCurrentProject concurrently.
++// and diyBackend.SetCurrentProject concurrently.
+ func TestStackReferenceString_currentProjectChange_race(t *testing.T) {
+ 	t.Parallel()
+ 
+@@ -717,7 +717,7 @@ func TestStackReferenceString_currentProjectChange_race(t *testing.T) {
+ 	// To exercise this data race, we'll have two goroutines.
+ 	// One goroutine will call StackReference.String repeatedly
+ 	// on all the stack references,
+-	// and the other goroutine will call localBackend.SetCurrentProject
++	// and the other goroutine will call diyBackend.SetCurrentProject
+ 	// with all the projects.
+ 
+ 	var wg sync.WaitGroup
+@@ -748,7 +748,7 @@ func TestStackReferenceString_currentProjectChange_race(t *testing.T) {
+ func TestProjectFolderStructure(t *testing.T) {
+ 	t.Parallel()
+ 
+-	// Login to a temp dir filestate backend
++	// Login to a temp dir diy backend
+ 
+ 	// Make a dummy file in the legacy location which isn't a stack file, we should still automatically turn
+ 	// this into project mode.
+@@ -765,7 +765,7 @@ func TestProjectFolderStructure(t *testing.T) {
+ 	assert.NoError(t, err)
+ 
+ 	// Check the backend says it's in project mode
+-	lb, ok := b.(*localBackend)
++	lb, ok := b.(*diyBackend)
+ 	assert.True(t, ok)
+ 	assert.NotNil(t, lb)
+ 	assert.IsType(t, &projectReferenceStore{}, lb.store)
+@@ -822,7 +822,7 @@ func TestProjectNameMustMatch(t *testing.T) {
+ 
+ 	chdir(t, projectDir)
+ 
+-	// Login to a temp dir filestate backend
++	// Login to a temp dir diy backend
+ 	tmpDir := t.TempDir()
+ 	ctx := context.Background()
+ 	b, err := New(ctx, diagtest.LogSink(t), "file://"+filepath.ToSlash(tmpDir), proj)
+@@ -921,8 +921,8 @@ func TestNew_legacyFileWarning(t *testing.T) {
+ 			var buff bytes.Buffer
+ 			sink := diag.DefaultSink(io.Discard, &buff, diag.FormatOptions{Color: colors.Never})
+ 
+-			_, err = newLocalBackend(ctx, sink, "file://"+filepath.ToSlash(stateDir), nil,
+-				&localBackendOptions{Env: env.NewEnv(tt.env)})
++			_, err = newDIYBackend(ctx, sink, "file://"+filepath.ToSlash(stateDir), nil,
++				&diyBackendOptions{Env: env.NewEnv(tt.env)})
+ 			require.NoError(t, err)
+ 
+ 			assert.Equal(t, tt.wantOut, buff.String())
+@@ -952,12 +952,12 @@ func TestLegacyUpgrade(t *testing.T) {
+ 	var output bytes.Buffer
+ 	sink := diag.DefaultSink(&output, &output, diag.FormatOptions{Color: colors.Never})
+ 
+-	// Login to a temp dir filestate backend
++	// Login to a temp dir diy backend
+ 	ctx := context.Background()
+ 	b, err := New(ctx, sink, "file://"+filepath.ToSlash(tmpDir), nil)
+ 	require.NoError(t, err)
+ 	// Check the backend says it's NOT in project mode
+-	lb, ok := b.(*localBackend)
++	lb, ok := b.(*diyBackend)
+ 	assert.True(t, ok)
+ 	assert.NotNil(t, lb)
+ 	assert.IsType(t, &legacyReferenceStore{}, lb.store)
+@@ -1267,7 +1267,7 @@ func TestUpgrade_manyFailures(t *testing.T) {
+ 	var output bytes.Buffer
+ 	sink := diag.DefaultSink(io.Discard, &output, diag.FormatOptions{Color: colors.Never})
+ 
+-	// Login to a temp dir filestate backend
++	// Login to a temp dir diy backend
+ 	b, err := New(ctx, sink, "file://"+filepath.ToSlash(tmpDir), nil)
+ 	require.NoError(t, err)
+ 
+@@ -1285,13 +1285,13 @@ func TestCreateStack_gzip(t *testing.T) {
+ 	ctx := context.Background()
+ 
+ 	s := make(env.MapStore)
+-	s[env.SelfManagedGzip.Var().Name()] = "true"
++	s[env.DIYBackendGzip.Var().Name()] = "true"
+ 
+-	b, err := newLocalBackend(
++	b, err := newDIYBackend(
+ 		ctx,
+ 		diagtest.LogSink(t), "file://"+filepath.ToSlash(stateDir),
+ 		&workspace.Project{Name: "testproj"},
+-		&localBackendOptions{Env: env.NewEnv(s)},
++		&diyBackendOptions{Env: env.NewEnv(s)},
+ 	)
+ 	require.NoError(t, err)
+ 
+@@ -1313,13 +1313,13 @@ func TestCreateStack_retainCheckpoints(t *testing.T) {
+ 	ctx := context.Background()
+ 
+ 	s := make(env.MapStore)
+-	s[env.SelfManagedRetainCheckpoints.Var().Name()] = "true"
++	s[env.DIYBackendRetainCheckpoints.Var().Name()] = "true"
+ 
+-	b, err := newLocalBackend(
++	b, err := newDIYBackend(
+ 		ctx,
+ 		diagtest.LogSink(t), "file://"+filepath.ToSlash(stateDir),
+ 		&workspace.Project{Name: "testproj"},
+-		&localBackendOptions{Env: env.NewEnv(s)},
++		&diyBackendOptions{Env: env.NewEnv(s)},
+ 	)
+ 	require.NoError(t, err)
+ 
+diff --git a/pkg/backend/filestate/bucket.go b/pkg/backend/diy/bucket.go
+similarity index 99%
+rename from pkg/backend/filestate/bucket.go
+rename to pkg/backend/diy/bucket.go
+index 47a295737c0b..6388f778c46b 100644
+--- a/pkg/backend/filestate/bucket.go
++++ b/pkg/backend/diy/bucket.go
+@@ -1,4 +1,4 @@
+-package filestate
++package diy
+ 
+ import (
+ 	"context"
+diff --git a/pkg/backend/filestate/bucket_test.go b/pkg/backend/diy/bucket_test.go
+similarity index 89%
+rename from pkg/backend/filestate/bucket_test.go
+rename to pkg/backend/diy/bucket_test.go
+index f21fd8d814e7..8e11a09519ef 100644
+--- a/pkg/backend/filestate/bucket_test.go
++++ b/pkg/backend/diy/bucket_test.go
+@@ -1,4 +1,4 @@
+-package filestate
++package diy
+ 
+ import (
+ 	"context"
+@@ -29,21 +29,21 @@ func TestWrappedBucket(t *testing.T) {
+ 		t.Skip("Skipping wrappedBucket tests because file paths won't be modified.")
+ 	}
+ 
+-	// Initialize a filestate backend, using the default Pulumi directory.
++	// Initialize a diy backend, using the default Pulumi directory.
+ 	cloudURL := FilePathPrefix + "~"
+ 	ctx := context.Background()
+ 	b, err := New(ctx, nil, cloudURL, nil)
+ 	if err != nil {
+-		t.Fatalf("Initializing new filestate backend: %v", err)
++		t.Fatalf("Initializing new diy backend: %v", err)
+ 	}
+-	localBackend, ok := b.(*localBackend)
++	diyBackend, ok := b.(*diyBackend)
+ 	if !ok {
+-		t.Fatalf("backend wasn't of type localBackend?")
++		t.Fatalf("backend wasn't of type diyBackend?")
+ 	}
+ 
+-	wrappedBucket, ok := localBackend.bucket.(*wrappedBucket)
++	wrappedBucket, ok := diyBackend.bucket.(*wrappedBucket)
+ 	if !ok {
+-		t.Fatalf("localBackend.bucket wasn't of type wrappedBucket?")
++		t.Fatalf("diyBackend.bucket wasn't of type wrappedBucket?")
+ 	}
+ 
+ 	// Perform basic file operations using wrappedBucket and verify that it will
+diff --git a/pkg/backend/filestate/doc.go b/pkg/backend/diy/doc.go
+similarity index 82%
+rename from pkg/backend/filestate/doc.go
+rename to pkg/backend/diy/doc.go
+index a84821f01731..b50e47b67950 100644
+--- a/pkg/backend/filestate/doc.go
++++ b/pkg/backend/diy/doc.go
+@@ -12,6 +12,6 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
+-// Package filestate implements the logic for interacting with a filestate backend such as AWS S3, Azure blob storage,
++// Package diy implements the logic for interacting with a diy backend such as AWS S3, Azure blob storage,
+ // or GCP cloud storage.
+-package filestate
++package diy
+diff --git a/pkg/backend/filestate/lock.go b/pkg/backend/diy/lock.go
+similarity index 91%
+rename from pkg/backend/filestate/lock.go
+rename to pkg/backend/diy/lock.go
+index a0e49f763b99..6ba760510d6d 100644
+--- a/pkg/backend/filestate/lock.go
++++ b/pkg/backend/diy/lock.go
+@@ -12,7 +12,7 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
+-package filestate
++package diy
+ 
+ import (
+ 	"context"
+@@ -58,7 +58,7 @@ func newLockContent() (*lockContent, error) {
+ }
+ 
+ // checkForLock looks for any existing locks for this stack, and returns a helpful diagnostic if there is one.
+-func (b *localBackend) checkForLock(ctx context.Context, stackRef backend.StackReference) error {
++func (b *diyBackend) checkForLock(ctx context.Context, stackRef backend.StackReference) error {
+ 	stackName := stackRef.FullyQualifiedName()
+ 	allFiles, err := listBucket(ctx, b.bucket, stackLockDir(stackName))
+ 	if err != nil {
+@@ -108,7 +108,7 @@ func (b *localBackend) checkForLock(ctx context.Context, stackRef backend.StackR
+ 	return nil
+ }
+ 
+-func (b *localBackend) Lock(ctx context.Context, stackRef backend.StackReference) error {
++func (b *diyBackend) Lock(ctx context.Context, stackRef backend.StackReference) error {
+ 	//
+ 	err := b.checkForLock(ctx, stackRef)
+ 	if err != nil {
+@@ -134,7 +134,7 @@ func (b *localBackend) Lock(ctx context.Context, stackRef backend.StackReference
+ 	return nil
+ }
+ 
+-func (b *localBackend) Unlock(ctx context.Context, stackRef backend.StackReference) {
++func (b *diyBackend) Unlock(ctx context.Context, stackRef backend.StackReference) {
+ 	err := b.bucket.Delete(ctx, b.lockPath(stackRef))
+ 	if err != nil {
+ 		b.d.Errorf(
+@@ -153,7 +153,7 @@ func stackLockDir(stack tokens.QName) string {
+ 	return path.Join(lockDir(), fsutil.QnamePath(stack))
+ }
+ 
+-func (b *localBackend) lockPath(stackRef backend.StackReference) string {
++func (b *diyBackend) lockPath(stackRef backend.StackReference) string {
+ 	contract.Requiref(stackRef != nil, "stack", "must not be nil")
+ 	return path.Join(stackLockDir(stackRef.FullyQualifiedName()), b.lockID+".json")
+ }
+diff --git a/pkg/backend/filestate/meta.go b/pkg/backend/diy/meta.go
+similarity index 95%
+rename from pkg/backend/filestate/meta.go
+rename to pkg/backend/diy/meta.go
+index db309125a43c..5865955c7fcc 100644
+--- a/pkg/backend/filestate/meta.go
++++ b/pkg/backend/diy/meta.go
+@@ -12,7 +12,7 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
+-package filestate
++package diy
+ 
+ import (
+ 	"context"
+@@ -30,7 +30,7 @@ import (
+ var pulumiMetaPath = filepath.Join(workspace.BookkeepingDir, "meta.yaml")
+ 
+ // pulumiMeta holds the contents of the .pulumi/meta.yaml file
+-// in a filestate backend.
++// in a diy backend.
+ //
+ // This file specifies metadata for the backend,
+ // including a version number that the backend can use
+@@ -59,7 +59,7 @@ type pulumiMeta struct {
+ // If the bucket is empty, this will create a new metadata file
+ // with the latest version number.
+ // This can be overridden by setting the environment variable
+-// "PULUMI_DIY_BACKEND_LEGACY_LAYOUT" to "1".
++// "PULUMI_diy_BACKEND_LEGACY_LAYOUT" to "1".
+ // ensurePulumiMeta uses the provided 'getenv' function
+ // to read the environment variable.
+ func ensurePulumiMeta(ctx context.Context, b Bucket, e env.Env) (*pulumiMeta, error) {
+@@ -92,7 +92,7 @@ func ensurePulumiMeta(ctx context.Context, b Bucket, e env.Env) (*pulumiMeta, er
+ 	if !useLegacy {
+ 		// Allow opting into legacy mode for new states
+ 		// by setting the environment variable.
+-		useLegacy = e.GetBool(env.SelfManagedStateLegacyLayout)
++		useLegacy = e.GetBool(env.DIYBackendLegacyLayout)
+ 	}
+ 
+ 	if useLegacy {
+@@ -160,7 +160,7 @@ func (m *pulumiMeta) WriteTo(ctx context.Context, b Bucket) error {
+ 	}
+ 
+ 	bs, err := yaml.Marshal(m)
+-	contract.AssertNoErrorf(err, "Could not marshal filestate.pulumiMeta to YAML")
++	contract.AssertNoErrorf(err, "Could not marshal diy.pulumiMeta to YAML")
+ 
+ 	if err := b.WriteAll(ctx, pulumiMetaPath, bs, nil); err != nil {
+ 		return fmt.Errorf("write %q: %w", pulumiMetaPath, err)
+diff --git a/pkg/backend/filestate/meta_test.go b/pkg/backend/diy/meta_test.go
+similarity index 98%
+rename from pkg/backend/filestate/meta_test.go
+rename to pkg/backend/diy/meta_test.go
+index a4279ea3b2a7..0a68eee354aa 100644
+--- a/pkg/backend/filestate/meta_test.go
++++ b/pkg/backend/diy/meta_test.go
+@@ -12,7 +12,7 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
+-package filestate
++package diy
+ 
+ import (
+ 	"context"
+@@ -32,7 +32,7 @@ func TestEnsurePulumiMeta(t *testing.T) {
+ 
+ 	mkmap := func(value string) env.MapStore {
+ 		m := make(env.MapStore)
+-		m[env.SelfManagedStateLegacyLayout.Var().Name()] = value
++		m[env.DIYBackendLegacyLayout.Var().Name()] = value
+ 		return m
+ 	}
+ 
+diff --git a/pkg/backend/filestate/pool.go b/pkg/backend/diy/pool.go
+similarity index 99%
+rename from pkg/backend/filestate/pool.go
+rename to pkg/backend/diy/pool.go
+index 2fcd3ca20d57..faa338cfaa55 100644
+--- a/pkg/backend/filestate/pool.go
++++ b/pkg/backend/diy/pool.go
+@@ -12,7 +12,7 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
+-package filestate
++package diy
+ 
+ import (
+ 	"runtime"
+diff --git a/pkg/backend/filestate/pool_test.go b/pkg/backend/diy/pool_test.go
+similarity index 99%
+rename from pkg/backend/filestate/pool_test.go
+rename to pkg/backend/diy/pool_test.go
+index e5ffbc4a76e9..7b06be321e46 100644
+--- a/pkg/backend/filestate/pool_test.go
++++ b/pkg/backend/diy/pool_test.go
+@@ -12,7 +12,7 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
+-package filestate
++package diy
+ 
+ import (
+ 	"errors"
+diff --git a/pkg/backend/filestate/snapshot.go b/pkg/backend/diy/snapshot.go
+similarity index 68%
+rename from pkg/backend/filestate/snapshot.go
+rename to pkg/backend/diy/snapshot.go
+index e11d9dcbab87..bbf1acc468fe 100644
+--- a/pkg/backend/filestate/snapshot.go
++++ b/pkg/backend/diy/snapshot.go
+@@ -12,7 +12,7 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
+-package filestate
++package diy
+ 
+ import (
+ 	"context"
+@@ -20,25 +20,25 @@ import (
+ 	"github.com/pulumi/pulumi/pkg/v3/resource/deploy"
+ )
+ 
+-// localSnapshotManager is a simple SnapshotManager implementation that persists snapshots
+-// to disk on the local machine.
+-type localSnapshotPersister struct {
++// diySnapshotPersister is a simple SnapshotManager implementation that persists snapshots
++// to blob storage.
++type diySnapshotPersister struct {
+ 	// TODO[pulumi/pulumi#12593]:
+ 	// Remove this once SnapshotPersister is updated to take a context.
+ 	ctx context.Context
+ 
+-	ref     *localBackendReference
+-	backend *localBackend
++	ref     *diyBackendReference
++	backend *diyBackend
+ }
+ 
+-func (sp *localSnapshotPersister) Save(snapshot *deploy.Snapshot) error {
++func (sp *diySnapshotPersister) Save(snapshot *deploy.Snapshot) error {
+ 	_, err := sp.backend.saveStack(sp.ctx, sp.ref, snapshot, snapshot.SecretsManager)
+ 	return err
+ }
+ 
+-func (b *localBackend) newSnapshotPersister(
++func (b *diyBackend) newSnapshotPersister(
+ 	ctx context.Context,
+-	ref *localBackendReference,
+-) *localSnapshotPersister {
+-	return &localSnapshotPersister{ctx: ctx, ref: ref, backend: b}
++	ref *diyBackendReference,
++) *diySnapshotPersister {
++	return &diySnapshotPersister{ctx: ctx, ref: ref, backend: b}
+ }
+diff --git a/pkg/backend/filestate/stack.go b/pkg/backend/diy/stack.go
+similarity index 59%
+rename from pkg/backend/filestate/stack.go
+rename to pkg/backend/diy/stack.go
+index ed9ecb98fc51..112d12a1b8a1 100644
+--- a/pkg/backend/filestate/stack.go
++++ b/pkg/backend/diy/stack.go
+@@ -12,7 +12,7 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
+-package filestate
++package diy
+ 
+ import (
+ 	"context"
+@@ -34,28 +34,28 @@ import (
+ 	"github.com/pulumi/pulumi/sdk/v3/go/common/util/result"
+ )
+ 
+-// localStack is a local stack descriptor.
+-type localStack struct {
++// diyStack is a diy stack descriptor.
++type diyStack struct {
+ 	// the stack's reference (qualified name).
+-	ref *localBackendReference
++	ref *diyBackendReference
+ 	// a snapshot representing the latest deployment state, allocated on first use. It's valid for the
+ 	// snapshot itself to be nil.
+ 	snapshot atomic.Pointer[*deploy.Snapshot]
+ 	// a pointer to the backend this stack belongs to.
+-	b *localBackend
++	b *diyBackend
+ }
+ 
+-func newStack(ref *localBackendReference, b *localBackend) backend.Stack {
++func newStack(ref *diyBackendReference, b *diyBackend) backend.Stack {
+ 	contract.Requiref(ref != nil, "ref", "ref was nil")
+ 
+-	return &localStack{
++	return &diyStack{
+ 		ref: ref,
+ 		b:   b,
+ 	}
+ }
+ 
+-func (s *localStack) Ref() backend.StackReference { return s.ref }
+-func (s *localStack) Snapshot(ctx context.Context, secretsProvider secrets.Provider) (*deploy.Snapshot, error) {
++func (s *diyStack) Ref() backend.StackReference { return s.ref }
++func (s *diyStack) Snapshot(ctx context.Context, secretsProvider secrets.Provider) (*deploy.Snapshot, error) {
+ 	if v := s.snapshot.Load(); v != nil {
+ 		return *v, nil
+ 	}
+@@ -68,78 +68,78 @@ func (s *localStack) Snapshot(ctx context.Context, secretsProvider secrets.Provi
+ 	s.snapshot.Store(&snap)
+ 	return snap, nil
+ }
+-func (s *localStack) Backend() backend.Backend              { return s.b }
+-func (s *localStack) Tags() map[apitype.StackTagName]string { return nil }
++func (s *diyStack) Backend() backend.Backend              { return s.b }
++func (s *diyStack) Tags() map[apitype.StackTagName]string { return nil }
+ 
+-func (s *localStack) Remove(ctx context.Context, force bool) (bool, error) {
++func (s *diyStack) Remove(ctx context.Context, force bool) (bool, error) {
+ 	return backend.RemoveStack(ctx, s, force)
+ }
+ 
+-func (s *localStack) Rename(ctx context.Context, newName tokens.QName) (backend.StackReference, error) {
++func (s *diyStack) Rename(ctx context.Context, newName tokens.QName) (backend.StackReference, error) {
+ 	return backend.RenameStack(ctx, s, newName)
+ }
+ 
+-func (s *localStack) Preview(
++func (s *diyStack) Preview(
+ 	ctx context.Context,
+ 	op backend.UpdateOperation, events chan<- engine.Event,
+ ) (*deploy.Plan, display.ResourceChanges, result.Result) {
+ 	return backend.PreviewStack(ctx, s, op, events)
+ }
+ 
+-func (s *localStack) Update(ctx context.Context, op backend.UpdateOperation) (display.ResourceChanges, result.Result) {
++func (s *diyStack) Update(ctx context.Context, op backend.UpdateOperation) (display.ResourceChanges, result.Result) {
+ 	return backend.UpdateStack(ctx, s, op)
+ }
+ 
+-func (s *localStack) Import(ctx context.Context, op backend.UpdateOperation,
++func (s *diyStack) Import(ctx context.Context, op backend.UpdateOperation,
+ 	imports []deploy.Import,
+ ) (display.ResourceChanges, result.Result) {
+ 	return backend.ImportStack(ctx, s, op, imports)
+ }
+ 
+-func (s *localStack) Refresh(ctx context.Context, op backend.UpdateOperation) (display.ResourceChanges, result.Result) {
++func (s *diyStack) Refresh(ctx context.Context, op backend.UpdateOperation) (display.ResourceChanges, result.Result) {
+ 	return backend.RefreshStack(ctx, s, op)
+ }
+ 
+-func (s *localStack) Destroy(ctx context.Context, op backend.UpdateOperation) (display.ResourceChanges, result.Result) {
++func (s *diyStack) Destroy(ctx context.Context, op backend.UpdateOperation) (display.ResourceChanges, result.Result) {
+ 	return backend.DestroyStack(ctx, s, op)
+ }
+ 
+-func (s *localStack) Watch(ctx context.Context, op backend.UpdateOperation, paths []string) result.Result {
++func (s *diyStack) Watch(ctx context.Context, op backend.UpdateOperation, paths []string) result.Result {
+ 	return backend.WatchStack(ctx, s, op, paths)
+ }
+ 
+-func (s *localStack) GetLogs(ctx context.Context, secretsProvider secrets.Provider, cfg backend.StackConfiguration,
++func (s *diyStack) GetLogs(ctx context.Context, secretsProvider secrets.Provider, cfg backend.StackConfiguration,
+ 	query operations.LogQuery,
+ ) ([]operations.LogEntry, error) {
+ 	return backend.GetStackLogs(ctx, secretsProvider, s, cfg, query)
+ }
+ 
+-func (s *localStack) ExportDeployment(ctx context.Context) (*apitype.UntypedDeployment, error) {
++func (s *diyStack) ExportDeployment(ctx context.Context) (*apitype.UntypedDeployment, error) {
+ 	return backend.ExportStackDeployment(ctx, s)
+ }
+ 
+-func (s *localStack) ImportDeployment(ctx context.Context, deployment *apitype.UntypedDeployment) error {
++func (s *diyStack) ImportDeployment(ctx context.Context, deployment *apitype.UntypedDeployment) error {
+ 	return backend.ImportStackDeployment(ctx, s, deployment)
+ }
+ 
+-func (s *localStack) DefaultSecretManager(info *workspace.ProjectStack) (secrets.Manager, error) {
++func (s *diyStack) DefaultSecretManager(info *workspace.ProjectStack) (secrets.Manager, error) {
+ 	return passphrase.NewPromptingPassphraseSecretsManager(info, false /* rotatePassphraseSecretsProvider */)
+ }
+ 
+-type localStackSummary struct {
++type diyStackSummary struct {
+ 	name backend.StackReference
+ 	chk  *apitype.CheckpointV3
+ }
+ 
+-func newLocalStackSummary(name backend.StackReference, chk *apitype.CheckpointV3) localStackSummary {
+-	return localStackSummary{name: name, chk: chk}
++func newDIYStackSummary(name backend.StackReference, chk *apitype.CheckpointV3) diyStackSummary {
++	return diyStackSummary{name: name, chk: chk}
+ }
+ 
+-func (lss localStackSummary) Name() backend.StackReference {
++func (lss diyStackSummary) Name() backend.StackReference {
+ 	return lss.name
+ }
+ 
+-func (lss localStackSummary) LastUpdate() *time.Time {
++func (lss diyStackSummary) LastUpdate() *time.Time {
+ 	if lss.chk != nil && lss.chk.Latest != nil {
+ 		if t := lss.chk.Latest.Manifest.Time; !t.IsZero() {
+ 			return &t
+@@ -148,7 +148,7 @@ func (lss localStackSummary) LastUpdate() *time.Time {
+ 	return nil
+ }
+ 
+-func (lss localStackSummary) ResourceCount() *int {
++func (lss diyStackSummary) ResourceCount() *int {
+ 	if lss.chk != nil && lss.chk.Latest != nil {
+ 		count := len(lss.chk.Latest.Resources)
+ 		return &count
+diff --git a/pkg/backend/filestate/state.go b/pkg/backend/diy/state.go
+similarity index 89%
+rename from pkg/backend/filestate/state.go
+rename to pkg/backend/diy/state.go
+index 3bbbc55392c3..d38c24bdca21 100644
+--- a/pkg/backend/filestate/state.go
++++ b/pkg/backend/diy/state.go
+@@ -12,7 +12,7 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
+-package filestate
++package diy
+ 
+ import (
+ 	"context"
+@@ -49,25 +49,25 @@ import (
+ // be used as a last resort when a command absolutely must be run.
+ var DisableIntegrityChecking bool
+ 
+-type localQuery struct {
++type diyQuery struct {
+ 	root string
+ 	proj *workspace.Project
+ }
+ 
+-func (q *localQuery) GetRoot() string {
++func (q *diyQuery) GetRoot() string {
+ 	return q.root
+ }
+ 
+-func (q *localQuery) GetProject() *workspace.Project {
++func (q *diyQuery) GetProject() *workspace.Project {
+ 	return q.proj
+ }
+ 
+-// update is an implementation of engine.Update backed by local state.
++// update is an implementation of engine.Update backed by diy state.
+ type update struct {
+ 	root    string
+ 	proj    *workspace.Project
+ 	target  *deploy.Target
+-	backend *localBackend
++	backend *diyBackend
+ }
+ 
+ func (u *update) GetRoot() string {
+@@ -82,17 +82,17 @@ func (u *update) GetTarget() *deploy.Target {
+ 	return u.target
+ }
+ 
+-func (b *localBackend) newQuery(
++func (b *diyBackend) newQuery(
+ 	ctx context.Context,
+ 	op backend.QueryOperation,
+ ) (engine.QueryInfo, error) {
+-	return &localQuery{root: op.Root, proj: op.Proj}, nil
++	return &diyQuery{root: op.Root, proj: op.Proj}, nil
+ }
+ 
+-func (b *localBackend) newUpdate(
++func (b *diyBackend) newUpdate(
+ 	ctx context.Context,
+ 	secretsProvider secrets.Provider,
+-	ref *localBackendReference,
++	ref *diyBackendReference,
+ 	op backend.UpdateOperation,
+ ) (*update, error) {
+ 	contract.Requiref(ref != nil, "ref", "must not be nil")
+@@ -113,10 +113,10 @@ func (b *localBackend) newUpdate(
+ 	}, nil
+ }
+ 
+-func (b *localBackend) getTarget(
++func (b *diyBackend) getTarget(
+ 	ctx context.Context,
+ 	secretsProvider secrets.Provider,
+-	ref *localBackendReference,
++	ref *diyBackendReference,
+ 	cfg config.Map,
+ 	dec config.Decrypter,
+ ) (*deploy.Target, error) {
+@@ -131,7 +131,7 @@ func (b *localBackend) getTarget(
+ 	}
+ 	return &deploy.Target{
+ 		Name:         ref.Name(),
+-		Organization: "organization", // filestate has no organizations really, but we just always say it's "organization"
++		Organization: "organization", // diy has no organizations really, but we just always say it's "organization"
+ 		Config:       cfg,
+ 		Decrypter:    dec,
+ 		Snapshot:     snapshot,
+@@ -141,9 +141,9 @@ func (b *localBackend) getTarget(
+ var errCheckpointNotFound = errors.New("checkpoint does not exist")
+ 
+ // stackExists simply does a check that the checkpoint file we expect for this stack exists.
+-func (b *localBackend) stackExists(
++func (b *diyBackend) stackExists(
+ 	ctx context.Context,
+-	ref *localBackendReference,
++	ref *diyBackendReference,
+ ) (string, error) {
+ 	contract.Requiref(ref != nil, "ref", "must not be nil")
+ 
+@@ -159,8 +159,8 @@ func (b *localBackend) stackExists(
+ 	return chkpath, nil
+ }
+ 
+-func (b *localBackend) getSnapshot(ctx context.Context,
+-	secretsProvider secrets.Provider, ref *localBackendReference,
++func (b *diyBackend) getSnapshot(ctx context.Context,
++	secretsProvider secrets.Provider, ref *diyBackendReference,
+ ) (*deploy.Snapshot, error) {
+ 	contract.Requiref(ref != nil, "ref", "must not be nil")
+ 
+@@ -186,7 +186,7 @@ func (b *localBackend) getSnapshot(ctx context.Context,
+ }
+ 
+ // GetCheckpoint loads a checkpoint file for the given stack in this project, from the current project workspace.
+-func (b *localBackend) getCheckpoint(ctx context.Context, ref *localBackendReference) (*apitype.CheckpointV3, error) {
++func (b *diyBackend) getCheckpoint(ctx context.Context, ref *diyBackendReference) (*apitype.CheckpointV3, error) {
+ 	chkpath := b.stackPath(ctx, ref)
+ 	bytes, err := b.bucket.ReadAll(ctx, chkpath)
+ 	if err != nil {
+@@ -200,9 +200,9 @@ func (b *localBackend) getCheckpoint(ctx context.Context, ref *localBackendRefer
+ 	return stack.UnmarshalVersionedCheckpointToLatestCheckpoint(m, bytes)
+ }
+ 
+-func (b *localBackend) saveCheckpoint(
++func (b *diyBackend) saveCheckpoint(
+ 	ctx context.Context,
+-	ref *localBackendReference,
++	ref *diyBackendReference,
+ 	checkpoint *apitype.VersionedCheckpoint,
+ ) (backupFile string, file string, _ error) {
+ 	// Make a serializable stack and then use the encoder to encode it.
+@@ -281,7 +281,7 @@ func (b *localBackend) saveCheckpoint(
+ 	logging.V(7).Infof("Saved stack %s checkpoint to: %s (backup=%s)", ref.FullyQualifiedName(), file, backupFile)
+ 
+ 	// And if we are retaining historical checkpoint information, write it out again
+-	if b.Env.GetBool(env.SelfManagedRetainCheckpoints) {
++	if b.Env.GetBool(env.DIYBackendRetainCheckpoints) {
+ 		if err = b.bucket.WriteAll(ctx, fmt.Sprintf("%v.%v", file, time.Now().UnixNano()), byts, nil); err != nil {
+ 			return backupFile, "", fmt.Errorf("An IO error occurred while writing the new snapshot file: %w", err)
+ 		}
+@@ -290,9 +290,9 @@ func (b *localBackend) saveCheckpoint(
+ 	return backupFile, file, nil
+ }
+ 
+-func (b *localBackend) saveStack(
++func (b *diyBackend) saveStack(
+ 	ctx context.Context,
+-	ref *localBackendReference, snap *deploy.Snapshot,
++	ref *diyBackendReference, snap *deploy.Snapshot,
+ 	sm secrets.Manager,
+ ) (string, error) {
+ 	contract.Requiref(ref != nil, "ref", "ref was nil")
+@@ -321,7 +321,7 @@ func (b *localBackend) saveStack(
+ }
+ 
+ // removeStack removes information about a stack from the current workspace.
+-func (b *localBackend) removeStack(ctx context.Context, ref *localBackendReference) error {
++func (b *diyBackend) removeStack(ctx context.Context, ref *diyBackendReference) error {
+ 	contract.Requiref(ref != nil, "ref", "must not be nil")
+ 
+ 	// Just make a backup of the file and don't write out anything new.
+@@ -354,11 +354,11 @@ func backupTarget(ctx context.Context, bucket Bucket, file string, keepOriginal
+ }
+ 
+ // backupStack copies the current Checkpoint file to ~/.pulumi/backups.
+-func (b *localBackend) backupStack(ctx context.Context, ref *localBackendReference) error {
++func (b *diyBackend) backupStack(ctx context.Context, ref *diyBackendReference) error {
+ 	contract.Requiref(ref != nil, "ref", "must not be nil")
+ 
+ 	// Exit early if backups are disabled.
+-	if b.Env.GetBool(env.SelfManagedDisableCheckpointBackups) {
++	if b.Env.GetBool(env.DIYBackendDisableCheckpointBackups) {
+ 		return nil
+ 	}
+ 
+@@ -387,7 +387,7 @@ func (b *localBackend) backupStack(ctx context.Context, ref *localBackendReferen
+ 	return b.bucket.WriteAll(ctx, filepath.Join(backupDir, backupFile), byts, nil)
+ }
+ 
+-func (b *localBackend) stackPath(ctx context.Context, ref *localBackendReference) string {
++func (b *diyBackend) stackPath(ctx context.Context, ref *diyBackendReference) string {
+ 	if ref == nil {
+ 		return StacksDir
+ 	}
+@@ -430,11 +430,11 @@ func (b *localBackend) stackPath(ctx context.Context, ref *localBackendReference
+ 	return plainPath
+ }
+ 
+-// getHistory returns locally stored update history. The first element of the result will be
++// getHistory returns stored update history. The first element of the result will be
+ // the most recent update record.
+-func (b *localBackend) getHistory(
++func (b *diyBackend) getHistory(
+ 	ctx context.Context,
+-	stack *localBackendReference,
++	stack *diyBackendReference,
+ 	pageSize int, page int,
+ ) ([]backend.UpdateInfo, error) {
+ 	contract.Requiref(stack != nil, "stack", "must not be nil")
+@@ -508,7 +508,7 @@ func (b *localBackend) getHistory(
+ 	return updates, nil
+ }
+ 
+-func (b *localBackend) renameHistory(ctx context.Context, oldName, newName *localBackendReference) error {
++func (b *diyBackend) renameHistory(ctx context.Context, oldName, newName *diyBackendReference) error {
+ 	contract.Requiref(oldName != nil, "oldName", "must not be nil")
+ 	contract.Requiref(newName != nil, "newName", "must not be nil")
+ 
+@@ -552,7 +552,7 @@ func (b *localBackend) renameHistory(ctx context.Context, oldName, newName *loca
+ }
+ 
+ // addToHistory saves the UpdateInfo and makes a copy of the current Checkpoint file.
+-func (b *localBackend) addToHistory(ctx context.Context, ref *localBackendReference, update backend.UpdateInfo) error {
++func (b *diyBackend) addToHistory(ctx context.Context, ref *diyBackendReference, update backend.UpdateInfo) error {
+ 	contract.Requiref(ref != nil, "ref", "must not be nil")
+ 
+ 	dir := ref.HistoryDir()
+diff --git a/pkg/backend/filestate/store.go b/pkg/backend/diy/store.go
+similarity index 85%
+rename from pkg/backend/filestate/store.go
+rename to pkg/backend/diy/store.go
+index c558ebbecbbe..47f6537569ed 100644
+--- a/pkg/backend/filestate/store.go
++++ b/pkg/backend/diy/store.go
+@@ -12,7 +12,7 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
+-package filestate
++package diy
+ 
+ import (
+ 	"context"
+@@ -36,15 +36,15 @@ import (
+ // but we can't make a constant from filepath.Join.
+ var (
+ 	// StacksDir is a path under the state's root directory
+-	// where the filestate backend stores stack information.
++	// where the diy backend stores stack information.
+ 	StacksDir = filepath.Join(workspace.BookkeepingDir, workspace.StackDir)
+ 
+ 	// HistoriesDir is a path under the state's root directory
+-	// where the filestate backend stores histories for all stacks.
++	// where the diy backend stores histories for all stacks.
+ 	HistoriesDir = filepath.Join(workspace.BookkeepingDir, workspace.HistoryDir)
+ 
+ 	// BackupsDir is a path under the state's root directory
+-	// where the filestate backend stores backups of stacks.
++	// where the diy backend stores backups of stacks.
+ 	BackupsDir = filepath.Join(workspace.BookkeepingDir, workspace.BackupDir)
+ )
+ 
+@@ -61,29 +61,29 @@ type referenceStore interface {
+ 	// This is the path to the file without the extension.
+ 	// The real file path is StackBasePath + ".json"
+ 	// or StackBasePath + ".json.gz".
+-	StackBasePath(*localBackendReference) string
++	StackBasePath(*diyBackendReference) string
+ 
+ 	// HistoryDir returns the path to the directory
+ 	// where history for this stack is stored.
+ 	//
+ 	// This must be under HistoriesDir.
+-	HistoryDir(*localBackendReference) string
++	HistoryDir(*diyBackendReference) string
+ 
+ 	// BackupDir returns the path to the directory
+ 	// where backups for this stack are stored.
+ 	//
+ 	// This must be under BackupsDir.
+-	BackupDir(*localBackendReference) string
++	BackupDir(*diyBackendReference) string
+ 
+ 	// ListReferences lists all stack references in the store.
+-	ListReferences(context.Context) ([]*localBackendReference, error)
++	ListReferences(context.Context) ([]*diyBackendReference, error)
+ 
+-	// ParseReference parses a localBackendReference from a string.
+-	ParseReference(ref string) (*localBackendReference, error)
++	// ParseReference parses a diyBackendReference from a string.
++	ParseReference(ref string) (*diyBackendReference, error)
+ 
+ 	// ValidateReference verifies that the provided reference is valid
+ 	// returning an error if it is not.
+-	ValidateReference(*localBackendReference) error
++	ValidateReference(*diyBackendReference) error
+ }
+ 
+ // projectReferenceStore is a referenceStore that stores stack
+@@ -106,10 +106,10 @@ func newProjectReferenceStore(bucket Bucket, currentProject func() *workspace.Pr
+ 	}
+ }
+ 
+-// newReference builds a new localBackendReference with the provided arguments.
++// newReference builds a new diyBackendReference with the provided arguments.
+ // This DOES NOT modify the underlying storage.
+-func (p *projectReferenceStore) newReference(project tokens.Name, name tokens.StackName) *localBackendReference {
+-	return &localBackendReference{
++func (p *projectReferenceStore) newReference(project tokens.Name, name tokens.StackName) *diyBackendReference {
++	return &diyBackendReference{
+ 		name:           name,
+ 		project:        project,
+ 		store:          p,
+@@ -117,23 +117,23 @@ func (p *projectReferenceStore) newReference(project tokens.Name, name tokens.St
+ 	}
+ }
+ 
+-func (p *projectReferenceStore) StackBasePath(ref *localBackendReference) string {
++func (p *projectReferenceStore) StackBasePath(ref *diyBackendReference) string {
+ 	contract.Requiref(ref.project != "", "ref.project", "must not be empty")
+ 	// No need for NamePath for the StackName because it's already constrained to characters that are valid for filenames.
+ 	return filepath.Join(StacksDir, fsutil.NamePath(ref.project), ref.name.String())
+ }
+ 
+-func (p *projectReferenceStore) HistoryDir(stack *localBackendReference) string {
++func (p *projectReferenceStore) HistoryDir(stack *diyBackendReference) string {
+ 	contract.Requiref(stack.project != "", "ref.project", "must not be empty")
+ 	return filepath.Join(HistoriesDir, fsutil.NamePath(stack.project), stack.name.String())
+ }
+ 
+-func (p *projectReferenceStore) BackupDir(stack *localBackendReference) string {
++func (p *projectReferenceStore) BackupDir(stack *diyBackendReference) string {
+ 	contract.Requiref(stack.project != "", "ref.project", "must not be empty")
+ 	return filepath.Join(BackupsDir, fsutil.NamePath(stack.project), stack.name.String())
+ }
+ 
+-func (p *projectReferenceStore) ParseReference(stackRef string) (*localBackendReference, error) {
++func (p *projectReferenceStore) ParseReference(stackRef string) (*diyBackendReference, error) {
+ 	// We accept the following forms:
+ 	//
+ 	// 1. <stack-name>
+@@ -163,7 +163,7 @@ func (p *projectReferenceStore) ParseReference(stackRef string) (*localBackendRe
+ 	// If the provided stack name didn't include the org or project,
+ 	// infer them from the local environment.
+ 	if org == "" {
+-		// Filestate organization MUST always be "organization"
++		// diy organization MUST always be "organization"
+ 		org = "organization"
+ 	}
+ 
+@@ -195,7 +195,7 @@ func (p *projectReferenceStore) ParseReference(stackRef string) (*localBackendRe
+ 	return p.newReference(tokens.Name(project), parsedName), nil
+ }
+ 
+-func (p *projectReferenceStore) ValidateReference(ref *localBackendReference) error {
++func (p *projectReferenceStore) ValidateReference(ref *diyBackendReference) error {
+ 	if ref.project == "" {
+ 		return errors.New("bad stack reference, project was not set")
+ 	}
+@@ -244,7 +244,7 @@ func (p *projectReferenceStore) ProjectExists(ctx context.Context, projectName s
+ 	return len(files) > 0, nil
+ }
+ 
+-func (p *projectReferenceStore) ListReferences(ctx context.Context) ([]*localBackendReference, error) {
++func (p *projectReferenceStore) ListReferences(ctx context.Context) ([]*diyBackendReference, error) {
+ 	// The first level of the bucket is the project name.
+ 	// The second level of the bucket is the stack name.
+ 	prefix := filepath.ToSlash(StacksDir) + "/"
+@@ -255,7 +255,7 @@ func (p *projectReferenceStore) ListReferences(ctx context.Context) ([]*localBac
+ 		// returning only files under the prefix.
+ 	})
+ 
+-	var stacks []*localBackendReference
++	var stacks []*diyBackendReference
+ 	for {
+ 		file, err := iter.Next(ctx)
+ 		if err != nil {
+@@ -330,31 +330,31 @@ func newLegacyReferenceStore(b Bucket) *legacyReferenceStore {
+ 	}
+ }
+ 
+-// newReference builds a new localBackendReference with the provided arguments.
++// newReference builds a new diyBackendReference with the provided arguments.
+ // This DOES NOT modify the underlying storage.
+-func (p *legacyReferenceStore) newReference(name tokens.StackName) *localBackendReference {
+-	return &localBackendReference{
++func (p *legacyReferenceStore) newReference(name tokens.StackName) *diyBackendReference {
++	return &diyBackendReference{
+ 		name:  name,
+ 		store: p,
+ 	}
+ }
+ 
+-func (p *legacyReferenceStore) StackBasePath(ref *localBackendReference) string {
++func (p *legacyReferenceStore) StackBasePath(ref *diyBackendReference) string {
+ 	contract.Requiref(ref.project == "", "ref.project", "must be empty")
+ 	return filepath.Join(StacksDir, ref.name.String())
+ }
+ 
+-func (p *legacyReferenceStore) HistoryDir(stack *localBackendReference) string {
++func (p *legacyReferenceStore) HistoryDir(stack *diyBackendReference) string {
+ 	contract.Requiref(stack.project == "", "ref.project", "must be empty")
+ 	return filepath.Join(HistoriesDir, stack.name.String())
+ }
+ 
+-func (p *legacyReferenceStore) BackupDir(stack *localBackendReference) string {
++func (p *legacyReferenceStore) BackupDir(stack *diyBackendReference) string {
+ 	contract.Requiref(stack.project == "", "ref.project", "must be empty")
+ 	return filepath.Join(BackupsDir, stack.name.String())
+ }
+ 
+-func (p *legacyReferenceStore) ParseReference(stackRef string) (*localBackendReference, error) {
++func (p *legacyReferenceStore) ParseReference(stackRef string) (*diyBackendReference, error) {
+ 	parsedName, err := tokens.ParseStackName(stackRef)
+ 	if err != nil {
+ 		return nil, err
+@@ -362,19 +362,19 @@ func (p *legacyReferenceStore) ParseReference(stackRef string) (*localBackendRef
+ 	return p.newReference(parsedName), nil
+ }
+ 
+-func (p *legacyReferenceStore) ValidateReference(ref *localBackendReference) error {
++func (p *legacyReferenceStore) ValidateReference(ref *diyBackendReference) error {
+ 	if ref.project != "" {
+ 		return errors.New("bad stack reference, project was set")
+ 	}
+ 	return nil
+ }
+ 
+-func (p *legacyReferenceStore) ListReferences(ctx context.Context) ([]*localBackendReference, error) {
++func (p *legacyReferenceStore) ListReferences(ctx context.Context) ([]*diyBackendReference, error) {
+ 	files, err := listBucket(ctx, p.bucket, StacksDir)
+ 	if err != nil {
+ 		return nil, fmt.Errorf("error listing stacks: %w", err)
+ 	}
+-	stacks := slice.Prealloc[*localBackendReference](len(files))
++	stacks := slice.Prealloc[*diyBackendReference](len(files))
+ 
+ 	for _, file := range files {
+ 		if file.IsDir {
+diff --git a/pkg/backend/filestate/store_test.go b/pkg/backend/diy/store_test.go
+similarity index 99%
+rename from pkg/backend/filestate/store_test.go
+rename to pkg/backend/diy/store_test.go
+index b96a755478ef..8db27654b686 100644
+--- a/pkg/backend/filestate/store_test.go
++++ b/pkg/backend/diy/store_test.go
+@@ -12,7 +12,7 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
+-package filestate
++package diy
+ 
+ import (
+ 	"context"
+diff --git a/pkg/backend/filestate/backend.go b/pkg/backend/filestate/backend.go
+index b49e596499fb..8a0ad7712581 100644
+--- a/pkg/backend/filestate/backend.go
++++ b/pkg/backend/filestate/backend.go
+@@ -15,1283 +15,11 @@
+ package filestate
+ 
+ import (
+-	"context"
+-	"encoding/json"
+-	"errors"
+-	"fmt"
+-	"net/url"
+-	"os"
+-	"path"
+-	"path/filepath"
+-	"sort"
+-	"strings"
+-	"sync"
+-	"sync/atomic"
+-	"time"
+-
+-	"github.com/gofrs/uuid"
+-
+-	user "github.com/tweekmonster/luser"
+-	"gocloud.dev/blob"
+-	_ "gocloud.dev/blob/azureblob" // driver for azblob://
+-	_ "gocloud.dev/blob/fileblob"  // driver for file://
+-	"gocloud.dev/blob/gcsblob"     // driver for gs://
+-	_ "gocloud.dev/blob/s3blob"    // driver for s3://
+-	"gocloud.dev/gcerrors"
+-
+-	"github.com/pulumi/pulumi/pkg/v3/authhelpers"
+-	"github.com/pulumi/pulumi/pkg/v3/backend"
+-	"github.com/pulumi/pulumi/pkg/v3/backend/display"
+-	sdkDisplay "github.com/pulumi/pulumi/pkg/v3/display"
+-	"github.com/pulumi/pulumi/pkg/v3/engine"
+-	"github.com/pulumi/pulumi/pkg/v3/operations"
+-	"github.com/pulumi/pulumi/pkg/v3/resource/deploy"
+-	"github.com/pulumi/pulumi/pkg/v3/resource/edit"
+-	"github.com/pulumi/pulumi/pkg/v3/resource/stack"
+-	"github.com/pulumi/pulumi/pkg/v3/secrets"
+-	"github.com/pulumi/pulumi/sdk/v3/go/common/apitype"
+-	"github.com/pulumi/pulumi/sdk/v3/go/common/diag"
+-	"github.com/pulumi/pulumi/sdk/v3/go/common/diag/colors"
+-	"github.com/pulumi/pulumi/sdk/v3/go/common/encoding"
+-	"github.com/pulumi/pulumi/sdk/v3/go/common/env"
+-	"github.com/pulumi/pulumi/sdk/v3/go/common/resource/config"
+-	"github.com/pulumi/pulumi/sdk/v3/go/common/slice"
+-	"github.com/pulumi/pulumi/sdk/v3/go/common/tokens"
+-	"github.com/pulumi/pulumi/sdk/v3/go/common/util/cmdutil"
+-	"github.com/pulumi/pulumi/sdk/v3/go/common/util/contract"
+-	"github.com/pulumi/pulumi/sdk/v3/go/common/util/result"
+-	"github.com/pulumi/pulumi/sdk/v3/go/common/workspace"
++	"github.com/pulumi/pulumi/pkg/v3/backend/diy"
+ )
+ 
+-// UpgradeOptions customizes the behavior of the upgrade operation.
+-type UpgradeOptions struct {
+-	// ProjectsForDetachedStacks is an optional function that is able to
+-	// backfill project names for stacks that have no project specified otherwise.
+-	//
+-	// It is called with a list of stack names that have no project specified.
+-	// It should return a list of project names to use for each stack name
+-	// in the same order.
+-	// If a returned name is blank, the stack at that position will be skipped
+-	// in the upgrade process.
+-	//
+-	// The length of 'projects' MUST match the length of 'stacks'.
+-	// If it does not, the upgrade will panic.
+-	//
+-	// If this function is not specified,
+-	// stacks without projects will be skipped during the upgrade.
+-	ProjectsForDetachedStacks func(stacks []tokens.StackName) (projects []tokens.Name, err error)
+-}
+-
+-// Backend extends the base backend interface with specific information about local backends.
+-type Backend interface {
+-	backend.Backend
+-	local() // at the moment, no local specific info, so just use a marker function.
+-
+-	// Upgrade to the latest state store version.
+-	Upgrade(ctx context.Context, opts *UpgradeOptions) error
+-}
+-
+-type localBackend struct {
+-	d diag.Sink
+-
+-	// originalURL is the URL provided when the localBackend was initialized, for example
+-	// "file://~". url is a canonicalized version that should be used when persisting data.
+-	// (For example, replacing ~ with the home directory, making an absolute path, etc.)
+-	originalURL string
+-	url         string
+-
+-	bucket Bucket
+-	mutex  sync.Mutex
+-
+-	lockID string
+-
+-	gzip bool
+-
+-	Env env.Env
+-
+-	// The current project, if any.
+-	currentProject atomic.Pointer[workspace.Project]
+-
+-	// The store controls the layout of stacks in the backend.
+-	// We use different layouts based on the version of the backend
+-	// specified in the metadata file.
+-	// If the metadata file is missing, we use the legacy layout.
+-	store referenceStore
+-}
+-
+-type localBackendReference struct {
+-	name    tokens.StackName
+-	project tokens.Name
+-
+-	// A thread-safe way to get the current project.
+-	// The function reference or the pointer returned by the function may be nil.
+-	currentProject func() *workspace.Project
+-
+-	// referenceStore that created this reference.
+-	//
+-	// This is necessary because
+-	// the referenceStore for a backend may change over time,
+-	// but the store for this reference should not.
+-	store referenceStore
+-}
+-
+-func (r *localBackendReference) String() string {
+-	// If project is blank this is a legacy non-project scoped stack reference, just return the name.
+-	if r.project == "" {
+-		return r.name.String()
+-	}
+-
+-	if r.currentProject != nil {
+-		proj := r.currentProject()
+-		// For project scoped references when stringifying backend references,
+-		// we take the current project (if present) into account.
+-		// If the project names match, we can elide them.
+-		if proj != nil && string(r.project) == string(proj.Name) {
+-			return r.name.String()
+-		}
+-	}
+-
+-	// Else return a new style fully qualified reference.
+-	return fmt.Sprintf("organization/%s/%s", r.project, r.name)
+-}
+-
+-func (r *localBackendReference) Name() tokens.StackName {
+-	return r.name
+-}
+-
+-func (r *localBackendReference) Project() (tokens.Name, bool) {
+-	return r.project, r.project != ""
+-}
+-
+-func (r *localBackendReference) FullyQualifiedName() tokens.QName {
+-	if r.project == "" {
+-		return r.name.Q()
+-	}
+-	return tokens.QName(fmt.Sprintf("organization/%s/%s", r.project, r.name))
+-}
+-
+-// Helper methods that delegate to the underlying referenceStore.
+-func (r *localBackendReference) Validate() error       { return r.store.ValidateReference(r) }
+-func (r *localBackendReference) StackBasePath() string { return r.store.StackBasePath(r) }
+-func (r *localBackendReference) HistoryDir() string    { return r.store.HistoryDir(r) }
+-func (r *localBackendReference) BackupDir() string     { return r.store.BackupDir(r) }
+-
+-func IsFileStateBackendURL(urlstr string) bool {
+-	u, err := url.Parse(urlstr)
+-	if err != nil {
+-		return false
+-	}
+-
+-	return blob.DefaultURLMux().ValidBucketScheme(u.Scheme)
+-}
+-
+-const FilePathPrefix = "file://"
+-
+-// New constructs a new filestate backend,
+-// using the given URL as the root for storage.
+-// The URL must use one of the schemes supported by the go-cloud blob package.
+-// Thes inclue: file, s3, gs, azblob.
+-func New(ctx context.Context, d diag.Sink, originalURL string, project *workspace.Project) (Backend, error) {
+-	return newLocalBackend(ctx, d, originalURL, project, nil)
+-}
+-
+-type localBackendOptions struct {
+-	// Env specifies how to get environment variables.
+-	//
+-	// Defaults to env.Global
+-	Env env.Env
+-}
+-
+-// newLocalBackend builds a filestate backend implementation
+-// with the given options.
+-func newLocalBackend(
+-	ctx context.Context, d diag.Sink, originalURL string, project *workspace.Project,
+-	opts *localBackendOptions,
+-) (*localBackend, error) {
+-	if opts == nil {
+-		opts = &localBackendOptions{}
+-	}
+-	if opts.Env == nil {
+-		opts.Env = env.Global()
+-	}
+-
+-	if !IsFileStateBackendURL(originalURL) {
+-		return nil, fmt.Errorf("local URL %s has an illegal prefix; expected one of: %s",
+-			originalURL, strings.Join(blob.DefaultURLMux().BucketSchemes(), ", "))
+-	}
+-
+-	u, err := massageBlobPath(originalURL)
+-	if err != nil {
+-		return nil, err
+-	}
+-
+-	p, err := url.Parse(u)
+-	if err != nil {
+-		return nil, err
+-	}
+-
+-	blobmux := blob.DefaultURLMux()
+-
+-	// for gcp we want to support additional credentials
+-	// schemes on top of go-cloud's default credentials mux.
+-	if p.Scheme == gcsblob.Scheme {
+-		blobmux, err = authhelpers.GoogleCredentialsMux(ctx)
+-		if err != nil {
+-			return nil, err
+-		}
+-	}
+-
+-	bucket, err := blobmux.OpenBucket(ctx, u)
+-	if err != nil {
+-		return nil, fmt.Errorf("unable to open bucket %s: %w", u, err)
+-	}
+-
+-	if !strings.HasPrefix(u, FilePathPrefix) {
+-		bucketSubDir := strings.TrimLeft(p.Path, "/")
+-		if bucketSubDir != "" {
+-			if !strings.HasSuffix(bucketSubDir, "/") {
+-				bucketSubDir += "/"
+-			}
+-
+-			bucket = blob.PrefixedBucket(bucket, bucketSubDir)
+-		}
+-	}
+-
+-	// Allocate a unique lock ID for this backend instance.
+-	lockID, err := uuid.NewV4()
+-	if err != nil {
+-		return nil, err
+-	}
+-
+-	gzipCompression := opts.Env.GetBool(env.SelfManagedGzip)
+-
+-	wbucket := &wrappedBucket{bucket: bucket}
+-	bucket = nil // prevent accidental use of unwrapped bucket
+-
+-	backend := &localBackend{
+-		d:           d,
+-		originalURL: originalURL,
+-		url:         u,
+-		bucket:      wbucket,
+-		lockID:      lockID.String(),
+-		gzip:        gzipCompression,
+-		Env:         opts.Env,
+-	}
+-	backend.currentProject.Store(project)
+-
+-	// Read the Pulumi state metadata
+-	// and ensure that it is compatible with this version of the CLI.
+-	// The version in the metadata file informs which store we use.
+-	meta, err := ensurePulumiMeta(ctx, wbucket, opts.Env)
+-	if err != nil {
+-		return nil, err
+-	}
+-
+-	// projectMode tracks whether the current state supports project-scoped stacks.
+-	// Historically, the filestate backend did not support this.
+-	// To avoid breaking old stacks, we use legacy mode for existing states.
+-	// We use project mode only if one of the following is true:
+-	//
+-	//  - The state has a single .pulumi/meta.yaml file
+-	//    and the version is 1 or greater.
+-	//  - The state is entirely new
+-	//    so there's no risk of breaking old stacks.
+-	//
+-	// All actual logic of project mode vs legacy mode is handled by the referenceStore.
+-	// This boolean just helps us warn users about unmigrated stacks.
+-	var projectMode bool
+-	switch meta.Version {
+-	case 0:
+-		backend.store = newLegacyReferenceStore(wbucket)
+-	case 1:
+-		backend.store = newProjectReferenceStore(wbucket, backend.currentProject.Load)
+-		projectMode = true
+-	default:
+-		return nil, fmt.Errorf(
+-			"state store unsupported: 'meta.yaml' version (%d) is not supported "+
+-				"by this version of the Pulumi CLI", meta.Version)
+-	}
+-
+-	// If we're not in project mode, or we've disabled the warning, we're done.
+-	if !projectMode || opts.Env.GetBool(env.SelfManagedStateNoLegacyWarning) {
+-		return backend, nil
+-	}
+-	// Otherwise, warn about any old stack files.
+-	// This is possible if a user creates a new stack with a new CLI,
+-	// or migrates it to project mode with `pulumi state upgrade`,
+-	// but someone else interacts with the same state with an old CLI.
+-
+-	refs, err := newLegacyReferenceStore(wbucket).ListReferences(ctx)
+-	if err != nil {
+-		// If there's an error listing don't fail, just don't print the warnings
+-		return backend, nil
+-	}
+-	if len(refs) == 0 {
+-		return backend, nil
+-	}
+-
+-	var msg strings.Builder
+-	msg.WriteString("Found legacy stack files in state store:\n")
+-	for _, ref := range refs {
+-		fmt.Fprintf(&msg, "  - %s\n", ref.Name())
+-	}
+-	msg.WriteString("Please run 'pulumi state upgrade' to migrate them to the new format.\n")
+-	msg.WriteString("Set PULUMI_DIY_BACKEND_NO_LEGACY_WARNING=1 to disable this warning.")
+-	d.Warningf(diag.Message("", msg.String()))
+-	return backend, nil
+-}
+-
+-func (b *localBackend) Upgrade(ctx context.Context, opts *UpgradeOptions) error {
+-	if opts == nil {
+-		opts = &UpgradeOptions{}
+-	}
+-
+-	// We don't use the existing b.store because
+-	// this may already be a projectReferenceStore
+-	// with new legacy files introduced to it accidentally.
+-	olds, err := newLegacyReferenceStore(b.bucket).ListReferences(ctx)
+-	if err != nil {
+-		return fmt.Errorf("read old references: %w", err)
+-	}
+-	sort.Slice(olds, func(i, j int) bool {
+-		return olds[i].Name().String() < olds[j].Name().String()
+-	})
+-
+-	// There's no limit to the number of stacks we need to upgrade.
+-	// We don't want to overload the system with too many concurrent upgrades.
+-	// We'll run a fixed pool of goroutines to upgrade stacks.
+-	pool := newWorkerPool(0 /* numWorkers */, len(olds) /* numTasks */)
+-	defer pool.Close()
+-
+-	// Projects for each stack in `olds` in the same order.
+-	// projects[i] is the project name for olds[i].
+-	projects := make([]tokens.Name, len(olds))
+-	for idx, old := range olds {
+-		idx, old := idx, old
+-		pool.Enqueue(func() error {
+-			project, err := b.guessProject(ctx, old)
+-			if err != nil {
+-				return fmt.Errorf("guess stack %s project: %w", old.Name(), err)
+-			}
+-
+-			// No lock necessary;
+-			// projects is pre-allocated.
+-			projects[idx] = project
+-			return nil
+-		})
+-	}
+-
+-	if err := pool.Wait(); err != nil {
+-		return err
+-	}
+-
+-	// If there are any stacks without projects
+-	// and the user provided a callback to fill them,
+-	// use it to fill in the missing projects.
+-	if opts.ProjectsForDetachedStacks != nil {
+-		var (
+-			// Names of stacks in 'olds' that don't have a project
+-			detached []tokens.StackName
+-
+-			// reverseIdx[i] is the index of detached[i]
+-			// in olds and projects.
+-			//
+-			// In other words:
+-			//
+-			//   detached[i] == olds[reverseIdx[i]].Name()
+-			//   projects[reverseIdx[i]] == ""
+-			reverseIdx []int
+-		)
+-		for i, ref := range olds {
+-			if projects[i] == "" {
+-				detached = append(detached, ref.Name())
+-				reverseIdx = append(reverseIdx, i)
+-			}
+-		}
+-
+-		if len(detached) != 0 {
+-			detachedProjects, err := opts.ProjectsForDetachedStacks(detached)
+-			if err != nil {
+-				return err
+-			}
+-			contract.Assertf(len(detached) == len(detachedProjects),
+-				"ProjectsForDetachedStacks returned the wrong number of projects: "+
+-					"expected %d, got %d", len(detached), len(detachedProjects))
+-
+-			for i, project := range detachedProjects {
+-				projects[reverseIdx[i]] = project
+-			}
+-		}
+-	}
+-
+-	// It's important that we attempt to write the new metadata file
+-	// before we attempt the upgrade.
+-	// This ensures that if permissions are borked for any reason,
+-	// (e.g., we can write to .pulumi/*/*" but not ".pulumi/*.")
+-	// we don't leave the bucket in a completely inaccessible state.
+-	meta := pulumiMeta{Version: 1}
+-	if err := meta.WriteTo(ctx, b.bucket); err != nil {
+-		var s strings.Builder
+-		fmt.Fprintf(&s, "Could not write new state metadata file: %v\n", err)
+-		fmt.Fprintf(&s, "Please verify that the storage is writable, and try again.")
+-		b.d.Errorf(diag.RawMessage("", s.String()))
+-		return errors.New("state upgrade failed")
+-	}
+-
+-	newStore := newProjectReferenceStore(b.bucket, b.currentProject.Load)
+-
+-	var upgraded atomic.Int64 // number of stacks successfully upgraded
+-	for idx, old := range olds {
+-		idx, old := idx, old
+-		pool.Enqueue(func() error {
+-			project := projects[idx]
+-			if project == "" {
+-				b.d.Warningf(diag.Message("", "Skipping stack %q: no project name found"), old)
+-				return nil
+-			}
+-
+-			if err := b.upgradeStack(ctx, newStore, project, old); err != nil {
+-				b.d.Warningf(diag.Message("", "Skipping stack %q: %v"), old, err)
+-			} else {
+-				upgraded.Add(1)
+-			}
+-			return nil
+-		})
+-	}
+-
+-	// We log all errors above. This should never fail.
+-	err = pool.Wait()
+-	contract.AssertNoErrorf(err, "pool.Wait should never return an error")
+-
+-	b.store = newStore
+-	b.d.Infoerrf(diag.Message("", "Upgraded %d stack(s) to project mode"), upgraded.Load())
+-	return nil
+-}
+-
+-// guessProject inspects the checkpoint for the given stack and attempts to
+-// guess the project name for it.
+-// Returns an empty string if the project name cannot be determined.
+-func (b *localBackend) guessProject(ctx context.Context, old *localBackendReference) (tokens.Name, error) {
+-	contract.Requiref(old.project == "", "old.project", "must be empty")
+-
+-	chk, err := b.getCheckpoint(ctx, old)
+-	if err != nil {
+-		return "", fmt.Errorf("read checkpoint: %w", err)
+-	}
+-
+-	// Try and find the project name from _any_ resource URN
+-	if chk.Latest != nil {
+-		for _, res := range chk.Latest.Resources {
+-			return tokens.Name(res.URN.Project()), nil
+-		}
+-	}
+-	return "", nil
+-}
+-
+-// upgradeStack upgrades a single stack to use the provided projectReferenceStore.
+-func (b *localBackend) upgradeStack(
+-	ctx context.Context,
+-	newStore *projectReferenceStore,
+-	project tokens.Name,
+-	old *localBackendReference,
+-) error {
+-	contract.Requiref(old.project == "", "old.project", "must be empty")
+-	contract.Requiref(project != "", "project", "must not be empty")
+-
+-	new := newStore.newReference(project, old.Name())
+-	if err := b.renameStack(ctx, old, new); err != nil {
+-		return fmt.Errorf("rename to %v: %w", new, err)
+-	}
+-
+-	return nil
+-}
+-
+-// massageBlobPath takes the path the user provided and converts it to an appropriate form go-cloud
+-// can support.  Importantly, s3/azblob/gs paths should not be be touched. This will only affect
+-// file:// paths which have a few oddities around them that we want to ensure work properly.
+-func massageBlobPath(path string) (string, error) {
+-	if !strings.HasPrefix(path, FilePathPrefix) {
+-		// Not a file:// path.  Keep this untouched and pass directly to gocloud.
+-		return path, nil
+-	}
+-
+-	// Strip off the "file://" portion so we can examine and determine what to do with the rest.
+-	path = strings.TrimPrefix(path, FilePathPrefix)
+-
+-	// We need to specially handle ~.  The shell doesn't take care of this for us, and later
+-	// functions we run into can't handle this either.
+-	//
+-	// From https://stackoverflow.com/questions/17609732/expand-tilde-to-home-directory
+-	if strings.HasPrefix(path, "~") {
+-		usr, err := user.Current()
+-		if err != nil {
+-			return "", fmt.Errorf("Could not determine current user to resolve `file://~` path.: %w", err)
+-		}
+-
+-		if path == "~" {
+-			path = usr.HomeDir
+-		} else {
+-			path = filepath.Join(usr.HomeDir, path[2:])
+-		}
+-	}
+-
+-	// For file:// backend, ensure a relative path is resolved. fileblob only supports absolute paths.
+-	path, err := filepath.Abs(path)
+-	if err != nil {
+-		return "", fmt.Errorf("An IO error occurred while building the absolute path: %w", err)
+-	}
+-
+-	// Using example from https://godoc.org/gocloud.dev/blob/fileblob#example-package--OpenBucket
+-	// On Windows, convert "\" to "/" and add a leading "/". (See https://gocloud.dev/howto/blob/#local)
+-	path = filepath.ToSlash(path)
+-	if os.PathSeparator != '/' && !strings.HasPrefix(path, "/") {
+-		path = "/" + path
+-	}
+-
+-	return FilePathPrefix + path, nil
+-}
+-
+-func Login(ctx context.Context, d diag.Sink, url string, project *workspace.Project) (Backend, error) {
+-	be, err := New(ctx, d, url, project)
+-	if err != nil {
+-		return nil, err
+-	}
+-	return be, workspace.StoreAccount(be.URL(), workspace.Account{}, true)
+-}
+-
+-func (b *localBackend) getReference(ref backend.StackReference) (*localBackendReference, error) {
+-	stackRef, ok := ref.(*localBackendReference)
+-	if !ok {
+-		return nil, errors.New("bad stack reference type")
+-	}
+-	return stackRef, stackRef.Validate()
+-}
+-
+-func (b *localBackend) local() {}
+-
+-func (b *localBackend) Name() string {
+-	name, err := os.Hostname()
+-	contract.IgnoreError(err)
+-	if name == "" {
+-		name = "local"
+-	}
+-	return name
+-}
+-
+-func (b *localBackend) URL() string {
+-	return b.originalURL
+-}
+-
+-func (b *localBackend) SetCurrentProject(project *workspace.Project) {
+-	b.currentProject.Store(project)
+-}
+-
+-func (b *localBackend) GetPolicyPack(ctx context.Context, policyPack string,
+-	d diag.Sink,
+-) (backend.PolicyPack, error) {
+-	return nil, errors.New("File state backend does not support resource policy")
+-}
+-
+-func (b *localBackend) ListPolicyGroups(ctx context.Context, orgName string, _ backend.ContinuationToken) (
+-	apitype.ListPolicyGroupsResponse, backend.ContinuationToken, error,
+-) {
+-	return apitype.ListPolicyGroupsResponse{}, nil, errors.New("File state backend does not support resource policy")
+-}
+-
+-func (b *localBackend) ListPolicyPacks(ctx context.Context, orgName string, _ backend.ContinuationToken) (
+-	apitype.ListPolicyPacksResponse, backend.ContinuationToken, error,
+-) {
+-	return apitype.ListPolicyPacksResponse{}, nil, errors.New("File state backend does not support resource policy")
+-}
+-
+-func (b *localBackend) SupportsTags() bool {
+-	return false
+-}
+-
+-func (b *localBackend) SupportsOrganizations() bool {
+-	return false
+-}
+-
+-func (b *localBackend) SupportsProgress() bool {
+-	return false
+-}
+-
+-func (b *localBackend) ParseStackReference(stackRef string) (backend.StackReference, error) {
+-	return b.parseStackReference(stackRef)
+-}
+-
+-func (b *localBackend) parseStackReference(stackRef string) (*localBackendReference, error) {
+-	return b.store.ParseReference(stackRef)
+-}
+-
+-// ValidateStackName verifies the stack name is valid for the local backend.
+-func (b *localBackend) ValidateStackName(stackRef string) error {
+-	_, err := b.ParseStackReference(stackRef)
+-	return err
+-}
+-
+-func (b *localBackend) DoesProjectExist(ctx context.Context, _ string, projectName string) (bool, error) {
+-	projStore, ok := b.store.(*projectReferenceStore)
+-	if !ok {
+-		// Legacy stores don't have projects
+-		// so the project does not exist.
+-		return false, nil
+-	}
+-
+-	return projStore.ProjectExists(ctx, projectName)
+-}
+-
+-// Confirm the specified stack's project doesn't contradict the meta.yaml of the current project.
+-// If the CWD is not in a Pulumi project, does not contradict.
+-// If the project name in Pulumi.yaml is "foo", a stack with a name of bar/foo should not work.
+-func currentProjectContradictsWorkspace(stack *localBackendReference) bool {
+-	contract.Requiref(stack != nil, "stack", "is nil")
+-
+-	if stack.project == "" {
+-		return false
+-	}
+-
+-	projPath, err := workspace.DetectProjectPath()
+-	if err != nil {
+-		return false
+-	}
+-
+-	if projPath == "" {
+-		return false
+-	}
+-
+-	proj, err := workspace.LoadProject(projPath)
+-	if err != nil {
+-		return false
+-	}
+-
+-	return proj.Name.String() != stack.project.String()
+-}
+-
+-func (b *localBackend) CreateStack(ctx context.Context, stackRef backend.StackReference,
+-	root string, opts *backend.CreateStackOptions,
+-) (backend.Stack, error) {
+-	if opts != nil && len(opts.Teams) > 0 {
+-		return nil, backend.ErrTeamsNotSupported
+-	}
+-
+-	localStackRef, err := b.getReference(stackRef)
+-	if err != nil {
+-		return nil, err
+-	}
+-
+-	err = b.Lock(ctx, stackRef)
+-	if err != nil {
+-		return nil, err
+-	}
+-	defer b.Unlock(ctx, stackRef)
+-
+-	if currentProjectContradictsWorkspace(localStackRef) {
+-		return nil, fmt.Errorf("provided project name %q doesn't match Pulumi.yaml", localStackRef.project)
+-	}
+-
+-	stackName := localStackRef.FullyQualifiedName()
+-	if stackName == "" {
+-		return nil, errors.New("invalid empty stack name")
+-	}
+-
+-	if _, err := b.stackExists(ctx, localStackRef); err == nil {
+-		return nil, &backend.StackAlreadyExistsError{StackName: string(stackName)}
+-	}
+-
+-	_, err = b.saveStack(ctx, localStackRef, nil, nil)
+-	if err != nil {
+-		return nil, err
+-	}
+-
+-	stack := newStack(localStackRef, b)
+-	b.d.Infof(diag.Message("", "Created stack '%s'"), stack.Ref())
+-
+-	return stack, nil
+-}
+-
+-func (b *localBackend) GetStack(ctx context.Context, stackRef backend.StackReference) (backend.Stack, error) {
+-	localStackRef, err := b.getReference(stackRef)
+-	if err != nil {
+-		return nil, err
+-	}
+-
+-	_, err = b.stackExists(ctx, localStackRef)
+-	if err != nil {
+-		if errors.Is(err, errCheckpointNotFound) {
+-			return nil, nil
+-		}
+-		return nil, err
+-	}
+-
+-	return newStack(localStackRef, b), nil
+-}
+-
+-func (b *localBackend) ListStacks(
+-	ctx context.Context, filter backend.ListStacksFilter, _ backend.ContinuationToken) (
+-	[]backend.StackSummary, backend.ContinuationToken, error,
+-) {
+-	stacks, err := b.getLocalStacks(ctx)
+-	if err != nil {
+-		return nil, nil, err
+-	}
+-
+-	// Note that the provided stack filter is only partially honored, since fields like organizations and tags
+-	// aren't persisted in the local backend.
+-	results := slice.Prealloc[backend.StackSummary](len(stacks))
+-	for _, stackRef := range stacks {
+-		// We can check for project name filter here, but be careful about legacy stores where project is always blank.
+-		stackProject, hasProject := stackRef.Project()
+-		if filter.Project != nil && hasProject && string(stackProject) != *filter.Project {
+-			continue
+-		}
+-
+-		chk, err := b.getCheckpoint(ctx, stackRef)
+-		if err != nil {
+-			return nil, nil, err
+-		}
+-		results = append(results, newLocalStackSummary(stackRef, chk))
+-	}
+-
+-	return results, nil, nil
+-}
+-
+-func (b *localBackend) RemoveStack(ctx context.Context, stack backend.Stack, force bool) (bool, error) {
+-	localStackRef, err := b.getReference(stack.Ref())
+-	if err != nil {
+-		return false, err
+-	}
+-
+-	err = b.Lock(ctx, localStackRef)
+-	if err != nil {
+-		return false, err
+-	}
+-	defer b.Unlock(ctx, localStackRef)
+-
+-	checkpoint, err := b.getCheckpoint(ctx, localStackRef)
+-	if err != nil {
+-		return false, err
+-	}
+-
+-	// Don't remove stacks that still have resources.
+-	if !force && checkpoint != nil && checkpoint.Latest != nil && len(checkpoint.Latest.Resources) > 0 {
+-		return true, errors.New("refusing to remove stack because it still contains resources")
+-	}
+-
+-	return false, b.removeStack(ctx, localStackRef)
+-}
+-
+-func (b *localBackend) RenameStack(ctx context.Context, stack backend.Stack,
+-	newName tokens.QName,
+-) (backend.StackReference, error) {
+-	localStackRef, err := b.getReference(stack.Ref())
+-	if err != nil {
+-		return nil, err
+-	}
+-
+-	// Ensure the new stack name is valid.
+-	newRef, err := b.parseStackReference(string(newName))
+-	if err != nil {
+-		return nil, err
+-	}
+-
+-	err = b.renameStack(ctx, localStackRef, newRef)
+-	if err != nil {
+-		return nil, err
+-	}
+-
+-	return newRef, nil
+-}
+-
+-func (b *localBackend) renameStack(ctx context.Context, oldRef *localBackendReference,
+-	newRef *localBackendReference,
+-) error {
+-	err := b.Lock(ctx, oldRef)
+-	if err != nil {
+-		return err
+-	}
+-	defer b.Unlock(ctx, oldRef)
+-
+-	// Ensure the destination stack does not already exist.
+-	hasExisting, err := b.bucket.Exists(ctx, b.stackPath(ctx, newRef))
+-	if err != nil {
+-		return err
+-	}
+-	if hasExisting {
+-		return fmt.Errorf("a stack named %s already exists", newRef.String())
+-	}
+-
+-	// Get the current state from the stack to be renamed.
+-	chk, err := b.getCheckpoint(ctx, oldRef)
+-	if err != nil {
+-		return fmt.Errorf("failed to load checkpoint: %w", err)
+-	}
+-
+-	// If we have a checkpoint, we need to rename the URNs inside it to use the new stack name.
+-	if chk != nil && chk.Latest != nil {
+-		project, has := newRef.Project()
+-		contract.Assertf(has || project == "", "project should be blank for legacy stacks")
+-		if err = edit.RenameStack(chk.Latest, newRef.name, tokens.PackageName(project)); err != nil {
+-			return err
+-		}
+-	}
+-
+-	chkJSON, err := encoding.JSON.Marshal(chk)
+-	if err != nil {
+-		return fmt.Errorf("marshalling checkpoint: %w", err)
+-	}
+-
+-	versionedCheckpoint := &apitype.VersionedCheckpoint{
+-		Version:    apitype.DeploymentSchemaVersionCurrent,
+-		Checkpoint: json.RawMessage(chkJSON),
+-	}
+-
+-	// Now save the snapshot with a new name (we pass nil to re-use the existing secrets manager from the snapshot).
+-	if _, _, err = b.saveCheckpoint(ctx, newRef, versionedCheckpoint); err != nil {
+-		return err
+-	}
+-
+-	// To remove the old stack, just make a backup of the file and don't write out anything new.
+-	file := b.stackPath(ctx, oldRef)
+-	backupTarget(ctx, b.bucket, file, false)
+-
+-	// And rename the history folder as well.
+-	if err = b.renameHistory(ctx, oldRef, newRef); err != nil {
+-		return err
+-	}
+-	return err
+-}
+-
+-func (b *localBackend) GetLatestConfiguration(ctx context.Context,
+-	stack backend.Stack,
+-) (config.Map, error) {
+-	hist, err := b.GetHistory(ctx, stack.Ref(), 1 /*pageSize*/, 1 /*page*/)
+-	if err != nil {
+-		return nil, err
+-	}
+-	if len(hist) == 0 {
+-		return nil, backend.ErrNoPreviousDeployment
+-	}
+-
+-	return hist[0].Config, nil
+-}
+-
+-func (b *localBackend) PackPolicies(
+-	ctx context.Context, policyPackRef backend.PolicyPackReference,
+-	cancellationScopes backend.CancellationScopeSource,
+-	callerEventsOpt chan<- engine.Event,
+-) result.Result {
+-	return result.Error("File state backend does not support resource policy")
+-}
+-
+-func (b *localBackend) Preview(ctx context.Context, stack backend.Stack,
+-	op backend.UpdateOperation, events chan<- engine.Event,
+-) (*deploy.Plan, sdkDisplay.ResourceChanges, result.Result) {
+-	// We can skip PreviewThenPromptThenExecute and just go straight to Execute.
+-	opts := backend.ApplierOptions{
+-		DryRun:   true,
+-		ShowLink: true,
+-	}
+-	return b.apply(ctx, apitype.PreviewUpdate, stack, op, opts, events)
+-}
+-
+-func (b *localBackend) Update(ctx context.Context, stack backend.Stack,
+-	op backend.UpdateOperation,
+-) (sdkDisplay.ResourceChanges, result.Result) {
+-	err := b.Lock(ctx, stack.Ref())
+-	if err != nil {
+-		return nil, result.FromError(err)
+-	}
+-	defer b.Unlock(ctx, stack.Ref())
+-
+-	return backend.PreviewThenPromptThenExecute(ctx, apitype.UpdateUpdate, stack, op, b.apply)
+-}
+-
+-func (b *localBackend) Import(ctx context.Context, stack backend.Stack,
+-	op backend.UpdateOperation, imports []deploy.Import,
+-) (sdkDisplay.ResourceChanges, result.Result) {
+-	err := b.Lock(ctx, stack.Ref())
+-	if err != nil {
+-		return nil, result.FromError(err)
+-	}
+-	defer b.Unlock(ctx, stack.Ref())
+-
+-	op.Imports = imports
+-	return backend.PreviewThenPromptThenExecute(ctx, apitype.ResourceImportUpdate, stack, op, b.apply)
+-}
+-
+-func (b *localBackend) Refresh(ctx context.Context, stack backend.Stack,
+-	op backend.UpdateOperation,
+-) (sdkDisplay.ResourceChanges, result.Result) {
+-	err := b.Lock(ctx, stack.Ref())
+-	if err != nil {
+-		return nil, result.FromError(err)
+-	}
+-	defer b.Unlock(ctx, stack.Ref())
+-
+-	return backend.PreviewThenPromptThenExecute(ctx, apitype.RefreshUpdate, stack, op, b.apply)
+-}
+-
+-func (b *localBackend) Destroy(ctx context.Context, stack backend.Stack,
+-	op backend.UpdateOperation,
+-) (sdkDisplay.ResourceChanges, result.Result) {
+-	err := b.Lock(ctx, stack.Ref())
+-	if err != nil {
+-		return nil, result.FromError(err)
+-	}
+-	defer b.Unlock(ctx, stack.Ref())
+-
+-	return backend.PreviewThenPromptThenExecute(ctx, apitype.DestroyUpdate, stack, op, b.apply)
+-}
+-
+-func (b *localBackend) Query(ctx context.Context, op backend.QueryOperation) error {
+-	return b.query(ctx, op, nil /*events*/)
+-}
+-
+-func (b *localBackend) Watch(ctx context.Context, stk backend.Stack,
+-	op backend.UpdateOperation, paths []string,
+-) result.Result {
+-	return backend.Watch(ctx, b, stk, op, b.apply, paths)
+-}
+-
+-// apply actually performs the provided type of update on a locally hosted stack.
+-func (b *localBackend) apply(
+-	ctx context.Context, kind apitype.UpdateKind, stack backend.Stack,
+-	op backend.UpdateOperation, opts backend.ApplierOptions,
+-	events chan<- engine.Event,
+-) (*deploy.Plan, sdkDisplay.ResourceChanges, result.Result) {
+-	stackRef := stack.Ref()
+-	localStackRef, err := b.getReference(stackRef)
+-	if err != nil {
+-		return nil, nil, result.FromError(err)
+-	}
+-
+-	if currentProjectContradictsWorkspace(localStackRef) {
+-		return nil, nil, result.Errorf("provided project name %q doesn't match Pulumi.yaml", localStackRef.project)
+-	}
+-
+-	actionLabel := backend.ActionLabel(kind, opts.DryRun)
+-
+-	if !(op.Opts.Display.JSONDisplay || op.Opts.Display.Type == display.DisplayWatch) {
+-		// Print a banner so it's clear this is a local deployment.
+-		fmt.Printf(op.Opts.Display.Color.Colorize(
+-			colors.SpecHeadline+"%s (%s):"+colors.Reset+"\n"), actionLabel, stackRef)
+-	}
+-
+-	// Start the update.
+-	update, err := b.newUpdate(ctx, op.SecretsProvider, localStackRef, op)
+-	if err != nil {
+-		return nil, nil, result.FromError(err)
+-	}
+-
+-	// Spawn a display loop to show events on the CLI.
+-	displayEvents := make(chan engine.Event)
+-	displayDone := make(chan bool)
+-	go display.ShowEvents(
+-		strings.ToLower(actionLabel), kind, stackRef.Name(), op.Proj.Name, "",
+-		displayEvents, displayDone, op.Opts.Display, opts.DryRun)
+-
+-	// Create a separate event channel for engine events that we'll pipe to both listening streams.
+-	engineEvents := make(chan engine.Event)
+-
+-	scope := op.Scopes.NewScope(engineEvents, opts.DryRun)
+-	eventsDone := make(chan bool)
+-	go func() {
+-		// Pull in all events from the engine and send them to the two listeners.
+-		for e := range engineEvents {
+-			displayEvents <- e
+-
+-			// If the caller also wants to see the events, stream them there also.
+-			if events != nil {
+-				events <- e
+-			}
+-		}
+-
+-		close(eventsDone)
+-	}()
+-
+-	// Create the management machinery.
+-	persister := b.newSnapshotPersister(ctx, localStackRef)
+-	manager := backend.NewSnapshotManager(persister, op.SecretsManager, update.GetTarget().Snapshot)
+-	engineCtx := &engine.Context{
+-		Cancel:          scope.Context(),
+-		Events:          engineEvents,
+-		SnapshotManager: manager,
+-		BackendClient:   backend.NewBackendClient(b, op.SecretsProvider),
+-	}
+-
+-	// Perform the update
+-	start := time.Now().Unix()
+-	var plan *deploy.Plan
+-	var changes sdkDisplay.ResourceChanges
+-	var updateErr error
+-	switch kind {
+-	case apitype.PreviewUpdate:
+-		plan, changes, updateErr = engine.Update(update, engineCtx, op.Opts.Engine, true)
+-	case apitype.UpdateUpdate:
+-		_, changes, updateErr = engine.Update(update, engineCtx, op.Opts.Engine, opts.DryRun)
+-	case apitype.ResourceImportUpdate:
+-		_, changes, updateErr = engine.Import(update, engineCtx, op.Opts.Engine, op.Imports, opts.DryRun)
+-	case apitype.RefreshUpdate:
+-		_, changes, updateErr = engine.Refresh(update, engineCtx, op.Opts.Engine, opts.DryRun)
+-	case apitype.DestroyUpdate:
+-		_, changes, updateErr = engine.Destroy(update, engineCtx, op.Opts.Engine, opts.DryRun)
+-	case apitype.StackImportUpdate, apitype.RenameUpdate:
+-		contract.Failf("unexpected %s event", kind)
+-	default:
+-		contract.Failf("Unrecognized update kind: %s", kind)
+-	}
+-	updateRes := result.WrapIfNonNil(updateErr)
+-	end := time.Now().Unix()
+-
+-	// Wait for the display to finish showing all the events.
+-	<-displayDone
+-	scope.Close() // Don't take any cancellations anymore, we're shutting down.
+-	close(engineEvents)
+-	err = manager.Close()
+-	// Historically we ignored this error (using IgnoreClose so it would log to the V11 log).
+-	// To minimize the immediate blast radius of this to start with we're just going to write an error to the user.
+-	if err != nil {
+-		cmdutil.Diag().Errorf(diag.Message("", "Snapshot write failed: %v"), err)
+-	}
+-
+-	// Make sure the goroutine writing to displayEvents and events has exited before proceeding.
+-	<-eventsDone
+-	close(displayEvents)
+-
+-	// Save update results.
+-	backendUpdateResult := backend.SucceededResult
+-	if updateRes != nil {
+-		backendUpdateResult = backend.FailedResult
+-	}
+-	info := backend.UpdateInfo{
+-		Kind:        kind,
+-		StartTime:   start,
+-		Message:     op.M.Message,
+-		Environment: op.M.Environment,
+-		Config:      update.GetTarget().Config,
+-		Result:      backendUpdateResult,
+-		EndTime:     end,
+-		// IDEA: it would be nice to populate the *Deployment, so that addToHistory below doesn't need to
+-		//     rudely assume it knows where the checkpoint file is on disk as it makes a copy of it.  This isn't
+-		//     trivial to achieve today given the event driven nature of plan-walking, however.
+-		ResourceChanges: changes,
+-	}
+-
+-	var saveErr error
+-	var backupErr error
+-	if !opts.DryRun {
+-		saveErr = b.addToHistory(ctx, localStackRef, info)
+-		backupErr = b.backupStack(ctx, localStackRef)
+-	}
+-
+-	if updateRes != nil {
+-		// We swallow saveErr and backupErr as they are less important than the updateErr.
+-		return plan, changes, updateRes
+-	}
+-
+-	if saveErr != nil {
+-		// We swallow backupErr as it is less important than the saveErr.
+-		return plan, changes, result.FromError(fmt.Errorf("saving update info: %w", saveErr))
+-	}
+-
+-	if backupErr != nil {
+-		return plan, changes, result.FromError(fmt.Errorf("saving backup: %w", backupErr))
+-	}
+-
+-	// Make sure to print a link to the stack's checkpoint before exiting.
+-	if !op.Opts.Display.SuppressPermalink && opts.ShowLink && !op.Opts.Display.JSONDisplay {
+-		// Note we get a real signed link for aws/azure/gcp links.  But no such option exists for
+-		// file:// links so we manually create the link ourselves.
+-		var link string
+-		if strings.HasPrefix(b.url, FilePathPrefix) {
+-			u, _ := url.Parse(b.url)
+-			u.Path = filepath.ToSlash(path.Join(u.Path, b.stackPath(ctx, localStackRef)))
+-			link = u.String()
+-		} else {
+-			link, err = b.bucket.SignedURL(ctx, b.stackPath(ctx, localStackRef), nil)
+-			if err != nil {
+-				// set link to be empty to when there is an error to hide use of Permalinks
+-				link = ""
+-
+-				// we log a warning here rather then returning an error to avoid exiting
+-				// pulumi with an error code.
+-				// printing a statefile perma link happens after all the providers have finished
+-				// deploying the infrastructure, failing the pulumi update because there was a
+-				// problem printing a statefile perma link can be missleading in automated CI environments.
+-				cmdutil.Diag().Warningf(diag.Message("", "Unable to create signed url for current backend to "+
+-					"create a Permalink. Please visit https://www.pulumi.com/docs/troubleshooting/ "+
+-					"for more information\n"))
+-			}
+-		}
+-
+-		if link != "" {
+-			fmt.Printf(op.Opts.Display.Color.Colorize(
+-				colors.SpecHeadline+"Permalink: "+
+-					colors.Underline+colors.BrightBlue+"%s"+colors.Reset+"\n"), link)
+-		}
+-	}
+-
+-	return plan, changes, nil
+-}
+-
+-// query executes a query program against the resource outputs of a locally hosted stack.
+-func (b *localBackend) query(ctx context.Context, op backend.QueryOperation,
+-	callerEventsOpt chan<- engine.Event,
+-) error {
+-	return backend.RunQuery(ctx, b, op, callerEventsOpt, b.newQuery)
+-}
+-
+-func (b *localBackend) GetHistory(
+-	ctx context.Context,
+-	stackRef backend.StackReference,
+-	pageSize int,
+-	page int,
+-) ([]backend.UpdateInfo, error) {
+-	localStackRef, err := b.getReference(stackRef)
+-	if err != nil {
+-		return nil, err
+-	}
+-	updates, err := b.getHistory(ctx, localStackRef, pageSize, page)
+-	if err != nil {
+-		return nil, err
+-	}
+-	return updates, nil
+-}
+-
+-func (b *localBackend) GetLogs(ctx context.Context,
+-	secretsProvider secrets.Provider, stack backend.Stack, cfg backend.StackConfiguration,
+-	query operations.LogQuery,
+-) ([]operations.LogEntry, error) {
+-	localStackRef, err := b.getReference(stack.Ref())
+-	if err != nil {
+-		return nil, err
+-	}
+-
+-	target, err := b.getTarget(ctx, secretsProvider, localStackRef, cfg.Config, cfg.Decrypter)
+-	if err != nil {
+-		return nil, err
+-	}
+-
+-	return GetLogsForTarget(target, query)
+-}
+-
+-// GetLogsForTarget fetches stack logs using the config, decrypter, and checkpoint in the given target.
+-func GetLogsForTarget(target *deploy.Target, query operations.LogQuery) ([]operations.LogEntry, error) {
+-	contract.Requiref(target != nil, "target", "must not be nil")
+-
+-	if target.Snapshot == nil {
+-		// If the stack has not been deployed yet, return no logs.
+-		return nil, nil
+-	}
+-
+-	config, err := target.Config.Decrypt(target.Decrypter)
+-	if err != nil {
+-		return nil, err
+-	}
+-
+-	components := operations.NewResourceTree(target.Snapshot.Resources)
+-	ops := components.OperationsProvider(config)
+-	logs, err := ops.GetLogs(query)
+-	if logs == nil {
+-		return nil, err
+-	}
+-	return *logs, err
+-}
+-
+-func (b *localBackend) ExportDeployment(ctx context.Context,
+-	stk backend.Stack,
+-) (*apitype.UntypedDeployment, error) {
+-	localStackRef, err := b.getReference(stk.Ref())
+-	if err != nil {
+-		return nil, err
+-	}
+-
+-	chk, err := b.getCheckpoint(ctx, localStackRef)
+-	if err != nil {
+-		return nil, fmt.Errorf("failed to load checkpoint: %w", err)
+-	}
+-
+-	data, err := encoding.JSON.Marshal(chk.Latest)
+-	if err != nil {
+-		return nil, err
+-	}
+-
+-	return &apitype.UntypedDeployment{
+-		Version:    3,
+-		Deployment: json.RawMessage(data),
+-	}, nil
+-}
+-
+-func (b *localBackend) ImportDeployment(ctx context.Context, stk backend.Stack,
+-	deployment *apitype.UntypedDeployment,
+-) error {
+-	localStackRef, err := b.getReference(stk.Ref())
+-	if err != nil {
+-		return err
+-	}
+-
+-	err = b.Lock(ctx, localStackRef)
+-	if err != nil {
+-		return err
+-	}
+-	defer b.Unlock(ctx, localStackRef)
+-
+-	stackName := localStackRef.FullyQualifiedName()
+-	chk, err := stack.MarshalUntypedDeploymentToVersionedCheckpoint(stackName, deployment)
+-	if err != nil {
+-		return err
+-	}
+-
+-	_, _, err = b.saveCheckpoint(ctx, localStackRef, chk)
+-	return err
+-}
+-
+-func (b *localBackend) CurrentUser() (string, []string, *workspace.TokenInformation, error) {
+-	user, err := user.Current()
+-	if err != nil {
+-		return "", nil, nil, err
+-	}
+-	return user.Username, nil, nil, nil
+-}
+-
+-func (b *localBackend) getLocalStacks(ctx context.Context) ([]*localBackendReference, error) {
+-	return b.store.ListReferences(ctx)
+-}
+-
+-// UpdateStackTags updates the stacks's tags, replacing all existing tags.
+-func (b *localBackend) UpdateStackTags(ctx context.Context,
+-	stack backend.Stack, tags map[apitype.StackTagName]string,
+-) error {
+-	// The local backend does not currently persist tags.
+-	return errors.New("stack tags not supported in --local mode")
+-}
+-
+-func (b *localBackend) CancelCurrentUpdate(ctx context.Context, stackRef backend.StackReference) error {
+-	// Try to delete ALL the lock files
+-	allFiles, err := listBucket(ctx, b.bucket, stackLockDir(stackRef.FullyQualifiedName()))
+-	if err != nil {
+-		// Don't error if it just wasn't found
+-		if gcerrors.Code(err) == gcerrors.NotFound {
+-			return nil
+-		}
+-		return err
+-	}
+-
+-	for _, file := range allFiles {
+-		if file.IsDir {
+-			continue
+-		}
+-
+-		err := b.bucket.Delete(ctx, file.Key)
+-		if err != nil {
+-			// Race condition, don't error if the file was delete between us calling list and now
+-			if gcerrors.Code(err) == gcerrors.NotFound {
+-				return nil
+-			}
+-			return err
+-		}
+-	}
+-
+-	return nil
++// This is just a compat shim for ESC which calls this method as "filestate.IsFileStateBackendURL".
++// Deprecated: Use diy.IsDIYBackendURL instead.
++func IsFileStateBackendURL(url string) bool {
++	return diy.IsDIYBackendURL(url)
+ }
+diff --git a/pkg/backend/httpstate/backend.go b/pkg/backend/httpstate/backend.go
+index 0e18360f8289..f99155ec9150 100644
+--- a/pkg/backend/httpstate/backend.go
++++ b/pkg/backend/httpstate/backend.go
+@@ -39,7 +39,7 @@ import (
+ 	esc_client "github.com/pulumi/esc/cmd/esc/cli/client"
+ 	"github.com/pulumi/pulumi/pkg/v3/backend"
+ 	"github.com/pulumi/pulumi/pkg/v3/backend/display"
+-	"github.com/pulumi/pulumi/pkg/v3/backend/filestate"
++	"github.com/pulumi/pulumi/pkg/v3/backend/diy"
+ 	"github.com/pulumi/pulumi/pkg/v3/backend/httpstate/client"
+ 	sdkDisplay "github.com/pulumi/pulumi/pkg/v3/display"
+ 	"github.com/pulumi/pulumi/pkg/v3/engine"
+@@ -152,9 +152,9 @@ func ValueOrDefaultURL(cloudURL string) string {
+ 	}
+ 
+ 	// If that didn't work, see if we have a current cloud, and use that. Note we need to be careful
+-	// to ignore the local cloud.
++	// to ignore the diy cloud.
+ 	if creds, err := workspace.GetStoredCredentials(); err == nil {
+-		if creds.Current != "" && !filestate.IsFileStateBackendURL(creds.Current) {
++		if creds.Current != "" && !diy.IsDIYBackendURL(creds.Current) {
+ 			return creds.Current
+ 		}
+ 	}
+@@ -1521,7 +1521,7 @@ func (b *cloudBackend) GetLogs(ctx context.Context,
+ 	if targetErr != nil {
+ 		return nil, targetErr
+ 	}
+-	return filestate.GetLogsForTarget(target, logQuery)
++	return diy.GetLogsForTarget(target, logQuery)
+ }
+ 
+ // ExportDeployment exports a deployment _from_ the backend service.
+diff --git a/pkg/backend/query.go b/pkg/backend/query.go
+index 9ae21a83d5de..841de062b17f 100644
+--- a/pkg/backend/query.go
++++ b/pkg/backend/query.go
+@@ -11,7 +11,7 @@ import (
+ 
+ type MakeQuery func(context.Context, QueryOperation) (engine.QueryInfo, error)
+ 
+-// RunQuery executes a query program against the resource outputs of a locally hosted stack.
++// RunQuery executes a query program against the resource outputs of a diy hosted stack.
+ func RunQuery(ctx context.Context, b Backend, op QueryOperation,
+ 	callerEventsOpt chan<- engine.Event, newQuery MakeQuery,
+ ) error {
+diff --git a/pkg/cmd/pulumi/config.go b/pkg/cmd/pulumi/config.go
+index 3acb61468f71..cf57c108118e 100644
+--- a/pkg/cmd/pulumi/config.go
++++ b/pkg/cmd/pulumi/config.go
+@@ -1329,7 +1329,7 @@ func getStackConfigurationWithFallback(
+ 
+ 	// If there are no secrets in the configuration, we should never use the decrypter, so it is safe to return
+ 	// one which panics if it is used. This provides for some nice UX in the common case (since, for example, building
+-	// the correct decrypter for the local backend would involve prompting for a passphrase)
++	// the correct decrypter for the diy backend would involve prompting for a passphrase)
+ 	if !needsCrypter(workspaceStack.Config, pulumiEnv) {
+ 		return backend.StackConfiguration{
+ 			Environment: pulumiEnv,
+diff --git a/pkg/cmd/pulumi/destroy.go b/pkg/cmd/pulumi/destroy.go
+index 2aa5ac475b19..3379236ee116 100644
+--- a/pkg/cmd/pulumi/destroy.go
++++ b/pkg/cmd/pulumi/destroy.go
+@@ -153,14 +153,14 @@ func newDestroyCmd() *cobra.Command {
+ 				return runDeployment(ctx, opts.Display, apitype.Destroy, stackName, args[0], remoteArgs)
+ 			}
+ 
+-			filestateBackend, err := isFilestateBackend(opts.Display)
++			isDIYBackend, err := isDIYBackend(opts.Display)
+ 			if err != nil {
+ 				return result.FromError(err)
+ 			}
+ 
+ 			// by default, we are going to suppress the permalink when using DIY backends
+ 			// this can be re-enabled by explicitly passing "false" to the `suppress-permalink` flag
+-			if suppressPermalink != "false" && filestateBackend {
++			if suppressPermalink != "false" && isDIYBackend {
+ 				opts.Display.SuppressPermalink = true
+ 			}
+ 
+@@ -175,7 +175,7 @@ func newDestroyCmd() *cobra.Command {
+ 					"using stack %v from backend %v", s.Ref().Name(), s.Backend().Name())
+ 				projectName, has := s.Ref().Project()
+ 				if !has {
+-					// If the stack doesn't have a project name (legacy filestate) then leave this blank, as
++					// If the stack doesn't have a project name (legacy diy) then leave this blank, as
+ 					// we used to.
+ 					projectName = ""
+ 				}
+diff --git a/pkg/cmd/pulumi/import.go b/pkg/cmd/pulumi/import.go
+index 77f8a61c6c19..1c72ff65ce31 100644
+--- a/pkg/cmd/pulumi/import.go
++++ b/pkg/cmd/pulumi/import.go
+@@ -807,14 +807,14 @@ func newImportCmd() *cobra.Command {
+ 				opts.Display.SuppressPermalink = false
+ 			}
+ 
+-			filestateBackend, err := isFilestateBackend(opts.Display)
++			isDIYBackend, err := isDIYBackend(opts.Display)
+ 			if err != nil {
+ 				return result.FromError(err)
+ 			}
+ 
+ 			// by default, we are going to suppress the permalink when using DIY backends
+ 			// this can be re-enabled by explicitly passing "false" to the `suppress-permalink` flag
+-			if suppressPermalink != "false" && filestateBackend {
++			if suppressPermalink != "false" && isDIYBackend {
+ 				opts.Display.SuppressPermalink = true
+ 			}
+ 
+diff --git a/pkg/cmd/pulumi/login.go b/pkg/cmd/pulumi/login.go
+index 93c4a1eb8e5e..0537505afed8 100644
+--- a/pkg/cmd/pulumi/login.go
++++ b/pkg/cmd/pulumi/login.go
+@@ -25,7 +25,7 @@ import (
+ 
+ 	"github.com/pulumi/pulumi/pkg/v3/backend"
+ 	"github.com/pulumi/pulumi/pkg/v3/backend/display"
+-	"github.com/pulumi/pulumi/pkg/v3/backend/filestate"
++	"github.com/pulumi/pulumi/pkg/v3/backend/diy"
+ 	"github.com/pulumi/pulumi/sdk/v3/go/common/util/cmdutil"
+ 	"github.com/pulumi/pulumi/sdk/v3/go/common/workspace"
+ )
+@@ -105,13 +105,13 @@ func newLoginCmd() *cobra.Command {
+ 				if cloudURL != "" {
+ 					return errors.New("a URL may not be specified when --local mode is enabled")
+ 				}
+-				cloudURL = filestate.FilePathPrefix + "~"
++				cloudURL = diy.FilePathPrefix + "~"
+ 			}
+ 
+ 			// If we're on Windows, and this is a local login path, then allow the user to provide
+ 			// backslashes as path separators.  We will normalize them here to forward slashes as that's
+ 			// what the gocloud blob system requires.
+-			if strings.HasPrefix(cloudURL, filestate.FilePathPrefix) && os.PathSeparator != '/' {
++			if strings.HasPrefix(cloudURL, diy.FilePathPrefix) && os.PathSeparator != '/' {
+ 				cloudURL = filepath.ToSlash(cloudURL)
+ 			}
+ 
+@@ -140,8 +140,8 @@ func newLoginCmd() *cobra.Command {
+ 			}
+ 
+ 			var be backend.Backend
+-			if filestate.IsFileStateBackendURL(cloudURL) {
+-				be, err = filestate.Login(ctx, cmdutil.Diag(), cloudURL, project)
++			if diy.IsDIYBackendURL(cloudURL) {
++				be, err = diy.Login(ctx, cmdutil.Diag(), cloudURL, project)
+ 				if defaultOrg != "" {
+ 					return errors.New("unable to set default org for this type of backend")
+ 				}
+diff --git a/pkg/cmd/pulumi/new_acceptance_test.go b/pkg/cmd/pulumi/new_acceptance_test.go
+index c4979d4ee32e..1a6095f9b11c 100644
+--- a/pkg/cmd/pulumi/new_acceptance_test.go
++++ b/pkg/cmd/pulumi/new_acceptance_test.go
+@@ -193,10 +193,10 @@ func TestCreatingProjectWithPulumiBackendURL(t *testing.T) {
+ 	require.NoError(t, err)
+ 	assert.True(t, strings.HasPrefix(b.URL(), "https://app.pulumi.com"))
+ 
+-	fileStateDir := t.TempDir()
++	backendDir := t.TempDir()
+ 
+ 	// Now override to local filesystem backend
+-	backendURL := "file://" + filepath.ToSlash(fileStateDir)
++	backendURL := "file://" + filepath.ToSlash(backendDir)
+ 	t.Setenv("PULUMI_CONFIG_PASSPHRASE", "how now brown cow")
+ 	t.Setenv(workspace.PulumiBackendURLEnvVar, backendURL)
+ 
+@@ -218,7 +218,7 @@ func TestCreatingProjectWithPulumiBackendURL(t *testing.T) {
+ 	assert.Equal(t, defaultProjectName, proj.Name.String())
+ 	// Expect the stack directory to have a checkpoint file for the stack.
+ 	_, err = os.Stat(filepath.Join(
+-		fileStateDir, workspace.BookkeepingDir, workspace.StackDir, defaultProjectName, stackName+".json"))
++		backendDir, workspace.BookkeepingDir, workspace.StackDir, defaultProjectName, stackName+".json"))
+ 	assert.NoError(t, err)
+ 
+ 	b, err = currentBackend(ctx, nil, display.Options{})
+diff --git a/pkg/cmd/pulumi/preview.go b/pkg/cmd/pulumi/preview.go
+index 144a17d5c56c..3e3e54119ed6 100644
+--- a/pkg/cmd/pulumi/preview.go
++++ b/pkg/cmd/pulumi/preview.go
+@@ -338,14 +338,14 @@ func newPreviewCmd() *cobra.Command {
+ 				return runDeployment(ctx, displayOpts, apitype.Preview, stackName, args[0], remoteArgs)
+ 			}
+ 
+-			filestateBackend, err := isFilestateBackend(displayOpts)
++			isDIYBackend, err := isDIYBackend(displayOpts)
+ 			if err != nil {
+ 				return result.FromError(err)
+ 			}
+ 
+ 			// by default, we are going to suppress the permalink when using DIY backends
+ 			// this can be re-enabled by explicitly passing "false" to the `suppress-permalink` flag
+-			if suppressPermalink != "false" && filestateBackend {
++			if suppressPermalink != "false" && isDIYBackend {
+ 				displayOpts.SuppressPermalink = true
+ 			}
+ 
+diff --git a/pkg/cmd/pulumi/refresh.go b/pkg/cmd/pulumi/refresh.go
+index 4bf6206bf2d6..91d6a2c4712a 100644
+--- a/pkg/cmd/pulumi/refresh.go
++++ b/pkg/cmd/pulumi/refresh.go
+@@ -148,14 +148,14 @@ func newRefreshCmd() *cobra.Command {
+ 				return runDeployment(ctx, opts.Display, apitype.Refresh, stackName, args[0], remoteArgs)
+ 			}
+ 
+-			filestateBackend, err := isFilestateBackend(opts.Display)
++			isDIYBackend, err := isDIYBackend(opts.Display)
+ 			if err != nil {
+ 				return result.FromError(err)
+ 			}
+ 
+ 			// by default, we are going to suppress the permalink when using DIY backends
+ 			// this can be re-enabled by explicitly passing "false" to the `suppress-permalink` flag
+-			if suppressPermalink != "false" && filestateBackend {
++			if suppressPermalink != "false" && isDIYBackend {
+ 				opts.Display.SuppressPermalink = true
+ 			}
+ 
+diff --git a/pkg/cmd/pulumi/state_upgrade.go b/pkg/cmd/pulumi/state_upgrade.go
+index 998812e8fb59..43370de38c9f 100644
+--- a/pkg/cmd/pulumi/state_upgrade.go
++++ b/pkg/cmd/pulumi/state_upgrade.go
+@@ -24,7 +24,7 @@ import (
+ 	"github.com/AlecAivazis/survey/v2/terminal"
+ 	"github.com/pulumi/pulumi/pkg/v3/backend"
+ 	"github.com/pulumi/pulumi/pkg/v3/backend/display"
+-	"github.com/pulumi/pulumi/pkg/v3/backend/filestate"
++	"github.com/pulumi/pulumi/pkg/v3/backend/diy"
+ 	"github.com/pulumi/pulumi/sdk/v3/go/common/tokens"
+ 	"github.com/pulumi/pulumi/sdk/v3/go/common/util/cmdutil"
+ 	"github.com/pulumi/pulumi/sdk/v3/go/common/util/contract"
+@@ -92,9 +92,9 @@ func (cmd *stateUpgradeCmd) Run(ctx context.Context) error {
+ 		return err
+ 	}
+ 
+-	lb, ok := b.(filestate.Backend)
++	lb, ok := b.(diy.Backend)
+ 	if !ok {
+-		// Only the file state backend supports upgrades,
++		// Only the diy backend supports upgrades,
+ 		// but we don't want to error out here.
+ 		// Report the no-op.
+ 		fmt.Fprintln(cmd.Stdout, "Nothing to do")
+@@ -109,7 +109,7 @@ func (cmd *stateUpgradeCmd) Run(ctx context.Context) error {
+ 		return nil
+ 	}
+ 
+-	var opts filestate.UpgradeOptions
++	var opts diy.UpgradeOptions
+ 	// If we're in interactive mode, prompt for the project name
+ 	// for each stack that doesn't have one.
+ 	if cmdutil.Interactive() {
+diff --git a/pkg/cmd/pulumi/state_upgrade_test.go b/pkg/cmd/pulumi/state_upgrade_test.go
+index 23f73fa9055d..0ef5d0334256 100644
+--- a/pkg/cmd/pulumi/state_upgrade_test.go
++++ b/pkg/cmd/pulumi/state_upgrade_test.go
+@@ -15,7 +15,7 @@ import (
+ 	"github.com/hinshun/vt10x"
+ 	"github.com/pulumi/pulumi/pkg/v3/backend"
+ 	"github.com/pulumi/pulumi/pkg/v3/backend/display"
+-	"github.com/pulumi/pulumi/pkg/v3/backend/filestate"
++	"github.com/pulumi/pulumi/pkg/v3/backend/diy"
+ 	"github.com/pulumi/pulumi/sdk/v3/go/common/testing/iotest"
+ 	"github.com/pulumi/pulumi/sdk/v3/go/common/tokens"
+ 	"github.com/pulumi/pulumi/sdk/v3/go/common/workspace"
+@@ -94,8 +94,8 @@ func TestStateUpgradeCommand_Run_upgrade(t *testing.T) {
+ 	var called bool
+ 	cmd := stateUpgradeCmd{
+ 		currentBackend: func(context.Context, *workspace.Project, display.Options) (backend.Backend, error) {
+-			return &stubFileBackend{
+-				UpgradeF: func(context.Context, *filestate.UpgradeOptions) error {
++			return &stubDIYBackend{
++				UpgradeF: func(context.Context, *diy.UpgradeOptions) error {
+ 					called = true
+ 					return nil
+ 				},
+@@ -116,8 +116,8 @@ func TestStateUpgradeCommand_Run_upgradeRejected(t *testing.T) {
+ 
+ 	cmd := stateUpgradeCmd{
+ 		currentBackend: func(context.Context, *workspace.Project, display.Options) (backend.Backend, error) {
+-			return &stubFileBackend{
+-				UpgradeF: func(context.Context, *filestate.UpgradeOptions) error {
++			return &stubDIYBackend{
++				UpgradeF: func(context.Context, *diy.UpgradeOptions) error {
+ 					t.Fatal("Upgrade should not be called")
+ 					return nil
+ 				},
+@@ -142,7 +142,7 @@ func TestStateUpgradeCommand_Run_unsupportedBackend(t *testing.T) {
+ 		},
+ 	}
+ 
+-	// Non-filestate backend is already up-to-date.
++	// Non-diy backend is already up-to-date.
+ 	err := cmd.Run(context.Background())
+ 	require.NoError(t, err)
+ 	assert.Contains(t, stdout.String(), "Nothing to do")
+@@ -336,14 +336,14 @@ func TestStateUpgradeProjectNameWidget_notATerminal(t *testing.T) {
+ 	assert.Equal(t, []tokens.Name{"", "", ""}, projects)
+ }
+ 
+-type stubFileBackend struct {
+-	filestate.Backend
++type stubDIYBackend struct {
++	diy.Backend
+ 
+-	UpgradeF func(context.Context, *filestate.UpgradeOptions) error
++	UpgradeF func(context.Context, *diy.UpgradeOptions) error
+ }
+ 
+-var _ filestate.Backend = (*stubFileBackend)(nil)
++var _ diy.Backend = (*stubDIYBackend)(nil)
+ 
+-func (f *stubFileBackend) Upgrade(ctx context.Context, opts *filestate.UpgradeOptions) error {
++func (f *stubDIYBackend) Upgrade(ctx context.Context, opts *diy.UpgradeOptions) error {
+ 	return f.UpgradeF(ctx, opts)
+ }
+diff --git a/pkg/cmd/pulumi/up.go b/pkg/cmd/pulumi/up.go
+index 9d8dbbf16233..b1440b577de1 100644
+--- a/pkg/cmd/pulumi/up.go
++++ b/pkg/cmd/pulumi/up.go
+@@ -495,14 +495,14 @@ func newUpCmd() *cobra.Command {
+ 				return runDeployment(ctx, opts.Display, apitype.Update, stackName, args[0], remoteArgs)
+ 			}
+ 
+-			filestateBackend, err := isFilestateBackend(opts.Display)
++			isDIYBackend, err := isDIYBackend(opts.Display)
+ 			if err != nil {
+ 				return result.FromError(err)
+ 			}
+ 
+ 			// by default, we are going to suppress the permalink when using DIY backends
+ 			// this can be re-enabled by explicitly passing "false" to the `suppress-permalink` flag
+-			if suppressPermalink != "false" && filestateBackend {
++			if suppressPermalink != "false" && isDIYBackend {
+ 				opts.Display.SuppressPermalink = true
+ 			}
+ 
+diff --git a/pkg/cmd/pulumi/util.go b/pkg/cmd/pulumi/util.go
+index 0d3f1a311f0a..334277927198 100644
+--- a/pkg/cmd/pulumi/util.go
++++ b/pkg/cmd/pulumi/util.go
+@@ -39,7 +39,7 @@ import (
+ 
+ 	"github.com/pulumi/pulumi/pkg/v3/backend"
+ 	"github.com/pulumi/pulumi/pkg/v3/backend/display"
+-	"github.com/pulumi/pulumi/pkg/v3/backend/filestate"
++	"github.com/pulumi/pulumi/pkg/v3/backend/diy"
+ 	"github.com/pulumi/pulumi/pkg/v3/backend/httpstate"
+ 	"github.com/pulumi/pulumi/pkg/v3/backend/state"
+ 	"github.com/pulumi/pulumi/pkg/v3/resource/deploy"
+@@ -100,7 +100,7 @@ func skipConfirmations() bool {
+ // backendInstance is used to inject a backend mock from tests.
+ var backendInstance backend.Backend
+ 
+-func isFilestateBackend(opts display.Options) (bool, error) {
++func isDIYBackend(opts display.Options) (bool, error) {
+ 	if backendInstance != nil {
+ 		return false, nil
+ 	}
+@@ -116,7 +116,7 @@ func isFilestateBackend(opts display.Options) (bool, error) {
+ 		return false, fmt.Errorf("could not get cloud url: %w", err)
+ 	}
+ 
+-	return filestate.IsFileStateBackendURL(url), nil
++	return diy.IsDIYBackendURL(url), nil
+ }
+ 
+ func loginToCloud(
+@@ -144,8 +144,8 @@ func nonInteractiveCurrentBackend(ctx context.Context, project *workspace.Projec
+ 		return nil, fmt.Errorf("could not get cloud url: %w", err)
+ 	}
+ 
+-	if filestate.IsFileStateBackendURL(url) {
+-		return filestate.New(ctx, cmdutil.Diag(), url, project)
++	if diy.IsDIYBackendURL(url) {
++		return diy.New(ctx, cmdutil.Diag(), url, project)
+ 	}
+ 
+ 	insecure := workspace.GetCloudInsecure(url)
+@@ -166,8 +166,8 @@ func currentBackend(ctx context.Context, project *workspace.Project, opts displa
+ 		return nil, fmt.Errorf("could not get cloud url: %w", err)
+ 	}
+ 
+-	if filestate.IsFileStateBackendURL(url) {
+-		return filestate.New(ctx, cmdutil.Diag(), url, project)
++	if diy.IsDIYBackendURL(url) {
++		return diy.New(ctx, cmdutil.Diag(), url, project)
+ 	}
+ 
+ 	return loginToCloud(ctx, url, project, workspace.GetCloudInsecure(url), opts)
+diff --git a/pkg/testing/integration/program.go b/pkg/testing/integration/program.go
+index 9fe34cc53e06..80f58df12ea1 100644
+--- a/pkg/testing/integration/program.go
++++ b/pkg/testing/integration/program.go
+@@ -737,7 +737,7 @@ func prepareProgram(t *testing.T, opts *ProgramTestOptions) {
+ 
+ 	// Disable stack backups for tests to avoid filling up ~/.pulumi/backups with unnecessary
+ 	// backups of test stacks.
+-	disableCheckpointBackups := env.SelfManagedDisableCheckpointBackups.Var().Name()
++	disableCheckpointBackups := env.DIYBackendDisableCheckpointBackups.Var().Name()
+ 	opts.Env = append(opts.Env, disableCheckpointBackups+"=1")
+ 
+ 	// We want tests to default into being ran in parallel, hence the odd double negative.
+diff --git a/sdk/go/auto/errors.go b/sdk/go/auto/errors.go
+index 4bc57ec138f5..b0f24a7a0b23 100644
+--- a/sdk/go/auto/errors.go
++++ b/sdk/go/auto/errors.go
+@@ -48,8 +48,8 @@ func IsConcurrentUpdateError(e error) bool {
+ 	}
+ 
+ 	conflictText := "[409] Conflict: Another update is currently in progress."
+-	localBackendConflictText := "the stack is currently locked by"
+-	return strings.Contains(ae.stderr, conflictText) || strings.Contains(ae.stderr, localBackendConflictText)
++	diyBackendConflictText := "the stack is currently locked by"
++	return strings.Contains(ae.stderr, conflictText) || strings.Contains(ae.stderr, diyBackendConflictText)
+ }
+ 
+ // IsSelectStack404Error returns true if the error was a result of selecting a stack that does not exist.
+diff --git a/sdk/go/auto/remote_stack.go b/sdk/go/auto/remote_stack.go
+index a5f9c1250fda..08f62a013207 100644
+--- a/sdk/go/auto/remote_stack.go
++++ b/sdk/go/auto/remote_stack.go
+@@ -146,7 +146,7 @@ func (s *RemoteStack) History(ctx context.Context, pageSize, page int) ([]Update
+ // Cancel stops a stack's currently running update. It returns an error if no update is currently running.
+ // Note that this operation is _very dangerous_, and may leave the stack in an inconsistent state
+ // if a resource operation was pending when the update was canceled.
+-// This command is not supported for local backends.
++// This command is not supported for diy backends.
+ func (s *RemoteStack) Cancel(ctx context.Context) error {
+ 	return s.stack.Cancel(ctx)
+ }
+diff --git a/sdk/go/auto/stack.go b/sdk/go/auto/stack.go
+index d707e4aabe04..4ecb4a061573 100644
+--- a/sdk/go/auto/stack.go
++++ b/sdk/go/auto/stack.go
+@@ -142,10 +142,10 @@ type Stack struct {
+ // FullyQualifiedStackName returns a stack name formatted with the greatest possible specificity:
+ // org/project/stack or user/project/stack
+ // Using this format avoids ambiguity in stack identity guards creating or selecting the wrong stack.
+-// Note that legacy filestate backends (local file, S3, Azure Blob) do not support stack names in this
++// Note that legacy diy backends (local file, S3, Azure Blob) do not support stack names in this
+ // format, and instead only use the stack name without an org/user or project to qualify it.
+-// See: https://github.com/pulumi/pulumi/issues/2522. Non-legacy filestate backends do support
+-// the org/project/stack format but org must be set to "organization".
++// See: https://github.com/pulumi/pulumi/issues/2522.
++// Non-legacy diy backends do support the org/project/stack format but org must be set to "organization".
+ func FullyQualifiedStackName(org, project, stack string) string {
+ 	return fmt.Sprintf("%s/%s/%s", org, project, stack)
+ }
+@@ -796,7 +796,7 @@ func (s *Stack) Info(ctx context.Context) (StackSummary, error) {
+ // Cancel stops a stack's currently running update. It returns an error if no update is currently running.
+ // Note that this operation is _very dangerous_, and may leave the stack in an inconsistent state
+ // if a resource operation was pending when the update was canceled.
+-// This command is not supported for local backends.
++// This command is not supported for diy backends.
+ func (s *Stack) Cancel(ctx context.Context) error {
+ 	stdout, stderr, errCode, err := s.runPulumiCmdSync(
+ 		ctx,
+@@ -861,7 +861,7 @@ func (ur *UpResult) GetPermalink() (string, error) {
+ var ErrParsePermalinkFailed = errors.New("failed to get permalink")
+ 
+ // GetPermalink returns the permalink URL in the Pulumi Console for the update
+-// or refresh operation. This will error for alternate, local backends.
++// or refresh operation. This will error for alternate, diy backends.
+ func GetPermalink(stdout string) (string, error) {
+ 	const permalinkSearchStr = `View Live: |View in Browser: |View in Browser \(Ctrl\+O\): |Permalink: `
+ 	startRegex := regexp.MustCompile(permalinkSearchStr)
+diff --git a/sdk/go/common/env/env.go b/sdk/go/common/env/env.go
+index d55bdf256a81..f11424995956 100644
+--- a/sdk/go/common/env/env.go
++++ b/sdk/go/common/env/env.go
+@@ -86,23 +86,23 @@ var SkipVersionCheck = env.Bool("AUTOMATION_API_SKIP_VERSION_CHECK",
+ 
+ // Environment variables that affect the DIY backend.
+ var (
+-	SelfManagedStateNoLegacyWarning = env.Bool("DIY_BACKEND_NO_LEGACY_WARNING",
++	DIYBackendNoLegacyWarning = env.Bool("DIY_BACKEND_NO_LEGACY_WARNING",
+ 		"Disables the warning about legacy stack files mixed with project-scoped stack files.",
+ 		env.Alternative("SELF_MANAGED_STATE_NO_LEGACY_WARNING"))
+ 
+-	SelfManagedStateLegacyLayout = env.Bool("DIY_BACKEND_LEGACY_LAYOUT",
++	DIYBackendLegacyLayout = env.Bool("DIY_BACKEND_LEGACY_LAYOUT",
+ 		"Uses the legacy layout for new buckets, which currently default to project-scoped stacks.",
+ 		env.Alternative("SELF_MANAGED_STATE_LEGACY_LAYOUT"))
+ 
+-	SelfManagedGzip = env.Bool("DIY_BACKEND_GZIP",
++	DIYBackendGzip = env.Bool("DIY_BACKEND_GZIP",
+ 		"Enables gzip compression when writing state files.",
+ 		env.Alternative("SELF_MANAGED_STATE_GZIP"))
+ 
+-	SelfManagedRetainCheckpoints = env.Bool("DIY_BACKEND_RETAIN_CHECKPOINTS",
++	DIYBackendRetainCheckpoints = env.Bool("DIY_BACKEND_RETAIN_CHECKPOINTS",
+ 		"If set every checkpoint will be duplicated to a timestamped file.",
+ 		env.Alternative("RETAIN_CHECKPOINTS"))
+ 
+-	SelfManagedDisableCheckpointBackups = env.Bool("DIY_BACKEND_DISABLE_CHECKPOINT_BACKUPS",
++	DIYBackendDisableCheckpointBackups = env.Bool("DIY_BACKEND_DISABLE_CHECKPOINT_BACKUPS",
+ 		"If set checkpoint backups will not be written the to the backup folder.",
+ 		env.Alternative("DISABLE_CHECKPOINT_BACKUPS"))
+ )
+diff --git a/sdk/nodejs/automation/errors.ts b/sdk/nodejs/automation/errors.ts
+index fd7aff83ded1..e9f383224b58 100644
+--- a/sdk/nodejs/automation/errors.ts
++++ b/sdk/nodejs/automation/errors.ts
+@@ -62,7 +62,7 @@ export class StackAlreadyExistsError extends CommandError {
+ const notFoundRegex = new RegExp("no stack named.*found");
+ const alreadyExistsRegex = new RegExp("stack.*already exists");
+ const conflictText = "[409] Conflict: Another update is currently in progress.";
+-const localBackendConflictText = "the stack is currently locked by";
++const diyBackendConflictText = "the stack is currently locked by";
+ 
+ /** @internal */
+ export function createCommandError(result: CommandResult): CommandError {
+@@ -73,7 +73,7 @@ export function createCommandError(result: CommandResult): CommandError {
+         ? new StackAlreadyExistsError(result)
+         : stderr.indexOf(conflictText) >= 0
+         ? new ConcurrentUpdateError(result)
+-        : stderr.indexOf(localBackendConflictText) >= 0
++        : stderr.indexOf(diyBackendConflictText) >= 0
+         ? new ConcurrentUpdateError(result)
+         : new CommandError(result);
+ }
+diff --git a/sdk/nodejs/automation/remoteStack.ts b/sdk/nodejs/automation/remoteStack.ts
+index 8b26a928941a..d4190cbc904b 100644
+--- a/sdk/nodejs/automation/remoteStack.ts
++++ b/sdk/nodejs/automation/remoteStack.ts
+@@ -104,7 +104,7 @@ export class RemoteStack {
+      * Cancel stops a stack's currently running update. It returns an error if no update is currently running.
+      * Note that this operation is _very dangerous_, and may leave the stack in an inconsistent state
+      * if a resource operation was pending when the update was canceled.
+-     * This command is not supported for local backends.
++     * This command is not supported for diy backends.
+      */
+     cancel(): Promise<void> {
+         return this.stack.cancel();
+diff --git a/sdk/nodejs/automation/stack.ts b/sdk/nodejs/automation/stack.ts
+index e7970d4eda01..0eade1c54a20 100644
+--- a/sdk/nodejs/automation/stack.ts
++++ b/sdk/nodejs/automation/stack.ts
+@@ -690,7 +690,7 @@ Event: ${line}\n${e.toString()}`);
+      * Cancel stops a stack's currently running update. It returns an error if no update is currently running.
+      * Note that this operation is _very dangerous_, and may leave the stack in an inconsistent state
+      * if a resource operation was pending when the update was canceled.
+-     * This command is not supported for local backends.
++     * This command is not supported for diy backends.
+      */
+     async cancel(): Promise<void> {
+         await this.runPulumiCmd(["cancel", "--yes"]);
+@@ -769,9 +769,10 @@ function applyGlobalOpts(opts: GlobalOpts, args: string[]) {
+  * Returns a stack name formatted with the greatest possible specificity:
+  * org/project/stack or user/project/stack
+  * Using this format avoids ambiguity in stack identity guards creating or selecting the wrong stack.
+- * Note that filestate backends (local file, S3, Azure Blob) do not support stack names in this
++ * Note that legacy diy backends (local file, S3, Azure Blob) do not support stack names in this
+  * format, and instead only use the stack name without an org/user or project to qualify it.
+  * See: https://github.com/pulumi/pulumi/issues/2522
++ * Non-legacy diy backends do support the org/project/stack format but org must be set to "organization".
+  *
+  * @param org The org (or user) that contains the Stack.
+  * @param project The project that parents the Stack.
+diff --git a/sdk/python/lib/pulumi/automation/_remote_stack.py b/sdk/python/lib/pulumi/automation/_remote_stack.py
+index e28ac3b73c17..1b74220bdba7 100644
+--- a/sdk/python/lib/pulumi/automation/_remote_stack.py
++++ b/sdk/python/lib/pulumi/automation/_remote_stack.py
+@@ -133,7 +133,7 @@ def cancel(self) -> None:
+         Cancel stops a stack's currently running update. It returns an error if no update is currently running.
+         Note that this operation is _very dangerous_, and may leave the stack in an inconsistent state
+         if a resource operation was pending when the update was canceled.
+-        This command is not supported for local backends.
++        This command is not supported for diy backends.
+         """
+         self.__stack.cancel()
+ 
+diff --git a/sdk/python/lib/pulumi/automation/_stack.py b/sdk/python/lib/pulumi/automation/_stack.py
+index be462002cc98..1ccb65aa4e0c 100644
+--- a/sdk/python/lib/pulumi/automation/_stack.py
++++ b/sdk/python/lib/pulumi/automation/_stack.py
+@@ -777,7 +777,7 @@ def cancel(self) -> None:
+         Cancel stops a stack's currently running update. It returns an error if no update is currently running.
+         Note that this operation is _very dangerous_, and may leave the stack in an inconsistent state
+         if a resource operation was pending when the update was canceled.
+-        This command is not supported for local backends.
++        This command is not supported for diy backends.
+         """
+         self._run_pulumi_cmd_sync(["cancel", "--yes"])
+ 
+@@ -903,9 +903,10 @@ def fully_qualified_stack_name(org: str, project: str, stack: str) -> str:
+ 
+     Using this format avoids ambiguity in stack identity guards creating or selecting the wrong stack.
+ 
+-    Note that filestate backends (local file, S3, Azure Blob) do not support stack names in this
++    Note that legacy diy backends (local file, S3, Azure Blob) do not support stack names in this
+     format, and instead only use the stack name without an org/user or project to qualify it.
+     See: https://github.com/pulumi/pulumi/issues/2522
++    Non-legacy diy backends do support the org/project/stack format but org must be set to "organization".
+ 
+     :param org: The name of the org or user.
+     :param project: The name of the project.
+diff --git a/sdk/python/lib/pulumi/automation/errors.py b/sdk/python/lib/pulumi/automation/errors.py
+index 78b9baad98eb..5c82ac23701f 100644
+--- a/sdk/python/lib/pulumi/automation/errors.py
++++ b/sdk/python/lib/pulumi/automation/errors.py
+@@ -68,7 +68,7 @@ class InvalidVersionError(Exception):
+ not_found_regex = re.compile("no stack named.*found")
+ already_exists_regex = re.compile("stack.*already exists")
+ conflict_text = "[409] Conflict: Another update is currently in progress."
+-local_backend_conflict_text = "the stack is currently locked by"
++diy_backend_conflict_text = "the stack is currently locked by"
+ inline_source_error_text = "python inline source runtime error"
+ runtime_error_regex = re.compile(
+     "failed with an unhandled exception|panic: runtime error|an unhandled error occurred:"
+@@ -87,7 +87,7 @@ def create_command_error(command_result: "CommandResult") -> CommandError:
+         return StackAlreadyExistsError(command_result)
+     if conflict_text in stderr:
+         return ConcurrentUpdateError(command_result)
+-    if local_backend_conflict_text in stderr:
++    if diy_backend_conflict_text in stderr:
+         return ConcurrentUpdateError(command_result)
+     if compilation_error_regex.search(stdout):
+         return CompilationError(command_result)
+diff --git a/sdk/python/lib/pulumi/policy/__main__.py b/sdk/python/lib/pulumi/policy/__main__.py
+index 5437b2976b92..8594f682936f 100644
+--- a/sdk/python/lib/pulumi/policy/__main__.py
++++ b/sdk/python/lib/pulumi/policy/__main__.py
+@@ -50,7 +50,7 @@ def main():
+                 project=os.environ["PULUMI_PROJECT"],
+                 stack=os.environ["PULUMI_STACK"],
+                 dry_run=os.environ["PULUMI_DRY_RUN"] == "true",
+-                # PULUMI_ORGANIZATION might not be set for filestate backends
++                # PULUMI_ORGANIZATION might not be set for diy backends
+                 organization=os.environ.get("PULUMI_ORGANIZATION", "organization"),
+             )
+         )
+diff --git a/tests/integration/backend/filestate/backend_aws_test.go b/tests/integration/backend/diy/backend_aws_test.go
+similarity index 98%
+rename from tests/integration/backend/filestate/backend_aws_test.go
+rename to tests/integration/backend/diy/backend_aws_test.go
+index e1fb4b10b3ff..bf2023466c63 100644
+--- a/tests/integration/backend/filestate/backend_aws_test.go
++++ b/tests/integration/backend/diy/backend_aws_test.go
+@@ -1,4 +1,4 @@
+-package filestate
++package diy
+ 
+ import (
+ 	"context"
+diff --git a/tests/integration/backend/filestate/backend_azure_test.go b/tests/integration/backend/diy/backend_azure_test.go
+similarity index 99%
+rename from tests/integration/backend/filestate/backend_azure_test.go
+rename to tests/integration/backend/diy/backend_azure_test.go
+index 0af72e26788d..f88adea1c106 100644
+--- a/tests/integration/backend/filestate/backend_azure_test.go
++++ b/tests/integration/backend/diy/backend_azure_test.go
+@@ -1,4 +1,4 @@
+-package filestate
++package diy
+ 
+ import (
+ 	"os"
+diff --git a/tests/integration/backend/filestate/backend_gcp_test.go b/tests/integration/backend/diy/backend_gcp_test.go
+similarity index 96%
+rename from tests/integration/backend/filestate/backend_gcp_test.go
+rename to tests/integration/backend/diy/backend_gcp_test.go
+index a8ed37a6a4c5..ef09870f9b05 100644
+--- a/tests/integration/backend/filestate/backend_gcp_test.go
++++ b/tests/integration/backend/diy/backend_gcp_test.go
+@@ -1,4 +1,4 @@
+-package filestate
++package diy
+ 
+ import (
+ 	"os"
+diff --git a/tests/integration/backend/filestate/helpers.go b/tests/integration/backend/diy/helpers.go
+similarity index 98%
+rename from tests/integration/backend/filestate/helpers.go
+rename to tests/integration/backend/diy/helpers.go
+index ebe0d5c43efe..79bb06f0e437 100644
+--- a/tests/integration/backend/filestate/helpers.go
++++ b/tests/integration/backend/diy/helpers.go
+@@ -1,4 +1,4 @@
+-package filestate
++package diy
+ 
+ import (
+ 	"crypto/rand"
+diff --git a/tests/integration/backend/filestate/project/Pulumi.yaml b/tests/integration/backend/diy/project/Pulumi.yaml
+similarity index 100%
+rename from tests/integration/backend/filestate/project/Pulumi.yaml
+rename to tests/integration/backend/diy/project/Pulumi.yaml
+diff --git a/tests/integration/backend/filestate/project/go.mod b/tests/integration/backend/diy/project/go.mod
+similarity index 100%
+rename from tests/integration/backend/filestate/project/go.mod
+rename to tests/integration/backend/diy/project/go.mod
+diff --git a/tests/integration/backend/filestate/project/go.sum b/tests/integration/backend/diy/project/go.sum
+similarity index 100%
+rename from tests/integration/backend/filestate/project/go.sum
+rename to tests/integration/backend/diy/project/go.sum
+diff --git a/tests/integration/backend/filestate/project/main.go b/tests/integration/backend/diy/project/main.go
+similarity index 100%
+rename from tests/integration/backend/filestate/project/main.go
+rename to tests/integration/backend/diy/project/main.go
+diff --git a/tests/integration/integration_nodejs_test.go b/tests/integration/integration_nodejs_test.go
+index 1eb1b99d177c..a99cad0666e7 100644
+--- a/tests/integration/integration_nodejs_test.go
++++ b/tests/integration/integration_nodejs_test.go
+@@ -866,7 +866,7 @@ func TestCloudSecretProvider(t *testing.T) {
+ 	//nolint:paralleltest // ProgramTest calls t.Parallel()
+ 	t.Run("gcp", func(t *testing.T) { integration.ProgramTest(t, &gcpTestOptions) })
+ 
+-	// Also run with local backend
++	// Also run with local diy backend
+ 	//
+ 	//nolint:paralleltest // ProgramTest calls t.Parallel()
+ 	t.Run("local", func(t *testing.T) { integration.ProgramTest(t, &localTestOptions) })
+diff --git a/tests/main_test.go b/tests/main_test.go
+index 83932d8bc253..0d3df78c0020 100644
+--- a/tests/main_test.go
++++ b/tests/main_test.go
+@@ -13,7 +13,7 @@ import (
+ func TestMain(m *testing.M) {
+ 	// Disable stack backups for tests to avoid filling up ~/.pulumi/backups with unnecessary
+ 	// backups of test stacks.
+-	disableCheckpointBackups := env.SelfManagedDisableCheckpointBackups.Var().Name()
++	disableCheckpointBackups := env.DIYBackendDisableCheckpointBackups.Var().Name()
+ 	if err := os.Setenv(disableCheckpointBackups, "1"); err != nil {
+ 		fmt.Printf("error setting env var '%s': %v\n", disableCheckpointBackups, err)
+ 		os.Exit(1)
+diff --git a/tests/smoke_test.go b/tests/smoke_test.go
+index 2d9a61d73533..709a919ffb37 100644
+--- a/tests/smoke_test.go
++++ b/tests/smoke_test.go
+@@ -42,7 +42,7 @@ func TestLanguageNewSmoke(t *testing.T) {
+ 			e := ptesting.NewEnvironment(t)
+ 			defer deleteIfNotFailed(e)
+ 
+-			// `new` wants to work in an empty directory but our use of local filestate means we have a
++			// `new` wants to work in an empty directory but our use of local url means we have a
+ 			// ".pulumi" directory at root.
+ 			projectDir := filepath.Join(e.RootPath, "project")
+ 			err := os.Mkdir(projectDir, 0o700)
+@@ -306,7 +306,7 @@ func TestLanguageImportSmoke(t *testing.T) {
+ 			e := ptesting.NewEnvironment(t)
+ 			defer deleteIfNotFailed(e)
+ 
+-			// `new` wants to work in an empty directory but our use of local filestate means we have a
++			// `new` wants to work in an empty directory but our use of local url means we have a
+ 			// ".pulumi" directory at root.
+ 			projectDir := filepath.Join(e.RootPath, "project")
+ 			err := os.Mkdir(projectDir, 0o700)
+diff --git a/tests/stack_test.go b/tests/stack_test.go
+index d94dea578a0c..e7a577db7639 100644
+--- a/tests/stack_test.go
++++ b/tests/stack_test.go
+@@ -366,7 +366,7 @@ func TestStackBackups(t *testing.T) {
+ 		e.ImportDirectory("integration/stack_outputs/nodejs")
+ 
+ 		// We're testing that backups are created so ensure backups aren't disabled.
+-		disableCheckpointBackups := env.SelfManagedDisableCheckpointBackups.Var().Name()
++		disableCheckpointBackups := env.DIYBackendDisableCheckpointBackups.Var().Name()
+ 		if env := os.Getenv(disableCheckpointBackups); env != "" {
+ 			os.Unsetenv(disableCheckpointBackups)
+ 			defer os.Setenv(disableCheckpointBackups, env)
+@@ -682,7 +682,7 @@ func TestLocalStateGzip(t *testing.T) { //nolint:paralleltest
+ 	e.RunCommand("pulumi", "up", "--non-interactive", "--yes", "--skip-preview")
+ 
+ 	assertGzipFileFormat, assertPlainFileFormat := stackFileFormatAsserters(t, e, "stack_dependencies", stackName)
+-	gzipEnvVar := env.SelfManagedGzip.Var().Name()
++	gzipEnvVar := env.DIYBackendGzip.Var().Name()
+ 	switchGzipOff := func() { e.Setenv(gzipEnvVar, "0") }
+ 	switchGzipOn := func() { e.Setenv(gzipEnvVar, "1") }
+ 	pulumiUp := func() { e.RunCommand("pulumi", "up", "--non-interactive", "--yes", "--skip-preview") }
+@@ -834,7 +834,7 @@ func TestNewStackConflictingOrg(t *testing.T) {
+ 	project, err := resource.NewUniqueHex("test-name-", 8, -1)
+ 	require.NoError(t, err)
+ 
+-	// `new` wants to work in an empty directory but our use of local filestate means we have a
++	// `new` wants to work in an empty directory but our use of local url means we have a
+ 	// ".pulumi" directory at root.
+ 	projectDir := filepath.Join(e.RootPath, project)
+ 	err = os.Mkdir(projectDir, 0o700)

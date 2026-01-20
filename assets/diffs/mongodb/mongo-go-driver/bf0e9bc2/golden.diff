@@ -1,0 +1,4393 @@
+diff --git a/.golangci.yml b/.golangci.yml
+index a8a0651ae4..88bafc6629 100644
+--- a/.golangci.yml
++++ b/.golangci.yml
+@@ -114,7 +114,7 @@ issues:
+     # Ignore missing package comments for directories that aren't frequently used by external users.
+     - path: (internal\/|benchmark\/|x\/|cmd\/|mongo\/integration\/)
+       text: should have a package comment
+-    # Disable unused linter for "golang.org/x/exp/rand" package in internal/randutil/rand.
+-    - path: internal/randutil/rand
++    # Disable unused linter for "golang.org/x/exp/rand" package in internal/rand.
++    - path: internal/rand
+       linters:
+         - unused
+diff --git a/benchmark/single.go b/benchmark/single.go
+index 37ca6b1eac..b85b46f34f 100644
+--- a/benchmark/single.go
++++ b/benchmark/single.go
+@@ -11,8 +11,8 @@ import (
+ 	"errors"
+ 
+ 	"go.mongodb.org/mongo-driver/bson"
+-	"go.mongodb.org/mongo-driver/internal"
+-	"go.mongodb.org/mongo-driver/internal/testutil"
++	"go.mongodb.org/mongo-driver/internal/handshake"
++	"go.mongodb.org/mongo-driver/internal/integtest"
+ 	"go.mongodb.org/mongo-driver/mongo"
+ 	"go.mongodb.org/mongo-driver/mongo/options"
+ )
+@@ -25,7 +25,7 @@ const (
+ )
+ 
+ func getClientDB(ctx context.Context) (*mongo.Database, error) {
+-	cs, err := testutil.GetConnString()
++	cs, err := integtest.GetConnString()
+ 	if err != nil {
+ 		return nil, err
+ 	}
+@@ -37,7 +37,7 @@ func getClientDB(ctx context.Context) (*mongo.Database, error) {
+ 		return nil, err
+ 	}
+ 
+-	db := client.Database(testutil.GetDBName(cs))
++	db := client.Database(integtest.GetDBName(cs))
+ 	return db, nil
+ }
+ 
+@@ -51,7 +51,7 @@ func SingleRunCommand(ctx context.Context, tm TimerManager, iters int) error {
+ 	}
+ 	defer db.Client().Disconnect(ctx)
+ 
+-	cmd := bson.D{{internal.LegacyHelloLowercase, true}}
++	cmd := bson.D{{handshake.LegacyHelloLowercase, true}}
+ 
+ 	tm.ResetTimer()
+ 	for i := 0; i < iters; i++ {
+diff --git a/cmd/testatlas/main.go b/cmd/testatlas/main.go
+index 83ced7a60f..d98631d468 100644
+--- a/cmd/testatlas/main.go
++++ b/cmd/testatlas/main.go
+@@ -13,7 +13,7 @@ import (
+ 	"time"
+ 
+ 	"go.mongodb.org/mongo-driver/bson"
+-	"go.mongodb.org/mongo-driver/internal"
++	"go.mongodb.org/mongo-driver/internal/handshake"
+ 	"go.mongodb.org/mongo-driver/mongo"
+ 	"go.mongodb.org/mongo-driver/mongo/options"
+ )
+@@ -54,7 +54,7 @@ func runTest(ctx context.Context, clientOpts *options.ClientOptions) error {
+ 	}()
+ 
+ 	db := client.Database("test")
+-	cmd := bson.D{{internal.LegacyHello, 1}}
++	cmd := bson.D{{handshake.LegacyHello, 1}}
+ 	err = db.RunCommand(ctx, cmd).Err()
+ 	if err != nil {
+ 		return fmt.Errorf("legacy hello error: %v", err)
+diff --git a/internal/assert/assertion_mongo.go b/internal/assert/assertion_mongo.go
+index 45bcfe47f8..e47fdf93e1 100644
+--- a/internal/assert/assertion_mongo.go
++++ b/internal/assert/assertion_mongo.go
+@@ -10,8 +10,10 @@
+ package assert
+ 
+ import (
++	"context"
+ 	"fmt"
+ 	"reflect"
++	"time"
+ 	"unsafe"
+ )
+ 
+@@ -88,3 +90,37 @@ Actual  : %s`,
+ 		expected.(fmt.Stringer).String(),
+ 		actual.(fmt.Stringer).String())
+ }
++
++// Soon runs the provided callback and fails the passed-in test if the callback
++// does not complete within timeout. The provided callback should respect the
++// passed-in context and cease execution when it has expired.
++//
++// Deprecated: This function will be removed with GODRIVER-2667, use
++// assert.Eventually instead.
++func Soon(t TestingT, callback func(ctx context.Context), timeout time.Duration) {
++	if h, ok := t.(tHelper); ok {
++		h.Helper()
++	}
++
++	// Create context to manually cancel callback after Soon assertion.
++	callbackCtx, cancel := context.WithCancel(context.Background())
++	defer cancel()
++
++	done := make(chan struct{})
++	fullCallback := func() {
++		callback(callbackCtx)
++		done <- struct{}{}
++	}
++
++	timer := time.NewTimer(timeout)
++	defer timer.Stop()
++
++	go fullCallback()
++
++	select {
++	case <-done:
++		return
++	case <-timer.C:
++		t.Errorf("timed out in %s waiting for callback", timeout)
++	}
++}
+diff --git a/internal/string_util.go b/internal/bsonutil/bsonutil.go
+similarity index 64%
+rename from internal/string_util.go
+rename to internal/bsonutil/bsonutil.go
+index 6cafa791db..eebb328906 100644
+--- a/internal/string_util.go
++++ b/internal/bsonutil/bsonutil.go
+@@ -4,7 +4,7 @@
+ // not use this file except in compliance with the License. You may obtain
+ // a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
+ 
+-package internal
++package bsonutil
+ 
+ import (
+ 	"fmt"
+@@ -12,13 +12,6 @@ import (
+ 	"go.mongodb.org/mongo-driver/bson"
+ )
+ 
+-// StringSliceFromRawElement decodes the provided BSON element into a []string. This internally calls
+-// StringSliceFromRawValue on the element's value. The error conditions outlined in that function's documentation
+-// apply for this function as well.
+-func StringSliceFromRawElement(element bson.RawElement) ([]string, error) {
+-	return StringSliceFromRawValue(element.Key(), element.Value())
+-}
+-
+ // StringSliceFromRawValue decodes the provided BSON value into a []string. This function returns an error if the value
+ // is not an array or any of the elements in the array are not strings. The name parameter is used to add context to
+ // error messages.
+@@ -43,3 +36,27 @@ func StringSliceFromRawValue(name string, val bson.RawValue) ([]string, error) {
+ 	}
+ 	return strs, nil
+ }
++
++// RawToDocuments converts a bson.Raw that is internally an array of documents to []bson.Raw.
++func RawToDocuments(doc bson.Raw) []bson.Raw {
++	values, err := doc.Values()
++	if err != nil {
++		panic(fmt.Sprintf("error converting BSON document to values: %v", err))
++	}
++
++	out := make([]bson.Raw, len(values))
++	for i := range values {
++		out[i] = values[i].Document()
++	}
++
++	return out
++}
++
++// RawToInterfaces takes one or many bson.Raw documents and returns them as a []interface{}.
++func RawToInterfaces(docs ...bson.Raw) []interface{} {
++	out := make([]interface{}, len(docs))
++	for i := range docs {
++		out[i] = docs[i]
++	}
++	return out
++}
+diff --git a/internal/cancellation_listener.go b/internal/cancellation_listener.go
+deleted file mode 100644
+index a7fa163bb3..0000000000
+--- a/internal/cancellation_listener.go
++++ /dev/null
+@@ -1,47 +0,0 @@
+-// Copyright (C) MongoDB, Inc. 2017-present.
+-//
+-// Licensed under the Apache License, Version 2.0 (the "License"); you may
+-// not use this file except in compliance with the License. You may obtain
+-// a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
+-
+-package internal
+-
+-import "context"
+-
+-// CancellationListener listens for context cancellation in a loop until the context expires or the listener is aborted.
+-type CancellationListener struct {
+-	aborted bool
+-	done    chan struct{}
+-}
+-
+-// NewCancellationListener constructs a CancellationListener.
+-func NewCancellationListener() *CancellationListener {
+-	return &CancellationListener{
+-		done: make(chan struct{}),
+-	}
+-}
+-
+-// Listen blocks until the provided context is cancelled or listening is aborted via the StopListening function. If this
+-// detects that the context has been cancelled (i.e. ctx.Err() == context.Canceled), the provided callback is called to
+-// abort in-progress work. Even if the context expires, this function will block until StopListening is called.
+-func (c *CancellationListener) Listen(ctx context.Context, abortFn func()) {
+-	c.aborted = false
+-
+-	select {
+-	case <-ctx.Done():
+-		if ctx.Err() == context.Canceled {
+-			c.aborted = true
+-			abortFn()
+-		}
+-
+-		<-c.done
+-	case <-c.done:
+-	}
+-}
+-
+-// StopListening stops the in-progress Listen call. This blocks if there is no in-progress Listen call. This function
+-// will return true if the provided abort callback was called when listening for cancellation on the previous context.
+-func (c *CancellationListener) StopListening() bool {
+-	c.done <- struct{}{}
+-	return c.aborted
+-}
+diff --git a/internal/credproviders/imds_provider.go b/internal/credproviders/imds_provider.go
+index 4d2a95b2e8..b20d8ad78d 100644
+--- a/internal/credproviders/imds_provider.go
++++ b/internal/credproviders/imds_provider.go
+@@ -15,8 +15,8 @@ import (
+ 	"net/url"
+ 	"time"
+ 
+-	"go.mongodb.org/mongo-driver/internal"
+ 	"go.mongodb.org/mongo-driver/internal/aws/credentials"
++	"go.mongodb.org/mongo-driver/internal/errutil"
+ )
+ 
+ const (
+@@ -47,7 +47,7 @@ func (a *AzureProvider) RetrieveWithContext(ctx context.Context) (credentials.Va
+ 	v := credentials.Value{ProviderName: AzureProviderName}
+ 	req, err := http.NewRequest(http.MethodGet, azureURI, nil)
+ 	if err != nil {
+-		return v, internal.WrapErrorf(err, "unable to retrieve Azure credentials")
++		return v, errutil.WrapErrorf(err, "unable to retrieve Azure credentials")
+ 	}
+ 	q := make(url.Values)
+ 	q.Set("api-version", "2018-02-01")
+@@ -58,15 +58,15 @@ func (a *AzureProvider) RetrieveWithContext(ctx context.Context) (credentials.Va
+ 
+ 	resp, err := a.httpClient.Do(req.WithContext(ctx))
+ 	if err != nil {
+-		return v, internal.WrapErrorf(err, "unable to retrieve Azure credentials")
++		return v, errutil.WrapErrorf(err, "unable to retrieve Azure credentials")
+ 	}
+ 	defer resp.Body.Close()
+ 	body, err := ioutil.ReadAll(resp.Body)
+ 	if err != nil {
+-		return v, internal.WrapErrorf(err, "unable to retrieve Azure credentials: error reading response body")
++		return v, errutil.WrapErrorf(err, "unable to retrieve Azure credentials: error reading response body")
+ 	}
+ 	if resp.StatusCode != http.StatusOK {
+-		return v, internal.WrapErrorf(err, "unable to retrieve Azure credentials: expected StatusCode 200, got StatusCode: %v. Response body: %s", resp.StatusCode, body)
++		return v, errutil.WrapErrorf(err, "unable to retrieve Azure credentials: expected StatusCode 200, got StatusCode: %v. Response body: %s", resp.StatusCode, body)
+ 	}
+ 	var tokenResponse struct {
+ 		AccessToken string `json:"access_token"`
+@@ -75,7 +75,7 @@ func (a *AzureProvider) RetrieveWithContext(ctx context.Context) (credentials.Va
+ 	// Attempt to read body as JSON
+ 	err = json.Unmarshal(body, &tokenResponse)
+ 	if err != nil {
+-		return v, internal.WrapErrorf(err, "unable to retrieve Azure credentials: error reading body JSON. Response body: %s", body)
++		return v, errutil.WrapErrorf(err, "unable to retrieve Azure credentials: error reading body JSON. Response body: %s", body)
+ 	}
+ 	if tokenResponse.AccessToken == "" {
+ 		return v, fmt.Errorf("unable to retrieve Azure credentials: got unexpected empty accessToken from Azure Metadata Server. Response body: %s", body)
+diff --git a/internal/csfle_util.go b/internal/csfle/csfle.go
+similarity index 98%
+rename from internal/csfle_util.go
+rename to internal/csfle/csfle.go
+index 635d8e3538..71e71b4687 100644
+--- a/internal/csfle_util.go
++++ b/internal/csfle/csfle.go
+@@ -4,7 +4,7 @@
+ // not use this file except in compliance with the License. You may obtain
+ // a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
+ 
+-package internal
++package csfle
+ 
+ import (
+ 	"fmt"
+diff --git a/internal/csot_util.go b/internal/csot/csot.go
+similarity index 99%
+rename from internal/csot_util.go
+rename to internal/csot/csot.go
+index 1e63257b30..678252c51a 100644
+--- a/internal/csot_util.go
++++ b/internal/csot/csot.go
+@@ -4,7 +4,7 @@
+ // not use this file except in compliance with the License. You may obtain
+ // a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
+ 
+-package internal
++package csot
+ 
+ import (
+ 	"context"
+diff --git a/internal/error.go b/internal/errutil/errutil.go
+similarity index 56%
+rename from internal/error.go
+rename to internal/errutil/errutil.go
+index 348bcdfb1a..9779f38fa5 100644
+--- a/internal/error.go
++++ b/internal/errutil/errutil.go
+@@ -4,7 +4,7 @@
+ // not use this file except in compliance with the License. You may obtain
+ // a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
+ 
+-package internal
++package errutil
+ 
+ import (
+ 	"fmt"
+@@ -18,12 +18,12 @@ type WrappedError interface {
+ 	Inner() error
+ }
+ 
+-// RolledUpErrorMessage gets a flattened error message.
+-func RolledUpErrorMessage(err error) string {
++// rolledUpErrorMessage gets a flattened error message.
++func rolledUpErrorMessage(err error) string {
+ 	if wrappedErr, ok := err.(WrappedError); ok {
+ 		inner := wrappedErr.Inner()
+ 		if inner != nil {
+-			return fmt.Sprintf("%s: %s", wrappedErr.Message(), RolledUpErrorMessage(inner))
++			return fmt.Sprintf("%s: %s", wrappedErr.Message(), rolledUpErrorMessage(inner))
+ 		}
+ 
+ 		return wrappedErr.Message()
+@@ -38,8 +38,6 @@ func UnwrapError(err error) error {
+ 	switch tErr := err.(type) {
+ 	case WrappedError:
+ 		return UnwrapError(tErr.Inner())
+-	case *multiError:
+-		return UnwrapError(tErr.errors[0])
+ 	}
+ 
+ 	return err
+@@ -55,52 +53,6 @@ func WrapErrorf(inner error, format string, args ...interface{}) error {
+ 	return &wrappedError{fmt.Sprintf(format, args...), inner}
+ }
+ 
+-// MultiError combines multiple errors into a single error. If there are no errors,
+-// nil is returned. If there is 1 error, it is returned. Otherwise, they are combined.
+-func MultiError(errors ...error) error {
+-
+-	// remove nils from the error list
+-	var nonNils []error
+-	for _, e := range errors {
+-		if e != nil {
+-			nonNils = append(nonNils, e)
+-		}
+-	}
+-
+-	switch len(nonNils) {
+-	case 0:
+-		return nil
+-	case 1:
+-		return nonNils[0]
+-	default:
+-		return &multiError{
+-			message: "multiple errors encountered",
+-			errors:  nonNils,
+-		}
+-	}
+-}
+-
+-type multiError struct {
+-	message string
+-	errors  []error
+-}
+-
+-func (e *multiError) Message() string {
+-	return e.message
+-}
+-
+-func (e *multiError) Error() string {
+-	result := e.message
+-	for _, e := range e.errors {
+-		result += fmt.Sprintf("\n  %s", e)
+-	}
+-	return result
+-}
+-
+-func (e *multiError) Errors() []error {
+-	return e.errors
+-}
+-
+ type wrappedError struct {
+ 	message string
+ 	inner   error
+@@ -111,7 +63,7 @@ func (e *wrappedError) Message() string {
+ }
+ 
+ func (e *wrappedError) Error() string {
+-	return RolledUpErrorMessage(e)
++	return rolledUpErrorMessage(e)
+ }
+ 
+ func (e *wrappedError) Inner() error {
+diff --git a/internal/testutil/monitor/monitor.go b/internal/eventtest/eventtest.go
+similarity index 94%
+rename from internal/testutil/monitor/monitor.go
+rename to internal/eventtest/eventtest.go
+index 680a66feda..c06037e850 100644
+--- a/internal/testutil/monitor/monitor.go
++++ b/internal/eventtest/eventtest.go
+@@ -4,9 +4,9 @@
+ // not use this file except in compliance with the License. You may obtain
+ // a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
+ 
+-// Package monitor provides test types that are used to monitor client state and actions via the
++// Package eventtest provides test types that are used to monitor client state and actions via the
+ // various monitor types supported by the driver.
+-package monitor
++package eventtest
+ 
+ import (
+ 	"sync"
+diff --git a/internal/const.go b/internal/handshake/handshake.go
+similarity index 64%
+rename from internal/const.go
+rename to internal/handshake/handshake.go
+index a7ef69d13d..c9537d3ef8 100644
+--- a/internal/const.go
++++ b/internal/handshake/handshake.go
+@@ -4,16 +4,10 @@
+ // not use this file except in compliance with the License. You may obtain
+ // a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
+ 
+-package internal // import "go.mongodb.org/mongo-driver/internal"
+-
+-// Version is the current version of the driver.
+-var Version = "local build"
++package handshake
+ 
+ // LegacyHello is the legacy version of the hello command.
+ var LegacyHello = "isMaster"
+ 
+ // LegacyHelloLowercase is the lowercase, legacy version of the hello command.
+ var LegacyHelloLowercase = "ismaster"
+-
+-// LegacyNotPrimary is the legacy version of the "not primary" server error message.
+-var LegacyNotPrimary = "not master"
+diff --git a/internal/http.go b/internal/httputil/httputil.go
+similarity index 74%
+rename from internal/http.go
+rename to internal/httputil/httputil.go
+index 1391ac4ca8..db0dd5f127 100644
+--- a/internal/http.go
++++ b/internal/httputil/httputil.go
+@@ -4,7 +4,7 @@
+ // not use this file except in compliance with the License. You may obtain
+ // a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
+ 
+-package internal // import "go.mongodb.org/mongo-driver/internal"
++package httputil
+ 
+ import (
+ 	"net/http"
+@@ -16,10 +16,10 @@ var DefaultHTTPClient = &http.Client{
+ }
+ 
+ // CloseIdleHTTPConnections closes any connections which were previously
+-// connected from previous requests but are now sitting idle in
+-// a "keep-alive" state. It does not interrupt any connections currently
+-// in use.
+-// Borrowed from go standard library.
++// connected from previous requests but are now sitting idle in a "keep-alive"
++// state. It does not interrupt any connections currently in use.
++//
++// Borrowed from the Go standard library.
+ func CloseIdleHTTPConnections(client *http.Client) {
+ 	type closeIdler interface {
+ 		CloseIdleConnections()
+diff --git a/internal/testutil/config.go b/internal/integtest/integtest.go
+similarity index 95%
+rename from internal/testutil/config.go
+rename to internal/integtest/integtest.go
+index 4ffe9c7acb..8cdfbf6741 100644
+--- a/internal/testutil/config.go
++++ b/internal/integtest/integtest.go
+@@ -4,7 +4,7 @@
+ // not use this file except in compliance with the License. You may obtain
+ // a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
+ 
+-package testutil
++package integtest
+ 
+ import (
+ 	"context"
+@@ -22,6 +22,7 @@ import (
+ 	"go.mongodb.org/mongo-driver/mongo/description"
+ 	"go.mongodb.org/mongo-driver/mongo/options"
+ 	"go.mongodb.org/mongo-driver/x/bsonx/bsoncore"
++	"go.mongodb.org/mongo-driver/x/mongo/driver"
+ 	"go.mongodb.org/mongo-driver/x/mongo/driver/connstring"
+ 	"go.mongodb.org/mongo-driver/x/mongo/driver/operation"
+ 	"go.mongodb.org/mongo-driver/x/mongo/driver/topology"
+@@ -75,6 +76,13 @@ func AddCompressorToURI(uri string) string {
+ 	return AddOptionsToURI(uri, "compressors=", comp)
+ }
+ 
++// AddTestServerAPIVersion adds the latest server API version in a ServerAPIOptions to passed-in opts.
++func AddTestServerAPIVersion(opts *options.ClientOptions) {
++	if os.Getenv("REQUIRE_API_VERSION") == "true" {
++		opts.SetServerAPIOptions(options.ServerAPI(driver.TestServerAPIVersion))
++	}
++}
++
+ // MonitoredTopology returns a new topology with the command monitor attached
+ func MonitoredTopology(t *testing.T, dbName string, monitor *event.CommandMonitor) *topology.Topology {
+ 	uri, err := MongoDBURI()
+diff --git a/internal/testutil/israce/norace.go b/internal/israce/norace.go
+similarity index 100%
+rename from internal/testutil/israce/norace.go
+rename to internal/israce/norace.go
+diff --git a/internal/testutil/israce/race.go b/internal/israce/race.go
+similarity index 100%
+rename from internal/testutil/israce/race.go
+rename to internal/israce/race.go
+diff --git a/internal/randutil/rand/bits.go b/internal/rand/bits.go
+similarity index 100%
+rename from internal/randutil/rand/bits.go
+rename to internal/rand/bits.go
+diff --git a/internal/randutil/rand/exp.go b/internal/rand/exp.go
+similarity index 100%
+rename from internal/randutil/rand/exp.go
+rename to internal/rand/exp.go
+diff --git a/internal/randutil/rand/normal.go b/internal/rand/normal.go
+similarity index 100%
+rename from internal/randutil/rand/normal.go
+rename to internal/rand/normal.go
+diff --git a/internal/randutil/rand/rand.go b/internal/rand/rand.go
+similarity index 100%
+rename from internal/randutil/rand/rand.go
+rename to internal/rand/rand.go
+diff --git a/internal/randutil/rand/rng.go b/internal/rand/rng.go
+similarity index 100%
+rename from internal/randutil/rand/rng.go
+rename to internal/rand/rng.go
+diff --git a/internal/randutil/randutil.go b/internal/randutil/randutil.go
+index 9616074321..dd8c6d6f41 100644
+--- a/internal/randutil/randutil.go
++++ b/internal/randutil/randutil.go
+@@ -12,7 +12,7 @@ import (
+ 	"fmt"
+ 	"io"
+ 
+-	xrand "go.mongodb.org/mongo-driver/internal/randutil/rand"
++	xrand "go.mongodb.org/mongo-driver/internal/rand"
+ )
+ 
+ // NewLockedRand returns a new "x/exp/rand" pseudo-random number generator seeded with a
+diff --git a/internal/spectest/spectest.go b/internal/spectest/spectest.go
+new file mode 100644
+index 0000000000..276fc35572
+--- /dev/null
++++ b/internal/spectest/spectest.go
+@@ -0,0 +1,35 @@
++// Copyright (C) MongoDB, Inc. 2023-present.
++//
++// Licensed under the Apache License, Version 2.0 (the "License"); you may
++// not use this file except in compliance with the License. You may obtain
++// a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
++
++package spectest
++
++import (
++	"io/ioutil"
++	"path"
++	"testing"
++
++	"go.mongodb.org/mongo-driver/internal/require"
++)
++
++// FindJSONFilesInDir finds the JSON files in a directory.
++func FindJSONFilesInDir(t *testing.T, dir string) []string {
++	t.Helper()
++
++	files := make([]string, 0)
++
++	entries, err := ioutil.ReadDir(dir)
++	require.NoError(t, err)
++
++	for _, entry := range entries {
++		if entry.IsDir() || path.Ext(entry.Name()) != ".json" {
++			continue
++		}
++
++		files = append(files, entry.Name())
++	}
++
++	return files
++}
+diff --git a/internal/testutil/helpers/helpers.go b/internal/testutil/helpers/helpers.go
+deleted file mode 100644
+index d94cbd225a..0000000000
+--- a/internal/testutil/helpers/helpers.go
++++ /dev/null
+@@ -1,95 +0,0 @@
+-// Copyright (C) MongoDB, Inc. 2017-present.
+-//
+-// Licensed under the Apache License, Version 2.0 (the "License"); you may
+-// not use this file except in compliance with the License. You may obtain
+-// a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
+-
+-package helpers
+-
+-import (
+-	"context"
+-	"fmt"
+-	"io/ioutil"
+-	"path"
+-	"testing"
+-	"time"
+-
+-	"go.mongodb.org/mongo-driver/bson"
+-	"go.mongodb.org/mongo-driver/internal/require"
+-)
+-
+-// AssertSoon runs the provided callback and fails the passed-in test if the callback
+-// does not complete within timeout. The provided callback should respect the
+-// passed-in context and cease execution when it has expired.
+-//
+-// Deprecated: This function will be removed with GODRIVER-2667, use assert.Eventually
+-// instead.
+-func AssertSoon(t testing.TB, callback func(ctx context.Context), timeout time.Duration) {
+-	t.Helper()
+-
+-	// Create context to manually cancel callback after Soon assertion.
+-	callbackCtx, cancel := context.WithCancel(context.Background())
+-	defer cancel()
+-
+-	done := make(chan struct{})
+-	fullCallback := func() {
+-		callback(callbackCtx)
+-		done <- struct{}{}
+-	}
+-
+-	timer := time.NewTimer(timeout)
+-	defer timer.Stop()
+-
+-	go fullCallback()
+-
+-	select {
+-	case <-done:
+-		return
+-	case <-timer.C:
+-		t.Fatalf("timed out in %s waiting for callback", timeout)
+-	}
+-}
+-
+-// FindJSONFilesInDir finds the JSON files in a directory.
+-func FindJSONFilesInDir(t *testing.T, dir string) []string {
+-	t.Helper()
+-
+-	files := make([]string, 0)
+-
+-	entries, err := ioutil.ReadDir(dir)
+-	require.NoError(t, err)
+-
+-	for _, entry := range entries {
+-		if entry.IsDir() || path.Ext(entry.Name()) != ".json" {
+-			continue
+-		}
+-
+-		files = append(files, entry.Name())
+-	}
+-
+-	return files
+-}
+-
+-// RawToDocuments converts a bson.Raw that is internally an array of documents to []bson.Raw.
+-func RawToDocuments(doc bson.Raw) []bson.Raw {
+-	values, err := doc.Values()
+-	if err != nil {
+-		panic(fmt.Sprintf("error converting BSON document to values: %v", err))
+-	}
+-
+-	out := make([]bson.Raw, len(values))
+-	for i := range values {
+-		out[i] = values[i].Document()
+-	}
+-
+-	return out
+-}
+-
+-// RawToInterfaces takes one or many bson.Raw documents and returns them as a []interface{}.
+-func RawToInterfaces(docs ...bson.Raw) []interface{} {
+-	out := make([]interface{}, len(docs))
+-	for i := range docs {
+-		out[i] = docs[i]
+-	}
+-	return out
+-}
+diff --git a/internal/testutil/ops.go b/internal/testutil/ops.go
+deleted file mode 100644
+index aa1ca85257..0000000000
+--- a/internal/testutil/ops.go
++++ /dev/null
+@@ -1,64 +0,0 @@
+-// Copyright (C) MongoDB, Inc. 2017-present.
+-//
+-// Licensed under the Apache License, Version 2.0 (the "License"); you may
+-// not use this file except in compliance with the License. You may obtain
+-// a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
+-
+-package testutil // import "go.mongodb.org/mongo-driver/internal/testutil"
+-
+-import (
+-	"context"
+-	"os"
+-	"testing"
+-
+-	"go.mongodb.org/mongo-driver/internal/require"
+-	"go.mongodb.org/mongo-driver/mongo/description"
+-	"go.mongodb.org/mongo-driver/mongo/options"
+-	"go.mongodb.org/mongo-driver/mongo/writeconcern"
+-	"go.mongodb.org/mongo-driver/x/bsonx/bsoncore"
+-	"go.mongodb.org/mongo-driver/x/mongo/driver"
+-	"go.mongodb.org/mongo-driver/x/mongo/driver/operation"
+-)
+-
+-// DropCollection drops the collection in the test cluster.
+-func DropCollection(t *testing.T, dbname, colname string) {
+-	err := operation.NewCommand(bsoncore.BuildDocument(nil, bsoncore.AppendStringElement(nil, "drop", colname))).
+-		Database(dbname).ServerSelector(description.WriteSelector()).Deployment(Topology(t)).
+-		Execute(context.Background())
+-	if de, ok := err.(driver.Error); err != nil && !(ok && de.NamespaceNotFound()) {
+-		require.NoError(t, err)
+-	}
+-}
+-
+-// AutoInsertDocs inserts the docs into the test cluster.
+-func AutoInsertDocs(t *testing.T, writeConcern *writeconcern.WriteConcern, docs ...bsoncore.Document) {
+-	InsertDocs(t, DBName(t), ColName(t), writeConcern, docs...)
+-}
+-
+-// InsertDocs inserts the docs into the test cluster.
+-func InsertDocs(t *testing.T, dbname, colname string, writeConcern *writeconcern.WriteConcern, docs ...bsoncore.Document) {
+-	err := operation.NewInsert(docs...).
+-		Collection(colname).
+-		Database(dbname).
+-		Deployment(Topology(t)).
+-		ServerSelector(description.WriteSelector()).
+-		WriteConcern(writeConcern).
+-		Execute(context.Background())
+-	require.NoError(t, err)
+-}
+-
+-// RunCommand runs an arbitrary command on a given database of target server
+-func RunCommand(s driver.Server, db string, cmd bsoncore.Document) (bsoncore.Document, error) {
+-	op := operation.NewCommand(cmd).
+-		Database(db).Deployment(driver.SingleServerDeployment{Server: s})
+-	err := op.Execute(context.Background())
+-	res := op.Result()
+-	return res, err
+-}
+-
+-// AddTestServerAPIVersion adds the latest server API version in a ServerAPIOptions to passed-in opts.
+-func AddTestServerAPIVersion(opts *options.ClientOptions) {
+-	if os.Getenv("REQUIRE_API_VERSION") == "true" {
+-		opts.SetServerAPIOptions(options.ServerAPI(driver.TestServerAPIVersion))
+-	}
+-}
+diff --git a/internal/uri_validation_errors.go b/internal/uri_validation_errors.go
+deleted file mode 100644
+index 21e73002a4..0000000000
+--- a/internal/uri_validation_errors.go
++++ /dev/null
+@@ -1,22 +0,0 @@
+-// Copyright (C) MongoDB, Inc. 2017-present.
+-//
+-// Licensed under the Apache License, Version 2.0 (the "License"); you may
+-// not use this file except in compliance with the License. You may obtain
+-// a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
+-
+-package internal
+-
+-import "errors"
+-
+-var (
+-	// ErrLoadBalancedWithMultipleHosts is returned when loadBalanced=true is specified in a URI with multiple hosts.
+-	ErrLoadBalancedWithMultipleHosts = errors.New("loadBalanced cannot be set to true if multiple hosts are specified")
+-	// ErrLoadBalancedWithReplicaSet is returned when loadBalanced=true is specified in a URI with the replicaSet option.
+-	ErrLoadBalancedWithReplicaSet = errors.New("loadBalanced cannot be set to true if a replica set name is specified")
+-	// ErrLoadBalancedWithDirectConnection is returned when loadBalanced=true is specified in a URI with the directConnection option.
+-	ErrLoadBalancedWithDirectConnection = errors.New("loadBalanced cannot be set to true if the direct connection option is specified")
+-	// ErrSRVMaxHostsWithReplicaSet is returned when srvMaxHosts > 0 is specified in a URI with the replicaSet option.
+-	ErrSRVMaxHostsWithReplicaSet = errors.New("srvMaxHosts cannot be a positive value if a replica set name is specified")
+-	// ErrSRVMaxHostsWithLoadBalanced is returned when srvMaxHosts > 0 is specified in a URI with loadBalanced=true.
+-	ErrSRVMaxHostsWithLoadBalanced = errors.New("srvMaxHosts cannot be a positive value if loadBalanced is set to true")
+-)
+diff --git a/internal/uuid/uuid_test.go b/internal/uuid/uuid_test.go
+index a06e96b1be..0426d07cdd 100644
+--- a/internal/uuid/uuid_test.go
++++ b/internal/uuid/uuid_test.go
+@@ -10,8 +10,8 @@ import (
+ 	"sync"
+ 	"testing"
+ 
++	"go.mongodb.org/mongo-driver/internal/israce"
+ 	"go.mongodb.org/mongo-driver/internal/require"
+-	"go.mongodb.org/mongo-driver/internal/testutil/israce"
+ )
+ 
+ // GODRIVER-2349
+diff --git a/internal/background_context.go b/mongo/background_context.go
+similarity index 87%
+rename from internal/background_context.go
+rename to mongo/background_context.go
+index 6f190edb3c..e4146e8b7c 100644
+--- a/internal/background_context.go
++++ b/mongo/background_context.go
+@@ -4,7 +4,7 @@
+ // not use this file except in compliance with the License. You may obtain
+ // a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
+ 
+-package internal
++package mongo
+ 
+ import "context"
+ 
+@@ -16,9 +16,9 @@ type backgroundContext struct {
+ 	childValuesCtx context.Context
+ }
+ 
+-// NewBackgroundContext creates a new Context whose behavior matches that of context.Background(), but Value calls are
++// newBackgroundContext creates a new Context whose behavior matches that of context.Background(), but Value calls are
+ // forwarded to the provided ctx parameter. If ctx is nil, context.Background() is returned.
+-func NewBackgroundContext(ctx context.Context) context.Context {
++func newBackgroundContext(ctx context.Context) context.Context {
+ 	if ctx == nil {
+ 		return context.Background()
+ 	}
+diff --git a/internal/background_context_test.go b/mongo/background_context_test.go
+similarity index 87%
+rename from internal/background_context_test.go
+rename to mongo/background_context_test.go
+index 7d6abc0c22..fe679ed1e8 100644
+--- a/internal/background_context_test.go
++++ b/mongo/background_context_test.go
+@@ -4,7 +4,7 @@
+ // not use this file except in compliance with the License. You may obtain
+ // a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
+ 
+-package internal
++package mongo
+ 
+ import (
+ 	"context"
+@@ -15,8 +15,8 @@ import (
+ )
+ 
+ func TestBackgroundContext(t *testing.T) {
+-	t.Run("NewBackgroundContext accepts a nil child", func(t *testing.T) {
+-		ctx := NewBackgroundContext(nil)
++	t.Run("newBackgroundContext accepts a nil child", func(t *testing.T) {
++		ctx := newBackgroundContext(nil)
+ 		assert.Equal(t, context.Background(), ctx, "expected context.Background() for a nil child")
+ 	})
+ 	t.Run("Value requests are forwarded", func(t *testing.T) {
+@@ -26,7 +26,7 @@ func TestBackgroundContext(t *testing.T) {
+ 		expectedVal := "value"
+ 		childCtx := context.WithValue(context.Background(), ctxKey{}, expectedVal)
+ 
+-		ctx := NewBackgroundContext(childCtx)
++		ctx := newBackgroundContext(childCtx)
+ 		gotVal, ok := ctx.Value(ctxKey{}).(string)
+ 		assert.True(t, ok, "expected context to contain a string value for ctxKey")
+ 		assert.Equal(t, expectedVal, gotVal, "expected value for ctxKey to be %q, got %q", expectedVal, gotVal)
+@@ -37,7 +37,7 @@ func TestBackgroundContext(t *testing.T) {
+ 		childCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+ 		defer cancel()
+ 
+-		ctx := NewBackgroundContext(childCtx)
++		ctx := newBackgroundContext(childCtx)
+ 		deadline, ok := ctx.Deadline()
+ 		assert.False(t, ok, "expected context to have no deadline, but got %v", deadline)
+ 	})
+@@ -47,7 +47,7 @@ func TestBackgroundContext(t *testing.T) {
+ 		childCtx, cancel := context.WithCancel(context.Background())
+ 		cancel()
+ 
+-		ctx := NewBackgroundContext(childCtx)
++		ctx := newBackgroundContext(childCtx)
+ 		select {
+ 		case <-ctx.Done():
+ 			t.Fatalf("expected context to not expire, but Done channel had a value; ctx error: %v", ctx.Err())
+diff --git a/mongo/change_stream.go b/mongo/change_stream.go
+index 3dc6ecf16c..862ba4a618 100644
+--- a/mongo/change_stream.go
++++ b/mongo/change_stream.go
+@@ -17,7 +17,7 @@ import (
+ 	"go.mongodb.org/mongo-driver/bson"
+ 	"go.mongodb.org/mongo-driver/bson/bsoncodec"
+ 	"go.mongodb.org/mongo-driver/bson/primitive"
+-	"go.mongodb.org/mongo-driver/internal"
++	"go.mongodb.org/mongo-driver/internal/csot"
+ 	"go.mongodb.org/mongo-driver/mongo/description"
+ 	"go.mongodb.org/mongo-driver/mongo/options"
+ 	"go.mongodb.org/mongo-driver/mongo/readconcern"
+@@ -280,8 +280,8 @@ func (cs *ChangeStream) executeOperation(ctx context.Context, resuming bool) err
+ 	// If no deadline is set on the passed-in context, cs.client.timeout is set, and context is not already
+ 	// a Timeout context, honor cs.client.timeout in new Timeout context for change stream operation execution
+ 	// and potential retry.
+-	if _, deadlineSet := ctx.Deadline(); !deadlineSet && cs.client.timeout != nil && !internal.IsTimeoutContext(ctx) {
+-		newCtx, cancelFunc := internal.MakeTimeoutContext(ctx, *cs.client.timeout)
++	if _, deadlineSet := ctx.Deadline(); !deadlineSet && cs.client.timeout != nil && !csot.IsTimeoutContext(ctx) {
++		newCtx, cancelFunc := csot.MakeTimeoutContext(ctx, *cs.client.timeout)
+ 		// Redefine ctx to be the new timeout-derived context.
+ 		ctx = newCtx
+ 		// Cancel the timeout-derived context at the end of executeOperation to avoid a context leak.
+@@ -294,7 +294,7 @@ func (cs *ChangeStream) executeOperation(ctx context.Context, resuming bool) err
+ 	if cs.client.retryReads {
+ 		retries = 1
+ 	}
+-	if internal.IsTimeoutContext(ctx) {
++	if csot.IsTimeoutContext(ctx) {
+ 		retries = -1
+ 	}
+ 
+diff --git a/mongo/client.go b/mongo/client.go
+index 588d741fa2..5929274831 100644
+--- a/mongo/client.go
++++ b/mongo/client.go
+@@ -16,7 +16,7 @@ import (
+ 	"go.mongodb.org/mongo-driver/bson"
+ 	"go.mongodb.org/mongo-driver/bson/bsoncodec"
+ 	"go.mongodb.org/mongo-driver/event"
+-	"go.mongodb.org/mongo-driver/internal"
++	"go.mongodb.org/mongo-driver/internal/httputil"
+ 	"go.mongodb.org/mongo-driver/internal/logger"
+ 	"go.mongodb.org/mongo-driver/internal/uuid"
+ 	"go.mongodb.org/mongo-driver/mongo/description"
+@@ -303,8 +303,8 @@ func (c *Client) Disconnect(ctx context.Context) error {
+ 		ctx = context.Background()
+ 	}
+ 
+-	if c.httpClient == internal.DefaultHTTPClient {
+-		defer internal.CloseIdleHTTPConnections(c.httpClient)
++	if c.httpClient == httputil.DefaultHTTPClient {
++		defer httputil.CloseIdleHTTPConnections(c.httpClient)
+ 	}
+ 
+ 	c.endSessions(ctx)
+diff --git a/mongo/client_test.go b/mongo/client_test.go
+index c279de7939..e1e8f322a8 100644
+--- a/mongo/client_test.go
++++ b/mongo/client_test.go
+@@ -17,7 +17,7 @@ import (
+ 	"go.mongodb.org/mongo-driver/bson"
+ 	"go.mongodb.org/mongo-driver/event"
+ 	"go.mongodb.org/mongo-driver/internal/assert"
+-	"go.mongodb.org/mongo-driver/internal/testutil"
++	"go.mongodb.org/mongo-driver/internal/integtest"
+ 	"go.mongodb.org/mongo-driver/mongo/options"
+ 	"go.mongodb.org/mongo-driver/mongo/readconcern"
+ 	"go.mongodb.org/mongo-driver/mongo/readpref"
+@@ -32,7 +32,7 @@ var bgCtx = context.Background()
+ func setupClient(opts ...*options.ClientOptions) *Client {
+ 	if len(opts) == 0 {
+ 		clientOpts := options.Client().ApplyURI("mongodb://localhost:27017")
+-		testutil.AddTestServerAPIVersion(clientOpts)
++		integtest.AddTestServerAPIVersion(clientOpts)
+ 		opts = append(opts, clientOpts)
+ 	}
+ 	client, _ := NewClient(opts...)
+@@ -317,7 +317,7 @@ func TestClient(t *testing.T) {
+ 		})
+ 	})
+ 	t.Run("endSessions", func(t *testing.T) {
+-		cs := testutil.ConnString(t)
++		cs := integtest.ConnString(t)
+ 		originalBatchSize := endSessionsBatchSize
+ 		endSessionsBatchSize = 2
+ 		defer func() {
+@@ -355,7 +355,7 @@ func TestClient(t *testing.T) {
+ 				}
+ 				clientOpts := options.Client().ApplyURI(cs.Original).SetReadPreference(readpref.Primary()).
+ 					SetWriteConcern(writeconcern.New(writeconcern.WMajority())).SetMonitor(cmdMonitor)
+-				testutil.AddTestServerAPIVersion(clientOpts)
++				integtest.AddTestServerAPIVersion(clientOpts)
+ 				client, err := Connect(bgCtx, clientOpts)
+ 				assert.Nil(t, err, "Connect error: %v", err)
+ 				defer func() {
+diff --git a/mongo/collection.go b/mongo/collection.go
+index d4c9934013..997d877681 100644
+--- a/mongo/collection.go
++++ b/mongo/collection.go
+@@ -18,7 +18,7 @@ import (
+ 	"go.mongodb.org/mongo-driver/bson/bsoncodec"
+ 	"go.mongodb.org/mongo-driver/bson/bsontype"
+ 	"go.mongodb.org/mongo-driver/bson/primitive"
+-	"go.mongodb.org/mongo-driver/internal"
++	"go.mongodb.org/mongo-driver/internal/csfle"
+ 	"go.mongodb.org/mongo-driver/mongo/description"
+ 	"go.mongodb.org/mongo-driver/mongo/options"
+ 	"go.mongodb.org/mongo-driver/mongo/readconcern"
+@@ -1804,7 +1804,7 @@ func (coll *Collection) dropEncryptedCollection(ctx context.Context, ef interfac
+ 
+ 	// Drop the two encryption-related, associated collections: `escCollection` and `ecocCollection`.
+ 	// Drop ESCCollection.
+-	escCollection, err := internal.GetEncryptedStateCollectionName(efBSON, coll.name, internal.EncryptedStateCollection)
++	escCollection, err := csfle.GetEncryptedStateCollectionName(efBSON, coll.name, csfle.EncryptedStateCollection)
+ 	if err != nil {
+ 		return err
+ 	}
+@@ -1813,7 +1813,7 @@ func (coll *Collection) dropEncryptedCollection(ctx context.Context, ef interfac
+ 	}
+ 
+ 	// Drop ECOCCollection.
+-	ecocCollection, err := internal.GetEncryptedStateCollectionName(efBSON, coll.name, internal.EncryptedCompactionCollection)
++	ecocCollection, err := csfle.GetEncryptedStateCollectionName(efBSON, coll.name, csfle.EncryptedCompactionCollection)
+ 	if err != nil {
+ 		return err
+ 	}
+diff --git a/mongo/database.go b/mongo/database.go
+index b95e8f524b..f5d5ad379b 100644
+--- a/mongo/database.go
++++ b/mongo/database.go
+@@ -14,7 +14,7 @@ import (
+ 
+ 	"go.mongodb.org/mongo-driver/bson"
+ 	"go.mongodb.org/mongo-driver/bson/bsoncodec"
+-	"go.mongodb.org/mongo-driver/internal"
++	"go.mongodb.org/mongo-driver/internal/csfle"
+ 	"go.mongodb.org/mongo-driver/mongo/description"
+ 	"go.mongodb.org/mongo-driver/mongo/options"
+ 	"go.mongodb.org/mongo-driver/mongo/readconcern"
+@@ -627,7 +627,7 @@ func (db *Database) createCollectionWithEncryptedFields(ctx context.Context, nam
+ 	stateCollectionOpts := options.CreateCollection().
+ 		SetClusteredIndex(bson.D{{"key", bson.D{{"_id", 1}}}, {"unique", true}})
+ 	// Create ESCCollection.
+-	escCollection, err := internal.GetEncryptedStateCollectionName(efBSON, name, internal.EncryptedStateCollection)
++	escCollection, err := csfle.GetEncryptedStateCollectionName(efBSON, name, csfle.EncryptedStateCollection)
+ 	if err != nil {
+ 		return err
+ 	}
+@@ -637,7 +637,7 @@ func (db *Database) createCollectionWithEncryptedFields(ctx context.Context, nam
+ 	}
+ 
+ 	// Create ECOCCollection.
+-	ecocCollection, err := internal.GetEncryptedStateCollectionName(efBSON, name, internal.EncryptedCompactionCollection)
++	ecocCollection, err := csfle.GetEncryptedStateCollectionName(efBSON, name, csfle.EncryptedCompactionCollection)
+ 	if err != nil {
+ 		return err
+ 	}
+diff --git a/mongo/description/max_staleness_spec_test.go b/mongo/description/max_staleness_spec_test.go
+index d3e9cc75dd..0bab617c6a 100644
+--- a/mongo/description/max_staleness_spec_test.go
++++ b/mongo/description/max_staleness_spec_test.go
+@@ -10,7 +10,7 @@ import (
+ 	"path"
+ 	"testing"
+ 
+-	"go.mongodb.org/mongo-driver/internal/testutil/helpers"
++	"go.mongodb.org/mongo-driver/internal/spectest"
+ )
+ 
+ const maxStalenessTestsDir = "../../testdata/max-staleness"
+@@ -24,7 +24,7 @@ func TestMaxStalenessSpec(t *testing.T) {
+ 		"Single",
+ 		"Unknown",
+ 	} {
+-		for _, file := range helpers.FindJSONFilesInDir(t,
++		for _, file := range spectest.FindJSONFilesInDir(t,
+ 			path.Join(maxStalenessTestsDir, topology)) {
+ 
+ 			runTest(t, maxStalenessTestsDir, topology, file)
+diff --git a/mongo/description/selector_spec_test.go b/mongo/description/selector_spec_test.go
+index 0dd1ca3088..f5d2eb3291 100644
+--- a/mongo/description/selector_spec_test.go
++++ b/mongo/description/selector_spec_test.go
+@@ -10,7 +10,7 @@ import (
+ 	"path"
+ 	"testing"
+ 
+-	"go.mongodb.org/mongo-driver/internal/testutil/helpers"
++	"go.mongodb.org/mongo-driver/internal/spectest"
+ )
+ 
+ const selectorTestsDir = "../../testdata/server-selection/server_selection"
+@@ -28,7 +28,7 @@ func TestServerSelectionSpec(t *testing.T) {
+ 		for _, subdir := range [...]string{"read", "write"} {
+ 			subdirPath := path.Join(topology, subdir)
+ 
+-			for _, file := range helpers.FindJSONFilesInDir(t,
++			for _, file := range spectest.FindJSONFilesInDir(t,
+ 				path.Join(selectorTestsDir, subdirPath)) {
+ 
+ 				runTest(t, selectorTestsDir, subdirPath, file)
+diff --git a/mongo/description/server.go b/mongo/description/server.go
+index b9713ebd41..cf39423839 100644
+--- a/mongo/description/server.go
++++ b/mongo/description/server.go
+@@ -13,7 +13,8 @@ import (
+ 
+ 	"go.mongodb.org/mongo-driver/bson"
+ 	"go.mongodb.org/mongo-driver/bson/primitive"
+-	"go.mongodb.org/mongo-driver/internal"
++	"go.mongodb.org/mongo-driver/internal/bsonutil"
++	"go.mongodb.org/mongo-driver/internal/handshake"
+ 	"go.mongodb.org/mongo-driver/internal/ptrutil"
+ 	"go.mongodb.org/mongo-driver/mongo/address"
+ 	"go.mongodb.org/mongo-driver/tag"
+@@ -81,7 +82,7 @@ func NewServer(addr address.Address, response bson.Raw) Server {
+ 		switch element.Key() {
+ 		case "arbiters":
+ 			var err error
+-			desc.Arbiters, err = internal.StringSliceFromRawElement(element)
++			desc.Arbiters, err = stringSliceFromRawElement(element)
+ 			if err != nil {
+ 				desc.LastError = err
+ 				return desc
+@@ -94,7 +95,7 @@ func NewServer(addr address.Address, response bson.Raw) Server {
+ 			}
+ 		case "compression":
+ 			var err error
+-			desc.Compression, err = internal.StringSliceFromRawElement(element)
++			desc.Compression, err = stringSliceFromRawElement(element)
+ 			if err != nil {
+ 				desc.LastError = err
+ 				return desc
+@@ -125,7 +126,7 @@ func NewServer(addr address.Address, response bson.Raw) Server {
+ 			}
+ 		case "hosts":
+ 			var err error
+-			desc.Hosts, err = internal.StringSliceFromRawElement(element)
++			desc.Hosts, err = stringSliceFromRawElement(element)
+ 			if err != nil {
+ 				desc.LastError = err
+ 				return desc
+@@ -136,7 +137,7 @@ func NewServer(addr address.Address, response bson.Raw) Server {
+ 				desc.LastError = fmt.Errorf("expected 'isWritablePrimary' to be a boolean but it's a BSON %s", element.Value().Type)
+ 				return desc
+ 			}
+-		case internal.LegacyHelloLowercase:
++		case handshake.LegacyHelloLowercase:
+ 			isWritablePrimary, ok = element.Value().BooleanOK()
+ 			if !ok {
+ 				desc.LastError = fmt.Errorf("expected legacy hello to be a boolean but it's a BSON %s", element.Value().Type)
+@@ -230,7 +231,7 @@ func NewServer(addr address.Address, response bson.Raw) Server {
+ 			}
+ 		case "passives":
+ 			var err error
+-			desc.Passives, err = internal.StringSliceFromRawElement(element)
++			desc.Passives, err = stringSliceFromRawElement(element)
+ 			if err != nil {
+ 				desc.LastError = err
+ 				return desc
+@@ -491,3 +492,11 @@ func sliceStringEqual(a []string, b []string) bool {
+ 	}
+ 	return true
+ }
++
++// stringSliceFromRawElement decodes the provided BSON element into a []string.
++// This internally calls StringSliceFromRawValue on the element's value. The
++// error conditions outlined in that function's documentation apply for this
++// function as well.
++func stringSliceFromRawElement(element bson.RawElement) ([]string, error) {
++	return bsonutil.StringSliceFromRawValue(element.Key(), element.Value())
++}
+diff --git a/mongo/gridfs/bucket.go b/mongo/gridfs/bucket.go
+index e4b8db5245..c9f40744f2 100644
+--- a/mongo/gridfs/bucket.go
++++ b/mongo/gridfs/bucket.go
+@@ -16,7 +16,7 @@ import (
+ 
+ 	"go.mongodb.org/mongo-driver/bson"
+ 	"go.mongodb.org/mongo-driver/bson/primitive"
+-	"go.mongodb.org/mongo-driver/internal"
++	"go.mongodb.org/mongo-driver/internal/csot"
+ 	"go.mongodb.org/mongo-driver/mongo"
+ 	"go.mongodb.org/mongo-driver/mongo/options"
+ 	"go.mongodb.org/mongo-driver/mongo/readconcern"
+@@ -260,8 +260,8 @@ func (b *Bucket) DeleteContext(ctx context.Context, fileID interface{}) error {
+ 	// If no deadline is set on the passed-in context, Timeout is set on the Client, and context is
+ 	// not already a Timeout context, honor Timeout in new Timeout context for operation execution to
+ 	// be shared by both delete operations.
+-	if _, deadlineSet := ctx.Deadline(); !deadlineSet && b.db.Client().Timeout() != nil && !internal.IsTimeoutContext(ctx) {
+-		newCtx, cancelFunc := internal.MakeTimeoutContext(ctx, *b.db.Client().Timeout())
++	if _, deadlineSet := ctx.Deadline(); !deadlineSet && b.db.Client().Timeout() != nil && !csot.IsTimeoutContext(ctx) {
++		newCtx, cancelFunc := csot.MakeTimeoutContext(ctx, *b.db.Client().Timeout())
+ 		// Redefine ctx to be the new timeout-derived context.
+ 		ctx = newCtx
+ 		// Cancel the timeout-derived context at the end of Execute to avoid a context leak.
+@@ -387,8 +387,8 @@ func (b *Bucket) DropContext(ctx context.Context) error {
+ 	// If no deadline is set on the passed-in context, Timeout is set on the Client, and context is
+ 	// not already a Timeout context, honor Timeout in new Timeout context for operation execution to
+ 	// be shared by both drop operations.
+-	if _, deadlineSet := ctx.Deadline(); !deadlineSet && b.db.Client().Timeout() != nil && !internal.IsTimeoutContext(ctx) {
+-		newCtx, cancelFunc := internal.MakeTimeoutContext(ctx, *b.db.Client().Timeout())
++	if _, deadlineSet := ctx.Deadline(); !deadlineSet && b.db.Client().Timeout() != nil && !csot.IsTimeoutContext(ctx) {
++		newCtx, cancelFunc := csot.MakeTimeoutContext(ctx, *b.db.Client().Timeout())
+ 		// Redefine ctx to be the new timeout-derived context.
+ 		ctx = newCtx
+ 		// Cancel the timeout-derived context at the end of Execute to avoid a context leak.
+diff --git a/mongo/gridfs/gridfs_test.go b/mongo/gridfs/gridfs_test.go
+index a6f06a6318..c95cf1f8d6 100644
+--- a/mongo/gridfs/gridfs_test.go
++++ b/mongo/gridfs/gridfs_test.go
+@@ -12,7 +12,7 @@ import (
+ 
+ 	"go.mongodb.org/mongo-driver/event"
+ 	"go.mongodb.org/mongo-driver/internal/assert"
+-	"go.mongodb.org/mongo-driver/internal/testutil"
++	"go.mongodb.org/mongo-driver/internal/integtest"
+ 	"go.mongodb.org/mongo-driver/mongo"
+ 	"go.mongodb.org/mongo-driver/mongo/options"
+ 	"go.mongodb.org/mongo-driver/mongo/readpref"
+@@ -28,7 +28,7 @@ func TestGridFS(t *testing.T) {
+ 		t.Skip("skipping integration test in short mode")
+ 	}
+ 
+-	cs := testutil.ConnString(t)
++	cs := integtest.ConnString(t)
+ 	poolMonitor := &event.PoolMonitor{
+ 		Event: func(evt *event.PoolEvent) {
+ 			switch evt.Type {
+diff --git a/mongo/integration/change_stream_test.go b/mongo/integration/change_stream_test.go
+index 08f1451be1..2a42964f51 100644
+--- a/mongo/integration/change_stream_test.go
++++ b/mongo/integration/change_stream_test.go
+@@ -17,8 +17,8 @@ import (
+ 	"go.mongodb.org/mongo-driver/bson/primitive"
+ 	"go.mongodb.org/mongo-driver/event"
+ 	"go.mongodb.org/mongo-driver/internal/assert"
++	"go.mongodb.org/mongo-driver/internal/eventtest"
+ 	"go.mongodb.org/mongo-driver/internal/require"
+-	"go.mongodb.org/mongo-driver/internal/testutil/monitor"
+ 	"go.mongodb.org/mongo-driver/mongo"
+ 	"go.mongodb.org/mongo-driver/mongo/integration/mtest"
+ 	"go.mongodb.org/mongo-driver/mongo/options"
+@@ -517,7 +517,7 @@ func TestChangeStream_ReplicaSet(t *testing.T) {
+ 		// by ChangeStream when executing an aggregate.
+ 
+ 		mt.Run("errors are processed for SDAM on initial aggregate", func(mt *mtest.T) {
+-			tpm := monitor.NewTestPoolMonitor()
++			tpm := eventtest.NewTestPoolMonitor()
+ 			mt.ResetClient(options.Client().
+ 				SetPoolMonitor(tpm.PoolMonitor).
+ 				SetWriteConcern(mtest.MajorityWc).
+@@ -540,7 +540,7 @@ func TestChangeStream_ReplicaSet(t *testing.T) {
+ 			assert.True(mt, tpm.IsPoolCleared(), "expected pool to be cleared after non-timeout network error but was not")
+ 		})
+ 		mt.Run("errors are processed for SDAM on getMore", func(mt *mtest.T) {
+-			tpm := monitor.NewTestPoolMonitor()
++			tpm := eventtest.NewTestPoolMonitor()
+ 			mt.ResetClient(options.Client().
+ 				SetPoolMonitor(tpm.PoolMonitor).
+ 				SetWriteConcern(mtest.MajorityWc).
+@@ -570,7 +570,7 @@ func TestChangeStream_ReplicaSet(t *testing.T) {
+ 			assert.True(mt, tpm.IsPoolCleared(), "expected pool to be cleared after non-timeout network error but was not")
+ 		})
+ 		mt.Run("errors are processed for SDAM on retried aggregate", func(mt *mtest.T) {
+-			tpm := monitor.NewTestPoolMonitor()
++			tpm := eventtest.NewTestPoolMonitor()
+ 			mt.ResetClient(options.Client().
+ 				SetPoolMonitor(tpm.PoolMonitor).
+ 				SetRetryReads(true))
+diff --git a/mongo/integration/clam_prose_test.go b/mongo/integration/clam_prose_test.go
+index 1b9bc57204..1d70c56eff 100644
+--- a/mongo/integration/clam_prose_test.go
++++ b/mongo/integration/clam_prose_test.go
+@@ -14,8 +14,8 @@ import (
+ 
+ 	"go.mongodb.org/mongo-driver/bson"
+ 	"go.mongodb.org/mongo-driver/internal/assert"
++	"go.mongodb.org/mongo-driver/internal/integtest"
+ 	"go.mongodb.org/mongo-driver/internal/logger"
+-	"go.mongodb.org/mongo-driver/internal/testutil"
+ 	"go.mongodb.org/mongo-driver/mongo"
+ 	"go.mongodb.org/mongo-driver/mongo/integration/mtest"
+ 	"go.mongodb.org/mongo-driver/mongo/options"
+@@ -320,7 +320,7 @@ func TestCommandLoggingAndMonitoringProse(t *testing.T) {
+ 				ctx, cancel := context.WithTimeout(ctx, deadline)
+ 				defer cancel()
+ 
+-				testutil.AddTestServerAPIVersion(clientOpts)
++				integtest.AddTestServerAPIVersion(clientOpts)
+ 
+ 				client, err := mongo.Connect(ctx, clientOpts)
+ 				assert.Nil(mt, err, "Connect error in setup: %v", err)
+@@ -378,7 +378,7 @@ func TestCommandLoggingAndMonitoringProse(t *testing.T) {
+ 
+ 			clientOpts := options.Client().SetLoggerOptions(loggerOpts).ApplyURI(mtest.ClusterURI())
+ 
+-			testutil.AddTestServerAPIVersion(clientOpts)
++			integtest.AddTestServerAPIVersion(clientOpts)
+ 
+ 			client, err := mongo.Connect(context.Background(), clientOpts)
+ 			assert.Nil(mt, err, "Connect error: %v", err)
+diff --git a/mongo/integration/client_options_test.go b/mongo/integration/client_options_test.go
+index 92a2c0b675..0fb068bc5e 100644
+--- a/mongo/integration/client_options_test.go
++++ b/mongo/integration/client_options_test.go
+@@ -13,17 +13,17 @@ import (
+ 	"testing"
+ 
+ 	"go.mongodb.org/mongo-driver/bson"
++	"go.mongodb.org/mongo-driver/internal/integtest"
+ 	"go.mongodb.org/mongo-driver/internal/require"
+-	"go.mongodb.org/mongo-driver/internal/testutil"
+ 	"go.mongodb.org/mongo-driver/mongo"
+ 	"go.mongodb.org/mongo-driver/mongo/options"
+ )
+ 
+ func TestClientOptions_CustomDialer(t *testing.T) {
+ 	td := &testDialer{d: &net.Dialer{}}
+-	cs := testutil.ConnString(t)
++	cs := integtest.ConnString(t)
+ 	opts := options.Client().ApplyURI(cs.String()).SetDialer(td)
+-	testutil.AddTestServerAPIVersion(opts)
++	integtest.AddTestServerAPIVersion(opts)
+ 	client, err := mongo.NewClient(opts)
+ 	require.NoError(t, err)
+ 	err = client.Connect(context.Background())
+diff --git a/mongo/integration/client_side_encryption_prose_test.go b/mongo/integration/client_side_encryption_prose_test.go
+index ec248377a2..5e8af1120c 100644
+--- a/mongo/integration/client_side_encryption_prose_test.go
++++ b/mongo/integration/client_side_encryption_prose_test.go
+@@ -28,9 +28,9 @@ import (
+ 	"go.mongodb.org/mongo-driver/bson/bsontype"
+ 	"go.mongodb.org/mongo-driver/bson/primitive"
+ 	"go.mongodb.org/mongo-driver/event"
+-	"go.mongodb.org/mongo-driver/internal"
+ 	"go.mongodb.org/mongo-driver/internal/assert"
+-	"go.mongodb.org/mongo-driver/internal/testutil"
++	"go.mongodb.org/mongo-driver/internal/handshake"
++	"go.mongodb.org/mongo-driver/internal/integtest"
+ 	"go.mongodb.org/mongo-driver/mongo"
+ 	"go.mongodb.org/mongo-driver/mongo/integration/mtest"
+ 	"go.mongodb.org/mongo-driver/mongo/options"
+@@ -63,7 +63,7 @@ func TestClientSideEncryptionProse(t *testing.T) {
+ 	defer mt.Close()
+ 
+ 	defaultKvClientOptions := options.Client().ApplyURI(mtest.ClusterURI())
+-	testutil.AddTestServerAPIVersion(defaultKvClientOptions)
++	integtest.AddTestServerAPIVersion(defaultKvClientOptions)
+ 	fullKmsProvidersMap := map[string]map[string]interface{}{
+ 		"aws": {
+ 			"accessKeyId":     awsAccessKeyID,
+@@ -245,7 +245,7 @@ func TestClientSideEncryptionProse(t *testing.T) {
+ 					},
+ 				}
+ 				kvClientOpts := options.Client().ApplyURI(mtest.ClusterURI()).SetMonitor(monitor)
+-				testutil.AddTestServerAPIVersion(kvClientOpts)
++				integtest.AddTestServerAPIVersion(kvClientOpts)
+ 				cpt := setup(mt, aeo, kvClientOpts, ceo)
+ 				defer cpt.teardown(mt)
+ 
+@@ -344,7 +344,7 @@ func TestClientSideEncryptionProse(t *testing.T) {
+ 						Username: "fake-user",
+ 						Password: "fake-password",
+ 					})
+-					testutil.AddTestServerAPIVersion(externalKvOpts)
++					integtest.AddTestServerAPIVersion(externalKvOpts)
+ 					aeo.SetKeyVaultClientOptions(externalKvOpts)
+ 					kvClientOpts = externalKvOpts
+ 				}
+@@ -1055,11 +1055,11 @@ func TestClientSideEncryptionProse(t *testing.T) {
+ 
+ 				mcryptOpts := options.Client().ApplyURI("mongodb://localhost:27021").
+ 					SetServerSelectionTimeout(1 * time.Second)
+-				testutil.AddTestServerAPIVersion(mcryptOpts)
++				integtest.AddTestServerAPIVersion(mcryptOpts)
+ 				mcryptClient, err := mongo.Connect(context.Background(), mcryptOpts)
+ 				assert.Nil(mt, err, "mongocryptd Connect error: %v", err)
+ 
+-				err = mcryptClient.Database("admin").RunCommand(context.Background(), bson.D{{internal.LegacyHelloLowercase, 1}}).Err()
++				err = mcryptClient.Database("admin").RunCommand(context.Background(), bson.D{{handshake.LegacyHelloLowercase, 1}}).Err()
+ 				assert.NotNil(mt, err, "expected mongocryptd legacy hello error, got nil")
+ 				assert.True(mt, strings.Contains(err.Error(), "server selection error"),
+ 					"expected mongocryptd server selection error, got %v", err)
+@@ -1248,7 +1248,7 @@ func TestClientSideEncryptionProse(t *testing.T) {
+ 				}
+ 
+ 				if tc.keyVaultClientSet {
+-					testutil.AddTestServerAPIVersion(d.clientKeyVaultOpts)
++					integtest.AddTestServerAPIVersion(d.clientKeyVaultOpts)
+ 					aeOpts.SetKeyVaultClientOptions(d.clientKeyVaultOpts)
+ 				}
+ 
+@@ -1266,7 +1266,7 @@ func TestClientSideEncryptionProse(t *testing.T) {
+ 					SetMaxPoolSize(tc.maxPoolSize).
+ 					SetAutoEncryptionOptions(aeOpts)
+ 
+-				testutil.AddTestServerAPIVersion(ceOpts)
++				integtest.AddTestServerAPIVersion(ceOpts)
+ 				clientEncrypted, err := mongo.Connect(context.Background(), ceOpts)
+ 				assert.Nil(mt, err, "Connect error: %v", err)
+ 				defer clientEncrypted.Disconnect(context.Background())
+@@ -1940,7 +1940,7 @@ func TestClientSideEncryptionProse(t *testing.T) {
+ 								co := options.Client().ApplyURI(mtest.ClusterURI())
+ 								keyVaultClient, err = mongo.Connect(context.Background(), co)
+ 								defer keyVaultClient.Disconnect(context.Background())
+-								testutil.AddTestServerAPIVersion(co)
++								integtest.AddTestServerAPIVersion(co)
+ 								assert.Nil(mt, err, "error on Connect: %v", err)
+ 							}
+ 							ceOpts := options.ClientEncryption().
+@@ -1982,7 +1982,7 @@ func TestClientSideEncryptionProse(t *testing.T) {
+ 								co := options.Client().ApplyURI(mtest.ClusterURI())
+ 								keyVaultClient, err = mongo.Connect(context.Background(), co)
+ 								defer keyVaultClient.Disconnect(context.Background())
+-								testutil.AddTestServerAPIVersion(co)
++								integtest.AddTestServerAPIVersion(co)
+ 								assert.Nil(mt, err, "error on Connect: %v", err)
+ 							}
+ 							ceOpts := options.ClientEncryption().
+@@ -2032,7 +2032,7 @@ func TestClientSideEncryptionProse(t *testing.T) {
+ 					co := options.Client().ApplyURI(mtest.ClusterURI())
+ 					keyVaultClient, err = mongo.Connect(context.Background(), co)
+ 					defer keyVaultClient.Disconnect(context.Background())
+-					testutil.AddTestServerAPIVersion(co)
++					integtest.AddTestServerAPIVersion(co)
+ 					assert.Nil(mt, err, "error on Connect: %v", err)
+ 				}
+ 				ceOpts := options.ClientEncryption().
+@@ -2172,7 +2172,7 @@ func TestClientSideEncryptionProse(t *testing.T) {
+ 			aeo := options.AutoEncryption().SetKmsProviders(kmsProviders).
+ 				SetExtraOptions(mongocryptdSpawnArgs)
+ 			cliOpts := options.Client().ApplyURI(mtest.ClusterURI()).SetAutoEncryptionOptions(aeo)
+-			testutil.AddTestServerAPIVersion(cliOpts)
++			integtest.AddTestServerAPIVersion(cliOpts)
+ 			encClient, err := mongo.Connect(context.Background(), cliOpts)
+ 			assert.Nil(mt, err, "Connect error: %v", err)
+ 			defer func() {
+@@ -2857,7 +2857,7 @@ func setup(mt *mtest.T, aeo *options.AutoEncryptionOptions, kvClientOpts *option
+ 		}
+ 		opts := options.Client().ApplyURI(mtest.ClusterURI()).SetWriteConcern(mtest.MajorityWc).
+ 			SetReadPreference(mtest.PrimaryRp).SetAutoEncryptionOptions(aeo).SetMonitor(cseMonitor)
+-		testutil.AddTestServerAPIVersion(opts)
++		integtest.AddTestServerAPIVersion(opts)
+ 		cpt.cseClient, err = mongo.Connect(context.Background(), opts)
+ 		assert.Nil(mt, err, "Connect error for encrypted client: %v", err)
+ 		cpt.cseColl = cpt.cseClient.Database("db").Collection("coll")
+@@ -2930,7 +2930,7 @@ func newDeadlockTest(mt *mtest.T) *deadlockTest {
+ 	var err error
+ 
+ 	clientTestOpts := options.Client().ApplyURI(mtest.ClusterURI()).SetWriteConcern(mtest.MajorityWc)
+-	testutil.AddTestServerAPIVersion(clientTestOpts)
++	integtest.AddTestServerAPIVersion(clientTestOpts)
+ 	if d.clientTest, err = mongo.Connect(context.Background(), clientTestOpts); err != nil {
+ 		mt.Fatalf("Connect error: %v", err)
+ 	}
+diff --git a/mongo/integration/client_side_encryption_test.go b/mongo/integration/client_side_encryption_test.go
+index 36a396a067..b4905f8ea5 100644
+--- a/mongo/integration/client_side_encryption_test.go
++++ b/mongo/integration/client_side_encryption_test.go
+@@ -18,7 +18,7 @@ import (
+ 	"go.mongodb.org/mongo-driver/bson/primitive"
+ 	"go.mongodb.org/mongo-driver/event"
+ 	"go.mongodb.org/mongo-driver/internal/assert"
+-	"go.mongodb.org/mongo-driver/internal/testutil"
++	"go.mongodb.org/mongo-driver/internal/integtest"
+ 	"go.mongodb.org/mongo-driver/mongo"
+ 	"go.mongodb.org/mongo-driver/mongo/integration/mtest"
+ 	"go.mongodb.org/mongo-driver/mongo/options"
+@@ -37,7 +37,7 @@ func createDataKeyAndEncrypt(mt *mtest.T, keyName string) primitive.Binary {
+ 		SetReadConcern(mtest.MajorityRc).
+ 		SetWriteConcern(mtest.MajorityWc)
+ 
+-	testutil.AddTestServerAPIVersion(kvClientOpts)
++	integtest.AddTestServerAPIVersion(kvClientOpts)
+ 
+ 	kmsProvidersMap := map[string]map[string]interface{}{
+ 		"local": {"key": localMasterKey},
+@@ -134,7 +134,7 @@ func TestClientSideEncryptionWithExplicitSessions(t *testing.T) {
+ 			SetAutoEncryptionOptions(aeOpts).
+ 			SetMonitor(makeMonitor(mt, &capturedEvents))
+ 
+-		testutil.AddTestServerAPIVersion(clientOpts)
++		integtest.AddTestServerAPIVersion(clientOpts)
+ 
+ 		client, err := mongo.Connect(context.Background(), clientOpts)
+ 		assert.Nil(mt, err, "Connect error: %v", err)
+@@ -196,7 +196,7 @@ func TestClientSideEncryptionWithExplicitSessions(t *testing.T) {
+ 			SetAutoEncryptionOptions(aeOpts).
+ 			SetMonitor(makeMonitor(mt, &capturedEvents))
+ 
+-		testutil.AddTestServerAPIVersion(clientOpts)
++		integtest.AddTestServerAPIVersion(clientOpts)
+ 
+ 		client, err := mongo.Connect(context.Background(), clientOpts)
+ 		assert.Nil(mt, err, "Connect error: %v", err)
+@@ -361,7 +361,7 @@ func TestClientSideEncryptionCustomCrypt(t *testing.T) {
+ 			SetAutoEncryptionOptions(aeOpts)
+ 		cc := &customCrypt{}
+ 		clientOpts.Crypt = cc
+-		testutil.AddTestServerAPIVersion(clientOpts)
++		integtest.AddTestServerAPIVersion(clientOpts)
+ 
+ 		client, err := mongo.Connect(context.Background(), clientOpts)
+ 		defer client.Disconnect(context.Background())
+@@ -509,7 +509,7 @@ func TestFLE2DocsExample(t *testing.T) {
+ 		// Create two data keys.
+ 		{
+ 			cOpts := options.Client().ApplyURI(mtest.ClusterURI())
+-			testutil.AddTestServerAPIVersion(cOpts)
++			integtest.AddTestServerAPIVersion(cOpts)
+ 			keyVaultClient, err := mongo.Connect(context.Background(), cOpts)
+ 			assert.Nil(mt, err, "error in Connect: %v", err)
+ 			defer keyVaultClient.Disconnect(context.Background())
+@@ -550,7 +550,7 @@ func TestFLE2DocsExample(t *testing.T) {
+ 		var encryptedColl *mongo.Collection
+ 		{
+ 			cOpts := options.Client().ApplyURI(mtest.ClusterURI())
+-			testutil.AddTestServerAPIVersion(cOpts)
++			integtest.AddTestServerAPIVersion(cOpts)
+ 			aeOpts := options.AutoEncryption().SetKmsProviders(kmsProvidersMap).SetKeyVaultNamespace("keyvault.datakeys").SetEncryptedFieldsMap(encryptedFieldsMap).SetExtraOptions(getCryptSharedLibExtraOptions())
+ 			cOpts.SetAutoEncryptionOptions(aeOpts)
+ 			encryptedClient, err := mongo.Connect(context.Background(), cOpts)
+diff --git a/mongo/integration/client_test.go b/mongo/integration/client_test.go
+index 98639eec6c..de3c552a1f 100644
+--- a/mongo/integration/client_test.go
++++ b/mongo/integration/client_test.go
+@@ -21,12 +21,11 @@ import (
+ 	"go.mongodb.org/mongo-driver/bson/bsonrw"
+ 	"go.mongodb.org/mongo-driver/bson/primitive"
+ 	"go.mongodb.org/mongo-driver/event"
+-	"go.mongodb.org/mongo-driver/internal"
+ 	"go.mongodb.org/mongo-driver/internal/assert"
++	"go.mongodb.org/mongo-driver/internal/eventtest"
++	"go.mongodb.org/mongo-driver/internal/handshake"
++	"go.mongodb.org/mongo-driver/internal/integtest"
+ 	"go.mongodb.org/mongo-driver/internal/require"
+-	"go.mongodb.org/mongo-driver/internal/testutil"
+-	"go.mongodb.org/mongo-driver/internal/testutil/helpers"
+-	"go.mongodb.org/mongo-driver/internal/testutil/monitor"
+ 	"go.mongodb.org/mongo-driver/mongo"
+ 	"go.mongodb.org/mongo-driver/mongo/integration/mtest"
+ 	"go.mongodb.org/mongo-driver/mongo/options"
+@@ -184,7 +183,7 @@ func TestClient(t *testing.T) {
+ 					tc.password,
+ 				)
+ 				authClientOpts := options.Client().ApplyURI(cs)
+-				testutil.AddTestServerAPIVersion(authClientOpts)
++				integtest.AddTestServerAPIVersion(authClientOpts)
+ 				authClient, err := mongo.Connect(context.Background(), authClientOpts)
+ 				assert.Nil(mt, err, "authClient Connect error: %v", err)
+ 				defer func() { _ = authClient.Disconnect(context.Background()) }()
+@@ -329,7 +328,7 @@ func TestClient(t *testing.T) {
+ 			invalidClientOpts := options.Client().
+ 				SetServerSelectionTimeout(100 * time.Millisecond).SetHosts([]string{"invalid:123"}).
+ 				SetConnectTimeout(500 * time.Millisecond).SetSocketTimeout(500 * time.Millisecond)
+-			testutil.AddTestServerAPIVersion(invalidClientOpts)
++			integtest.AddTestServerAPIVersion(invalidClientOpts)
+ 			client, err := mongo.Connect(context.Background(), invalidClientOpts)
+ 			assert.Nil(mt, err, "Connect error: %v", err)
+ 			err = client.Ping(context.Background(), readpref.Primary())
+@@ -467,7 +466,7 @@ func TestClient(t *testing.T) {
+ 		// First two messages should be connection handshakes: one for the heartbeat connection and the other for the
+ 		// application connection.
+ 		for idx, pair := range msgPairs[:2] {
+-			helloCommand := internal.LegacyHello
++			helloCommand := handshake.LegacyHello
+ 			//  Expect "hello" command name with API version.
+ 			if os.Getenv("REQUIRE_API_VERSION") == "true" {
+ 				helloCommand = "hello"
+@@ -530,7 +529,7 @@ func TestClient(t *testing.T) {
+ 
+ 		// Assert that the minimum RTT is eventually >250ms.
+ 		topo := getTopologyFromClient(mt.Client)
+-		helpers.AssertSoon(mt, func(ctx context.Context) {
++		assert.Soon(mt, func(ctx context.Context) {
+ 			for {
+ 				// Stop loop if callback has been canceled.
+ 				select {
+@@ -570,7 +569,7 @@ func TestClient(t *testing.T) {
+ 
+ 		// Reset the client with a dialer that delays all network round trips by 300ms and set the
+ 		// heartbeat interval to 100ms to reduce the time it takes to collect RTT samples.
+-		tpm := monitor.NewTestPoolMonitor()
++		tpm := eventtest.NewTestPoolMonitor()
+ 		mt.ResetClient(options.Client().
+ 			SetPoolMonitor(tpm.PoolMonitor).
+ 			SetDialer(newSlowConnDialer(slowConnDialerDelay)).
+@@ -578,7 +577,7 @@ func TestClient(t *testing.T) {
+ 
+ 		// Assert that the minimum RTT is eventually >250ms.
+ 		topo := getTopologyFromClient(mt.Client)
+-		helpers.AssertSoon(mt, func(ctx context.Context) {
++		assert.Soon(mt, func(ctx context.Context) {
+ 			for {
+ 				// Stop loop if callback has been canceled.
+ 				select {
+@@ -629,7 +628,7 @@ func TestClient(t *testing.T) {
+ 
+ 		// Assert that RTT90s are eventually >300ms.
+ 		topo := getTopologyFromClient(mt.Client)
+-		helpers.AssertSoon(mt, func(ctx context.Context) {
++		assert.Soon(mt, func(ctx context.Context) {
+ 			for {
+ 				// Stop loop if callback has been canceled.
+ 				select {
+@@ -671,7 +670,7 @@ func TestClient(t *testing.T) {
+ 		// heartbeat interval to 100ms to reduce the time it takes to collect RTT samples, and
+ 		// set a Timeout of 0 (infinite) on the Client to ensure that RTT90 is used as a sending
+ 		// threshold.
+-		tpm := monitor.NewTestPoolMonitor()
++		tpm := eventtest.NewTestPoolMonitor()
+ 		mt.ResetClient(options.Client().
+ 			SetPoolMonitor(tpm.PoolMonitor).
+ 			SetDialer(newSlowConnDialer(slowConnDialerDelay)).
+@@ -680,7 +679,7 @@ func TestClient(t *testing.T) {
+ 
+ 		// Assert that RTT90s are eventually >275ms.
+ 		topo := getTopologyFromClient(mt.Client)
+-		helpers.AssertSoon(mt, func(ctx context.Context) {
++		assert.Soon(mt, func(ctx context.Context) {
+ 			for {
+ 				// Stop loop if callback has been canceled.
+ 				select {
+@@ -734,8 +733,8 @@ func TestClient(t *testing.T) {
+ 		// First message should a be connection handshake. This handshake should use OP_QUERY as the OpCode, as wire
+ 		// version is not yet known.
+ 		pair := msgPairs[0]
+-		assert.Equal(mt, internal.LegacyHello, pair.CommandName, "expected command name %s at index 0, got %s",
+-			internal.LegacyHello, pair.CommandName)
++		assert.Equal(mt, handshake.LegacyHello, pair.CommandName, "expected command name %s at index 0, got %s",
++			handshake.LegacyHello, pair.CommandName)
+ 		assert.Equal(mt, wiremessage.OpQuery, pair.Sent.OpCode,
+ 			"expected 'OP_QUERY' OpCode in wire message, got %q", pair.Sent.OpCode.String())
+ 
+@@ -971,7 +970,7 @@ func TestClientStress(t *testing.T) {
+ 		// pool configurations.
+ 		maxPoolSizes := []uint64{1, 10, 100}
+ 		for _, maxPoolSize := range maxPoolSizes {
+-			tpm := monitor.NewTestPoolMonitor()
++			tpm := eventtest.NewTestPoolMonitor()
+ 			maxPoolSizeOpt := mtest.NewOptions().ClientOptions(
+ 				options.Client().
+ 					SetPoolMonitor(tpm.PoolMonitor).
+diff --git a/mongo/integration/crud_helpers_test.go b/mongo/integration/crud_helpers_test.go
+index 86e1808513..a60adeb683 100644
+--- a/mongo/integration/crud_helpers_test.go
++++ b/mongo/integration/crud_helpers_test.go
+@@ -19,8 +19,8 @@ import (
+ 	"go.mongodb.org/mongo-driver/bson/bsontype"
+ 	"go.mongodb.org/mongo-driver/bson/primitive"
+ 	"go.mongodb.org/mongo-driver/internal/assert"
+-	"go.mongodb.org/mongo-driver/internal/testutil"
+-	"go.mongodb.org/mongo-driver/internal/testutil/helpers"
++	"go.mongodb.org/mongo-driver/internal/bsonutil"
++	"go.mongodb.org/mongo-driver/internal/integtest"
+ 	"go.mongodb.org/mongo-driver/mongo"
+ 	"go.mongodb.org/mongo-driver/mongo/gridfs"
+ 	"go.mongodb.org/mongo-driver/mongo/integration/mtest"
+@@ -121,7 +121,7 @@ func killSessions(mt *mtest.T) {
+ // replica sets, the command is run against the primary. sharded clusters, the command is run against each mongos.
+ func runCommandOnAllServers(commandFn func(client *mongo.Client) error) error {
+ 	opts := options.Client().ApplyURI(mtest.ClusterURI())
+-	testutil.AddTestServerAPIVersion(opts)
++	integtest.AddTestServerAPIVersion(opts)
+ 
+ 	if mtest.ClusterTopologyKind() != mtest.Sharded {
+ 		client, err := mongo.Connect(context.Background(), opts)
+@@ -172,7 +172,7 @@ func executeAggregate(mt *mtest.T, agg aggregator, sess mongo.Session, args bson
+ 
+ 		switch key {
+ 		case "pipeline":
+-			pipeline = helpers.RawToInterfaces(helpers.RawToDocuments(val.Array())...)
++			pipeline = bsonutil.RawToInterfaces(bsonutil.RawToDocuments(val.Array())...)
+ 		case "batchSize":
+ 			opts.SetBatchSize(val.Int32())
+ 		case "collation":
+@@ -210,7 +210,7 @@ func executeWatch(mt *mtest.T, w watcher, sess mongo.Session, args bson.Raw) (*m
+ 
+ 		switch key {
+ 		case "pipeline":
+-			pipeline = helpers.RawToInterfaces(helpers.RawToDocuments(val.Array())...)
++			pipeline = bsonutil.RawToInterfaces(bsonutil.RawToDocuments(val.Array())...)
+ 		default:
+ 			mt.Fatalf("unrecognized watch option: %v", key)
+ 		}
+@@ -313,7 +313,7 @@ func executeInsertMany(mt *mtest.T, sess mongo.Session, args bson.Raw) (*mongo.I
+ 
+ 		switch key {
+ 		case "documents":
+-			docs = helpers.RawToInterfaces(helpers.RawToDocuments(val.Array())...)
++			docs = bsonutil.RawToInterfaces(bsonutil.RawToDocuments(val.Array())...)
+ 		case "options":
+ 			// Some of the older tests use this to set the "ordered" option
+ 			optsDoc := val.Document()
+@@ -700,7 +700,7 @@ func executeFindOneAndUpdate(mt *mtest.T, sess mongo.Session, args bson.Raw) *mo
+ 			update = createUpdate(mt, val)
+ 		case "arrayFilters":
+ 			opts = opts.SetArrayFilters(options.ArrayFilters{
+-				Filters: helpers.RawToInterfaces(helpers.RawToDocuments(val.Array())...),
++				Filters: bsonutil.RawToInterfaces(bsonutil.RawToDocuments(val.Array())...),
+ 			})
+ 		case "sort":
+ 			opts = opts.SetSort(val.Document())
+@@ -882,7 +882,7 @@ func executeUpdateOne(mt *mtest.T, sess mongo.Session, args bson.Raw) (*mongo.Up
+ 			update = createUpdate(mt, val)
+ 		case "arrayFilters":
+ 			opts = opts.SetArrayFilters(options.ArrayFilters{
+-				Filters: helpers.RawToInterfaces(helpers.RawToDocuments(val.Array())...),
++				Filters: bsonutil.RawToInterfaces(bsonutil.RawToDocuments(val.Array())...),
+ 			})
+ 		case "upsert":
+ 			opts = opts.SetUpsert(val.Boolean())
+@@ -930,7 +930,7 @@ func executeUpdateMany(mt *mtest.T, sess mongo.Session, args bson.Raw) (*mongo.U
+ 			update = createUpdate(mt, val)
+ 		case "arrayFilters":
+ 			opts = opts.SetArrayFilters(options.ArrayFilters{
+-				Filters: helpers.RawToInterfaces(helpers.RawToDocuments(val.Array())...),
++				Filters: bsonutil.RawToInterfaces(bsonutil.RawToDocuments(val.Array())...),
+ 			})
+ 		case "upsert":
+ 			opts = opts.SetUpsert(val.Boolean())
+@@ -1116,7 +1116,7 @@ func createBulkWriteModel(mt *mtest.T, rawModel bson.Raw) mongo.WriteModel {
+ 		}
+ 		if arrayFilters, err := args.LookupErr("arrayFilters"); err == nil {
+ 			uom.SetArrayFilters(options.ArrayFilters{
+-				Filters: helpers.RawToInterfaces(helpers.RawToDocuments(arrayFilters.Array())...),
++				Filters: bsonutil.RawToInterfaces(bsonutil.RawToDocuments(arrayFilters.Array())...),
+ 			})
+ 		}
+ 		if hintVal, err := args.LookupErr("hint"); err == nil {
+@@ -1139,7 +1139,7 @@ func createBulkWriteModel(mt *mtest.T, rawModel bson.Raw) mongo.WriteModel {
+ 		}
+ 		if arrayFilters, err := args.LookupErr("arrayFilters"); err == nil {
+ 			umm.SetArrayFilters(options.ArrayFilters{
+-				Filters: helpers.RawToInterfaces(helpers.RawToDocuments(arrayFilters.Array())...),
++				Filters: bsonutil.RawToInterfaces(bsonutil.RawToDocuments(arrayFilters.Array())...),
+ 			})
+ 		}
+ 		if hintVal, err := args.LookupErr("hint"); err == nil {
+@@ -1384,7 +1384,7 @@ func executeCreateCollection(mt *mtest.T, sess mongo.Session, args bson.Raw) err
+ func executeAdminCommand(mt *mtest.T, op *operation) {
+ 	// Per the streamable hello test format description, a separate client must be used to execute this operation.
+ 	clientOpts := options.Client().ApplyURI(mtest.ClusterURI())
+-	testutil.AddTestServerAPIVersion(clientOpts)
++	integtest.AddTestServerAPIVersion(clientOpts)
+ 	client, err := mongo.Connect(context.Background(), clientOpts)
+ 	assert.Nil(mt, err, "Connect error: %v", err)
+ 	defer func() {
+diff --git a/mongo/integration/crud_spec_test.go b/mongo/integration/crud_spec_test.go
+index 1e29f866f5..04688aa528 100644
+--- a/mongo/integration/crud_spec_test.go
++++ b/mongo/integration/crud_spec_test.go
+@@ -18,7 +18,7 @@ import (
+ 
+ 	"go.mongodb.org/mongo-driver/bson"
+ 	"go.mongodb.org/mongo-driver/internal/assert"
+-	"go.mongodb.org/mongo-driver/internal/testutil/helpers"
++	"go.mongodb.org/mongo-driver/internal/bsonutil"
+ 	"go.mongodb.org/mongo-driver/mongo"
+ 	"go.mongodb.org/mongo-driver/mongo/integration/mtest"
+ )
+@@ -112,7 +112,7 @@ func runCrudFile(t *testing.T, file string) {
+ 
+ func runCrudTest(mt *mtest.T, test crudTest, testFile crudTestFile) {
+ 	if len(testFile.Data) > 0 {
+-		docs := helpers.RawToInterfaces(testFile.Data...)
++		docs := bsonutil.RawToInterfaces(testFile.Data...)
+ 		_, err := mt.Coll.InsertMany(context.Background(), docs)
+ 		assert.Nil(mt, err, "InsertMany error: %v", err)
+ 	}
+diff --git a/mongo/integration/csot_cse_prose_test.go b/mongo/integration/csot_cse_prose_test.go
+index feead10fb6..c207174833 100644
+--- a/mongo/integration/csot_cse_prose_test.go
++++ b/mongo/integration/csot_cse_prose_test.go
+@@ -16,7 +16,7 @@ import (
+ 	"go.mongodb.org/mongo-driver/bson"
+ 	"go.mongodb.org/mongo-driver/event"
+ 	"go.mongodb.org/mongo-driver/internal/assert"
+-	"go.mongodb.org/mongo-driver/internal/testutil"
++	"go.mongodb.org/mongo-driver/internal/integtest"
+ 	"go.mongodb.org/mongo-driver/mongo"
+ 	"go.mongodb.org/mongo-driver/mongo/integration/mtest"
+ 	"go.mongodb.org/mongo-driver/mongo/options"
+@@ -47,7 +47,7 @@ func TestCSOTClientSideEncryptionProse(t *testing.T) {
+ 			aeo := options.AutoEncryption().SetKmsProviders(kmsProviders).
+ 				SetExtraOptions(mongocryptdSpawnArgs)
+ 			cliOpts := options.Client().ApplyURI(mtest.ClusterURI()).SetAutoEncryptionOptions(aeo)
+-			testutil.AddTestServerAPIVersion(cliOpts)
++			integtest.AddTestServerAPIVersion(cliOpts)
+ 			encClient, err := mongo.Connect(context.Background(), cliOpts)
+ 			assert.Nil(mt, err, "Connect error: %v", err)
+ 			defer func() {
+@@ -70,7 +70,7 @@ func TestCSOTClientSideEncryptionProse(t *testing.T) {
+ 			}
+ 			mcryptOpts := options.Client().SetMonitor(mcryptMonitor).
+ 				ApplyURI("mongodb://localhost:23000/?timeoutMS=1000")
+-			testutil.AddTestServerAPIVersion(mcryptOpts)
++			integtest.AddTestServerAPIVersion(mcryptOpts)
+ 			mcryptClient, err := mongo.Connect(context.Background(), mcryptOpts)
+ 			assert.Nil(mt, err, "mongocryptd Connect error: %v", err)
+ 			defer func() {
+diff --git a/mongo/integration/csot_prose_test.go b/mongo/integration/csot_prose_test.go
+index 0fb9c1a9a2..c53982f918 100644
+--- a/mongo/integration/csot_prose_test.go
++++ b/mongo/integration/csot_prose_test.go
+@@ -15,8 +15,7 @@ import (
+ 	"go.mongodb.org/mongo-driver/bson"
+ 	"go.mongodb.org/mongo-driver/event"
+ 	"go.mongodb.org/mongo-driver/internal/assert"
+-	"go.mongodb.org/mongo-driver/internal/testutil"
+-	"go.mongodb.org/mongo-driver/internal/testutil/helpers"
++	"go.mongodb.org/mongo-driver/internal/integtest"
+ 	"go.mongodb.org/mongo-driver/mongo"
+ 	"go.mongodb.org/mongo-driver/mongo/integration/mtest"
+ 	"go.mongodb.org/mongo-driver/mongo/options"
+@@ -58,7 +57,7 @@ func TestCSOTProse(t *testing.T) {
+ 			SetTimeout(2 * time.Second).
+ 			SetMonitor(cm).
+ 			ApplyURI(mtest.ClusterURI())
+-		testutil.AddTestServerAPIVersion(cliOptions)
++		integtest.AddTestServerAPIVersion(cliOptions)
+ 		cli, err := mongo.Connect(context.Background(), cliOptions)
+ 		assert.Nil(mt, err, "Connect error: %v", err)
+ 
+@@ -97,7 +96,7 @@ func TestCSOTProse(t *testing.T) {
+ 			}
+ 
+ 			// Assert that Ping fails within 150ms due to server selection timeout.
+-			helpers.AssertSoon(mt, callback, 150*time.Millisecond)
++			assert.Soon(mt, callback, 150*time.Millisecond)
+ 		})
+ 
+ 		cliOpts = options.Client().ApplyURI("mongodb://invalid/?timeoutMS=100&serverSelectionTimeoutMS=200")
+@@ -111,7 +110,7 @@ func TestCSOTProse(t *testing.T) {
+ 			}
+ 
+ 			// Assert that Ping fails within 150ms due to timeout.
+-			helpers.AssertSoon(mt, callback, 150*time.Millisecond)
++			assert.Soon(mt, callback, 150*time.Millisecond)
+ 		})
+ 
+ 		cliOpts = options.Client().ApplyURI("mongodb://invalid/?timeoutMS=200&serverSelectionTimeoutMS=100")
+@@ -125,7 +124,7 @@ func TestCSOTProse(t *testing.T) {
+ 			}
+ 
+ 			// Assert that Ping fails within 150ms due to server selection timeout.
+-			helpers.AssertSoon(mt, callback, 150*time.Millisecond)
++			assert.Soon(mt, callback, 150*time.Millisecond)
+ 		})
+ 
+ 		cliOpts = options.Client().ApplyURI("mongodb://invalid/?timeoutMS=0&serverSelectionTimeoutMS=100")
+@@ -139,7 +138,7 @@ func TestCSOTProse(t *testing.T) {
+ 			}
+ 
+ 			// Assert that Ping fails within 150ms due to server selection timeout.
+-			helpers.AssertSoon(mt, callback, 150*time.Millisecond)
++			assert.Soon(mt, callback, 150*time.Millisecond)
+ 		})
+ 	})
+ }
+diff --git a/mongo/integration/database_test.go b/mongo/integration/database_test.go
+index 6a87e88e8a..2094fb07ae 100644
+--- a/mongo/integration/database_test.go
++++ b/mongo/integration/database_test.go
+@@ -16,8 +16,8 @@ import (
+ 	"go.mongodb.org/mongo-driver/bson"
+ 	"go.mongodb.org/mongo-driver/bson/bsontype"
+ 	"go.mongodb.org/mongo-driver/bson/primitive"
+-	"go.mongodb.org/mongo-driver/internal"
+ 	"go.mongodb.org/mongo-driver/internal/assert"
++	"go.mongodb.org/mongo-driver/internal/handshake"
+ 	"go.mongodb.org/mongo-driver/mongo"
+ 	"go.mongodb.org/mongo-driver/mongo/integration/mtest"
+ 	"go.mongodb.org/mongo-driver/mongo/options"
+@@ -42,7 +42,7 @@ func TestDatabase(t *testing.T) {
+ 
+ 	mt.RunOpts("run command", noClientOpts, func(mt *mtest.T) {
+ 		mt.Run("decode raw", func(mt *mtest.T) {
+-			res, err := mt.DB.RunCommand(context.Background(), bson.D{{internal.LegacyHello, 1}}).DecodeBytes()
++			res, err := mt.DB.RunCommand(context.Background(), bson.D{{handshake.LegacyHello, 1}}).DecodeBytes()
+ 			assert.Nil(mt, err, "RunCommand error: %v", err)
+ 
+ 			ok, err := res.LookupErr("ok")
+@@ -50,7 +50,7 @@ func TestDatabase(t *testing.T) {
+ 			assert.Equal(mt, bson.TypeDouble, ok.Type, "expected ok type %v, got %v", bson.TypeDouble, ok.Type)
+ 			assert.Equal(mt, 1.0, ok.Double(), "expected ok value 1.0, got %v", ok.Double())
+ 
+-			hello, err := res.LookupErr(internal.LegacyHelloLowercase)
++			hello, err := res.LookupErr(handshake.LegacyHelloLowercase)
+ 			assert.Nil(mt, err, "legacy hello response field not found in result")
+ 			assert.Equal(mt, bson.TypeBoolean, hello.Type, "expected hello type %v, got %v", bson.TypeBoolean, hello.Type)
+ 			assert.True(mt, hello.Boolean(), "expected hello value true, got false")
+@@ -76,14 +76,14 @@ func TestDatabase(t *testing.T) {
+ 
+ 			runCmdOpts := options.RunCmd().
+ 				SetReadPreference(readpref.SecondaryPreferred())
+-			err := mt.DB.RunCommand(context.Background(), bson.D{{internal.LegacyHello, 1}}, runCmdOpts).Err()
++			err := mt.DB.RunCommand(context.Background(), bson.D{{handshake.LegacyHello, 1}}, runCmdOpts).Err()
+ 			assert.Nil(mt, err, "RunCommand error: %v", err)
+ 
+ 			expected := bson.Raw(bsoncore.NewDocumentBuilder().
+ 				AppendString("mode", "secondaryPreferred").
+ 				Build())
+ 			evt := mt.GetStartedEvent()
+-			assert.Equal(mt, internal.LegacyHello, evt.CommandName, "expected legacy hello command to be sent, got %q", evt.CommandName)
++			assert.Equal(mt, handshake.LegacyHello, evt.CommandName, "expected legacy hello command to be sent, got %q", evt.CommandName)
+ 			actual, ok := evt.Command.Lookup("$readPreference").DocumentOK()
+ 			assert.True(mt, ok, "expected command %v to contain a $readPreference document", evt.Command)
+ 			assert.Equal(mt, expected, actual, "expected $readPreference document %v, got %v", expected, actual)
+diff --git a/mongo/integration/errors_test.go b/mongo/integration/errors_test.go
+index e47cd7dc45..87170e353e 100644
+--- a/mongo/integration/errors_test.go
++++ b/mongo/integration/errors_test.go
+@@ -19,7 +19,7 @@ import (
+ 
+ 	"go.mongodb.org/mongo-driver/bson"
+ 	"go.mongodb.org/mongo-driver/internal/assert"
+-	"go.mongodb.org/mongo-driver/internal/testutil"
++	"go.mongodb.org/mongo-driver/internal/integtest"
+ 	"go.mongodb.org/mongo-driver/mongo"
+ 	"go.mongodb.org/mongo-driver/mongo/integration/mtest"
+ 	"go.mongodb.org/mongo-driver/mongo/options"
+@@ -86,7 +86,7 @@ func TestErrors(t *testing.T) {
+ 			})
+ 
+ 			clientOpts := options.Client().ApplyURI(mtest.ClusterURI())
+-			testutil.AddTestServerAPIVersion(clientOpts)
++			integtest.AddTestServerAPIVersion(clientOpts)
+ 			client, err := mongo.Connect(context.Background(), clientOpts)
+ 			assert.Nil(mt, err, "Connect error: %v", err)
+ 			defer client.Disconnect(context.Background())
+diff --git a/mongo/integration/gridfs_test.go b/mongo/integration/gridfs_test.go
+index 1183f90edb..58f11e57da 100644
+--- a/mongo/integration/gridfs_test.go
++++ b/mongo/integration/gridfs_test.go
+@@ -19,7 +19,7 @@ import (
+ 	"go.mongodb.org/mongo-driver/bson/primitive"
+ 	"go.mongodb.org/mongo-driver/event"
+ 	"go.mongodb.org/mongo-driver/internal/assert"
+-	"go.mongodb.org/mongo-driver/internal/testutil/israce"
++	"go.mongodb.org/mongo-driver/internal/israce"
+ 	"go.mongodb.org/mongo-driver/mongo"
+ 	"go.mongodb.org/mongo-driver/mongo/gridfs"
+ 	"go.mongodb.org/mongo-driver/mongo/integration/mtest"
+diff --git a/mongo/integration/handshake_test.go b/mongo/integration/handshake_test.go
+index d23ac8af87..e888875eeb 100644
+--- a/mongo/integration/handshake_test.go
++++ b/mongo/integration/handshake_test.go
+@@ -14,8 +14,8 @@ import (
+ 	"testing"
+ 
+ 	"go.mongodb.org/mongo-driver/bson"
+-	"go.mongodb.org/mongo-driver/internal"
+ 	"go.mongodb.org/mongo-driver/internal/assert"
++	"go.mongodb.org/mongo-driver/internal/handshake"
+ 	"go.mongodb.org/mongo-driver/internal/require"
+ 	"go.mongodb.org/mongo-driver/mongo/integration/mtest"
+ 	"go.mongodb.org/mongo-driver/version"
+@@ -188,7 +188,7 @@ func TestHandshakeProse(t *testing.T) {
+ 
+ 			// First two messages are handshake messages
+ 			for idx, pair := range messages[:2] {
+-				hello := internal.LegacyHello
++				hello := handshake.LegacyHello
+ 				//  Expect "hello" command name with API version.
+ 				if os.Getenv("REQUIRE_API_VERSION") == "true" {
+ 					hello = "hello"
+diff --git a/mongo/integration/mtest/mongotest.go b/mongo/integration/mtest/mongotest.go
+index 034791d655..fc914305ea 100644
+--- a/mongo/integration/mtest/mongotest.go
++++ b/mongo/integration/mtest/mongotest.go
+@@ -17,8 +17,8 @@ import (
+ 
+ 	"go.mongodb.org/mongo-driver/bson"
+ 	"go.mongodb.org/mongo-driver/event"
+-	"go.mongodb.org/mongo-driver/internal"
+ 	"go.mongodb.org/mongo-driver/internal/assert"
++	"go.mongodb.org/mongo-driver/internal/csfle"
+ 	"go.mongodb.org/mongo-driver/mongo"
+ 	"go.mongodb.org/mongo-driver/mongo/options"
+ 	"go.mongodb.org/mongo-driver/mongo/readconcern"
+@@ -492,13 +492,13 @@ func DropEncryptedCollection(t *T, coll *mongo.Collection, encryptedFields inter
+ 
+ 	// Drop the two encryption-related, associated collections: `escCollection` and `ecocCollection`.
+ 	// Drop ESCCollection.
+-	escCollection, err := internal.GetEncryptedStateCollectionName(efBSON, coll.Name(), internal.EncryptedStateCollection)
++	escCollection, err := csfle.GetEncryptedStateCollectionName(efBSON, coll.Name(), csfle.EncryptedStateCollection)
+ 	assert.Nil(t, err, "error in getEncryptedStateCollectionName: %v", err)
+ 	err = coll.Database().Collection(escCollection).Drop(context.Background())
+ 	assert.Nil(t, err, "error in Drop: %v", err)
+ 
+ 	// Drop ECOCCollection.
+-	ecocCollection, err := internal.GetEncryptedStateCollectionName(efBSON, coll.Name(), internal.EncryptedCompactionCollection)
++	ecocCollection, err := csfle.GetEncryptedStateCollectionName(efBSON, coll.Name(), csfle.EncryptedCompactionCollection)
+ 	assert.Nil(t, err, "error in getEncryptedStateCollectionName: %v", err)
+ 	err = coll.Database().Collection(ecocCollection).Drop(context.Background())
+ 	assert.Nil(t, err, "error in Drop: %v", err)
+diff --git a/mongo/integration/mtest/opmsg_deployment.go b/mongo/integration/mtest/opmsg_deployment.go
+index b4a9c68457..ae4e359380 100644
+--- a/mongo/integration/mtest/opmsg_deployment.go
++++ b/mongo/integration/mtest/opmsg_deployment.go
+@@ -11,7 +11,7 @@ import (
+ 	"errors"
+ 
+ 	"go.mongodb.org/mongo-driver/bson"
+-	"go.mongodb.org/mongo-driver/internal"
++	"go.mongodb.org/mongo-driver/internal/csot"
+ 	"go.mongodb.org/mongo-driver/mongo/address"
+ 	"go.mongodb.org/mongo-driver/mongo/description"
+ 	"go.mongodb.org/mongo-driver/x/bsonx/bsoncore"
+@@ -148,7 +148,7 @@ func (md *mockDeployment) Connection(context.Context) (driver.Connection, error)
+ 
+ // RTTMonitor implements the driver.Server interface.
+ func (md *mockDeployment) RTTMonitor() driver.RTTMonitor {
+-	return &internal.ZeroRTTMonitor{}
++	return &csot.ZeroRTTMonitor{}
+ }
+ 
+ // Connect is a no-op method which implements the driver.Connector interface.
+diff --git a/mongo/integration/mtest/setup.go b/mongo/integration/mtest/setup.go
+index 449c9120f2..fd26629069 100644
+--- a/mongo/integration/mtest/setup.go
++++ b/mongo/integration/mtest/setup.go
+@@ -17,7 +17,7 @@ import (
+ 	"time"
+ 
+ 	"go.mongodb.org/mongo-driver/bson"
+-	"go.mongodb.org/mongo-driver/internal/testutil"
++	"go.mongodb.org/mongo-driver/internal/integtest"
+ 	"go.mongodb.org/mongo-driver/mongo"
+ 	"go.mongodb.org/mongo-driver/mongo/description"
+ 	"go.mongodb.org/mongo-driver/mongo/options"
+@@ -81,7 +81,7 @@ func Setup(setupOpts ...*SetupOptions) error {
+ 		uri = *opts.URI
+ 	default:
+ 		var err error
+-		uri, err = testutil.MongoDBURI()
++		uri, err = integtest.MongoDBURI()
+ 		if err != nil {
+ 			return fmt.Errorf("error getting uri: %v", err)
+ 		}
+@@ -96,7 +96,7 @@ func Setup(setupOpts ...*SetupOptions) error {
+ 	testContext.requireAPIVersion = os.Getenv("REQUIRE_API_VERSION") == "true"
+ 
+ 	clientOpts := options.Client().ApplyURI(uri)
+-	testutil.AddTestServerAPIVersion(clientOpts)
++	integtest.AddTestServerAPIVersion(clientOpts)
+ 
+ 	cfg, err := topology.NewConfig(clientOpts, nil)
+ 	if err != nil {
+diff --git a/mongo/integration/primary_stepdown_test.go b/mongo/integration/primary_stepdown_test.go
+index a87db483b1..63b38fb0ba 100644
+--- a/mongo/integration/primary_stepdown_test.go
++++ b/mongo/integration/primary_stepdown_test.go
+@@ -12,7 +12,7 @@ import (
+ 
+ 	"go.mongodb.org/mongo-driver/bson"
+ 	"go.mongodb.org/mongo-driver/internal/assert"
+-	"go.mongodb.org/mongo-driver/internal/testutil/monitor"
++	"go.mongodb.org/mongo-driver/internal/eventtest"
+ 	"go.mongodb.org/mongo-driver/mongo"
+ 	"go.mongodb.org/mongo-driver/mongo/integration/mtest"
+ 	"go.mongodb.org/mongo-driver/mongo/options"
+@@ -30,7 +30,7 @@ func TestConnectionsSurvivePrimaryStepDown(t *testing.T) {
+ 
+ 	getMoreOpts := mtest.NewOptions().MinServerVersion("4.2")
+ 	mt.RunOpts("getMore iteration", getMoreOpts, func(mt *mtest.T) {
+-		tpm := monitor.NewTestPoolMonitor()
++		tpm := eventtest.NewTestPoolMonitor()
+ 		mt.ResetClient(options.Client().
+ 			SetRetryWrites(false).
+ 			SetPoolMonitor(tpm.PoolMonitor))
+@@ -74,7 +74,7 @@ func TestConnectionsSurvivePrimaryStepDown(t *testing.T) {
+ 				opts.MaxServerVersion(tc.maxVersion)
+ 			}
+ 			mt.RunOpts(tc.name, opts, func(mt *mtest.T) {
+-				tpm := monitor.NewTestPoolMonitor()
++				tpm := eventtest.NewTestPoolMonitor()
+ 				mt.ResetClient(options.Client().
+ 					SetRetryWrites(false).
+ 					SetPoolMonitor(tpm.PoolMonitor).
+diff --git a/mongo/integration/retryable_reads_prose_test.go b/mongo/integration/retryable_reads_prose_test.go
+index dad3f86535..b83414e518 100644
+--- a/mongo/integration/retryable_reads_prose_test.go
++++ b/mongo/integration/retryable_reads_prose_test.go
+@@ -15,13 +15,13 @@ import (
+ 	"go.mongodb.org/mongo-driver/bson"
+ 	"go.mongodb.org/mongo-driver/event"
+ 	"go.mongodb.org/mongo-driver/internal/assert"
+-	"go.mongodb.org/mongo-driver/internal/testutil/monitor"
++	"go.mongodb.org/mongo-driver/internal/eventtest"
+ 	"go.mongodb.org/mongo-driver/mongo/integration/mtest"
+ 	"go.mongodb.org/mongo-driver/mongo/options"
+ )
+ 
+ func TestRetryableReadsProse(t *testing.T) {
+-	tpm := monitor.NewTestPoolMonitor()
++	tpm := eventtest.NewTestPoolMonitor()
+ 
+ 	// Client options with MaxPoolSize of 1 and RetryReads used per the test description.
+ 	// Lower HeartbeatInterval used to speed the test up for any server that uses streaming
+diff --git a/mongo/integration/retryable_writes_prose_test.go b/mongo/integration/retryable_writes_prose_test.go
+index 40710fa4e8..e731a09ade 100644
+--- a/mongo/integration/retryable_writes_prose_test.go
++++ b/mongo/integration/retryable_writes_prose_test.go
+@@ -18,8 +18,8 @@ import (
+ 	"go.mongodb.org/mongo-driver/bson/bsontype"
+ 	"go.mongodb.org/mongo-driver/event"
+ 	"go.mongodb.org/mongo-driver/internal/assert"
++	"go.mongodb.org/mongo-driver/internal/eventtest"
+ 	"go.mongodb.org/mongo-driver/internal/require"
+-	"go.mongodb.org/mongo-driver/internal/testutil/monitor"
+ 	"go.mongodb.org/mongo-driver/mongo"
+ 	"go.mongodb.org/mongo-driver/mongo/integration/mtest"
+ 	"go.mongodb.org/mongo-driver/mongo/options"
+@@ -145,7 +145,7 @@ func TestRetryableWritesProse(t *testing.T) {
+ 		})
+ 	})
+ 
+-	tpm := monitor.NewTestPoolMonitor()
++	tpm := eventtest.NewTestPoolMonitor()
+ 	// Client options with MaxPoolSize of 1 and RetryWrites used per the test description.
+ 	// Lower HeartbeatInterval used to speed the test up for any server that uses streaming
+ 	// heartbeats. Only connect to first host in list for sharded clusters.
+diff --git a/mongo/integration/sdam_error_handling_test.go b/mongo/integration/sdam_error_handling_test.go
+index 72a13b4881..58cac9ccdd 100644
+--- a/mongo/integration/sdam_error_handling_test.go
++++ b/mongo/integration/sdam_error_handling_test.go
+@@ -18,8 +18,7 @@ import (
+ 
+ 	"go.mongodb.org/mongo-driver/bson"
+ 	"go.mongodb.org/mongo-driver/internal/assert"
+-	"go.mongodb.org/mongo-driver/internal/testutil/helpers"
+-	"go.mongodb.org/mongo-driver/internal/testutil/monitor"
++	"go.mongodb.org/mongo-driver/internal/eventtest"
+ 	"go.mongodb.org/mongo-driver/mongo"
+ 	"go.mongodb.org/mongo-driver/mongo/integration/mtest"
+ 	"go.mongodb.org/mongo-driver/mongo/options"
+@@ -72,7 +71,7 @@ func TestSDAMErrorHandling(t *testing.T) {
+ 				})
+ 
+ 				// Reset the client with the appName specified in the failpoint and the pool monitor.
+-				tpm := monitor.NewTestPoolMonitor()
++				tpm := eventtest.NewTestPoolMonitor()
+ 				mt.ResetClient(baseClientOpts().
+ 					SetAppName(appName).
+ 					SetPoolMonitor(tpm.PoolMonitor).
+@@ -87,7 +86,7 @@ func TestSDAMErrorHandling(t *testing.T) {
+ 				assert.True(mt, mongo.IsTimeout(err), "expected timeout error, got %v", err)
+ 				assert.True(mt, mongo.IsNetworkError(err), "expected network error, got %v", err)
+ 				// Assert that the pool is cleared within 2 seconds.
+-				helpers.AssertSoon(mt, func(ctx context.Context) {
++				assert.Soon(mt, func(ctx context.Context) {
+ 					ticker := time.NewTicker(100 * time.Millisecond)
+ 					defer ticker.Stop()
+ 
+@@ -124,7 +123,7 @@ func TestSDAMErrorHandling(t *testing.T) {
+ 					})
+ 
+ 					// Reset the client with the appName specified in the failpoint.
+-					tpm := monitor.NewTestPoolMonitor()
++					tpm := eventtest.NewTestPoolMonitor()
+ 					mt.ResetClient(baseClientOpts().
+ 						SetAppName(appName).
+ 						SetPoolMonitor(tpm.PoolMonitor).
+@@ -132,7 +131,7 @@ func TestSDAMErrorHandling(t *testing.T) {
+ 						SetMinPoolSize(5))
+ 
+ 					// Assert that the pool is cleared within 2 seconds.
+-					helpers.AssertSoon(mt, func(ctx context.Context) {
++					assert.Soon(mt, func(ctx context.Context) {
+ 						ticker := time.NewTicker(100 * time.Millisecond)
+ 						defer ticker.Stop()
+ 
+@@ -168,7 +167,7 @@ func TestSDAMErrorHandling(t *testing.T) {
+ 					})
+ 
+ 					// Reset the client with the appName specified in the failpoint.
+-					tpm := monitor.NewTestPoolMonitor()
++					tpm := eventtest.NewTestPoolMonitor()
+ 					mt.ResetClient(baseClientOpts().SetAppName(appName).SetPoolMonitor(tpm.PoolMonitor))
+ 
+ 					_, err := mt.Coll.InsertOne(context.Background(), bson.D{{"x", 1}})
+@@ -176,7 +175,7 @@ func TestSDAMErrorHandling(t *testing.T) {
+ 					assert.False(mt, mongo.IsTimeout(err), "expected non-timeout error, got %v", err)
+ 
+ 					// Assert that the pool is cleared within 2 seconds.
+-					helpers.AssertSoon(mt, func(ctx context.Context) {
++					assert.Soon(mt, func(ctx context.Context) {
+ 						ticker := time.NewTicker(100 * time.Millisecond)
+ 						defer ticker.Stop()
+ 
+@@ -214,7 +213,7 @@ func TestSDAMErrorHandling(t *testing.T) {
+ 				})
+ 
+ 				// Reset the client with the appName specified in the failpoint.
+-				tpm := monitor.NewTestPoolMonitor()
++				tpm := eventtest.NewTestPoolMonitor()
+ 				mt.ResetClient(baseClientOpts().SetAppName(appName).SetPoolMonitor(tpm.PoolMonitor))
+ 
+ 				_, err := mt.Coll.InsertOne(context.Background(), bson.D{{"test", 1}})
+@@ -223,7 +222,7 @@ func TestSDAMErrorHandling(t *testing.T) {
+ 				assert.True(mt, tpm.IsPoolCleared(), "expected pool to be cleared but was not")
+ 			})
+ 			mt.Run("pool not cleared on timeout network error", func(mt *mtest.T) {
+-				tpm := monitor.NewTestPoolMonitor()
++				tpm := eventtest.NewTestPoolMonitor()
+ 				mt.ResetClient(baseClientOpts().SetPoolMonitor(tpm.PoolMonitor))
+ 
+ 				_, err := mt.Coll.InsertOne(context.Background(), bson.D{{"x", 1}})
+@@ -240,7 +239,7 @@ func TestSDAMErrorHandling(t *testing.T) {
+ 				assert.False(mt, tpm.IsPoolCleared(), "expected pool to not be cleared but was")
+ 			})
+ 			mt.Run("pool not cleared on context cancellation", func(mt *mtest.T) {
+-				tpm := monitor.NewTestPoolMonitor()
++				tpm := eventtest.NewTestPoolMonitor()
+ 				mt.ResetClient(baseClientOpts().SetPoolMonitor(tpm.PoolMonitor))
+ 
+ 				_, err := mt.Coll.InsertOne(context.Background(), bson.D{{"x", 1}})
+@@ -313,7 +312,7 @@ func TestSDAMErrorHandling(t *testing.T) {
+ 					})
+ 
+ 					// Reset the client with the appName specified in the failpoint.
+-					tpm := monitor.NewTestPoolMonitor()
++					tpm := eventtest.NewTestPoolMonitor()
+ 					mt.ResetClient(baseClientOpts().SetAppName(appName).SetPoolMonitor(tpm.PoolMonitor))
+ 
+ 					runServerErrorsTest(mt, tc.isShutdownError, tpm)
+@@ -337,7 +336,7 @@ func TestSDAMErrorHandling(t *testing.T) {
+ 					})
+ 
+ 					// Reset the client with the appName specified in the failpoint.
+-					tpm := monitor.NewTestPoolMonitor()
++					tpm := eventtest.NewTestPoolMonitor()
+ 					mt.ResetClient(baseClientOpts().SetAppName(appName).SetPoolMonitor(tpm.PoolMonitor))
+ 
+ 					runServerErrorsTest(mt, tc.isShutdownError, tpm)
+@@ -347,7 +346,7 @@ func TestSDAMErrorHandling(t *testing.T) {
+ 	})
+ }
+ 
+-func runServerErrorsTest(mt *mtest.T, isShutdownError bool, tpm *monitor.TestPoolMonitor) {
++func runServerErrorsTest(mt *mtest.T, isShutdownError bool, tpm *eventtest.TestPoolMonitor) {
+ 	mt.Helper()
+ 
+ 	_, err := mt.Coll.InsertOne(context.Background(), bson.D{{"x", 1}})
+diff --git a/mongo/integration/sdam_prose_test.go b/mongo/integration/sdam_prose_test.go
+index 713f449658..2225a60a50 100644
+--- a/mongo/integration/sdam_prose_test.go
++++ b/mongo/integration/sdam_prose_test.go
+@@ -12,9 +12,8 @@ import (
+ 	"testing"
+ 	"time"
+ 
+-	"go.mongodb.org/mongo-driver/internal"
+ 	"go.mongodb.org/mongo-driver/internal/assert"
+-	"go.mongodb.org/mongo-driver/internal/testutil/helpers"
++	"go.mongodb.org/mongo-driver/internal/handshake"
+ 	"go.mongodb.org/mongo-driver/mongo/description"
+ 	"go.mongodb.org/mongo-driver/mongo/integration/mtest"
+ 	"go.mongodb.org/mongo-driver/mongo/options"
+@@ -109,7 +108,7 @@ func TestSDAMProse(t *testing.T) {
+ 					Times: 1000,
+ 				},
+ 				Data: mtest.FailPointData{
+-					FailCommands:    []string{internal.LegacyHello, "hello"},
++					FailCommands:    []string{handshake.LegacyHello, "hello"},
+ 					BlockConnection: true,
+ 					BlockTimeMS:     500,
+ 					AppName:         "streamingRttTest",
+@@ -136,7 +135,7 @@ func TestSDAMProse(t *testing.T) {
+ 					time.Sleep(500 * time.Millisecond)
+ 				}
+ 			}
+-			helpers.AssertSoon(t, callback, defaultCallbackTimeout)
++			assert.Soon(t, callback, defaultCallbackTimeout)
+ 		})
+ 	})
+ 
+@@ -148,7 +147,7 @@ func TestSDAMProse(t *testing.T) {
+ 				Times: 5,
+ 			},
+ 			Data: mtest.FailPointData{
+-				FailCommands: []string{internal.LegacyHello, "hello"},
++				FailCommands: []string{handshake.LegacyHello, "hello"},
+ 				ErrorCode:    1234,
+ 				AppName:      "SDAMMinHeartbeatFrequencyTest",
+ 			},
+diff --git a/mongo/integration/server_selection_prose_test.go b/mongo/integration/server_selection_prose_test.go
+index 0b11167e60..69a9a91ab6 100644
+--- a/mongo/integration/server_selection_prose_test.go
++++ b/mongo/integration/server_selection_prose_test.go
+@@ -15,8 +15,8 @@ import (
+ 	"go.mongodb.org/mongo-driver/bson"
+ 	"go.mongodb.org/mongo-driver/event"
+ 	"go.mongodb.org/mongo-driver/internal/assert"
++	"go.mongodb.org/mongo-driver/internal/eventtest"
+ 	"go.mongodb.org/mongo-driver/internal/require"
+-	"go.mongodb.org/mongo-driver/internal/testutil/monitor"
+ 	"go.mongodb.org/mongo-driver/mongo/description"
+ 	"go.mongodb.org/mongo-driver/mongo/integration/mtest"
+ 	"go.mongodb.org/mongo-driver/mongo/options"
+@@ -47,7 +47,7 @@ func (set saturatedHosts) isSaturated(tolerance uint64) bool {
+ // awaitSaturation uses CMAP events to ensure that the client's connection pools for N-mongoses have been saturated.
+ // The qualification for a host to be "saturated" is for each host on the client to have a tolerable number of ready
+ // connections.
+-func awaitSaturation(ctx context.Context, mt *mtest.T, monitor *monitor.TestPoolMonitor, tolerance uint64) error {
++func awaitSaturation(ctx context.Context, mt *mtest.T, monitor *eventtest.TestPoolMonitor, tolerance uint64) error {
+ 	set := make(saturatedHosts)
+ 	var err error
+ 	for !set.isSaturated(tolerance) {
+@@ -71,7 +71,7 @@ func awaitSaturation(ctx context.Context, mt *mtest.T, monitor *monitor.TestPool
+ // runsServerSelection will run opCount-many `FindOne` operations within threadCount-many go routines.  The purpose of
+ // this is to test the reliability of the server selection algorithm, which can be verified with the `counts` map and
+ // `event.PoolEvent` slice.
+-func runsServerSelection(mt *mtest.T, monitor *monitor.TestPoolMonitor,
++func runsServerSelection(mt *mtest.T, monitor *eventtest.TestPoolMonitor,
+ 	threadCount, opCount int) (map[string]int, []*event.PoolEvent) {
+ 	var wg sync.WaitGroup
+ 	for i := 0; i < threadCount; i++ {
+@@ -145,7 +145,7 @@ func TestServerSelectionProse(t *testing.T) {
+ 		// Reset the client with exactly 2 mongos hosts. Use a ServerMonitor to wait for both mongos
+ 		// host descriptions to move from kind "Unknown" to kind "Mongos".
+ 		topologyEvents := make(chan *event.TopologyDescriptionChangedEvent, 10)
+-		tpm := monitor.NewTestPoolMonitor()
++		tpm := eventtest.NewTestPoolMonitor()
+ 		mt.ResetClient(options.Client().
+ 			SetLocalThreshold(localThreshold).
+ 			SetMaxPoolSize(maxPoolSize).
+@@ -196,7 +196,7 @@ func TestServerSelectionProse(t *testing.T) {
+ 		// Reset the client with exactly 2 mongos hosts. Use a ServerMonitor to wait for both mongos
+ 		// host descriptions to move from kind "Unknown" to kind "Mongos".
+ 		topologyEvents := make(chan *event.TopologyDescriptionChangedEvent, 10)
+-		tpm := monitor.NewTestPoolMonitor()
++		tpm := eventtest.NewTestPoolMonitor()
+ 		mt.ResetClient(options.Client().
+ 			SetHosts(hosts[:2]).
+ 			SetPoolMonitor(tpm.PoolMonitor).
+diff --git a/mongo/integration/unified/admin_helpers.go b/mongo/integration/unified/admin_helpers.go
+index a50a595393..f7bcb99146 100644
+--- a/mongo/integration/unified/admin_helpers.go
++++ b/mongo/integration/unified/admin_helpers.go
+@@ -12,7 +12,7 @@ import (
+ 	"strings"
+ 
+ 	"go.mongodb.org/mongo-driver/bson"
+-	"go.mongodb.org/mongo-driver/internal/testutil"
++	"go.mongodb.org/mongo-driver/internal/integtest"
+ 	"go.mongodb.org/mongo-driver/mongo"
+ 	"go.mongodb.org/mongo-driver/mongo/integration/mtest"
+ 	"go.mongodb.org/mongo-driver/mongo/options"
+@@ -84,7 +84,7 @@ func runCommandOnHost(ctx context.Context, host string, commandFn func(context.C
+ 	clientOpts := options.Client().
+ 		ApplyURI(mtest.ClusterURI()).
+ 		SetHosts([]string{host})
+-	testutil.AddTestServerAPIVersion(clientOpts)
++	integtest.AddTestServerAPIVersion(clientOpts)
+ 
+ 	client, err := mongo.Connect(ctx, clientOpts)
+ 	if err != nil {
+diff --git a/mongo/integration/unified/bulkwrite_helpers.go b/mongo/integration/unified/bulkwrite_helpers.go
+index 069ceb324d..895c57e990 100644
+--- a/mongo/integration/unified/bulkwrite_helpers.go
++++ b/mongo/integration/unified/bulkwrite_helpers.go
+@@ -10,7 +10,7 @@ import (
+ 	"fmt"
+ 
+ 	"go.mongodb.org/mongo-driver/bson"
+-	"go.mongodb.org/mongo-driver/internal/testutil/helpers"
++	"go.mongodb.org/mongo-driver/internal/bsonutil"
+ 	"go.mongodb.org/mongo-driver/mongo"
+ 	"go.mongodb.org/mongo-driver/mongo/options"
+ )
+@@ -74,7 +74,7 @@ func createBulkWriteModel(rawModel bson.Raw) (mongo.WriteModel, error) {
+ 			switch key {
+ 			case "arrayFilters":
+ 				uom.SetArrayFilters(options.ArrayFilters{
+-					Filters: helpers.RawToInterfaces(helpers.RawToDocuments(val.Array())...),
++					Filters: bsonutil.RawToInterfaces(bsonutil.RawToDocuments(val.Array())...),
+ 				})
+ 			case "collation":
+ 				collation, err := createCollation(val.Document())
+@@ -123,7 +123,7 @@ func createBulkWriteModel(rawModel bson.Raw) (mongo.WriteModel, error) {
+ 			switch key {
+ 			case "arrayFilters":
+ 				umm.SetArrayFilters(options.ArrayFilters{
+-					Filters: helpers.RawToInterfaces(helpers.RawToDocuments(val.Array())...),
++					Filters: bsonutil.RawToInterfaces(bsonutil.RawToDocuments(val.Array())...),
+ 				})
+ 			case "collation":
+ 				collation, err := createCollation(val.Document())
+diff --git a/mongo/integration/unified/client_entity.go b/mongo/integration/unified/client_entity.go
+index 56301c9bb8..5039e9b5b4 100644
+--- a/mongo/integration/unified/client_entity.go
++++ b/mongo/integration/unified/client_entity.go
+@@ -16,9 +16,9 @@ import (
+ 
+ 	"go.mongodb.org/mongo-driver/bson"
+ 	"go.mongodb.org/mongo-driver/event"
+-	"go.mongodb.org/mongo-driver/internal"
++	"go.mongodb.org/mongo-driver/internal/handshake"
++	"go.mongodb.org/mongo-driver/internal/integtest"
+ 	"go.mongodb.org/mongo-driver/internal/logger"
+-	"go.mongodb.org/mongo-driver/internal/testutil"
+ 	"go.mongodb.org/mongo-driver/mongo"
+ 	"go.mongodb.org/mongo-driver/mongo/integration/mtest"
+ 	"go.mongodb.org/mongo-driver/mongo/options"
+@@ -179,7 +179,7 @@ func newClientEntity(ctx context.Context, em *EntityMap, entityOptions *entityOp
+ 		}
+ 		clientOpts.SetServerAPIOptions(entityOptions.ServerAPIOptions.ServerAPIOptions)
+ 	} else {
+-		testutil.AddTestServerAPIVersion(clientOpts)
++		integtest.AddTestServerAPIVersion(clientOpts)
+ 	}
+ 	for _, cmd := range entityOptions.IgnoredCommands {
+ 		entity.ignoredCommands[cmd] = struct{}{}
+@@ -238,7 +238,7 @@ func (c *clientEntity) isIgnoredEvent(commandName string, eventDoc bson.Raw) boo
+ 		return true
+ 	}
+ 
+-	if commandName == "hello" || strings.ToLower(commandName) == internal.LegacyHelloLowercase {
++	if commandName == "hello" || strings.ToLower(commandName) == handshake.LegacyHelloLowercase {
+ 		// If observeSensitiveCommands is false (or unset) and hello command has been
+ 		// redacted at operation level, hello command should be ignored as it contained
+ 		// speculativeAuthenticate.
+diff --git a/mongo/integration/unified/client_operation_execution.go b/mongo/integration/unified/client_operation_execution.go
+index 3c97adb7e9..506ca4f351 100644
+--- a/mongo/integration/unified/client_operation_execution.go
++++ b/mongo/integration/unified/client_operation_execution.go
+@@ -12,7 +12,7 @@ import (
+ 	"time"
+ 
+ 	"go.mongodb.org/mongo-driver/bson/primitive"
+-	"go.mongodb.org/mongo-driver/internal/testutil/helpers"
++	"go.mongodb.org/mongo-driver/internal/bsonutil"
+ 	"go.mongodb.org/mongo-driver/mongo"
+ 	"go.mongodb.org/mongo-driver/mongo/options"
+ 	"go.mongodb.org/mongo-driver/x/bsonx/bsoncore"
+@@ -85,7 +85,7 @@ func executeCreateChangeStream(ctx context.Context, operation *operation) (*oper
+ 		case "maxAwaitTimeMS":
+ 			opts.SetMaxAwaitTime(time.Duration(val.Int32()) * time.Millisecond)
+ 		case "pipeline":
+-			pipeline = helpers.RawToInterfaces(helpers.RawToDocuments(val.Array())...)
++			pipeline = bsonutil.RawToInterfaces(bsonutil.RawToDocuments(val.Array())...)
+ 		case "resumeAfter":
+ 			opts.SetResumeAfter(val.Document())
+ 		case "showExpandedEvents":
+diff --git a/mongo/integration/unified/collection_data.go b/mongo/integration/unified/collection_data.go
+index 0ab0334973..979ecccf05 100644
+--- a/mongo/integration/unified/collection_data.go
++++ b/mongo/integration/unified/collection_data.go
+@@ -12,7 +12,7 @@ import (
+ 	"fmt"
+ 
+ 	"go.mongodb.org/mongo-driver/bson"
+-	"go.mongodb.org/mongo-driver/internal/testutil/helpers"
++	"go.mongodb.org/mongo-driver/internal/bsonutil"
+ 	"go.mongodb.org/mongo-driver/mongo/integration/mtest"
+ 	"go.mongodb.org/mongo-driver/mongo/options"
+ 	"go.mongodb.org/mongo-driver/mongo/readconcern"
+@@ -71,7 +71,7 @@ func (c *collectionData) createCollection(ctx context.Context) error {
+ 		return nil
+ 	}
+ 
+-	docs := helpers.RawToInterfaces(c.Documents...)
++	docs := bsonutil.RawToInterfaces(c.Documents...)
+ 	if _, err := coll.InsertMany(ctx, docs); err != nil {
+ 		return fmt.Errorf("error inserting data: %v", err)
+ 	}
+diff --git a/mongo/integration/unified/collection_operation_execution.go b/mongo/integration/unified/collection_operation_execution.go
+index d41c0da8cc..18c6e040fe 100644
+--- a/mongo/integration/unified/collection_operation_execution.go
++++ b/mongo/integration/unified/collection_operation_execution.go
+@@ -13,7 +13,7 @@ import (
+ 
+ 	"go.mongodb.org/mongo-driver/bson"
+ 	"go.mongodb.org/mongo-driver/bson/bsontype"
+-	"go.mongodb.org/mongo-driver/internal/testutil/helpers"
++	"go.mongodb.org/mongo-driver/internal/bsonutil"
+ 	"go.mongodb.org/mongo-driver/mongo"
+ 	"go.mongodb.org/mongo-driver/mongo/options"
+ 	"go.mongodb.org/mongo-driver/x/bsonx/bsoncore"
+@@ -78,7 +78,7 @@ func executeAggregate(ctx context.Context, operation *operation) (*operationResu
+ 		case "maxAwaitTimeMS":
+ 			opts.SetMaxAwaitTime(time.Duration(val.Int32()) * time.Millisecond)
+ 		case "pipeline":
+-			pipeline = helpers.RawToInterfaces(helpers.RawToDocuments(val.Array())...)
++			pipeline = bsonutil.RawToInterfaces(bsonutil.RawToDocuments(val.Array())...)
+ 		case "let":
+ 			opts.SetLet(val.Document())
+ 		default:
+@@ -808,7 +808,7 @@ func executeFindOneAndUpdate(ctx context.Context, operation *operation) (*operat
+ 		switch key {
+ 		case "arrayFilters":
+ 			opts.SetArrayFilters(options.ArrayFilters{
+-				Filters: helpers.RawToInterfaces(helpers.RawToDocuments(val.Array())...),
++				Filters: bsonutil.RawToInterfaces(bsonutil.RawToDocuments(val.Array())...),
+ 			})
+ 		case "bypassDocumentValidation":
+ 			opts.SetBypassDocumentValidation(val.Boolean())
+@@ -895,7 +895,7 @@ func executeInsertMany(ctx context.Context, operation *operation) (*operationRes
+ 		case "comment":
+ 			opts.SetComment(val)
+ 		case "documents":
+-			documents = helpers.RawToInterfaces(helpers.RawToDocuments(val.Array())...)
++			documents = bsonutil.RawToInterfaces(bsonutil.RawToDocuments(val.Array())...)
+ 		case "ordered":
+ 			opts.SetOrdered(val.Boolean())
+ 		default:
+diff --git a/mongo/integration/unified/crud_helpers.go b/mongo/integration/unified/crud_helpers.go
+index 91cddb2fe2..245d0e02a9 100644
+--- a/mongo/integration/unified/crud_helpers.go
++++ b/mongo/integration/unified/crud_helpers.go
+@@ -11,7 +11,7 @@ import (
+ 
+ 	"go.mongodb.org/mongo-driver/bson"
+ 	"go.mongodb.org/mongo-driver/bson/bsontype"
+-	"go.mongodb.org/mongo-driver/internal/testutil/helpers"
++	"go.mongodb.org/mongo-driver/internal/bsonutil"
+ 	"go.mongodb.org/mongo-driver/mongo/options"
+ )
+ 
+@@ -41,7 +41,7 @@ func createUpdateArguments(args bson.Raw) (*updateArguments, error) {
+ 		switch key {
+ 		case "arrayFilters":
+ 			ua.opts.SetArrayFilters(options.ArrayFilters{
+-				Filters: helpers.RawToInterfaces(helpers.RawToDocuments(val.Array())...),
++				Filters: bsonutil.RawToInterfaces(bsonutil.RawToDocuments(val.Array())...),
+ 			})
+ 		case "bypassDocumentValidation":
+ 			ua.opts.SetBypassDocumentValidation(val.Boolean())
+diff --git a/mongo/integration/unified/database_operation_execution.go b/mongo/integration/unified/database_operation_execution.go
+index 9c2005c130..661f982982 100644
+--- a/mongo/integration/unified/database_operation_execution.go
++++ b/mongo/integration/unified/database_operation_execution.go
+@@ -13,7 +13,7 @@ import (
+ 
+ 	"go.mongodb.org/mongo-driver/bson"
+ 	"go.mongodb.org/mongo-driver/bson/bsontype"
+-	"go.mongodb.org/mongo-driver/internal/testutil/helpers"
++	"go.mongodb.org/mongo-driver/internal/bsonutil"
+ 	"go.mongodb.org/mongo-driver/mongo/options"
+ )
+ 
+@@ -43,7 +43,7 @@ func executeCreateView(ctx context.Context, operation *operation) (*operationRes
+ 		case "collection":
+ 			collName = val.StringValue()
+ 		case "pipeline":
+-			pipeline = helpers.RawToInterfaces(helpers.RawToDocuments(val.Array())...)
++			pipeline = bsonutil.RawToInterfaces(bsonutil.RawToDocuments(val.Array())...)
+ 		case "viewOn":
+ 			viewOn = val.StringValue()
+ 		default:
+diff --git a/mongo/integration/unified/operation.go b/mongo/integration/unified/operation.go
+index 66e9b2ed17..bd46820009 100644
+--- a/mongo/integration/unified/operation.go
++++ b/mongo/integration/unified/operation.go
+@@ -12,7 +12,7 @@ import (
+ 	"time"
+ 
+ 	"go.mongodb.org/mongo-driver/bson"
+-	"go.mongodb.org/mongo-driver/internal"
++	"go.mongodb.org/mongo-driver/internal/csot"
+ 	"go.mongodb.org/mongo-driver/mongo"
+ )
+ 
+@@ -93,7 +93,7 @@ func (op *operation) run(ctx context.Context, loopDone <-chan struct{}) (*operat
+ 	// Special handling for the "timeoutMS" field because it applies to (almost) all operations.
+ 	if tms, ok := op.Arguments.Lookup("timeoutMS").Int32OK(); ok {
+ 		timeout := time.Duration(tms) * time.Millisecond
+-		newCtx, cancelFunc := internal.MakeTimeoutContext(ctx, timeout)
++		newCtx, cancelFunc := csot.MakeTimeoutContext(ctx, timeout)
+ 		// Redefine ctx to be the new timeout-derived context.
+ 		ctx = newCtx
+ 		// Cancel the timeout-derived context at the end of run to avoid a context leak.
+diff --git a/mongo/integration/unified/unified_spec_runner.go b/mongo/integration/unified/unified_spec_runner.go
+index bac72bde27..f27e6537e6 100644
+--- a/mongo/integration/unified/unified_spec_runner.go
++++ b/mongo/integration/unified/unified_spec_runner.go
+@@ -17,7 +17,7 @@ import (
+ 
+ 	"go.mongodb.org/mongo-driver/bson"
+ 	"go.mongodb.org/mongo-driver/internal/assert"
+-	"go.mongodb.org/mongo-driver/internal/testutil/helpers"
++	"go.mongodb.org/mongo-driver/internal/spectest"
+ 	"go.mongodb.org/mongo-driver/mongo"
+ 	"go.mongodb.org/mongo-driver/mongo/integration/mtest"
+ )
+@@ -89,7 +89,7 @@ type TestFile struct {
+ // runTestDirectory runs the files in the given directory, which must be in the unified spec format, with
+ // expectValidFail determining whether the tests should expect to pass or fail
+ func runTestDirectory(t *testing.T, directoryPath string, expectValidFail bool) {
+-	for _, filename := range helpers.FindJSONFilesInDir(t, directoryPath) {
++	for _, filename := range spectest.FindJSONFilesInDir(t, directoryPath) {
+ 		t.Run(filename, func(t *testing.T) {
+ 			runTestFile(t, path.Join(directoryPath, filename), expectValidFail)
+ 		})
+diff --git a/mongo/integration/unified_runner_events_helper_test.go b/mongo/integration/unified_runner_events_helper_test.go
+index a17ca602d0..44d5cf5c8b 100644
+--- a/mongo/integration/unified_runner_events_helper_test.go
++++ b/mongo/integration/unified_runner_events_helper_test.go
+@@ -13,7 +13,6 @@ import (
+ 
+ 	"go.mongodb.org/mongo-driver/event"
+ 	"go.mongodb.org/mongo-driver/internal/assert"
+-	"go.mongodb.org/mongo-driver/internal/testutil/helpers"
+ 	"go.mongodb.org/mongo-driver/mongo/address"
+ 	"go.mongodb.org/mongo-driver/mongo/description"
+ 	"go.mongodb.org/mongo-driver/mongo/integration/mtest"
+@@ -112,7 +111,7 @@ func waitForEvent(mt *mtest.T, test *testCase, op *operation) {
+ 		}
+ 	}
+ 
+-	helpers.AssertSoon(mt, callback, defaultCallbackTimeout)
++	assert.Soon(mt, callback, defaultCallbackTimeout)
+ }
+ 
+ func assertEventCount(mt *mtest.T, testCase *testCase, op *operation) {
+@@ -151,7 +150,7 @@ func waitForPrimaryChange(mt *mtest.T, testCase *testCase, op *operation) {
+ 	}
+ 
+ 	timeout := convertValueToMilliseconds(mt, op.Arguments.Lookup("timeoutMS"))
+-	helpers.AssertSoon(mt, callback, timeout)
++	assert.Soon(mt, callback, timeout)
+ }
+ 
+ // getPrimaryAddress returns the address of the current primary. If failFast is true, the server selection fast path
+diff --git a/mongo/integration/unified_spec_test.go b/mongo/integration/unified_spec_test.go
+index d5ad5903eb..e71b6c839d 100644
+--- a/mongo/integration/unified_spec_test.go
++++ b/mongo/integration/unified_spec_test.go
+@@ -25,8 +25,8 @@ import (
+ 	"go.mongodb.org/mongo-driver/bson/bsontype"
+ 	"go.mongodb.org/mongo-driver/event"
+ 	"go.mongodb.org/mongo-driver/internal/assert"
+-	"go.mongodb.org/mongo-driver/internal/testutil"
+-	"go.mongodb.org/mongo-driver/internal/testutil/helpers"
++	"go.mongodb.org/mongo-driver/internal/bsonutil"
++	"go.mongodb.org/mongo-driver/internal/integtest"
+ 	"go.mongodb.org/mongo-driver/mongo"
+ 	"go.mongodb.org/mongo-driver/mongo/address"
+ 	"go.mongodb.org/mongo-driver/mongo/gridfs"
+@@ -468,7 +468,7 @@ func executeTestRunnerOperation(mt *mtest.T, testCase *testCase, op *operation,
+ 
+ 		targetHost := clientSession.PinnedServer.Addr.String()
+ 		opts := options.Client().ApplyURI(mtest.ClusterURI()).SetHosts([]string{targetHost})
+-		testutil.AddTestServerAPIVersion(opts)
++		integtest.AddTestServerAPIVersion(opts)
+ 		client, err := mongo.Connect(context.Background(), opts)
+ 		if err != nil {
+ 			return fmt.Errorf("Connect error for targeted client: %v", err)
+@@ -892,7 +892,7 @@ func setupSessions(mt *mtest.T, test *testCase) (mongo.Session, mongo.Session) {
+ func insertDocuments(mt *mtest.T, coll *mongo.Collection, rawDocs []bson.Raw) {
+ 	mt.Helper()
+ 
+-	docsToInsert := helpers.RawToInterfaces(rawDocs...)
++	docsToInsert := bsonutil.RawToInterfaces(rawDocs...)
+ 	if len(docsToInsert) == 0 {
+ 		return
+ 	}
+diff --git a/mongo/ocsp_test.go b/mongo/ocsp_test.go
+index c4d03f397a..5bf7d0c085 100644
+--- a/mongo/ocsp_test.go
++++ b/mongo/ocsp_test.go
+@@ -15,7 +15,7 @@ import (
+ 	"time"
+ 
+ 	"go.mongodb.org/mongo-driver/internal/assert"
+-	"go.mongodb.org/mongo-driver/internal/testutil"
++	"go.mongodb.org/mongo-driver/internal/integtest"
+ 	"go.mongodb.org/mongo-driver/mongo/options"
+ 	"go.mongodb.org/mongo-driver/mongo/readpref"
+ )
+@@ -28,7 +28,7 @@ func TestOCSP(t *testing.T) {
+ 	shouldSucceed, err := strconv.ParseBool(successEnvVar)
+ 	assert.Nil(t, err, "invalid value for OCSP_TLS_SHOULD_SUCCEED; expected true or false, got %v", successEnvVar)
+ 
+-	cs := testutil.ConnString(t)
++	cs := integtest.ConnString(t)
+ 
+ 	t.Run("tls", func(t *testing.T) {
+ 		clientOpts := createOCSPClientOptions(cs.Original)
+diff --git a/mongo/options/autoencryptionoptions.go b/mongo/options/autoencryptionoptions.go
+index d561d5ef11..15d513862d 100644
+--- a/mongo/options/autoencryptionoptions.go
++++ b/mongo/options/autoencryptionoptions.go
+@@ -10,7 +10,7 @@ import (
+ 	"crypto/tls"
+ 	"net/http"
+ 
+-	"go.mongodb.org/mongo-driver/internal"
++	"go.mongodb.org/mongo-driver/internal/httputil"
+ )
+ 
+ // AutoEncryptionOptions represents options used to configure auto encryption/decryption behavior for a mongo.Client
+@@ -43,7 +43,7 @@ type AutoEncryptionOptions struct {
+ // AutoEncryption creates a new AutoEncryptionOptions configured with default values.
+ func AutoEncryption() *AutoEncryptionOptions {
+ 	return &AutoEncryptionOptions{
+-		HTTPClient: internal.DefaultHTTPClient,
++		HTTPClient: httputil.DefaultHTTPClient,
+ 	}
+ }
+ 
+diff --git a/mongo/options/clientencryptionoptions.go b/mongo/options/clientencryptionoptions.go
+index 7eef3fe6a5..2457f682ba 100644
+--- a/mongo/options/clientencryptionoptions.go
++++ b/mongo/options/clientencryptionoptions.go
+@@ -11,7 +11,7 @@ import (
+ 	"fmt"
+ 	"net/http"
+ 
+-	"go.mongodb.org/mongo-driver/internal"
++	"go.mongodb.org/mongo-driver/internal/httputil"
+ )
+ 
+ // ClientEncryptionOptions represents all possible options used to configure a ClientEncryption instance.
+@@ -25,7 +25,7 @@ type ClientEncryptionOptions struct {
+ // ClientEncryption creates a new ClientEncryptionOptions instance.
+ func ClientEncryption() *ClientEncryptionOptions {
+ 	return &ClientEncryptionOptions{
+-		HTTPClient: internal.DefaultHTTPClient,
++		HTTPClient: httputil.DefaultHTTPClient,
+ 	}
+ }
+ 
+diff --git a/mongo/options/clientoptions.go b/mongo/options/clientoptions.go
+index 1c2e5bed51..34d47698a0 100644
+--- a/mongo/options/clientoptions.go
++++ b/mongo/options/clientoptions.go
+@@ -23,7 +23,7 @@ import (
+ 	"github.com/youmark/pkcs8"
+ 	"go.mongodb.org/mongo-driver/bson/bsoncodec"
+ 	"go.mongodb.org/mongo-driver/event"
+-	"go.mongodb.org/mongo-driver/internal"
++	"go.mongodb.org/mongo-driver/internal/httputil"
+ 	"go.mongodb.org/mongo-driver/mongo/readconcern"
+ 	"go.mongodb.org/mongo-driver/mongo/readpref"
+ 	"go.mongodb.org/mongo-driver/mongo/writeconcern"
+@@ -249,7 +249,7 @@ type ClientOptions struct {
+ // Client creates a new ClientOptions instance.
+ func Client() *ClientOptions {
+ 	return &ClientOptions{
+-		HTTPClient: internal.DefaultHTTPClient,
++		HTTPClient: httputil.DefaultHTTPClient,
+ 	}
+ }
+ 
+@@ -287,23 +287,23 @@ func (c *ClientOptions) validate() error {
+ 	// Validation for load-balanced mode.
+ 	if c.LoadBalanced != nil && *c.LoadBalanced {
+ 		if len(c.Hosts) > 1 {
+-			return internal.ErrLoadBalancedWithMultipleHosts
++			return connstring.ErrLoadBalancedWithMultipleHosts
+ 		}
+ 		if c.ReplicaSet != nil {
+-			return internal.ErrLoadBalancedWithReplicaSet
++			return connstring.ErrLoadBalancedWithReplicaSet
+ 		}
+ 		if c.Direct != nil && *c.Direct {
+-			return internal.ErrLoadBalancedWithDirectConnection
++			return connstring.ErrLoadBalancedWithDirectConnection
+ 		}
+ 	}
+ 
+ 	// Validation for srvMaxHosts.
+ 	if c.SRVMaxHosts != nil && *c.SRVMaxHosts > 0 {
+ 		if c.ReplicaSet != nil {
+-			return internal.ErrSRVMaxHostsWithReplicaSet
++			return connstring.ErrSRVMaxHostsWithReplicaSet
+ 		}
+ 		if c.LoadBalanced != nil && *c.LoadBalanced {
+-			return internal.ErrSRVMaxHostsWithLoadBalanced
++			return connstring.ErrSRVMaxHostsWithLoadBalanced
+ 		}
+ 	}
+ 	return nil
+@@ -872,7 +872,7 @@ func (c *ClientOptions) SetTLSConfig(cfg *tls.Config) *ClientOptions {
+ 
+ // SetHTTPClient specifies the http.Client to be used for any HTTP requests.
+ //
+-// This should only be used to set custom HTTP client configurations. By default, the connection will use an internal.DefaultHTTPClient.
++// This should only be used to set custom HTTP client configurations. By default, the connection will use an httputil.DefaultHTTPClient.
+ func (c *ClientOptions) SetHTTPClient(client *http.Client) *ClientOptions {
+ 	c.HTTPClient = client
+ 	return c
+diff --git a/mongo/options/clientoptions_test.go b/mongo/options/clientoptions_test.go
+index fc4d415fc4..2ae3a673ce 100644
+--- a/mongo/options/clientoptions_test.go
++++ b/mongo/options/clientoptions_test.go
+@@ -27,8 +27,9 @@ import (
+ 	"go.mongodb.org/mongo-driver/bson"
+ 	"go.mongodb.org/mongo-driver/bson/bsoncodec"
+ 	"go.mongodb.org/mongo-driver/event"
+-	"go.mongodb.org/mongo-driver/internal"
+ 	"go.mongodb.org/mongo-driver/internal/assert"
++	"go.mongodb.org/mongo-driver/internal/errutil"
++	"go.mongodb.org/mongo-driver/internal/httputil"
+ 	"go.mongodb.org/mongo-driver/mongo/readconcern"
+ 	"go.mongodb.org/mongo-driver/mongo/readpref"
+ 	"go.mongodb.org/mongo-driver/mongo/writeconcern"
+@@ -40,7 +41,7 @@ var tClientOptions = reflect.TypeOf(&ClientOptions{})
+ func TestClientOptions(t *testing.T) {
+ 	t.Run("ApplyURI/doesn't overwrite previous errors", func(t *testing.T) {
+ 		uri := "not-mongo-db-uri://"
+-		want := internal.WrapErrorf(
++		want := errutil.WrapErrorf(
+ 			errors.New(`scheme must be "mongodb" or "mongodb+srv"`), "error parsing uri",
+ 		)
+ 		co := Client().ApplyURI(uri).ApplyURI("mongodb://localhost/")
+@@ -208,10 +209,10 @@ func TestClientOptions(t *testing.T) {
+ 				"ParseError",
+ 				"not-mongo-db-uri://",
+ 				&ClientOptions{
+-					err: internal.WrapErrorf(
++					err: errutil.WrapErrorf(
+ 						errors.New(`scheme must be "mongodb" or "mongodb+srv"`), "error parsing uri",
+ 					),
+-					HTTPClient: internal.DefaultHTTPClient,
++					HTTPClient: httputil.DefaultHTTPClient,
+ 				},
+ 			},
+ 			{
+@@ -220,7 +221,7 @@ func TestClientOptions(t *testing.T) {
+ 				&ClientOptions{
+ 					err:        fmt.Errorf("unknown read preference %v", ""),
+ 					Hosts:      []string{"localhost"},
+-					HTTPClient: internal.DefaultHTTPClient,
++					HTTPClient: httputil.DefaultHTTPClient,
+ 				},
+ 			},
+ 			{
+@@ -229,7 +230,7 @@ func TestClientOptions(t *testing.T) {
+ 				&ClientOptions{
+ 					err:        errors.New("can not specify tags, max staleness, or hedge with mode primary"),
+ 					Hosts:      []string{"localhost"},
+-					HTTPClient: internal.DefaultHTTPClient,
++					HTTPClient: httputil.DefaultHTTPClient,
+ 				},
+ 			},
+ 			{
+@@ -238,7 +239,7 @@ func TestClientOptions(t *testing.T) {
+ 				&ClientOptions{
+ 					err:        &os.PathError{Op: "open", Path: "testdata/doesntexist"},
+ 					Hosts:      []string{"localhost"},
+-					HTTPClient: internal.DefaultHTTPClient,
++					HTTPClient: httputil.DefaultHTTPClient,
+ 				},
+ 			},
+ 			{
+@@ -247,7 +248,7 @@ func TestClientOptions(t *testing.T) {
+ 				&ClientOptions{
+ 					err:        &os.PathError{Op: "open", Path: "testdata/doesntexist"},
+ 					Hosts:      []string{"localhost"},
+-					HTTPClient: internal.DefaultHTTPClient,
++					HTTPClient: httputil.DefaultHTTPClient,
+ 				},
+ 			},
+ 			{
+@@ -284,11 +285,11 @@ func TestClientOptions(t *testing.T) {
+ 				"Unescaped slash in username",
+ 				"mongodb:///:pwd@localhost",
+ 				&ClientOptions{
+-					err: internal.WrapErrorf(
++					err: errutil.WrapErrorf(
+ 						errors.New("unescaped slash in username"),
+ 						"error parsing uri",
+ 					),
+-					HTTPClient: internal.DefaultHTTPClient,
++					HTTPClient: httputil.DefaultHTTPClient,
+ 				},
+ 			},
+ 			{
+@@ -471,34 +472,34 @@ func TestClientOptions(t *testing.T) {
+ 				"TLS only tlsCertificateFile",
+ 				"mongodb://localhost/?tlsCertificateFile=testdata/nopass/cert.pem",
+ 				&ClientOptions{
+-					err: internal.WrapErrorf(
++					err: errutil.WrapErrorf(
+ 						errors.New("the tlsPrivateKeyFile URI option must be provided if the tlsCertificateFile option is specified"),
+ 						"error validating uri",
+ 					),
+-					HTTPClient: internal.DefaultHTTPClient,
++					HTTPClient: httputil.DefaultHTTPClient,
+ 				},
+ 			},
+ 			{
+ 				"TLS only tlsPrivateKeyFile",
+ 				"mongodb://localhost/?tlsPrivateKeyFile=testdata/nopass/key.pem",
+ 				&ClientOptions{
+-					err: internal.WrapErrorf(
++					err: errutil.WrapErrorf(
+ 						errors.New("the tlsCertificateFile URI option must be provided if the tlsPrivateKeyFile option is specified"),
+ 						"error validating uri",
+ 					),
+-					HTTPClient: internal.DefaultHTTPClient,
++					HTTPClient: httputil.DefaultHTTPClient,
+ 				},
+ 			},
+ 			{
+ 				"TLS tlsCertificateFile and tlsPrivateKeyFile and tlsCertificateKeyFile",
+ 				"mongodb://localhost/?tlsCertificateFile=testdata/nopass/cert.pem&tlsPrivateKeyFile=testdata/nopass/key.pem&tlsCertificateKeyFile=testdata/nopass/certificate.pem",
+ 				&ClientOptions{
+-					err: internal.WrapErrorf(
++					err: errutil.WrapErrorf(
+ 						errors.New("the sslClientCertificateKeyFile/tlsCertificateKeyFile URI option cannot be provided "+
+ 							"along with tlsCertificateFile or tlsPrivateKeyFile"),
+ 						"error validating uri",
+ 					),
+-					HTTPClient: internal.DefaultHTTPClient,
++					HTTPClient: httputil.DefaultHTTPClient,
+ 				},
+ 			},
+ 			{
+@@ -524,7 +525,7 @@ func TestClientOptions(t *testing.T) {
+ 				"mongodb://localhost/?tlsCAFile=testdata/empty-ca.pem",
+ 				&ClientOptions{
+ 					Hosts:      []string{"localhost"},
+-					HTTPClient: internal.DefaultHTTPClient,
++					HTTPClient: httputil.DefaultHTTPClient,
+ 					err:        errors.New("the specified CA file does not contain any valid certificates"),
+ 				},
+ 			},
+@@ -533,7 +534,7 @@ func TestClientOptions(t *testing.T) {
+ 				"mongodb://localhost/?tlsCAFile=testdata/ca-key.pem",
+ 				&ClientOptions{
+ 					Hosts:      []string{"localhost"},
+-					HTTPClient: internal.DefaultHTTPClient,
++					HTTPClient: httputil.DefaultHTTPClient,
+ 					err:        errors.New("the specified CA file does not contain any valid certificates"),
+ 				},
+ 			},
+@@ -542,7 +543,7 @@ func TestClientOptions(t *testing.T) {
+ 				"mongodb://localhost/?tlsCAFile=testdata/malformed-ca.pem",
+ 				&ClientOptions{
+ 					Hosts:      []string{"localhost"},
+-					HTTPClient: internal.DefaultHTTPClient,
++					HTTPClient: httputil.DefaultHTTPClient,
+ 					err:        errors.New("the specified CA file does not contain any valid certificates"),
+ 				},
+ 			},
+@@ -649,10 +650,10 @@ func TestClientOptions(t *testing.T) {
+ 			opts *ClientOptions
+ 			err  error
+ 		}{
+-			{"multiple hosts in URI", Client().ApplyURI("mongodb://foo,bar"), internal.ErrLoadBalancedWithMultipleHosts},
+-			{"multiple hosts in options", Client().SetHosts([]string{"foo", "bar"}), internal.ErrLoadBalancedWithMultipleHosts},
+-			{"replica set name", Client().SetReplicaSet("foo"), internal.ErrLoadBalancedWithReplicaSet},
+-			{"directConnection=true", Client().SetDirect(true), internal.ErrLoadBalancedWithDirectConnection},
++			{"multiple hosts in URI", Client().ApplyURI("mongodb://foo,bar"), connstring.ErrLoadBalancedWithMultipleHosts},
++			{"multiple hosts in options", Client().SetHosts([]string{"foo", "bar"}), connstring.ErrLoadBalancedWithMultipleHosts},
++			{"replica set name", Client().SetReplicaSet("foo"), connstring.ErrLoadBalancedWithReplicaSet},
++			{"directConnection=true", Client().SetDirect(true), connstring.ErrLoadBalancedWithDirectConnection},
+ 		}
+ 		for _, tc := range testCases {
+ 			t.Run(tc.name, func(t *testing.T) {
+@@ -710,8 +711,8 @@ func TestClientOptions(t *testing.T) {
+ 			opts *ClientOptions
+ 			err  error
+ 		}{
+-			{"replica set name", Client().SetReplicaSet("foo"), internal.ErrSRVMaxHostsWithReplicaSet},
+-			{"loadBalanced=true", Client().SetLoadBalanced(true), internal.ErrSRVMaxHostsWithLoadBalanced},
++			{"replica set name", Client().SetReplicaSet("foo"), connstring.ErrSRVMaxHostsWithReplicaSet},
++			{"loadBalanced=true", Client().SetLoadBalanced(true), connstring.ErrSRVMaxHostsWithLoadBalanced},
+ 			{"loadBalanced=false", Client().SetLoadBalanced(false), nil},
+ 		}
+ 		for _, tc := range testCases {
+diff --git a/mongo/session.go b/mongo/session.go
+index 766e07f394..22aa026c9e 100644
+--- a/mongo/session.go
++++ b/mongo/session.go
+@@ -13,7 +13,6 @@ import (
+ 
+ 	"go.mongodb.org/mongo-driver/bson"
+ 	"go.mongodb.org/mongo-driver/bson/primitive"
+-	"go.mongodb.org/mongo-driver/internal"
+ 	"go.mongodb.org/mongo-driver/mongo/description"
+ 	"go.mongodb.org/mongo-driver/mongo/options"
+ 	"go.mongodb.org/mongo-driver/x/bsonx/bsoncore"
+@@ -196,7 +195,7 @@ func (s *sessionImpl) WithTransaction(ctx context.Context, fn func(ctx SessionCo
+ 			if s.clientSession.TransactionRunning() {
+ 				// Wrap the user-provided Context in a new one that behaves like context.Background() for deadlines and
+ 				// cancellations, but forwards Value requests to the original one.
+-				_ = s.AbortTransaction(internal.NewBackgroundContext(ctx))
++				_ = s.AbortTransaction(newBackgroundContext(ctx))
+ 			}
+ 
+ 			select {
+@@ -228,7 +227,7 @@ func (s *sessionImpl) WithTransaction(ctx context.Context, fn func(ctx SessionCo
+ 		if ctx.Err() != nil {
+ 			// Wrap the user-provided Context in a new one that behaves like context.Background() for deadlines and
+ 			// cancellations, but forwards Value requests to the original one.
+-			_ = s.AbortTransaction(internal.NewBackgroundContext(ctx))
++			_ = s.AbortTransaction(newBackgroundContext(ctx))
+ 			return nil, ctx.Err()
+ 		}
+ 
+diff --git a/mongo/with_transactions_test.go b/mongo/with_transactions_test.go
+index cdf5899e93..743d6ef052 100644
+--- a/mongo/with_transactions_test.go
++++ b/mongo/with_transactions_test.go
+@@ -18,8 +18,7 @@ import (
+ 	"go.mongodb.org/mongo-driver/bson"
+ 	"go.mongodb.org/mongo-driver/event"
+ 	"go.mongodb.org/mongo-driver/internal/assert"
+-	"go.mongodb.org/mongo-driver/internal/testutil"
+-	"go.mongodb.org/mongo-driver/internal/testutil/helpers"
++	"go.mongodb.org/mongo-driver/internal/integtest"
+ 	"go.mongodb.org/mongo-driver/mongo/description"
+ 	"go.mongodb.org/mongo-driver/mongo/options"
+ 	"go.mongodb.org/mongo-driver/mongo/readpref"
+@@ -419,7 +418,7 @@ func TestConvenientTransactions(t *testing.T) {
+ 		}
+ 
+ 		// Assert that transaction is canceled within 500ms and not 2 seconds.
+-		helpers.AssertSoon(t, callback, 500*time.Millisecond)
++		assert.Soon(t, callback, 500*time.Millisecond)
+ 
+ 		// Assert that AbortTransaction was started once and succeeded.
+ 		assert.Equal(t, 1, len(abortStarted), "expected 1 abortTransaction started event, got %d", len(abortStarted))
+@@ -479,7 +478,7 @@ func TestConvenientTransactions(t *testing.T) {
+ 		}
+ 
+ 		// Assert that transaction fails within 500ms and not 2 seconds.
+-		helpers.AssertSoon(t, callback, 500*time.Millisecond)
++		assert.Soon(t, callback, 500*time.Millisecond)
+ 	})
+ 	t.Run("canceled context before callback does not retry", func(t *testing.T) {
+ 		withTransactionTimeout = 2 * time.Second
+@@ -509,7 +508,7 @@ func TestConvenientTransactions(t *testing.T) {
+ 		}
+ 
+ 		// Assert that transaction fails within 500ms and not 2 seconds.
+-		helpers.AssertSoon(t, callback, 500*time.Millisecond)
++		assert.Soon(t, callback, 500*time.Millisecond)
+ 	})
+ 	t.Run("slow operation in callback retries", func(t *testing.T) {
+ 		withTransactionTimeout = 2 * time.Second
+@@ -562,12 +561,12 @@ func TestConvenientTransactions(t *testing.T) {
+ 		}
+ 
+ 		// Assert that transaction passes within 2 seconds.
+-		helpers.AssertSoon(t, callback, 2*time.Second)
++		assert.Soon(t, callback, 2*time.Second)
+ 	})
+ }
+ 
+ func setupConvenientTransactions(t *testing.T, extraClientOpts ...*options.ClientOptions) *Client {
+-	cs := testutil.ConnString(t)
++	cs := integtest.ConnString(t)
+ 	poolMonitor := &event.PoolMonitor{
+ 		Event: func(evt *event.PoolEvent) {
+ 			switch evt.Type {
+@@ -584,7 +583,7 @@ func setupConvenientTransactions(t *testing.T, extraClientOpts ...*options.Clien
+ 		SetReadPreference(readpref.Primary()).
+ 		SetWriteConcern(writeconcern.New(writeconcern.WMajority())).
+ 		SetPoolMonitor(poolMonitor)
+-	testutil.AddTestServerAPIVersion(baseClientOpts)
++	integtest.AddTestServerAPIVersion(baseClientOpts)
+ 	fullClientOpts := []*options.ClientOptions{baseClientOpts}
+ 	fullClientOpts = append(fullClientOpts, extraClientOpts...)
+ 
+diff --git a/x/mongo/driver/auth/auth_spec_test.go b/x/mongo/driver/auth/auth_spec_test.go
+index c476734914..4e0e7e7ea6 100644
+--- a/x/mongo/driver/auth/auth_spec_test.go
++++ b/x/mongo/driver/auth/auth_spec_test.go
+@@ -14,7 +14,7 @@ import (
+ 	"testing"
+ 
+ 	"go.mongodb.org/mongo-driver/internal/require"
+-	"go.mongodb.org/mongo-driver/internal/testutil/helpers"
++	"go.mongodb.org/mongo-driver/internal/spectest"
+ 	"go.mongodb.org/mongo-driver/mongo/options"
+ )
+ 
+@@ -105,7 +105,7 @@ func mapInterfaceToString(m map[string]interface{}) map[string]string {
+ 
+ // Test case for all connection string spec tests.
+ func TestAuthSpec(t *testing.T) {
+-	for _, file := range helpers.FindJSONFilesInDir(t, authTestsDir) {
++	for _, file := range spectest.FindJSONFilesInDir(t, authTestsDir) {
+ 		runTestsInFile(t, authTestsDir, file)
+ 	}
+ }
+diff --git a/x/mongo/driver/auth/creds/gcpcreds.go b/x/mongo/driver/auth/creds/gcpcreds.go
+index f5b06ff970..821071665c 100644
+--- a/x/mongo/driver/auth/creds/gcpcreds.go
++++ b/x/mongo/driver/auth/creds/gcpcreds.go
+@@ -14,7 +14,7 @@ import (
+ 	"net/http"
+ 	"os"
+ 
+-	"go.mongodb.org/mongo-driver/internal"
++	"go.mongodb.org/mongo-driver/internal/errutil"
+ 	"go.mongodb.org/mongo-driver/x/bsonx/bsoncore"
+ )
+ 
+@@ -37,20 +37,20 @@ func (p GCPCredentialProvider) GetCredentialsDoc(ctx context.Context) (bsoncore.
+ 	url := fmt.Sprintf("http://%s/computeMetadata/v1/instance/service-accounts/default/token", metadataHost)
+ 	req, err := http.NewRequest(http.MethodGet, url, nil)
+ 	if err != nil {
+-		return nil, internal.WrapErrorf(err, "unable to retrieve GCP credentials")
++		return nil, errutil.WrapErrorf(err, "unable to retrieve GCP credentials")
+ 	}
+ 	req.Header.Set("Metadata-Flavor", "Google")
+ 	resp, err := p.httpClient.Do(req.WithContext(ctx))
+ 	if err != nil {
+-		return nil, internal.WrapErrorf(err, "unable to retrieve GCP credentials")
++		return nil, errutil.WrapErrorf(err, "unable to retrieve GCP credentials")
+ 	}
+ 	defer resp.Body.Close()
+ 	body, err := ioutil.ReadAll(resp.Body)
+ 	if err != nil {
+-		return nil, internal.WrapErrorf(err, "unable to retrieve GCP credentials: error reading response body")
++		return nil, errutil.WrapErrorf(err, "unable to retrieve GCP credentials: error reading response body")
+ 	}
+ 	if resp.StatusCode != http.StatusOK {
+-		return nil, internal.WrapErrorf(err, "unable to retrieve GCP credentials: expected StatusCode 200, got StatusCode: %v. Response body: %s", resp.StatusCode, body)
++		return nil, errutil.WrapErrorf(err, "unable to retrieve GCP credentials: expected StatusCode 200, got StatusCode: %v. Response body: %s", resp.StatusCode, body)
+ 	}
+ 	var tokenResponse struct {
+ 		AccessToken string `json:"access_token"`
+@@ -58,7 +58,7 @@ func (p GCPCredentialProvider) GetCredentialsDoc(ctx context.Context) (bsoncore.
+ 	// Attempt to read body as JSON
+ 	err = json.Unmarshal(body, &tokenResponse)
+ 	if err != nil {
+-		return nil, internal.WrapErrorf(err, "unable to retrieve GCP credentials: error reading body JSON. Response body: %s", body)
++		return nil, errutil.WrapErrorf(err, "unable to retrieve GCP credentials: error reading body JSON. Response body: %s", body)
+ 	}
+ 	if tokenResponse.AccessToken == "" {
+ 		return nil, fmt.Errorf("unable to retrieve GCP credentials: got unexpected empty accessToken from GCP Metadata Server. Response body: %s", body)
+diff --git a/x/mongo/driver/auth/speculative_scram_test.go b/x/mongo/driver/auth/speculative_scram_test.go
+index 4d5d04c73b..a159891adc 100644
+--- a/x/mongo/driver/auth/speculative_scram_test.go
++++ b/x/mongo/driver/auth/speculative_scram_test.go
+@@ -12,8 +12,8 @@ import (
+ 	"testing"
+ 
+ 	"go.mongodb.org/mongo-driver/bson"
+-	"go.mongodb.org/mongo-driver/internal"
+ 	"go.mongodb.org/mongo-driver/internal/assert"
++	"go.mongodb.org/mongo-driver/internal/handshake"
+ 	"go.mongodb.org/mongo-driver/mongo/address"
+ 	"go.mongodb.org/mongo-driver/x/bsonx/bsoncore"
+ 	"go.mongodb.org/mongo-driver/x/mongo/driver/drivertest"
+@@ -23,7 +23,7 @@ var (
+ 	// The base elements for a hello response.
+ 	handshakeHelloElements = [][]byte{
+ 		bsoncore.AppendInt32Element(nil, "ok", 1),
+-		bsoncore.AppendBooleanElement(nil, internal.LegacyHelloLowercase, true),
++		bsoncore.AppendBooleanElement(nil, handshake.LegacyHelloLowercase, true),
+ 		bsoncore.AppendInt32Element(nil, "maxBsonObjectSize", 16777216),
+ 		bsoncore.AppendInt32Element(nil, "maxMessageSizeBytes", 48000000),
+ 		bsoncore.AppendInt32Element(nil, "minWireVersion", 0),
+@@ -95,7 +95,7 @@ func TestSpeculativeSCRAM(t *testing.T) {
+ 					len(tc.payloads), (conn.Written))
+ 				helloCmd, err := drivertest.GetCommandFromQueryWireMessage(<-conn.Written)
+ 				assert.Nil(t, err, "error parsing hello command: %v", err)
+-				assertCommandName(t, helloCmd, internal.LegacyHello)
++				assertCommandName(t, helloCmd, handshake.LegacyHello)
+ 
+ 				// Assert that the correct document was sent for speculative authentication.
+ 				authDocVal, err := helloCmd.LookupErr("speculativeAuthenticate")
+@@ -179,7 +179,7 @@ func TestSpeculativeSCRAM(t *testing.T) {
+ 					numResponses, len(conn.Written))
+ 				hello, err := drivertest.GetCommandFromQueryWireMessage(<-conn.Written)
+ 				assert.Nil(t, err, "error parsing hello command: %v", err)
+-				assertCommandName(t, hello, internal.LegacyHello)
++				assertCommandName(t, hello, handshake.LegacyHello)
+ 				_, err = hello.LookupErr("speculativeAuthenticate")
+ 				assert.Nil(t, err, "expected command %s to contain 'speculativeAuthenticate'", bson.Raw(hello))
+ 
+diff --git a/x/mongo/driver/auth/speculative_x509_test.go b/x/mongo/driver/auth/speculative_x509_test.go
+index 2ab9299a15..cf46de6ffd 100644
+--- a/x/mongo/driver/auth/speculative_x509_test.go
++++ b/x/mongo/driver/auth/speculative_x509_test.go
+@@ -12,8 +12,8 @@ import (
+ 	"testing"
+ 
+ 	"go.mongodb.org/mongo-driver/bson"
+-	"go.mongodb.org/mongo-driver/internal"
+ 	"go.mongodb.org/mongo-driver/internal/assert"
++	"go.mongodb.org/mongo-driver/internal/handshake"
+ 	"go.mongodb.org/mongo-driver/mongo/address"
+ 	"go.mongodb.org/mongo-driver/x/bsonx/bsoncore"
+ 	"go.mongodb.org/mongo-driver/x/mongo/driver/drivertest"
+@@ -60,7 +60,7 @@ func TestSpeculativeX509(t *testing.T) {
+ 			numResponses, len(conn.Written))
+ 		hello, err := drivertest.GetCommandFromQueryWireMessage(<-conn.Written)
+ 		assert.Nil(t, err, "error parsing hello command: %v", err)
+-		assertCommandName(t, hello, internal.LegacyHello)
++		assertCommandName(t, hello, handshake.LegacyHello)
+ 
+ 		authDocVal, err := hello.LookupErr("speculativeAuthenticate")
+ 		assert.Nil(t, err, "expected command %s to contain 'speculativeAuthenticate'", bson.Raw(hello))
+@@ -105,7 +105,7 @@ func TestSpeculativeX509(t *testing.T) {
+ 			numResponses, len(conn.Written))
+ 		hello, err := drivertest.GetCommandFromQueryWireMessage(<-conn.Written)
+ 		assert.Nil(t, err, "error parsing hello command: %v", err)
+-		assertCommandName(t, hello, internal.LegacyHello)
++		assertCommandName(t, hello, handshake.LegacyHello)
+ 		_, err = hello.LookupErr("speculativeAuthenticate")
+ 		assert.Nil(t, err, "expected command %s to contain 'speculativeAuthenticate'", bson.Raw(hello))
+ 
+diff --git a/x/mongo/driver/batch_cursor.go b/x/mongo/driver/batch_cursor.go
+index b211a7b8d7..85f68f9f1a 100644
+--- a/x/mongo/driver/batch_cursor.go
++++ b/x/mongo/driver/batch_cursor.go
+@@ -17,8 +17,8 @@ import (
+ 	"go.mongodb.org/mongo-driver/bson"
+ 	"go.mongodb.org/mongo-driver/bson/bsontype"
+ 	"go.mongodb.org/mongo-driver/event"
+-	"go.mongodb.org/mongo-driver/internal"
+ 	"go.mongodb.org/mongo-driver/internal/codecutil"
++	"go.mongodb.org/mongo-driver/internal/csot"
+ 	"go.mongodb.org/mongo-driver/mongo/description"
+ 	"go.mongodb.org/mongo-driver/x/bsonx/bsoncore"
+ 	"go.mongodb.org/mongo-driver/x/mongo/driver/session"
+@@ -514,7 +514,7 @@ func (lbcd *loadBalancedCursorDeployment) Connection(_ context.Context) (Connect
+ 
+ // RTTMonitor implements the driver.Server interface.
+ func (lbcd *loadBalancedCursorDeployment) RTTMonitor() RTTMonitor {
+-	return &internal.ZeroRTTMonitor{}
++	return &csot.ZeroRTTMonitor{}
+ }
+ 
+ func (lbcd *loadBalancedCursorDeployment) ProcessError(err error, conn Connection) ProcessErrorResult {
+diff --git a/x/mongo/driver/command_monitoring_test.go b/x/mongo/driver/command_monitoring_test.go
+index 81ffb6db93..7d0f30c136 100644
+--- a/x/mongo/driver/command_monitoring_test.go
++++ b/x/mongo/driver/command_monitoring_test.go
+@@ -9,8 +9,8 @@ package driver
+ import (
+ 	"testing"
+ 
+-	"go.mongodb.org/mongo-driver/internal"
+ 	"go.mongodb.org/mongo-driver/internal/assert"
++	"go.mongodb.org/mongo-driver/internal/handshake"
+ 	"go.mongodb.org/mongo-driver/x/bsonx/bsoncore"
+ )
+ 
+@@ -18,17 +18,17 @@ func TestCommandMonitoring(t *testing.T) {
+ 	t.Run("redactCommand", func(t *testing.T) {
+ 		emptyDoc := bsoncore.BuildDocumentFromElements(nil)
+ 		legacyHello := bsoncore.BuildDocumentFromElements(nil,
+-			bsoncore.AppendInt32Element(nil, internal.LegacyHello, 1),
++			bsoncore.AppendInt32Element(nil, handshake.LegacyHello, 1),
+ 		)
+ 		legacyHelloLowercase := bsoncore.BuildDocumentFromElements(nil,
+-			bsoncore.AppendInt32Element(nil, internal.LegacyHelloLowercase, 1),
++			bsoncore.AppendInt32Element(nil, handshake.LegacyHelloLowercase, 1),
+ 		)
+ 		legacyHelloSpeculative := bsoncore.BuildDocumentFromElements(nil,
+-			bsoncore.AppendInt32Element(nil, internal.LegacyHello, 1),
++			bsoncore.AppendInt32Element(nil, handshake.LegacyHello, 1),
+ 			bsoncore.AppendDocumentElement(nil, "speculativeAuthenticate", emptyDoc),
+ 		)
+ 		legacyHelloSpeculativeLowercase := bsoncore.BuildDocumentFromElements(nil,
+-			bsoncore.AppendInt32Element(nil, internal.LegacyHelloLowercase, 1),
++			bsoncore.AppendInt32Element(nil, handshake.LegacyHelloLowercase, 1),
+ 			bsoncore.AppendDocumentElement(nil, "speculativeAuthenticate", emptyDoc),
+ 		)
+ 
+@@ -38,10 +38,10 @@ func TestCommandMonitoring(t *testing.T) {
+ 			command     bsoncore.Document
+ 			redacted    bool
+ 		}{
+-			{"legacy hello", internal.LegacyHello, legacyHello, false},
+-			{"legacy hello lowercase", internal.LegacyHelloLowercase, legacyHelloLowercase, false},
+-			{"legacy hello speculative auth", internal.LegacyHello, legacyHelloSpeculative, true},
+-			{"legacy hello speculative auth lowercase", internal.LegacyHello, legacyHelloSpeculativeLowercase, true},
++			{"legacy hello", handshake.LegacyHello, legacyHello, false},
++			{"legacy hello lowercase", handshake.LegacyHelloLowercase, legacyHelloLowercase, false},
++			{"legacy hello speculative auth", handshake.LegacyHello, legacyHelloSpeculative, true},
++			{"legacy hello speculative auth lowercase", handshake.LegacyHello, legacyHelloSpeculativeLowercase, true},
+ 		}
+ 		for _, tc := range testCases {
+ 			t.Run(tc.name, func(t *testing.T) {
+diff --git a/x/mongo/driver/connstring/connstring.go b/x/mongo/driver/connstring/connstring.go
+index 6f03a58577..819c63b8ae 100644
+--- a/x/mongo/driver/connstring/connstring.go
++++ b/x/mongo/driver/connstring/connstring.go
+@@ -15,13 +15,40 @@ import (
+ 	"strings"
+ 	"time"
+ 
+-	"go.mongodb.org/mongo-driver/internal"
++	"go.mongodb.org/mongo-driver/internal/errutil"
+ 	"go.mongodb.org/mongo-driver/internal/randutil"
+ 	"go.mongodb.org/mongo-driver/mongo/writeconcern"
+ 	"go.mongodb.org/mongo-driver/x/mongo/driver/dns"
+ 	"go.mongodb.org/mongo-driver/x/mongo/driver/wiremessage"
+ )
+ 
++var (
++	// ErrLoadBalancedWithMultipleHosts is returned when loadBalanced=true is
++	// specified in a URI with multiple hosts.
++	ErrLoadBalancedWithMultipleHosts = errors.New(
++		"loadBalanced cannot be set to true if multiple hosts are specified")
++
++	// ErrLoadBalancedWithReplicaSet is returned when loadBalanced=true is
++	// specified in a URI with the replicaSet option.
++	ErrLoadBalancedWithReplicaSet = errors.New(
++		"loadBalanced cannot be set to true if a replica set name is specified")
++
++	// ErrLoadBalancedWithDirectConnection is returned when loadBalanced=true is
++	// specified in a URI with the directConnection option.
++	ErrLoadBalancedWithDirectConnection = errors.New(
++		"loadBalanced cannot be set to true if the direct connection option is specified")
++
++	// ErrSRVMaxHostsWithReplicaSet is returned when srvMaxHosts > 0 is
++	// specified in a URI with the replicaSet option.
++	ErrSRVMaxHostsWithReplicaSet = errors.New(
++		"srvMaxHosts cannot be a positive value if a replica set name is specified")
++
++	// ErrSRVMaxHostsWithLoadBalanced is returned when srvMaxHosts > 0 is
++	// specified in a URI with loadBalanced=true.
++	ErrSRVMaxHostsWithLoadBalanced = errors.New(
++		"srvMaxHosts cannot be a positive value if loadBalanced is set to true")
++)
++
+ // random is a package-global pseudo-random number generator.
+ var random = randutil.NewLockedRand()
+ 
+@@ -31,11 +58,11 @@ func ParseAndValidate(s string) (ConnString, error) {
+ 	p := parser{dnsResolver: dns.DefaultResolver}
+ 	err := p.parse(s)
+ 	if err != nil {
+-		return p.ConnString, internal.WrapErrorf(err, "error parsing uri")
++		return p.ConnString, errutil.WrapErrorf(err, "error parsing uri")
+ 	}
+ 	err = p.ConnString.Validate()
+ 	if err != nil {
+-		return p.ConnString, internal.WrapErrorf(err, "error validating uri")
++		return p.ConnString, errutil.WrapErrorf(err, "error validating uri")
+ 	}
+ 	return p.ConnString, nil
+ }
+@@ -47,7 +74,7 @@ func Parse(s string) (ConnString, error) {
+ 	p := parser{dnsResolver: dns.DefaultResolver}
+ 	err := p.parse(s)
+ 	if err != nil {
+-		err = internal.WrapErrorf(err, "error parsing uri")
++		err = errutil.WrapErrorf(err, "error parsing uri")
+ 	}
+ 	return p.ConnString, err
+ }
+@@ -235,7 +262,7 @@ func (p *parser) parse(original string) error {
+ 		}
+ 		p.Username, err = url.PathUnescape(username)
+ 		if err != nil {
+-			return internal.WrapErrorf(err, "invalid username")
++			return errutil.WrapErrorf(err, "invalid username")
+ 		}
+ 		p.UsernameSet = true
+ 
+@@ -248,7 +275,7 @@ func (p *parser) parse(original string) error {
+ 		}
+ 		p.Password, err = url.PathUnescape(password)
+ 		if err != nil {
+-			return internal.WrapErrorf(err, "invalid password")
++			return errutil.WrapErrorf(err, "invalid password")
+ 		}
+ 	}
+ 
+@@ -325,7 +352,7 @@ func (p *parser) parse(original string) error {
+ 	for _, host := range parsedHosts {
+ 		err = p.addHost(host)
+ 		if err != nil {
+-			return internal.WrapErrorf(err, "invalid host %q", host)
++			return errutil.WrapErrorf(err, "invalid host %q", host)
+ 		}
+ 	}
+ 	if len(p.Hosts) == 0 {
+@@ -371,27 +398,27 @@ func (p *parser) validate() error {
+ 			return errors.New("a direct connection cannot be made if an SRV URI is used")
+ 		}
+ 		if p.LoadBalancedSet && p.LoadBalanced {
+-			return internal.ErrLoadBalancedWithDirectConnection
++			return ErrLoadBalancedWithDirectConnection
+ 		}
+ 	}
+ 
+ 	// Validation for load-balanced mode.
+ 	if p.LoadBalancedSet && p.LoadBalanced {
+ 		if len(p.Hosts) > 1 {
+-			return internal.ErrLoadBalancedWithMultipleHosts
++			return ErrLoadBalancedWithMultipleHosts
+ 		}
+ 		if p.ReplicaSet != "" {
+-			return internal.ErrLoadBalancedWithReplicaSet
++			return ErrLoadBalancedWithReplicaSet
+ 		}
+ 	}
+ 
+ 	// Check for invalid use of SRVMaxHosts.
+ 	if p.SRVMaxHosts > 0 {
+ 		if p.ReplicaSet != "" {
+-			return internal.ErrSRVMaxHostsWithReplicaSet
++			return ErrSRVMaxHostsWithReplicaSet
+ 		}
+ 		if p.LoadBalanced {
+-			return internal.ErrSRVMaxHostsWithLoadBalanced
++			return ErrSRVMaxHostsWithLoadBalanced
+ 		}
+ 	}
+ 
+@@ -570,7 +597,7 @@ func (p *parser) addHost(host string) error {
+ 	}
+ 	host, err := url.QueryUnescape(host)
+ 	if err != nil {
+-		return internal.WrapErrorf(err, "invalid host %q", host)
++		return errutil.WrapErrorf(err, "invalid host %q", host)
+ 	}
+ 
+ 	_, port, err := net.SplitHostPort(host)
+@@ -585,7 +612,7 @@ func (p *parser) addHost(host string) error {
+ 	if port != "" {
+ 		d, err := strconv.Atoi(port)
+ 		if err != nil {
+-			return internal.WrapErrorf(err, "port must be an integer")
++			return errutil.WrapErrorf(err, "port must be an integer")
+ 		}
+ 		if d <= 0 || d >= 65536 {
+ 			return fmt.Errorf("port must be in the range [1, 65535]")
+@@ -603,12 +630,12 @@ func (p *parser) addOption(pair string) error {
+ 
+ 	key, err := url.QueryUnescape(kv[0])
+ 	if err != nil {
+-		return internal.WrapErrorf(err, "invalid option key %q", kv[0])
++		return errutil.WrapErrorf(err, "invalid option key %q", kv[0])
+ 	}
+ 
+ 	value, err := url.QueryUnescape(kv[1])
+ 	if err != nil {
+-		return internal.WrapErrorf(err, "invalid option value %q", kv[1])
++		return errutil.WrapErrorf(err, "invalid option value %q", kv[1])
+ 	}
+ 
+ 	lowerKey := strings.ToLower(key)
+@@ -1024,7 +1051,7 @@ func extractDatabaseFromURI(uri string) (extractedDatabase, error) {
+ 
+ 	escapedDatabase, err := url.QueryUnescape(database)
+ 	if err != nil {
+-		return extractedDatabase{}, internal.WrapErrorf(err, "invalid database %q", database)
++		return extractedDatabase{}, errutil.WrapErrorf(err, "invalid database %q", database)
+ 	}
+ 
+ 	uri = uri[len(database):]
+diff --git a/x/mongo/driver/connstring/connstring_spec_test.go b/x/mongo/driver/connstring/connstring_spec_test.go
+index eb4e8bfbcd..a5f646297c 100644
+--- a/x/mongo/driver/connstring/connstring_spec_test.go
++++ b/x/mongo/driver/connstring/connstring_spec_test.go
+@@ -17,7 +17,7 @@ import (
+ 	"time"
+ 
+ 	"go.mongodb.org/mongo-driver/internal/require"
+-	"go.mongodb.org/mongo-driver/internal/testutil/helpers"
++	"go.mongodb.org/mongo-driver/internal/spectest"
+ 	"go.mongodb.org/mongo-driver/x/mongo/driver/connstring"
+ )
+ 
+@@ -170,13 +170,13 @@ func runTest(t *testing.T, filename string, test testCase, warningsError bool) {
+ 
+ // Test case for all connection string spec tests.
+ func TestConnStringSpec(t *testing.T) {
+-	for _, file := range helpers.FindJSONFilesInDir(t, connstringTestsDir) {
++	for _, file := range spectest.FindJSONFilesInDir(t, connstringTestsDir) {
+ 		runTestsInFile(t, connstringTestsDir, file, false)
+ 	}
+ }
+ 
+ func TestURIOptionsSpec(t *testing.T) {
+-	for _, file := range helpers.FindJSONFilesInDir(t, urioptionsTestDir) {
++	for _, file := range spectest.FindJSONFilesInDir(t, urioptionsTestDir) {
+ 		runTestsInFile(t, urioptionsTestDir, file, true)
+ 	}
+ }
+diff --git a/x/mongo/driver/driver.go b/x/mongo/driver/driver.go
+index 38a0a2d130..0dbd3f70f4 100644
+--- a/x/mongo/driver/driver.go
++++ b/x/mongo/driver/driver.go
+@@ -10,7 +10,7 @@ import (
+ 	"context"
+ 	"time"
+ 
+-	"go.mongodb.org/mongo-driver/internal"
++	"go.mongodb.org/mongo-driver/internal/csot"
+ 	"go.mongodb.org/mongo-driver/mongo/address"
+ 	"go.mongodb.org/mongo-driver/mongo/description"
+ 	"go.mongodb.org/mongo-driver/x/bsonx/bsoncore"
+@@ -89,7 +89,7 @@ type RTTMonitor interface {
+ 	Stats() string
+ }
+ 
+-var _ RTTMonitor = &internal.ZeroRTTMonitor{}
++var _ RTTMonitor = &csot.ZeroRTTMonitor{}
+ 
+ // PinnedConnection represents a Connection that can be pinned by one or more cursors or transactions. Implementations
+ // of this interface should maintain the following invariants:
+@@ -224,7 +224,7 @@ func (ssd SingleConnectionDeployment) Connection(context.Context) (Connection, e
+ 
+ // RTTMonitor implements the driver.Server interface.
+ func (ssd SingleConnectionDeployment) RTTMonitor() RTTMonitor {
+-	return &internal.ZeroRTTMonitor{}
++	return &csot.ZeroRTTMonitor{}
+ }
+ 
+ // TODO(GODRIVER-617): We can likely use 1 type for both the Type and the RetryMode by using 2 bits for the mode and 1
+diff --git a/x/mongo/driver/errors.go b/x/mongo/driver/errors.go
+index df4192619a..a9fcb50125 100644
+--- a/x/mongo/driver/errors.go
++++ b/x/mongo/driver/errors.go
+@@ -13,11 +13,15 @@ import (
+ 	"strings"
+ 
+ 	"go.mongodb.org/mongo-driver/bson"
+-	"go.mongodb.org/mongo-driver/internal"
+ 	"go.mongodb.org/mongo-driver/mongo/description"
+ 	"go.mongodb.org/mongo-driver/x/bsonx/bsoncore"
+ )
+ 
++// LegacyNotPrimaryErrMsg is the error message that older MongoDB servers (see
++// SERVER-50412 for versions) return when a write operation is erroneously sent
++// to a non-primary node.
++const LegacyNotPrimaryErrMsg = "not master"
++
+ var (
+ 	retryableCodes          = []int32{11600, 11602, 10107, 13435, 13436, 189, 91, 7, 6, 89, 9001, 262}
+ 	nodeIsRecoveringCodes   = []int32{11600, 11602, 13436, 189, 91}
+@@ -206,7 +210,7 @@ func (wce WriteConcernError) NotPrimary() bool {
+ 		}
+ 	}
+ 	hasNoCode := wce.Code == 0
+-	return hasNoCode && strings.Contains(wce.Message, internal.LegacyNotPrimary)
++	return hasNoCode && strings.Contains(wce.Message, LegacyNotPrimaryErrMsg)
+ }
+ 
+ // WriteError is a non-write concern failure that occurred as a result of a write
+@@ -354,7 +358,7 @@ func (e Error) NotPrimary() bool {
+ 		}
+ 	}
+ 	hasNoCode := e.Code == 0
+-	return hasNoCode && strings.Contains(e.Message, internal.LegacyNotPrimary)
++	return hasNoCode && strings.Contains(e.Message, LegacyNotPrimaryErrMsg)
+ }
+ 
+ // NamespaceNotFound returns true if this errors is a NamespaceNotFound error.
+diff --git a/x/mongo/driver/integration/aggregate_test.go b/x/mongo/driver/integration/aggregate_test.go
+index 267b01cdca..95a9b821ae 100644
+--- a/x/mongo/driver/integration/aggregate_test.go
++++ b/x/mongo/driver/integration/aggregate_test.go
+@@ -14,8 +14,8 @@ import (
+ 
+ 	"go.mongodb.org/mongo-driver/bson"
+ 	"go.mongodb.org/mongo-driver/event"
++	"go.mongodb.org/mongo-driver/internal/integtest"
+ 	"go.mongodb.org/mongo-driver/internal/require"
+-	"go.mongodb.org/mongo-driver/internal/testutil"
+ 	"go.mongodb.org/mongo-driver/mongo/description"
+ 	"go.mongodb.org/mongo-driver/mongo/writeconcern"
+ 	"go.mongodb.org/mongo-driver/x/bsonx/bsoncore"
+@@ -47,12 +47,12 @@ func skipIfBelow32(ctx context.Context, t *testing.T, topo *topology.Topology) {
+ 	noerr(t, err)
+ 
+ 	versionCmd := bsoncore.BuildDocument(nil, bsoncore.AppendInt32Element(nil, "serverStatus", 1))
+-	serverStatus, err := testutil.RunCommand(server, dbName, versionCmd)
++	serverStatus, err := runCommand(server, dbName, versionCmd)
+ 	noerr(t, err)
+ 	version, err := serverStatus.LookupErr("version")
+ 	noerr(t, err)
+ 
+-	if testutil.CompareVersions(t, version.StringValue(), "3.2") < 0 {
++	if integtest.CompareVersions(t, version.StringValue(), "3.2") < 0 {
+ 		t.Skip()
+ 	}
+ }
+@@ -67,7 +67,7 @@ func TestAggregate(t *testing.T) {
+ 		monitor, started, succeeded, failed := setUpMonitor()
+ 		dbName := "TestAggMaxTimeDB"
+ 		collName := "TestAggMaxTimeColl"
+-		top := testutil.MonitoredTopology(t, dbName, monitor)
++		top := integtest.MonitoredTopology(t, dbName, monitor)
+ 		clearChannels(started, succeeded, failed)
+ 		skipIfBelow32(ctx, t, top)
+ 
+@@ -122,7 +122,7 @@ func TestAggregate(t *testing.T) {
+ 			bsoncore.BuildDocument(nil, bsoncore.AppendInt32Element(nil, "_id", 5)),
+ 		}
+ 		wc := writeconcern.New(writeconcern.WMajority())
+-		testutil.AutoInsertDocs(t, wc, ds...)
++		autoInsertDocs(t, wc, ds...)
+ 
+ 		op := operation.NewAggregate(bsoncore.BuildArray(nil,
+ 			bsoncore.BuildDocumentValue(
+@@ -137,7 +137,7 @@ func TestAggregate(t *testing.T) {
+ 					"$sort", bsoncore.AppendInt32Element(nil, "_id", 1),
+ 				),
+ 			),
+-		)).Collection(testutil.ColName(t)).Database(dbName).Deployment(testutil.Topology(t)).
++		)).Collection(integtest.ColName(t)).Database(dbName).Deployment(integtest.Topology(t)).
+ 			ServerSelector(description.WriteSelector()).BatchSize(2)
+ 		err := op.Execute(context.Background())
+ 		noerr(t, err)
+@@ -170,10 +170,10 @@ func TestAggregate(t *testing.T) {
+ 			bsoncore.BuildDocument(nil, bsoncore.AppendInt32Element(nil, "_id", 2)),
+ 		}
+ 		wc := writeconcern.New(writeconcern.WMajority())
+-		testutil.AutoInsertDocs(t, wc, ds...)
++		autoInsertDocs(t, wc, ds...)
+ 
+-		op := operation.NewAggregate(bsoncore.BuildArray(nil)).Collection(testutil.ColName(t)).Database(dbName).
+-			Deployment(testutil.Topology(t)).ServerSelector(description.WriteSelector()).AllowDiskUse(true)
++		op := operation.NewAggregate(bsoncore.BuildArray(nil)).Collection(integtest.ColName(t)).Database(dbName).
++			Deployment(integtest.Topology(t)).ServerSelector(description.WriteSelector()).AllowDiskUse(true)
+ 		err := op.Execute(context.Background())
+ 		if err != nil {
+ 			t.Errorf("Expected no error from allowing disk use, but got %v", err)
+diff --git a/x/mongo/driver/integration/compressor_test.go b/x/mongo/driver/integration/compressor_test.go
+index 75f45cb838..16f809cb80 100644
+--- a/x/mongo/driver/integration/compressor_test.go
++++ b/x/mongo/driver/integration/compressor_test.go
+@@ -12,8 +12,8 @@ import (
+ 	"testing"
+ 
+ 	"go.mongodb.org/mongo-driver/bson"
++	"go.mongodb.org/mongo-driver/internal/integtest"
+ 	"go.mongodb.org/mongo-driver/internal/require"
+-	"go.mongodb.org/mongo-driver/internal/testutil"
+ 	"go.mongodb.org/mongo-driver/mongo/writeconcern"
+ 	"go.mongodb.org/mongo-driver/x/bsonx/bsoncore"
+ 	"go.mongodb.org/mongo-driver/x/mongo/driver/operation"
+@@ -26,16 +26,16 @@ func TestCompression(t *testing.T) {
+ 	}
+ 
+ 	wc := writeconcern.New(writeconcern.WMajority())
+-	collOne := testutil.ColName(t)
++	collOne := integtest.ColName(t)
+ 
+-	testutil.DropCollection(t, testutil.DBName(t), collOne)
+-	testutil.InsertDocs(t, testutil.DBName(t), collOne, wc,
++	dropCollection(t, integtest.DBName(t), collOne)
++	insertDocs(t, integtest.DBName(t), collOne, wc,
+ 		bsoncore.BuildDocument(nil, bsoncore.AppendStringElement(nil, "name", "compression_test")),
+ 	)
+ 
+ 	cmd := operation.NewCommand(bsoncore.BuildDocument(nil, bsoncore.AppendInt32Element(nil, "serverStatus", 1))).
+-		Deployment(testutil.Topology(t)).
+-		Database(testutil.DBName(t))
++		Deployment(integtest.Topology(t)).
++		Database(integtest.DBName(t))
+ 
+ 	ctx := context.Background()
+ 	err := cmd.Execute(ctx)
+@@ -45,7 +45,7 @@ func TestCompression(t *testing.T) {
+ 	serverVersion, err := result.LookupErr("version")
+ 	noerr(t, err)
+ 
+-	if testutil.CompareVersions(t, serverVersion.StringValue(), "3.4") < 0 {
++	if integtest.CompareVersions(t, serverVersion.StringValue(), "3.4") < 0 {
+ 		t.Skip("skipping compression test for version < 3.4")
+ 	}
+ 
+@@ -61,7 +61,7 @@ func TestCompression(t *testing.T) {
+ 	noerr(t, err)
+ 
+ 	compressorKey := "compressor"
+-	compareTo36 := testutil.CompareVersions(t, serverVersion.StringValue(), "3.6")
++	compareTo36 := integtest.CompareVersions(t, serverVersion.StringValue(), "3.6")
+ 	if compareTo36 < 0 {
+ 		compressorKey = "compressed"
+ 	}
+diff --git a/x/mongo/driver/integration/main_test.go b/x/mongo/driver/integration/main_test.go
+index 74f541a8bf..ef6331853d 100644
+--- a/x/mongo/driver/integration/main_test.go
++++ b/x/mongo/driver/integration/main_test.go
+@@ -7,14 +7,22 @@
+ package integration
+ 
+ import (
++	"context"
+ 	"flag"
+ 	"fmt"
+ 	"os"
+ 	"strings"
+ 	"testing"
+ 
++	"go.mongodb.org/mongo-driver/internal/integtest"
++	"go.mongodb.org/mongo-driver/internal/require"
++	"go.mongodb.org/mongo-driver/mongo/description"
++	"go.mongodb.org/mongo-driver/mongo/writeconcern"
++	"go.mongodb.org/mongo-driver/x/bsonx/bsoncore"
++	"go.mongodb.org/mongo-driver/x/mongo/driver"
+ 	"go.mongodb.org/mongo-driver/x/mongo/driver/auth"
+ 	"go.mongodb.org/mongo-driver/x/mongo/driver/connstring"
++	"go.mongodb.org/mongo-driver/x/mongo/driver/operation"
+ 	"go.mongodb.org/mongo-driver/x/mongo/driver/topology"
+ )
+ 
+@@ -111,3 +119,39 @@ func addCompressorToURI(uri string) string {
+ 
+ 	return uri + "compressors=" + comp
+ }
++
++// runCommand runs an arbitrary command on a given database of target server
++func runCommand(s driver.Server, db string, cmd bsoncore.Document) (bsoncore.Document, error) {
++	op := operation.NewCommand(cmd).
++		Database(db).Deployment(driver.SingleServerDeployment{Server: s})
++	err := op.Execute(context.Background())
++	res := op.Result()
++	return res, err
++}
++
++// dropCollection drops the collection in the test cluster.
++func dropCollection(t *testing.T, dbname, colname string) {
++	err := operation.NewCommand(bsoncore.BuildDocument(nil, bsoncore.AppendStringElement(nil, "drop", colname))).
++		Database(dbname).ServerSelector(description.WriteSelector()).Deployment(integtest.Topology(t)).
++		Execute(context.Background())
++	if de, ok := err.(driver.Error); err != nil && !(ok && de.NamespaceNotFound()) {
++		require.NoError(t, err)
++	}
++}
++
++// autoInsertDocs inserts the docs into the test cluster.
++func autoInsertDocs(t *testing.T, writeConcern *writeconcern.WriteConcern, docs ...bsoncore.Document) {
++	insertDocs(t, integtest.DBName(t), integtest.ColName(t), writeConcern, docs...)
++}
++
++// insertDocs inserts the docs into the test cluster.
++func insertDocs(t *testing.T, dbname, colname string, writeConcern *writeconcern.WriteConcern, docs ...bsoncore.Document) {
++	err := operation.NewInsert(docs...).
++		Collection(colname).
++		Database(dbname).
++		Deployment(integtest.Topology(t)).
++		ServerSelector(description.WriteSelector()).
++		WriteConcern(writeConcern).
++		Execute(context.Background())
++	require.NoError(t, err)
++}
+diff --git a/x/mongo/driver/integration/scram_test.go b/x/mongo/driver/integration/scram_test.go
+index e057266665..18d99a5c40 100644
+--- a/x/mongo/driver/integration/scram_test.go
++++ b/x/mongo/driver/integration/scram_test.go
+@@ -13,7 +13,7 @@ import (
+ 	"testing"
+ 
+ 	"go.mongodb.org/mongo-driver/bson/bsontype"
+-	"go.mongodb.org/mongo-driver/internal/testutil"
++	"go.mongodb.org/mongo-driver/internal/integtest"
+ 	"go.mongodb.org/mongo-driver/mongo/description"
+ 	"go.mongodb.org/mongo-driver/mongo/options"
+ 	"go.mongodb.org/mongo-driver/mongo/writeconcern"
+@@ -33,7 +33,7 @@ func TestSCRAM(t *testing.T) {
+ 		t.Skip("Skipping because authentication is required")
+ 	}
+ 
+-	server, err := testutil.Topology(t).SelectServer(context.Background(), description.WriteSelector())
++	server, err := integtest.Topology(t).SelectServer(context.Background(), description.WriteSelector())
+ 	noerr(t, err)
+ 	serverConnection, err := server.Connection(context.Background())
+ 	noerr(t, err)
+@@ -60,9 +60,9 @@ func TestSCRAM(t *testing.T) {
+ 	// Verify that test (root) user is authenticated.  If this fails, the
+ 	// rest of the test can't succeed.
+ 	wc := writeconcern.New(writeconcern.WMajority())
+-	collOne := testutil.ColName(t)
+-	testutil.DropCollection(t, testutil.DBName(t), collOne)
+-	testutil.InsertDocs(t, testutil.DBName(t),
++	collOne := integtest.ColName(t)
++	dropCollection(t, integtest.DBName(t), collOne)
++	insertDocs(t, integtest.DBName(t),
+ 		collOne, wc, bsoncore.BuildDocument(nil, bsoncore.AppendStringElement(nil, "name", "scram_test")),
+ 	)
+ 
+@@ -129,7 +129,7 @@ func testScramUserAuthWithMech(t *testing.T, c scramTestCase, mech string) error
+ 	credential := options.Credential{
+ 		Username:   c.username,
+ 		Password:   c.password,
+-		AuthSource: testutil.DBName(t),
++		AuthSource: integtest.DBName(t),
+ 	}
+ 	switch mech {
+ 	case "negotiate":
+@@ -142,17 +142,17 @@ func testScramUserAuthWithMech(t *testing.T, c scramTestCase, mech string) error
+ 
+ func runScramAuthTest(t *testing.T, credential options.Credential) error {
+ 	t.Helper()
+-	topology := testutil.TopologyWithCredential(t, credential)
++	topology := integtest.TopologyWithCredential(t, credential)
+ 	server, err := topology.SelectServer(context.Background(), description.WriteSelector())
+ 	noerr(t, err)
+ 
+ 	cmd := bsoncore.BuildDocument(nil, bsoncore.AppendInt32Element(nil, "dbstats", 1))
+-	_, err = testutil.RunCommand(server, testutil.DBName(t), cmd)
++	_, err = runCommand(server, integtest.DBName(t), cmd)
+ 	return err
+ }
+ 
+ func createScramUsers(t *testing.T, s driver.Server, cases []scramTestCase) error {
+-	db := testutil.DBName(t)
++	db := integtest.DBName(t)
+ 	for _, c := range cases {
+ 		var values []bsoncore.Value
+ 		for _, v := range c.mechanisms {
+@@ -169,9 +169,9 @@ func createScramUsers(t *testing.T, s driver.Server, cases []scramTestCase) erro
+ 			)),
+ 			bsoncore.AppendArrayElement(nil, "mechanisms", bsoncore.BuildArray(nil, values...)),
+ 		)
+-		_, err := testutil.RunCommand(s, db, newUserCmd)
++		_, err := runCommand(s, db, newUserCmd)
+ 		if err != nil {
+-			return fmt.Errorf("Couldn't create user '%s' on db '%s': %v", c.username, testutil.DBName(t), err)
++			return fmt.Errorf("Couldn't create user '%s' on db '%s': %v", c.username, integtest.DBName(t), err)
+ 		}
+ 	}
+ 	return nil
+diff --git a/x/mongo/driver/mongocrypt/mongocrypt.go b/x/mongo/driver/mongocrypt/mongocrypt.go
+index 64e2265083..f8138fc00e 100644
+--- a/x/mongo/driver/mongocrypt/mongocrypt.go
++++ b/x/mongo/driver/mongocrypt/mongocrypt.go
+@@ -23,7 +23,8 @@ import (
+ 	"unsafe"
+ 
+ 	"go.mongodb.org/mongo-driver/bson"
+-	"go.mongodb.org/mongo-driver/internal"
++	"go.mongodb.org/mongo-driver/internal/errutil"
++	"go.mongodb.org/mongo-driver/internal/httputil"
+ 	"go.mongodb.org/mongo-driver/x/bsonx/bsoncore"
+ 	"go.mongodb.org/mongo-driver/x/mongo/driver/auth/creds"
+ 	"go.mongodb.org/mongo-driver/x/mongo/driver/mongocrypt/options"
+@@ -55,7 +56,7 @@ func NewMongoCrypt(opts *options.MongoCryptOptions) (*MongoCrypt, error) {
+ 	}
+ 	httpClient := opts.HTTPClient
+ 	if httpClient == nil {
+-		httpClient = internal.DefaultHTTPClient
++		httpClient = httputil.DefaultHTTPClient
+ 	}
+ 	kmsProviders := make(map[string]kmsProvider)
+ 	if needsKmsProvider(opts.KmsProviders, "gcp") {
+@@ -381,8 +382,8 @@ func (m *MongoCrypt) CryptSharedLibVersionString() string {
+ // Close cleans up any resources associated with the given MongoCrypt instance.
+ func (m *MongoCrypt) Close() {
+ 	C.mongocrypt_destroy(m.wrapped)
+-	if m.httpClient == internal.DefaultHTTPClient {
+-		internal.CloseIdleHTTPConnections(m.httpClient)
++	if m.httpClient == httputil.DefaultHTTPClient {
++		httputil.CloseIdleHTTPConnections(m.httpClient)
+ 	}
+ }
+ 
+@@ -511,7 +512,7 @@ func (m *MongoCrypt) GetKmsProviders(ctx context.Context) (bsoncore.Document, er
+ 	for k, p := range m.kmsProviders {
+ 		doc, err := p.GetCredentialsDoc(ctx)
+ 		if err != nil {
+-			return nil, internal.WrapErrorf(err, "unable to retrieve %s credentials", k)
++			return nil, errutil.WrapErrorf(err, "unable to retrieve %s credentials", k)
+ 		}
+ 		builder.AppendDocument(k, doc)
+ 	}
+diff --git a/x/mongo/driver/ocsp/config.go b/x/mongo/driver/ocsp/config.go
+index 4cb14e4d01..eac2aab7fa 100644
+--- a/x/mongo/driver/ocsp/config.go
++++ b/x/mongo/driver/ocsp/config.go
+@@ -12,7 +12,7 @@ import (
+ 	"fmt"
+ 	"net/http"
+ 
+-	"go.mongodb.org/mongo-driver/internal"
++	"go.mongodb.org/mongo-driver/internal/httputil"
+ 	"golang.org/x/crypto/ocsp"
+ )
+ 
+@@ -33,7 +33,7 @@ func newConfig(certChain []*x509.Certificate, opts *VerifyOptions) (config, erro
+ 	}
+ 
+ 	if cfg.httpClient == nil {
+-		cfg.httpClient = internal.DefaultHTTPClient
++		cfg.httpClient = httputil.DefaultHTTPClient
+ 	}
+ 
+ 	if len(certChain) == 0 {
+diff --git a/x/mongo/driver/ocsp/ocsp_test.go b/x/mongo/driver/ocsp/ocsp_test.go
+index a829bd34a2..707be581e0 100644
+--- a/x/mongo/driver/ocsp/ocsp_test.go
++++ b/x/mongo/driver/ocsp/ocsp_test.go
+@@ -16,8 +16,8 @@ import (
+ 	"testing"
+ 	"time"
+ 
+-	"go.mongodb.org/mongo-driver/internal"
+ 	"go.mongodb.org/mongo-driver/internal/assert"
++	"go.mongodb.org/mongo-driver/internal/httputil"
+ )
+ 
+ func TestContactResponders(t *testing.T) {
+@@ -34,7 +34,7 @@ func TestContactResponders(t *testing.T) {
+ 			serverCert: serverCert,
+ 			issuer:     &x509.Certificate{},
+ 			cache:      NewCache(),
+-			httpClient: internal.DefaultHTTPClient,
++			httpClient: httputil.DefaultHTTPClient,
+ 		}
+ 
+ 		res := contactResponders(ctx, cfg)
+@@ -59,7 +59,7 @@ func TestContactResponders(t *testing.T) {
+ 			serverCert: serverCert,
+ 			issuer:     &x509.Certificate{},
+ 			cache:      NewCache(),
+-			httpClient: internal.DefaultHTTPClient,
++			httpClient: httputil.DefaultHTTPClient,
+ 		}
+ 
+ 		// Expect that contactResponders() returns a nil response but does not cause any errors when
+diff --git a/x/mongo/driver/operation.go b/x/mongo/driver/operation.go
+index cc0cda7a95..c7766de261 100644
+--- a/x/mongo/driver/operation.go
++++ b/x/mongo/driver/operation.go
+@@ -22,7 +22,9 @@ import (
+ 	"go.mongodb.org/mongo-driver/bson/bsontype"
+ 	"go.mongodb.org/mongo-driver/bson/primitive"
+ 	"go.mongodb.org/mongo-driver/event"
+-	"go.mongodb.org/mongo-driver/internal"
++	"go.mongodb.org/mongo-driver/internal/csot"
++	"go.mongodb.org/mongo-driver/internal/errutil"
++	"go.mongodb.org/mongo-driver/internal/handshake"
+ 	"go.mongodb.org/mongo-driver/internal/logger"
+ 	"go.mongodb.org/mongo-driver/mongo/address"
+ 	"go.mongodb.org/mongo-driver/mongo/description"
+@@ -417,8 +419,8 @@ func (op Operation) Execute(ctx context.Context) error {
+ 
+ 	// If no deadline is set on the passed-in context, op.Timeout is set, and context is not already
+ 	// a Timeout context, honor op.Timeout in new Timeout context for operation execution.
+-	if _, deadlineSet := ctx.Deadline(); !deadlineSet && op.Timeout != nil && !internal.IsTimeoutContext(ctx) {
+-		newCtx, cancelFunc := internal.MakeTimeoutContext(ctx, *op.Timeout)
++	if _, deadlineSet := ctx.Deadline(); !deadlineSet && op.Timeout != nil && !csot.IsTimeoutContext(ctx) {
++		newCtx, cancelFunc := csot.MakeTimeoutContext(ctx, *op.Timeout)
+ 		// Redefine ctx to be the new timeout-derived context.
+ 		ctx = newCtx
+ 		// Cancel the timeout-derived context at the end of Execute to avoid a context leak.
+@@ -456,7 +458,7 @@ func (op Operation) Execute(ctx context.Context) error {
+ 	// If context is a Timeout context, automatically set retries to -1 (infinite) if retrying is
+ 	// enabled.
+ 	retryEnabled := op.RetryMode != nil && op.RetryMode.Enabled()
+-	if internal.IsTimeoutContext(ctx) && retryEnabled {
++	if csot.IsTimeoutContext(ctx) && retryEnabled {
+ 		retries = -1
+ 	}
+ 
+@@ -668,8 +670,8 @@ func (op Operation) Execute(ctx context.Context) error {
+ 		if ctx.Err() != nil {
+ 			err = ctx.Err()
+ 		} else if deadline, ok := ctx.Deadline(); ok {
+-			if internal.IsTimeoutContext(ctx) && time.Now().Add(srvr.RTTMonitor().P90()).After(deadline) {
+-				err = internal.WrapErrorf(ErrDeadlineWouldBeExceeded,
++			if csot.IsTimeoutContext(ctx) && time.Now().Add(srvr.RTTMonitor().P90()).After(deadline) {
++				err = errutil.WrapErrorf(ErrDeadlineWouldBeExceeded,
+ 					"remaining time %v until context deadline is less than 90th percentile RTT\n%v", time.Until(deadline), srvr.RTTMonitor().Stats())
+ 			} else if time.Now().Add(srvr.RTTMonitor().Min()).After(deadline) {
+ 				err = context.DeadlineExceeded
+@@ -903,7 +905,7 @@ func (op Operation) Execute(ctx context.Context) error {
+ 				}
+ 				// Reset the retries number for RetryOncePerCommand unless context is a Timeout context, in
+ 				// which case retries should remain as -1 (as many times as possible).
+-				if *op.RetryMode == RetryOncePerCommand && !internal.IsTimeoutContext(ctx) {
++				if *op.RetryMode == RetryOncePerCommand && !csot.IsTimeoutContext(ctx) {
+ 					retries = 1
+ 				}
+ 			}
+@@ -1434,7 +1436,7 @@ func (op Operation) addClusterTime(dst []byte, desc description.SelectedServer)
+ // operation's MaxTimeMS if set. If no MaxTimeMS is set on the operation, and context is
+ // not a Timeout context, calculateMaxTimeMS returns 0.
+ func (op Operation) calculateMaxTimeMS(ctx context.Context, rtt90 time.Duration, rttStats string) (uint64, error) {
+-	if internal.IsTimeoutContext(ctx) {
++	if csot.IsTimeoutContext(ctx) {
+ 		if deadline, ok := ctx.Deadline(); ok {
+ 			remainingTimeout := time.Until(deadline)
+ 			maxTime := remainingTimeout - rtt90
+@@ -1443,7 +1445,7 @@ func (op Operation) calculateMaxTimeMS(ctx context.Context, rtt90 time.Duration,
+ 			// maxTimeMS value (e.g. 400 microseconds evaluates to 1ms, not 0ms).
+ 			maxTimeMS := int64((maxTime + (time.Millisecond - 1)) / time.Millisecond)
+ 			if maxTimeMS <= 0 {
+-				return 0, internal.WrapErrorf(ErrDeadlineWouldBeExceeded,
++				return 0, errutil.WrapErrorf(ErrDeadlineWouldBeExceeded,
+ 					"remaining time %v until context deadline is less than or equal to 90th percentile RTT\n%v",
+ 					remainingTimeout, rttStats)
+ 			}
+@@ -1634,7 +1636,7 @@ func (op Operation) secondaryOK(desc description.SelectedServer) wiremessage.Que
+ }
+ 
+ func (Operation) canCompress(cmd string) bool {
+-	if cmd == internal.LegacyHello || cmd == "hello" || cmd == "saslStart" || cmd == "saslContinue" || cmd == "getnonce" || cmd == "authenticate" ||
++	if cmd == handshake.LegacyHello || cmd == "hello" || cmd == "saslStart" || cmd == "saslContinue" || cmd == "getnonce" || cmd == "authenticate" ||
+ 		cmd == "createUser" || cmd == "updateUser" || cmd == "copydbSaslStart" || cmd == "copydbgetnonce" || cmd == "copydb" {
+ 		return false
+ 	}
+@@ -1766,7 +1768,7 @@ func (op *Operation) redactCommand(cmd string, doc bsoncore.Document) bool {
+ 
+ 		return true
+ 	}
+-	if strings.ToLower(cmd) != internal.LegacyHelloLowercase && cmd != "hello" {
++	if strings.ToLower(cmd) != handshake.LegacyHelloLowercase && cmd != "hello" {
+ 		return false
+ 	}
+ 
+diff --git a/x/mongo/driver/operation/hello.go b/x/mongo/driver/operation/hello.go
+index f0d98ee703..3cfa2d450a 100644
+--- a/x/mongo/driver/operation/hello.go
++++ b/x/mongo/driver/operation/hello.go
+@@ -15,7 +15,8 @@ import (
+ 	"strings"
+ 
+ 	"go.mongodb.org/mongo-driver/bson"
+-	"go.mongodb.org/mongo-driver/internal"
++	"go.mongodb.org/mongo-driver/internal/bsonutil"
++	"go.mongodb.org/mongo-driver/internal/handshake"
+ 	"go.mongodb.org/mongo-driver/mongo/address"
+ 	"go.mongodb.org/mongo-driver/mongo/description"
+ 	"go.mongodb.org/mongo-driver/version"
+@@ -498,7 +499,7 @@ func (h *Hello) command(dst []byte, desc description.SelectedServer) ([]byte, er
+ 	if desc.Kind == description.LoadBalanced || h.serverAPI != nil || desc.Server.HelloOK {
+ 		dst = bsoncore.AppendInt32Element(dst, "hello", 1)
+ 	} else {
+-		dst = bsoncore.AppendInt32Element(dst, internal.LegacyHello, 1)
++		dst = bsoncore.AppendInt32Element(dst, handshake.LegacyHello, 1)
+ 	}
+ 	dst = bsoncore.AppendBooleanElement(dst, "helloOk", true)
+ 
+@@ -580,7 +581,7 @@ func (h *Hello) GetHandshakeInformation(ctx context.Context, _ address.Address,
+ 	// Cast to bson.Raw to lookup saslSupportedMechs to avoid converting from bsoncore.Value to bson.RawValue for the
+ 	// StringSliceFromRawValue call.
+ 	if saslSupportedMechs, lookupErr := bson.Raw(h.res).LookupErr("saslSupportedMechs"); lookupErr == nil {
+-		info.SaslSupportedMechs, err = internal.StringSliceFromRawValue("saslSupportedMechs", saslSupportedMechs)
++		info.SaslSupportedMechs, err = bsonutil.StringSliceFromRawValue("saslSupportedMechs", saslSupportedMechs)
+ 	}
+ 	return info, err
+ }
+diff --git a/x/mongo/driver/operation_test.go b/x/mongo/driver/operation_test.go
+index 80fe63de8b..c1bc9f1e56 100644
+--- a/x/mongo/driver/operation_test.go
++++ b/x/mongo/driver/operation_test.go
+@@ -17,8 +17,9 @@ import (
+ 	"github.com/google/go-cmp/cmp"
+ 	"go.mongodb.org/mongo-driver/bson/bsontype"
+ 	"go.mongodb.org/mongo-driver/bson/primitive"
+-	"go.mongodb.org/mongo-driver/internal"
+ 	"go.mongodb.org/mongo-driver/internal/assert"
++	"go.mongodb.org/mongo-driver/internal/csot"
++	"go.mongodb.org/mongo-driver/internal/handshake"
+ 	"go.mongodb.org/mongo-driver/internal/uuid"
+ 	"go.mongodb.org/mongo-driver/mongo/address"
+ 	"go.mongodb.org/mongo-driver/mongo/description"
+@@ -272,7 +273,7 @@ func TestOperation(t *testing.T) {
+ 		negMaxTime := -2 * time.Second
+ 		shortRTT := 50 * time.Millisecond
+ 		longRTT := 10 * time.Second
+-		timeoutCtx, cancel := internal.MakeTimeoutContext(context.Background(), timeout)
++		timeoutCtx, cancel := csot.MakeTimeoutContext(context.Background(), timeout)
+ 		defer cancel()
+ 
+ 		testCases := []struct {
+@@ -629,7 +630,7 @@ func TestOperation(t *testing.T) {
+ 		}
+ 		op := Operation{
+ 			CommandFn: func(dst []byte, desc description.SelectedServer) ([]byte, error) {
+-				return bsoncore.AppendInt32Element(dst, internal.LegacyHello, 1), nil
++				return bsoncore.AppendInt32Element(dst, handshake.LegacyHello, 1), nil
+ 			},
+ 			Database:   "admin",
+ 			Deployment: SingleConnectionDeployment{conn},
+@@ -821,7 +822,7 @@ func (ms *mockRetryServer) Connection(ctx context.Context) (Connection, error) {
+ }
+ 
+ func (ms *mockRetryServer) RTTMonitor() RTTMonitor {
+-	return &internal.ZeroRTTMonitor{}
++	return &csot.ZeroRTTMonitor{}
+ }
+ 
+ func TestRetry(t *testing.T) {
+diff --git a/x/mongo/driver/topology/CMAP_spec_test.go b/x/mongo/driver/topology/CMAP_spec_test.go
+index ad58081c7d..44ccb8841a 100644
+--- a/x/mongo/driver/topology/CMAP_spec_test.go
++++ b/x/mongo/driver/topology/CMAP_spec_test.go
+@@ -21,7 +21,7 @@ import (
+ 	"go.mongodb.org/mongo-driver/bson/primitive"
+ 	"go.mongodb.org/mongo-driver/event"
+ 	"go.mongodb.org/mongo-driver/internal/require"
+-	"go.mongodb.org/mongo-driver/internal/testutil/helpers"
++	"go.mongodb.org/mongo-driver/internal/spectest"
+ 	"go.mongodb.org/mongo-driver/mongo/address"
+ 	"go.mongodb.org/mongo-driver/x/mongo/driver/operation"
+ )
+@@ -120,7 +120,7 @@ type testInfo struct {
+ const cmapTestDir = "../../../../testdata/connection-monitoring-and-pooling/"
+ 
+ func TestCMAPSpec(t *testing.T) {
+-	for _, testFileName := range helpers.FindJSONFilesInDir(t, cmapTestDir) {
++	for _, testFileName := range spectest.FindJSONFilesInDir(t, cmapTestDir) {
+ 		t.Run(testFileName, func(t *testing.T) {
+ 			runCMAPTest(t, testFileName)
+ 		})
+diff --git a/x/mongo/driver/topology/connection.go b/x/mongo/driver/topology/connection.go
+index 6e8fd52974..af25b1f68c 100644
+--- a/x/mongo/driver/topology/connection.go
++++ b/x/mongo/driver/topology/connection.go
+@@ -18,7 +18,6 @@ import (
+ 	"sync/atomic"
+ 	"time"
+ 
+-	"go.mongodb.org/mongo-driver/internal"
+ 	"go.mongodb.org/mongo-driver/mongo/address"
+ 	"go.mongodb.org/mongo-driver/mongo/description"
+ 	"go.mongodb.org/mongo-driver/x/bsonx/bsoncore"
+@@ -95,7 +94,7 @@ func newConnection(addr address.Address, opts ...ConnectionOption) *connection {
+ 		connectDone:          make(chan struct{}),
+ 		config:               cfg,
+ 		connectContextMade:   make(chan struct{}),
+-		cancellationListener: internal.NewCancellationListener(),
++		cancellationListener: newCancellListener(),
+ 	}
+ 	// Connections to non-load balanced deployments should eagerly set the generation numbers so errors encountered
+ 	// at any point during connection establishment can be processed without the connection being considered stale.
+@@ -840,3 +839,47 @@ func configureTLS(ctx context.Context,
+ 	}
+ 	return client, nil
+ }
++
++// TODO: Naming?
++
++// cancellListener listens for context cancellation and notifies listeners via a
++// callback function.
++type cancellListener struct {
++	aborted bool
++	done    chan struct{}
++}
++
++// newCancellListener constructs a cancellListener.
++func newCancellListener() *cancellListener {
++	return &cancellListener{
++		done: make(chan struct{}),
++	}
++}
++
++// Listen blocks until the provided context is cancelled or listening is aborted
++// via the StopListening function. If this detects that the context has been
++// cancelled (i.e. ctx.Err() == context.Canceled), the provided callback is
++// called to abort in-progress work. Even if the context expires, this function
++// will block until StopListening is called.
++func (c *cancellListener) Listen(ctx context.Context, abortFn func()) {
++	c.aborted = false
++
++	select {
++	case <-ctx.Done():
++		if ctx.Err() == context.Canceled {
++			c.aborted = true
++			abortFn()
++		}
++
++		<-c.done
++	case <-c.done:
++	}
++}
++
++// StopListening stops the in-progress Listen call. This blocks if there is no
++// in-progress Listen call. This function will return true if the provided abort
++// callback was called when listening for cancellation on the previous context.
++func (c *cancellListener) StopListening() bool {
++	c.done <- struct{}{}
++	return c.aborted
++}
+diff --git a/x/mongo/driver/topology/connection_options.go b/x/mongo/driver/topology/connection_options.go
+index 6e6ea01d80..de23f3430d 100644
+--- a/x/mongo/driver/topology/connection_options.go
++++ b/x/mongo/driver/topology/connection_options.go
+@@ -15,7 +15,7 @@ import (
+ 
+ 	"go.mongodb.org/mongo-driver/bson/primitive"
+ 	"go.mongodb.org/mongo-driver/event"
+-	"go.mongodb.org/mongo-driver/internal"
++	"go.mongodb.org/mongo-driver/internal/httputil"
+ 	"go.mongodb.org/mongo-driver/x/mongo/driver"
+ 	"go.mongodb.org/mongo-driver/x/mongo/driver/ocsp"
+ )
+@@ -72,7 +72,7 @@ func newConnectionConfig(opts ...ConnectionOption) *connectionConfig {
+ 		connectTimeout:      30 * time.Second,
+ 		dialer:              nil,
+ 		tlsConnectionSource: defaultTLSConnectionSource,
+-		httpClient:          internal.DefaultHTTPClient,
++		httpClient:          httputil.DefaultHTTPClient,
+ 	}
+ 
+ 	for _, opt := range opts {
+diff --git a/x/mongo/driver/topology/connection_test.go b/x/mongo/driver/topology/connection_test.go
+index 6af5e616f3..ab2496b1ac 100644
+--- a/x/mongo/driver/topology/connection_test.go
++++ b/x/mongo/driver/topology/connection_test.go
+@@ -18,9 +18,7 @@ import (
+ 	"time"
+ 
+ 	"github.com/google/go-cmp/cmp"
+-	"go.mongodb.org/mongo-driver/internal"
+ 	"go.mongodb.org/mongo-driver/internal/assert"
+-	"go.mongodb.org/mongo-driver/internal/testutil/helpers"
+ 	"go.mongodb.org/mongo-driver/mongo/address"
+ 	"go.mongodb.org/mongo-driver/mongo/description"
+ 	"go.mongodb.org/mongo-driver/x/mongo/driver"
+@@ -244,7 +242,7 @@ func TestConnection(t *testing.T) {
+ 
+ 							connectErr = conn.connect(connectCtx)
+ 						}
+-						helpers.AssertSoon(t, callback, tc.maxConnectTime)
++						assert.Soon(t, callback, tc.maxConnectTime)
+ 
+ 						ce, ok := connectErr.(ConnectionError)
+ 						assert.True(t, ok, "expected error %v to be of type %T", connectErr, ConnectionError{})
+@@ -279,7 +277,7 @@ func TestConnection(t *testing.T) {
+ 
+ 							connectErr = conn.connect(connectCtx)
+ 						}
+-						helpers.AssertSoon(t, callback, tc.maxConnectTime)
++						assert.Soon(t, callback, tc.maxConnectTime)
+ 
+ 						ce, ok := connectErr.(ConnectionError)
+ 						assert.True(t, ok, "expected error %v to be of type %T", connectErr, ConnectionError{})
+@@ -1196,7 +1194,7 @@ func (d *dialer) lenclosed() int {
+ }
+ 
+ type testCancellationListener struct {
+-	listener         *internal.CancellationListener
++	listener         *cancellListener
+ 	numListen        int
+ 	numStopListening int
+ 	aborted          bool
+@@ -1206,7 +1204,7 @@ type testCancellationListener struct {
+ // returned by the StopListening method.
+ func newTestCancellationListener(aborted bool) *testCancellationListener {
+ 	return &testCancellationListener{
+-		listener: internal.NewCancellationListener(),
++		listener: newCancellListener(),
+ 		aborted:  aborted,
+ 	}
+ }
+diff --git a/x/mongo/driver/topology/sdam_spec_test.go b/x/mongo/driver/topology/sdam_spec_test.go
+index 5efa19c56b..3548d69b3e 100644
+--- a/x/mongo/driver/topology/sdam_spec_test.go
++++ b/x/mongo/driver/topology/sdam_spec_test.go
+@@ -20,7 +20,7 @@ import (
+ 	"go.mongodb.org/mongo-driver/bson/primitive"
+ 	"go.mongodb.org/mongo-driver/event"
+ 	"go.mongodb.org/mongo-driver/internal/assert"
+-	"go.mongodb.org/mongo-driver/internal/testutil/helpers"
++	"go.mongodb.org/mongo-driver/internal/spectest"
+ 	"go.mongodb.org/mongo-driver/mongo/address"
+ 	"go.mongodb.org/mongo-driver/mongo/description"
+ 	"go.mongodb.org/mongo-driver/mongo/options"
+@@ -560,7 +560,7 @@ func runTest(t *testing.T, directory string, filename string) {
+ // Test case for all SDAM spec tests.
+ func TestSDAMSpec(t *testing.T) {
+ 	for _, subdir := range []string{"single", "rs", "sharded", "load-balanced", "errors", "monitoring"} {
+-		for _, file := range helpers.FindJSONFilesInDir(t, path.Join(testsDir, subdir)) {
++		for _, file := range spectest.FindJSONFilesInDir(t, path.Join(testsDir, subdir)) {
+ 			runTest(t, subdir, file)
+ 		}
+ 	}
+diff --git a/x/mongo/driver/topology/server_rtt_test.go b/x/mongo/driver/topology/server_rtt_test.go
+index ca67c5ccf6..a55f3d2f19 100644
+--- a/x/mongo/driver/topology/server_rtt_test.go
++++ b/x/mongo/driver/topology/server_rtt_test.go
+@@ -14,7 +14,7 @@ import (
+ 	"time"
+ 
+ 	"go.mongodb.org/mongo-driver/internal/assert"
+-	"go.mongodb.org/mongo-driver/internal/testutil/helpers"
++	"go.mongodb.org/mongo-driver/internal/spectest"
+ )
+ 
+ // Test case for all server selection rtt spec tests.
+@@ -29,7 +29,7 @@ func TestServerSelectionRTTSpec(t *testing.T) {
+ 
+ 	const testsDir string = "../../../../testdata/server-selection/rtt"
+ 
+-	for _, file := range helpers.FindJSONFilesInDir(t, testsDir) {
++	for _, file := range spectest.FindJSONFilesInDir(t, testsDir) {
+ 		func(t *testing.T, filename string) {
+ 			filepath := path.Join(testsDir, filename)
+ 			content, err := ioutil.ReadFile(filepath)
+diff --git a/x/mongo/driver/topology/server_test.go b/x/mongo/driver/topology/server_test.go
+index 08e294625a..e6cd35b0c5 100644
+--- a/x/mongo/driver/topology/server_test.go
++++ b/x/mongo/driver/topology/server_test.go
+@@ -27,8 +27,8 @@ import (
+ 	"go.mongodb.org/mongo-driver/bson/primitive"
+ 	"go.mongodb.org/mongo-driver/event"
+ 	"go.mongodb.org/mongo-driver/internal/assert"
++	"go.mongodb.org/mongo-driver/internal/eventtest"
+ 	"go.mongodb.org/mongo-driver/internal/require"
+-	"go.mongodb.org/mongo-driver/internal/testutil/monitor"
+ 	"go.mongodb.org/mongo-driver/mongo/address"
+ 	"go.mongodb.org/mongo-driver/mongo/description"
+ 	"go.mongodb.org/mongo-driver/x/bsonx/bsoncore"
+@@ -161,7 +161,7 @@ func TestServerHeartbeatTimeout(t *testing.T) {
+ 			wg.Add(1)
+ 
+ 			errors := &errorQueue{errors: tc.ioErrors}
+-			tpm := monitor.NewTestPoolMonitor()
++			tpm := eventtest.NewTestPoolMonitor()
+ 			server := NewServer(
+ 				address.Address("localhost:27017"),
+ 				primitive.NewObjectID(),
+@@ -289,7 +289,7 @@ func TestServerConnectionTimeout(t *testing.T) {
+ 				_ = l.Close()
+ 			}()
+ 
+-			tpm := monitor.NewTestPoolMonitor()
++			tpm := eventtest.NewTestPoolMonitor()
+ 			server := NewServer(
+ 				address.Address(l.Addr().String()),
+ 				primitive.NewObjectID(),
+diff --git a/x/mongo/driver/topology/topology_errors_test.go b/x/mongo/driver/topology/topology_errors_test.go
+index 23dffe994c..c09ef9731c 100644
+--- a/x/mongo/driver/topology/topology_errors_test.go
++++ b/x/mongo/driver/topology/topology_errors_test.go
+@@ -17,7 +17,6 @@ import (
+ 	"time"
+ 
+ 	"go.mongodb.org/mongo-driver/internal/assert"
+-	"go.mongodb.org/mongo-driver/internal/testutil/helpers"
+ 	"go.mongodb.org/mongo-driver/mongo/description"
+ )
+ 
+@@ -55,7 +54,7 @@ func TestTopologyErrors(t *testing.T) {
+ 				subCh := make(<-chan description.Topology)
+ 				_, serverSelectionErr = topo.selectServerFromSubscription(selectServerCtx, subCh, state)
+ 			}
+-			helpers.AssertSoon(t, callback, 150*time.Millisecond)
++			assert.Soon(t, callback, 150*time.Millisecond)
+ 			assert.True(t, errors.Is(serverSelectionErr, context.DeadlineExceeded), "expected %v, received %v",
+ 				context.DeadlineExceeded, serverSelectionErr)
+ 		})
+diff --git a/x/mongo/driver/topology/topology_test.go b/x/mongo/driver/topology/topology_test.go
+index 230e4bb972..6c92cf6a77 100644
+--- a/x/mongo/driver/topology/topology_test.go
++++ b/x/mongo/driver/topology/topology_test.go
+@@ -18,10 +18,9 @@ import (
+ 	"time"
+ 
+ 	"go.mongodb.org/mongo-driver/bson/primitive"
+-	"go.mongodb.org/mongo-driver/internal"
+ 	"go.mongodb.org/mongo-driver/internal/assert"
+ 	"go.mongodb.org/mongo-driver/internal/require"
+-	"go.mongodb.org/mongo-driver/internal/testutil/helpers"
++	"go.mongodb.org/mongo-driver/internal/spectest"
+ 	"go.mongodb.org/mongo-driver/mongo/address"
+ 	"go.mongodb.org/mongo-driver/mongo/description"
+ 	"go.mongodb.org/mongo-driver/mongo/options"
+@@ -342,7 +341,7 @@ func TestServerSelection(t *testing.T) {
+ 		serv, err := topo.FindServer(desc.Servers[0])
+ 		noerr(t, err)
+ 		atomic.StoreInt64(&serv.state, serverConnected)
+-		_ = serv.ProcessError(driver.Error{Message: internal.LegacyNotPrimary}, initConnection{})
++		_ = serv.ProcessError(driver.Error{Message: driver.LegacyNotPrimaryErrMsg}, initConnection{})
+ 
+ 		resp := make(chan []description.Server)
+ 
+@@ -733,7 +732,7 @@ type inWindowTestCase struct {
+ func TestServerSelectionSpecInWindow(t *testing.T) {
+ 	const testsDir = "../../../../testdata/server-selection/in_window"
+ 
+-	files := helpers.FindJSONFilesInDir(t, testsDir)
++	files := spectest.FindJSONFilesInDir(t, testsDir)
+ 
+ 	for _, file := range files {
+ 		t.Run(file, func(t *testing.T) {

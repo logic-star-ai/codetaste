@@ -1,0 +1,3174 @@
+diff --git a/jax/_src/api.py b/jax/_src/api.py
+index 62347fe1fc86..05f8dd52e829 100644
+--- a/jax/_src/api.py
++++ b/jax/_src/api.py
+@@ -116,8 +116,7 @@ def _nan_check_posthook(fun, args, kwargs, output):
+     fun._cache_miss(*args, **kwargs)[0]  # probably won't return
+ 
+ def _update_debug_special_global(_):
+-  if (config.config._read("jax_debug_nans") or
+-      config.config._read("jax_debug_infs")):
++  if config._read("jax_debug_nans") or config._read("jax_debug_infs"):
+     jax_jit.global_state().post_hook = _nan_check_posthook
+   else:
+     jax_jit.global_state().post_hook = None
+diff --git a/jax/_src/compiler.py b/jax/_src/compiler.py
+index 04040c97e839..2309217fdb3c 100644
+--- a/jax/_src/compiler.py
++++ b/jax/_src/compiler.py
+@@ -305,7 +305,7 @@ def compile_or_get_cached(
+   try:
+     cache_key = compilation_cache.get_cache_key(
+         computation, devices, compile_options, backend,
+-        config.config.jax_use_original_compilation_cache_key_generation,
++        config.use_original_compilation_cache_key_generation.value,
+     )
+   except xc._xla.XlaRuntimeError as ex:
+     logger.error("compile_or_get_cached: unable to generate cache key, "
+@@ -324,7 +324,7 @@ def compile_or_get_cached(
+ 
+     # TODO(b/293308239) Instrument metrics for new cache savings and cache hit
+     # rate after it is enabled.
+-    if config.config.jax_use_original_compilation_cache_key_generation:
++    if config.use_original_compilation_cache_key_generation.value:
+       # TODO(b/293308239) Remove metrics for the original cache after the new
+       # compilation cache key implementation is fully rolled out.
+       monitoring.record_event('/jax/compilation_cache/cache_hits_original')
+diff --git a/jax/_src/config.py b/jax/_src/config.py
+index 310b092342a5..73736336324f 100644
+--- a/jax/_src/config.py
++++ b/jax/_src/config.py
+@@ -598,6 +598,16 @@ def __setattr__(self, name, val):
+ 
+ 
+ config = Config()
++
++_read = config._read
++update = config.update
++define_bool_state = config.define_bool_state
++define_enum_state = config.define_enum_state
++define_int_state = config.define_int_state
++define_float_state = config.define_float_state
++define_string_state = config.define_string_state
++parse_flags_with_absl = config.parse_flags_with_absl
++
+ flags = config
+ FLAGS = flags.FLAGS
+ 
+diff --git a/jax/_src/distributed.py b/jax/_src/distributed.py
+index e1a429e49f79..0650620f2874 100644
+--- a/jax/_src/distributed.py
++++ b/jax/_src/distributed.py
+@@ -63,8 +63,8 @@ def initialize(self,
+     if local_device_ids:
+       visible_devices = ','.join(str(x) for x in local_device_ids) # type: ignore[union-attr]
+       logger.info('JAX distributed initialized with visible devices: %s', visible_devices)
+-      config.config.update("jax_cuda_visible_devices", visible_devices)
+-      config.config.update("jax_rocm_visible_devices", visible_devices)
++      config.update("jax_cuda_visible_devices", visible_devices)
++      config.update("jax_rocm_visible_devices", visible_devices)
+ 
+     self.process_id = process_id
+ 
+diff --git a/jax/_src/maps.py b/jax/_src/maps.py
+index f6a3cff4712d..3bf28773fc9d 100644
+--- a/jax/_src/maps.py
++++ b/jax/_src/maps.py
+@@ -26,6 +26,7 @@
+ from jax import lax
+ from jax import numpy as jnp
+ 
++from jax._src import config
+ from jax._src import core
+ from jax._src import dispatch
+ from jax._src import effects
+@@ -40,7 +41,6 @@
+                                _ensure_index_tuple, donation_vector,
+                                shaped_abstractify, check_callable)
+ from jax._src.array import ArrayImpl
+-from jax._src.config import config
+ from jax._src.errors import JAXTypeError
+ from jax._src.interpreters import ad
+ from jax._src.interpreters import batching
+@@ -670,8 +670,8 @@ def make_xmap_callable(fun: lu.WrappedFun,
+                                  name=name),
+                         source_info_util.new_source_info(), resource_env, {})
+   jaxpr = plan.subst_axes_with_resources(jaxpr)
+-  use_spmd_lowering = config.experimental_xmap_spmd_lowering
+-  ensure_fixed_sharding = config.experimental_xmap_ensure_fixed_sharding
++  use_spmd_lowering = _SPMD_LOWERING.value
++  ensure_fixed_sharding = _ENSURE_FIXED_SHARDING.value
+   if use_spmd_lowering and ensure_fixed_sharding:
+     jaxpr = _fix_inferred_spmd_sharding(jaxpr, resource_env)
+ 
+@@ -686,7 +686,7 @@ def make_xmap_callable(fun: lu.WrappedFun,
+     mesh_in_axes, mesh_out_axes = plan.to_mesh_axes(in_axes, out_axes)
+     mesh = resource_env.physical_mesh
+     tiling_method: pxla.TilingMethod
+-    if config.experimental_xmap_spmd_lowering_manual:
++    if _SPMD_LOWERING_MANUAL.value:
+       manual_mesh_axes = frozenset(it.chain.from_iterable(plan.physical_axis_resources.values()))
+       tiling_method = pxla.TileManual(manual_mesh_axes)
+     else:
+@@ -1284,7 +1284,7 @@ def out_axes_transform(out_axes):
+ 
+ def _xmap_lowering_rule(ctx, *args, **kwargs):
+   if isinstance(ctx.module_context.axis_context, sharding_impls.SPMDAxisContext):
+-    if config.experimental_xmap_spmd_lowering_manual:
++    if _SPMD_LOWERING_MANUAL.value:
+       return _xmap_lowering_rule_spmd_manual(ctx, *args, **kwargs)
+     else:
+       return _xmap_lowering_rule_spmd(ctx, *args, **kwargs)
+@@ -1404,7 +1404,7 @@ def add_spmd_axes(
+       for dim, dim_extra_axis in enumerate(extra):
+         if dim_extra_axis is None: continue
+         assert dim_extra_axis not in axes
+-        assert not config.jax_enable_checks or all(v != dim for v in axes.values())
++        assert not config.enable_checks.value or all(v != dim for v in axes.values())
+         axes[dim_extra_axis] = dim
+   add_spmd_axes(mesh_in_axes, spmd_in_axes)
+   add_spmd_axes(mesh_out_axes, spmd_out_axes)
+@@ -1839,38 +1839,34 @@ def _clear_compilation_cache(_):
+ 
+ def _ensure_spmd_and(f):
+   def update(v):
+-    if v and not config.experimental_xmap_spmd_lowering:
++    if v and not _SPMD_LOWERING.value:
+       raise RuntimeError("This flag requires enabling the experimental_xmap_spmd_lowering flag")
+     return f(v)
+   return update
+ 
+ 
+-try:
+-  config.define_bool_state(
+-      name="experimental_xmap_spmd_lowering",
+-      default=False,
+-      help=("When set, multi-device xmap computations will be compiled through "
+-            "the XLA SPMD partitioner instead of explicit cross-replica collectives. "
+-            "Not supported on CPU!"),
+-      update_global_hook=_clear_compilation_cache,
+-      update_thread_local_hook=_thread_local_flag_unsupported)
+-  config.define_bool_state(
+-      name="experimental_xmap_spmd_lowering_manual",
+-      default=False,
+-      help=("When set, multi-device xmap computations will be compiled using "
+-            "the MANUAL partitioning feature of the XLA SPMD partitioner instead of "
+-            "sharding constraints on vectorized code. "
+-            "Requires experimental_xmap_spmd_lowering!"),
+-      update_global_hook=_ensure_spmd_and(_clear_compilation_cache),
+-      update_thread_local_hook=_thread_local_flag_unsupported)
+-  config.define_bool_state(
+-      name="experimental_xmap_ensure_fixed_sharding",
+-      default=False,
+-      help=("When set and `experimental_xmap_spmd_lowering` is enabled, the lowering will "
+-            "try to limit the flexibility of the automated SPMD partitioner heuristics "
+-            "by emitting additional sharding annotations for program intermediates."),
+-      update_global_hook=_ensure_spmd_and(_clear_compilation_cache),
+-      update_thread_local_hook=_thread_local_flag_unsupported)
+-except Exception:
+-  raise ImportError("jax.experimental.maps has to be imported before JAX flags "
+-                    "are parsed")
++_SPMD_LOWERING = config.define_bool_state(
++    name="experimental_xmap_spmd_lowering",
++    default=False,
++    help=("When set, multi-device xmap computations will be compiled through "
++          "the XLA SPMD partitioner instead of explicit cross-replica collectives. "
++          "Not supported on CPU!"),
++    update_global_hook=_clear_compilation_cache,
++    update_thread_local_hook=_thread_local_flag_unsupported)
++_SPMD_LOWERING_MANUAL = config.define_bool_state(
++    name="experimental_xmap_spmd_lowering_manual",
++    default=False,
++    help=("When set, multi-device xmap computations will be compiled using "
++          "the MANUAL partitioning feature of the XLA SPMD partitioner instead of "
++          "sharding constraints on vectorized code. "
++          "Requires experimental_xmap_spmd_lowering!"),
++    update_global_hook=_ensure_spmd_and(_clear_compilation_cache),
++    update_thread_local_hook=_thread_local_flag_unsupported)
++_ENSURE_FIXED_SHARDING = config.define_bool_state(
++    name="experimental_xmap_ensure_fixed_sharding",
++    default=False,
++    help=("When set and `experimental_xmap_spmd_lowering` is enabled, the lowering will "
++          "try to limit the flexibility of the automated SPMD partitioner heuristics "
++          "by emitting additional sharding annotations for program intermediates."),
++    update_global_hook=_ensure_spmd_and(_clear_compilation_cache),
++    update_thread_local_hook=_thread_local_flag_unsupported)
+diff --git a/jax/_src/ops/scatter.py b/jax/_src/ops/scatter.py
+index 8101199906f6..9a2a2fa34626 100644
+--- a/jax/_src/ops/scatter.py
++++ b/jax/_src/ops/scatter.py
+@@ -21,9 +21,9 @@
+ 
+ import numpy as np
+ 
+-from jax import config
+ from jax import lax
+ 
++from jax._src import config
+ from jax._src import core
+ from jax._src import dtypes
+ from jax._src import util
+@@ -91,11 +91,12 @@ def _scatter_impl(x, y, scatter_op, treedef, static_idx, dynamic_idx,
+ 
+   if not dtypes.safe_to_cast(y, x):
+     # TODO(jakevdp): change this to an error after the deprecation period.
+-    warnings.warn("scatter inputs have incompatible types: cannot safely cast "
+-                  f"value from dtype={lax.dtype(y)} to dtype={lax.dtype(x)} "
+-                  f"with jax_numpy_dtype_promotion={config.jax_numpy_dtype_promotion!r}. "
+-                  "In future JAX releases this will result in an error.",
+-                  FutureWarning)
++    warnings.warn(
++      "scatter inputs have incompatible types: cannot safely cast value "
++      f"from dtype={lax.dtype(y)} to dtype={lax.dtype(x)} with "
++      f"jax_numpy_dtype_promotion={config.numpy_dtype_promotion.value!r}. "
++      "In future JAX releases this will result in an error.",
++      FutureWarning)
+ 
+   idx = jnp._merge_static_and_dynamic_indices(treedef, static_idx, dynamic_idx)
+   indexer = jnp._index_to_gather(jnp.shape(x), idx,
+diff --git a/jax/_src/test_util.py b/jax/_src/test_util.py
+index 9861a69258a1..90580e722268 100644
+--- a/jax/_src/test_util.py
++++ b/jax/_src/test_util.py
+@@ -42,16 +42,13 @@
+ from jax.tree_util import tree_map, tree_all, tree_flatten, tree_unflatten
+ from jax._src import api
+ from jax._src import pjit as pjit_lib
+-from jax._src import config as jax_config
++from jax._src import config
+ from jax._src import core
+ from jax._src import dispatch
+ from jax._src import dtypes as _dtypes
+ from jax._src import monitoring
+ from jax._src import stages
+ from jax._src.interpreters import pxla
+-from jax._src.config import (bool_env, config,
+-                             raise_persistent_cache_errors,
+-                             persistent_cache_min_compile_time_secs)
+ from jax._src.numpy.util import promote_dtypes, promote_dtypes_inexact
+ from jax._src.util import unzip2
+ from jax._src.public_test_util import (  # noqa: F401
+@@ -64,18 +61,18 @@
+ # jax.test_util. Functionality appearing here is for internal use only, and
+ # may be changed or removed at any time and without any deprecation cycle.
+ 
+-_TEST_DUT = jax_config.DEFINE_string(
++_TEST_DUT = config.DEFINE_string(
+     'jax_test_dut', '',
+     help=
+     'Describes the device under test in case special consideration is required.'
+ )
+ 
+-_NUM_GENERATED_CASES = jax_config.DEFINE_integer(
++_NUM_GENERATED_CASES = config.DEFINE_integer(
+   'jax_num_generated_cases',
+   int(os.getenv('JAX_NUM_GENERATED_CASES', '10')),
+   help='Number of generated cases to test')
+ 
+-_MAX_CASES_SAMPLING_RETRIES = jax_config.DEFINE_integer(
++_MAX_CASES_SAMPLING_RETRIES = config.DEFINE_integer(
+   'max_cases_sampling_retries',
+   int(os.getenv('JAX_MAX_CASES_SAMPLING_RETRIES', '100')),
+   'Number of times a failed test sample should be retried. '
+@@ -83,25 +80,25 @@
+   'sampling process is terminated.'
+ )
+ 
+-_SKIP_SLOW_TESTS = jax_config.DEFINE_bool(
++_SKIP_SLOW_TESTS = config.DEFINE_bool(
+     'jax_skip_slow_tests',
+-    bool_env('JAX_SKIP_SLOW_TESTS', False),
++    config.bool_env('JAX_SKIP_SLOW_TESTS', False),
+     help='Skip tests marked as slow (> 5 sec).'
+ )
+ 
+-_TEST_TARGETS = jax_config.DEFINE_string(
++_TEST_TARGETS = config.DEFINE_string(
+   'test_targets', os.getenv('JAX_TEST_TARGETS', ''),
+   'Regular expression specifying which tests to run, called via re.search on '
+   'the test name. If empty or unspecified, run all tests.'
+ )
+-_EXCLUDE_TEST_TARGETS = jax_config.DEFINE_string(
++_EXCLUDE_TEST_TARGETS = config.DEFINE_string(
+   'exclude_test_targets', os.getenv('JAX_EXCLUDE_TEST_TARGETS', ''),
+   'Regular expression specifying which tests NOT to run, called via re.search '
+   'on the test name. If empty or unspecified, run all tests.'
+ )
+-TEST_WITH_PERSISTENT_COMPILATION_CACHE = jax_config.DEFINE_bool(
++TEST_WITH_PERSISTENT_COMPILATION_CACHE = config.DEFINE_bool(
+     'jax_test_with_persistent_compilation_cache',
+-    bool_env('JAX_TEST_WITH_PERSISTENT_COMPILATION_CACHE', False),
++    config.bool_env('JAX_TEST_WITH_PERSISTENT_COMPILATION_CACHE', False),
+     help='If enabled, the persistent compilation cache will be enabled for all '
+     'test cases. This can be used to increase compilation cache coverage.')
+ 
+@@ -299,7 +296,7 @@ def supported_dtypes():
+              np.uint8, np.uint16, np.uint32, np.uint64,
+              _dtypes.bfloat16, np.float16, np.float32, np.float64,
+              np.complex64, np.complex128}
+-  if not config.x64_enabled:
++  if not config.enable_x64.value:
+     types -= {np.uint64, np.int64, np.float64, np.complex128}
+   return types
+ 
+@@ -532,7 +529,7 @@ def gen(shape, dtype, post=lambda x: x):
+       # leads to overflows in this case; sample from signed ints instead.
+       if dtype == np.uint64:
+         vals = vals.astype(np.int64)
+-      elif dtype == np.uint32 and not config.x64_enabled:
++      elif dtype == np.uint32 and not config.enable_x64.value:
+         vals = vals.astype(np.int32)
+     vals = vals.reshape(shape)
+     # Non-standard NaNs cause errors in numpy equality assertions.
+@@ -915,8 +912,8 @@ def setUpClass(cls):
+     if TEST_WITH_PERSISTENT_COMPILATION_CACHE.value:
+       cls._compilation_cache_exit_stack = ExitStack()
+       stack = cls._compilation_cache_exit_stack
+-      stack.enter_context(raise_persistent_cache_errors(True))
+-      stack.enter_context(persistent_cache_min_compile_time_secs(0))
++      stack.enter_context(config.raise_persistent_cache_errors(True))
++      stack.enter_context(config.persistent_cache_min_compile_time_secs(0))
+ 
+       tmp_dir = stack.enter_context(tempfile.TemporaryDirectory())
+       compilation_cache.initialize_cache(tmp_dir)
+@@ -963,7 +960,7 @@ def assertArraysAllClose(self, x, y, *, check_dtypes=True, atol=None,
+       self.assertDtypesMatch(x, y)
+ 
+   def assertDtypesMatch(self, x, y, *, canonicalize_dtypes=True):
+-    if not config.x64_enabled and canonicalize_dtypes:
++    if not config.enable_x64.value and canonicalize_dtypes:
+       self.assertEqual(_dtypes.canonicalize_dtype(_dtype(x), allow_extended_dtype=True),
+                        _dtypes.canonicalize_dtype(_dtype(y), allow_extended_dtype=True))
+     else:
+@@ -1133,26 +1130,6 @@ def with_and_without_mesh(f):
+       ('Mesh', (('x', 2),), (('i', 'x'),))
+     ))(with_mesh_from_kwargs(f))
+ 
+-old_spmd_lowering_flag = None
+-def set_spmd_lowering_flag(val: bool):
+-  global old_spmd_lowering_flag
+-  old_spmd_lowering_flag = config.experimental_xmap_spmd_lowering
+-  config.update('experimental_xmap_spmd_lowering', val)
+-
+-def restore_spmd_lowering_flag():
+-  if old_spmd_lowering_flag is None: return
+-  config.update('experimental_xmap_spmd_lowering', old_spmd_lowering_flag)
+-
+-old_spmd_manual_lowering_flag = None
+-def set_spmd_manual_lowering_flag(val: bool):
+-  global old_spmd_manual_lowering_flag
+-  old_spmd_manual_lowering_flag = config.experimental_xmap_spmd_lowering_manual
+-  config.update('experimental_xmap_spmd_lowering_manual', val)
+-
+-def restore_spmd_manual_lowering_flag():
+-  if old_spmd_manual_lowering_flag is None: return
+-  config.update('experimental_xmap_spmd_lowering_manual', old_spmd_manual_lowering_flag)
+-
+ def create_global_mesh(mesh_shape, axis_names):
+   size = math.prod(mesh_shape)
+   if len(jax.devices()) < size:
+diff --git a/jax/_src/tpu_custom_call.py b/jax/_src/tpu_custom_call.py
+index a4c7dce136fb..f92fae4e6274 100644
+--- a/jax/_src/tpu_custom_call.py
++++ b/jax/_src/tpu_custom_call.py
+@@ -38,7 +38,7 @@
+ from jaxlib.mlir.passmanager import PassManager
+ import numpy as np
+ 
+-mosaic_use_cpp_passes = config.config.define_bool_state(
++_MOSAIC_USE_CPP_PASSES = config.define_bool_state(
+     name="mosaic_use_cpp_passes",
+     default=False,
+     help=(
+@@ -54,13 +54,13 @@
+ apply_vector_layout = tpu_mosaic.apply_vector_layout
+ infer_memref_layout = tpu_mosaic.infer_memref_layout
+ 
+-mosaic_allow_hlo = config.config.define_bool_state(
++_MOSAIC_ALLOW_HLO = config.define_bool_state(
+     name="jax_mosaic_allow_hlo",
+     default=False,
+     help="Allow hlo dialects in Mosaic",
+ )
+ 
+-mosaic_dump_mlir = config.config.define_bool_state(
++_MOSAIC_DUMP_MLIR = config.define_bool_state(
+     name="jax_mosaic_dump_mlir",
+     default=False,
+     help="Print mlir module after each pass",
+@@ -243,7 +243,7 @@ def _lower_tpu_kernel(
+       )
+       dump_mlir(module, "initial module")
+ 
+-      if mosaic_allow_hlo.value:
++      if _MOSAIC_ALLOW_HLO.value:
+         # Run hlo dialect conversion: hlo -> linalg -> vector.
+         pipeline = [
+             "hlo-legalize-to-arithmetic",
+@@ -255,7 +255,7 @@ def _lower_tpu_kernel(
+         )
+         dump_mlir(module, "after hlo conversion module")
+ 
+-      if mosaic_use_cpp_passes.value:
++      if _MOSAIC_USE_CPP_PASSES.value:
+         pipeline = [
+             (
+                 f"func.func(tpu-infer-memref-layout{{hardware-generation={hardware_generation}}})"
+@@ -278,7 +278,7 @@ def _lower_tpu_kernel(
+       module.operation.verify()
+       dump_mlir(module, "after infer vector layout pass")
+ 
+-      if mosaic_use_cpp_passes.value:
++      if _MOSAIC_USE_CPP_PASSES.value:
+         pipeline = [
+             (
+                 "func.func(tpu-apply-vector-layout{sublane-count=8"
+@@ -418,6 +418,6 @@ def apply_kernel(*args, collective_id: int | None = None):
+ 
+ def dump_mlir(module: ir.Module, msg: str):
+   """A helper function to print mlir module with a message."""
+-  if mosaic_dump_mlir.value:
++  if _MOSAIC_DUMP_MLIR.value:
+     print(f"[jax_mosaic_dump_mlir] {msg}")
+     print(module)
+diff --git a/jax/experimental/export/export.py b/jax/experimental/export/export.py
+index 0d67c04204ca..91abd7e77c1e 100644
+--- a/jax/experimental/export/export.py
++++ b/jax/experimental/export/export.py
+@@ -28,9 +28,9 @@
+ import numpy as np
+ 
+ import jax
+-from jax import config
+ from jax import sharding
+ 
++from jax._src import config
+ from jax._src import core
+ from jax._src import dispatch
+ from jax._src.interpreters import mlir
+@@ -387,7 +387,7 @@ def f_jax(*args, **kwargs): ...
+       exported = jax_export.export(f_jax)(*args, **kwargs)
+   """
+   fun_name = getattr(fun_jax, "__name__", "unknown")
+-  version = config.jax_serialization_version
++  version = config.jax_serialization_version.value
+   if (version < minimum_supported_serialization_version or
+       version > maximum_supported_serialization_version):
+     raise ValueError(
+diff --git a/jax/experimental/export/shape_poly.py b/jax/experimental/export/shape_poly.py
+index d41c7d496f9b..0edacf0ada23 100644
+--- a/jax/experimental/export/shape_poly.py
++++ b/jax/experimental/export/shape_poly.py
+@@ -48,9 +48,9 @@
+ import opt_einsum
+ 
+ import jax
+-from jax import config
+ from jax.interpreters import xla
+ 
++from jax._src import config
+ from jax._src import core
+ from jax._src import dtypes
+ from jax._src import effects
+@@ -651,7 +651,7 @@ def divmod(self, divisor: "_DimExpr") -> tuple[DimSize, int]:
+           raise InconclusiveDimensionOperation("")
+         remainder = 0
+ 
+-      if config.jax_enable_checks:
++      if config.enable_checks.value:
+         assert self == divisor * quotient + remainder
+       return quotient, remainder
+     except InconclusiveDimensionOperation:
+diff --git a/jax/experimental/jax2tf/examples/saved_model_main_test.py b/jax/experimental/jax2tf/examples/saved_model_main_test.py
+index 3aafc834e04c..aa6be0cff19a 100644
+--- a/jax/experimental/jax2tf/examples/saved_model_main_test.py
++++ b/jax/experimental/jax2tf/examples/saved_model_main_test.py
+@@ -17,14 +17,14 @@
+ from absl import flags
+ from absl.testing import absltest
+ from absl.testing import parameterized
+-import jax
++
+ from jax._src import config
+ from jax._src import test_util as jtu
+ 
+ from jax.experimental.jax2tf.examples import saved_model_main
+ from jax.experimental.jax2tf.tests import tf_test_util
+ 
+-jax.config.parse_flags_with_absl()
++config.parse_flags_with_absl()
+ FLAGS = flags.FLAGS
+ 
+ 
+diff --git a/jax/experimental/jax2tf/tests/back_compat_test.py b/jax/experimental/jax2tf/tests/back_compat_test.py
+index 90c2ac113aa4..a57b6baa7435 100644
+--- a/jax/experimental/jax2tf/tests/back_compat_test.py
++++ b/jax/experimental/jax2tf/tests/back_compat_test.py
+@@ -26,7 +26,6 @@
+ import numpy as np
+ 
+ import jax
+-from jax import config
+ from jax import lax
+ from jax.experimental.export import export
+ from jax.experimental.jax2tf.tests import back_compat_test_util as bctu
+@@ -60,6 +59,7 @@
+ from jax.sharding import Mesh
+ from jax.sharding import PartitionSpec as P
+ 
++from jax._src import config
+ from jax._src import test_util as jtu
+ 
+ config.parse_flags_with_absl()
+@@ -159,7 +159,7 @@ def cholesky_input(self, shape, dtype):
+       dict(testcase_name=f"_dtype={dtype_name}", dtype_name=dtype_name)
+       for dtype_name in ("f32", "f64", "c64", "c128"))
+   def test_cpu_cholesky_lapack_potrf(self, dtype_name="f32"):
+-    if not config.jax_enable_x64 and dtype_name in ["f64", "c128"]:
++    if not config.enable_x64.value and dtype_name in ["f64", "c128"]:
+       self.skipTest("Test disabled for x32 mode")
+ 
+     dtype = dict(f32=np.float32, f64=np.float64,
+@@ -179,7 +179,7 @@ def test_cpu_cholesky_lapack_potrf(self, dtype_name="f32"):
+       dict(testcase_name=f"_dtype={dtype_name}", dtype_name=dtype_name)
+       for dtype_name in ("f32", "f64", "c64", "c128"))
+   def test_cpu_eig_lapack_geev(self, dtype_name="f32"):
+-    if not config.jax_enable_x64 and dtype_name in ["f64", "c128"]:
++    if not config.enable_x64.value and dtype_name in ["f64", "c128"]:
+       self.skipTest("Test disabled for x32 mode")
+ 
+     dtype = dict(f32=np.float32, f64=np.float64,
+@@ -271,7 +271,7 @@ def check_eigh_results(self, operand, res_now, res_expected, *,
+       for dtype_name in ("f32", "f64", "c64", "c128"))
+   def test_cpu_eigh_lapack_syevd(self, dtype_name="f32"):
+     # For lax.linalg.eigh
+-    if not config.jax_enable_x64 and dtype_name in ["f64", "c128"]:
++    if not config.enable_x64.value and dtype_name in ["f64", "c128"]:
+       self.skipTest("Test disabled for x32 mode")
+ 
+     dtype = dict(f32=np.float32, f64=np.float64,
+@@ -327,7 +327,7 @@ def qr_harness(shape, dtype):
+       for dtype_name in ("f32", "f64", "c64", "c128"))
+   def test_cpu_qr_lapack_geqrf(self, dtype_name="f32"):
+     # For lax.linalg.qr
+-    if not config.jax_enable_x64 and dtype_name in ["f64", "c128"]:
++    if not config.enable_x64.value and dtype_name in ["f64", "c128"]:
+       self.skipTest("Test disabled for x32 mode")
+ 
+     dtype = dict(f32=np.float32, f64=np.float64,
+@@ -395,7 +395,7 @@ def test_tpu_Lu(self):
+       for dtype_name in ("f32", "f64", "c64", "c128"))
+   def test_cpu_lu_lapack_getrf(self, dtype_name:str):
+     # For lax.linalg.lu on CPU.
+-    if not config.jax_enable_x64 and dtype_name in ["f64", "c128"]:
++    if not config.enable_x64.value and dtype_name in ["f64", "c128"]:
+       self.skipTest("Test disabled for x32 mode")
+     dtype = dict(f32=np.float32, f64=np.float64,
+                  c64=np.complex64, c128=np.complex128)[dtype_name]
+@@ -480,7 +480,7 @@ def compute_max_backward_error(operand, reconstructed_operand):
+       for dtype_name in ("f32", "f64", "c64", "c128")])
+   @jax.default_matmul_precision("float32")
+   def test_cpu_schur_lapack_gees(self, dtype_name="f32"):
+-    if not config.jax_enable_x64 and dtype_name in ["f64", "c128"]:
++    if not config.enable_x64.value and dtype_name in ["f64", "c128"]:
+       self.skipTest("Test disabled for x32 mode")
+ 
+     dtype = dict(f32=np.float32, f64=np.float64,
+@@ -509,7 +509,7 @@ def check_schur_results(res_run, res_expected, *, rtol, atol):
+       for dtype_name in ("f32", "f64", "c64", "c128"))
+   @jax.default_matmul_precision("float32")
+   def test_cpu_svd_lapack_gesdd(self, dtype_name="f32"):
+-    if not config.jax_enable_x64 and dtype_name in ["f64", "c128"]:
++    if not config.enable_x64.value and dtype_name in ["f64", "c128"]:
+       self.skipTest("Test disabled for x32 mode")
+ 
+     dtype = dict(f32=np.float32, f64=np.float64,
+@@ -534,7 +534,7 @@ def func(input):
+       for dtype_name in ("f32", "f64", "c64", "c128")])
+   @jax.default_matmul_precision("float32")
+   def test_cpu_triangular_solve_blas_trsm(self, dtype_name="f32"):
+-    if not config.jax_enable_x64 and dtype_name in ["f64", "c128"]:
++    if not config.enable_x64.value and dtype_name in ["f64", "c128"]:
+       self.skipTest("Test disabled for x32 mode")
+ 
+     dtype = dict(f32=np.float32, f64=np.float64,
+@@ -669,16 +669,11 @@ def func(key, a):  # a is only used for its shape
+     # replace this strict check with something else.
+     data = self.load_testdata(stablehlo_dynamic_rng_bit_generator.data_2023_06_17)
+ 
+-    prev_default_prng_impl = jax.config.jax_default_prng_impl
+-    try:
+-      jax.config.update("jax_default_prng_impl", "unsafe_rbg")
+-
++    with config.default_prng_impl("unsafe_rbg"):
+       self.run_one_test(
+         func, data, polymorphic_shapes=(None, "b0, b1"),
+         # Recent serializations also include shape_assertion, tested with dynamic_top_k
+         expect_current_custom_calls=["stablehlo.dynamic_rng_bit_generator", "shape_assertion"])
+-    finally:
+-      jax.config.update("jax_default_prng_impl", prev_default_prng_impl)
+ 
+   def test_stablehlo_dynamic_top_k(self):
+     # stablehlo.dynamic_top_k is used temporarily for a top_k with dynamism
+diff --git a/jax/experimental/jax2tf/tests/jax2tf_limitations.py b/jax/experimental/jax2tf/tests/jax2tf_limitations.py
+index 72fbde21bd3b..4fd4d39d551e 100644
+--- a/jax/experimental/jax2tf/tests/jax2tf_limitations.py
++++ b/jax/experimental/jax2tf/tests/jax2tf_limitations.py
+@@ -20,9 +20,9 @@
+ import jax
+ from jax import lax
+ from jax import numpy as jnp
+-from jax import config
+-from jax._src import test_util as jtu
++from jax._src import config
+ from jax._src import dtypes
++from jax._src import test_util as jtu
+ from jax.experimental.jax2tf.tests import primitive_harness
+ import numpy as np
+ 
+@@ -114,7 +114,7 @@ def filter(  # type: ignore[override]
+     """Checks if this limitation is enabled for dtype and device and mode."""
+     native_serialization_mask = (
+         Jax2TfLimitation.FOR_NATIVE
+-        if config.jax2tf_default_native_serialization
++        if config.jax2tf_default_native_serialization.value
+         else Jax2TfLimitation.FOR_NON_NATIVE)
+     return ((mode is None or mode in self.modes) and
+             (self.native_serialization & native_serialization_mask) and
+diff --git a/jax/experimental/jax2tf/tests/jax2tf_test.py b/jax/experimental/jax2tf/tests/jax2tf_test.py
+index 7dcee07a50ee..517729ce88d3 100644
+--- a/jax/experimental/jax2tf/tests/jax2tf_test.py
++++ b/jax/experimental/jax2tf/tests/jax2tf_test.py
+@@ -19,7 +19,6 @@
+ import math
+ import os
+ import re
+-from typing import Callable, Optional
+ import unittest
+ 
+ from absl import logging
+@@ -31,20 +30,17 @@
+ from jax import lax
+ from jax import numpy as jnp
+ from jax import sharding
++from jax._src import config
+ from jax._src import core
+ from jax._src import source_info_util
+ from jax._src import test_util as jtu
+-from jax._src.lib import xla_client
+-from jax._src.lib.mlir.dialects import hlo
+-import jax._src.xla_bridge
+-from jax import config
++from jax._src import xla_bridge as xb
+ from jax.experimental import jax2tf
+ from jax.experimental.export import export
+ from jax.experimental.jax2tf.tests import tf_test_util
+ from jax.experimental.maps import xmap
+ from jax.experimental.shard_map import shard_map
+ from jax.experimental import pjit
+-from jax.interpreters import mlir
+ from jax.sharding import PartitionSpec as P
+ 
+ import numpy as np
+@@ -233,7 +229,7 @@ def _tf_grad(a, b):
+     with_function=[True, False],
+   )
+   def test_converts_64bit(self, dtype=np.int64, with_function=False):
+-    if not config.jax_enable_x64:
++    if not config.enable_x64.value:
+       self.skipTest("requires x64 mode")
+     big_const = np.full((5,), 2 ** 33, dtype=dtype)
+     self.ConvertAndCompare(jnp.sin, big_const)
+@@ -249,7 +245,7 @@ def test_converts_64bit(self, dtype=np.int64, with_function=False):
+ 
+   def test_64bit_behavior_enable_x64_readme(self):
+     # Tests some of the examples from the README
+-    if not config.jax_enable_x64:
++    if not config.enable_x64.value:
+       self.skipTest("requires x64 mode")
+ 
+     # JAX and TF have different default float types if JAX_ENABLE_X64=1
+@@ -266,7 +262,7 @@ def test_64bit_behavior_enable_x64_readme(self):
+ 
+   def test_64bit_behavior_not_enable_x64_readme(self):
+     # Tests some of the examples from the README
+-    if config.jax_enable_x64:
++    if config.enable_x64.value:
+       self.skipTest("requires not x64 mode")
+ 
+     # JAX and TF have same default float types if JAX_ENABLE_X64=0
+@@ -817,7 +813,7 @@ def f(x1):
+     arg = np.array(3.)
+     f_tf = jax2tf.convert(jax.grad(remat_f))
+     f_tf_hlo = self.TfToHlo(f_tf, arg)
+-    if jax.config.jax_remat_opt_barrier:
++    if config.remat_opt_barrier.value:
+       self.assertRegex(f_tf_hlo, r"opt-barrier")
+     else:
+       self.assertRegex(f_tf_hlo,
+@@ -849,7 +845,7 @@ def f_jax():
+     f_tf = jax2tf.convert(f_jax)
+     # for native serialization the HLO we get from TF is constant-folded, so this
+     # test fails.
+-    if not config.jax2tf_default_native_serialization:
++    if not config.jax2tf_default_native_serialization.value:
+       self.assertIn("sine(", self.TfToHlo(f_tf))
+ 
+   def test_convert_of_nested_independent_jit(self):
+@@ -954,7 +950,7 @@ def caller_jax(x):
+ 
+       out = jax2tf.convert(caller_jax, with_gradient=False)(2.)
+       return out
+-    if config.jax2tf_default_native_serialization:
++    if config.jax2tf_default_native_serialization.value:
+       self.assertIn("my_test_function_jax/mul", self.TfToHlo(run_tf))
+     else:
+       graph_def = str(tf.function(run_tf, autograph=False).get_concrete_function().graph.as_graph_def())
+@@ -984,7 +980,7 @@ def jax_fn_array(x):
+   def test_shared_constants(self):
+     # Check that the constants are shared properly in converted functions
+     # See https://github.com/google/jax/issues/7992.
+-    if config.jax2tf_default_native_serialization:
++    if config.jax2tf_default_native_serialization.value:
+       raise unittest.SkipTest("shared constants tests not interesting for native serialization")
+     const = np.random.uniform(size=256).astype(np.float32)  # A shared constant
+     def f(x):
+@@ -996,7 +992,7 @@ def f(x):
+   def test_shared_constants_under_cond(self):
+     # Check that the constants are shared properly in converted functions
+     # See https://github.com/google/jax/issues/7992.
+-    if config.jax2tf_default_native_serialization:
++    if config.jax2tf_default_native_serialization.value:
+       raise unittest.SkipTest("shared constants tests not interesting for native serialization")
+     const_size = 512
+     const = np.random.uniform(size=const_size).astype(np.float32)  # A shared constant
+@@ -1012,7 +1008,7 @@ def f2(x):
+ 
+   def test_shared_constants_under_scan(self):
+     # See https://github.com/google/jax/issues/7992.
+-    if config.jax2tf_default_native_serialization:
++    if config.jax2tf_default_native_serialization.value:
+       raise unittest.SkipTest("shared constants tests not interesting for native serialization")
+     const_size = 512
+     const = np.random.uniform(size=const_size).astype(np.float32)  # A shared constant
+@@ -1031,7 +1027,7 @@ def f2(xs):
+ 
+   def test_shared_constants_under_jit(self):
+     # We do not share constants under jit.
+-    if config.jax2tf_default_native_serialization:
++    if config.jax2tf_default_native_serialization.value:
+       raise unittest.SkipTest("shared constants tests not interesting for native serialization")
+     const = np.random.uniform(size=(16, 16)).astype(np.float32)  # A shared constant
+     @jax.jit
+@@ -1047,7 +1043,7 @@ def test_shared_constants_randint(self):
+     # randint has the property that the TF lowering of the randbits_p
+     # primitive generates constants that did not exist in the Jaxpr. As such
+     # it has created new errors related to the sharing of the constants.
+-    if config.jax2tf_default_native_serialization:
++    if config.jax2tf_default_native_serialization.value:
+       raise unittest.SkipTest("shared constants tests not interesting for native serialization")
+ 
+     key = jax.random.PRNGKey(42)
+@@ -1296,7 +1292,7 @@ def body_fun(carry):
+     x = np.arange(math.prod(shape), dtype=np.float32).reshape(shape)
+ 
+     jax_comp = jax.xla_computation(f_while)(x)
+-    backend = jax._src.xla_bridge.get_backend()
++    backend = xb.get_backend()
+     modules = backend.compile(jax_comp).hlo_modules()
+     jax_opt_hlo = modules[0].to_string()
+     print(f"JAX OPT HLO = {jax_opt_hlo}")
+@@ -1342,7 +1338,8 @@ def assertAllOperationStartWith(self, g: tf.Graph, scope_name: str):
+         self.fail(f"{op.name} does not start with {scope_name}.")
+ 
+   def test_name_scope_polymorphic(self):
+-    if config.jax2tf_default_native_serialization and not config.jax_dynamic_shapes:
++    if (config.jax2tf_default_native_serialization.value and
++        not config.dynamic_shapes.value):
+       self.skipTest("shape polymorphism but --jax_dynamic_shapes is not set.")
+ 
+     def func_jax(x, y):
+diff --git a/jax/experimental/jax2tf/tests/jax_primitives_coverage_test.py b/jax/experimental/jax2tf/tests/jax_primitives_coverage_test.py
+index ea1266105514..13c6849c01ea 100644
+--- a/jax/experimental/jax2tf/tests/jax_primitives_coverage_test.py
++++ b/jax/experimental/jax2tf/tests/jax_primitives_coverage_test.py
+@@ -28,9 +28,10 @@
+ 
+ from absl.testing import absltest
+ 
++import jax
++from jax._src import config
+ from jax._src import test_util as jtu
+ from jax._src import maps  # Needed for config flags.
+-from jax import config
+ 
+ import numpy as np
+ 
+@@ -139,7 +140,7 @@ def unique_hash(h: primitive_harness.Harness, l: primitive_harness.Limitation):
+       raise unittest.SkipTest("Set JAX_OUTPUT_LIMITATIONS_DOC=1 to enable the generation of the documentation")
+     # The CPU/GPU have more supported types than TPU.
+     self.assertEqual("cpu", jtu.device_under_test(), "The documentation can be generated only on CPU")
+-    self.assertTrue(config.x64_enabled, "The documentation must be generated with JAX_ENABLE_X64=1")
++    self.assertTrue(config.enable_x64.value, "The documentation must be generated with JAX_ENABLE_X64=1")
+ 
+     with open(os.path.join(os.path.dirname(__file__),
+                            '../g3doc/jax_primitives_coverage.md.template')) as f:
+diff --git a/jax/experimental/jax2tf/tests/primitive_harness.py b/jax/experimental/jax2tf/tests/primitive_harness.py
+index 48ef2d86c2c6..9ede6cc32db0 100644
+--- a/jax/experimental/jax2tf/tests/primitive_harness.py
++++ b/jax/experimental/jax2tf/tests/primitive_harness.py
+@@ -67,8 +67,7 @@
+ # then the test file has to import jtu first (to define the flags) which is not
+ # desired if the test file is outside of this project (we don't want a
+ # dependency on jtu outside of jax repo).
+-jax.config.parse_flags_with_absl()
+-FLAGS = config.FLAGS
++config.parse_flags_with_absl()
+ 
+ Rng = Any  # A random number generator
+ DType = Any
+diff --git a/jax/experimental/jax2tf/tests/primitives_test.py b/jax/experimental/jax2tf/tests/primitives_test.py
+index 981fdb817182..6bca0a38e4de 100644
+--- a/jax/experimental/jax2tf/tests/primitives_test.py
++++ b/jax/experimental/jax2tf/tests/primitives_test.py
+@@ -72,7 +72,7 @@
+ import numpy as np
+ import tensorflow as tf  # type: ignore[import]
+ 
+-jax.config.parse_flags_with_absl()
++config.parse_flags_with_absl()
+ 
+ # Import after parsing flags
+ from jax.experimental.jax2tf.tests import tf_test_util
+diff --git a/jax/experimental/jax2tf/tests/shape_poly_test.py b/jax/experimental/jax2tf/tests/shape_poly_test.py
+index 70df089a9022..a298a3633fec 100644
+--- a/jax/experimental/jax2tf/tests/shape_poly_test.py
++++ b/jax/experimental/jax2tf/tests/shape_poly_test.py
+@@ -38,6 +38,7 @@
+ import jax.numpy as jnp
+ from jax import random
+ from jax import tree_util
++from jax._src import config
+ from jax._src import core
+ from jax._src import test_util as jtu
+ from jax._src import util
+@@ -51,9 +52,6 @@
+ 
+ import tensorflow as tf  # type: ignore[import]
+ 
+-from jax import config
+-from jax._src.config import numpy_dtype_promotion
+-
+ config.parse_flags_with_absl()
+ 
+ # Import after parsing flags
+@@ -723,7 +721,7 @@ def f_jax(x, y):
+                      expected_output_signature=(
+                          # for native serialization we cannot refine the inferred shape of the
+                          # output if the input is more specific than polymorphic_shapes.
+-                         tf.TensorSpec([2, 3]) if not config.jax2tf_default_native_serialization
++                         tf.TensorSpec([2, 3]) if not config.jax2tf_default_native_serialization.value
+                          else tf.TensorSpec([2, None])))
+ 
+     check_shape_poly(self,
+@@ -1300,7 +1298,7 @@ def tf_value_and_grad(xv):
+ 
+     # for native serialization we cannot refine the inferred shape of the
+     # output if the input is more specific than polymorphic_shapes.
+-    if config.jax2tf_default_native_serialization:
++    if config.jax2tf_default_native_serialization.value:
+       self.assertEqual((None, None, None, None), tuple(tf_grad.output_shapes[0]))
+       self.assertEqual((None, None, None, None), tuple(tf_grad.output_shapes[1]))
+     else:
+@@ -1424,9 +1422,7 @@ def f_jax(xi_yf, zb):  # xi: s16[2, 3, 4], yf: f32[2, 3, 4], zb: bool[2]
+ 
+   def test_prng(self):
+     # The PRNG implementation uses opaque types, test shape polymorphism
+-    try:
+-      prev_custom_prng = config.jax_enable_custom_prng
+-      config.update("jax_enable_custom_prng", True)
++    with config.enable_custom_prng(True):
+ 
+       def f_jax(x):  # x: f32[b1, b2]
+         key = random.PRNGKey(123)  #  key: key<fry>[]
+@@ -1452,8 +1448,6 @@ def inner(count, x):  # count i32, x: key<fry>[b2]
+       check_shape_poly(self, f_jax,
+                        arg_descriptors=[RandArg((3, 4), _f32)],
+                        polymorphic_shapes=["b1, b2"])
+-    finally:
+-      config.update("jax_enable_custom_prng", prev_custom_prng)
+ 
+   def test_saved_model(self):
+     f_jax = jnp.sin
+@@ -1788,7 +1782,7 @@ def f_jax(x):  # x: f32[b]
+         # should be a symbolic dimension
+         self.assertTrue(isinstance(res, int) or hasattr(res, "dimension_as_value"))
+ 
+-      if config.jax_enable_x64:
++      if config.enable_x64.value:
+         # Outside jax2tf, x.shape[0] is a Python (64-bit) integer and for most
+         # operations here JAX is not involved at all because the other operand
+         # is a Python or NumPy constant. So the result will be 64-bits. But under
+@@ -1833,7 +1827,7 @@ def f_jax(x):  # x: f32[b]
+         self.assertTrue(d1.aval.weak_type), d1
+       return d0 + np.array(5., dtype=np.float32) + d1 + x[0]
+ 
+-    with numpy_dtype_promotion("strict"):
++    with config.numpy_dtype_promotion("strict"):
+       # strict type promotion is sensitive to weak_types
+       check_shape_poly(self,
+                        f_jax,
+@@ -2236,7 +2230,7 @@ def f_jax(operand, start_indices, x):
+                   polymorphic_shapes=[poly],
+                   # In non-native serialization, we cannot check exact match,
+                   # we ought to check the invariants of the result.
+-                  check_result=config.jax2tf_default_native_serialization)
++                  check_result=config.jax2tf_default_native_serialization.value)
+       for dtype in [np.float32, np.float64, np.complex64, np.complex128]
+       for poly in ["b, ...", "b, w, w"]
+       for left in ([True, False] if dtype == np.float32 else [True])
+@@ -2523,7 +2517,7 @@ def f_jax(operand, start_indices, x):
+           lambda x, full_matrices: lax.linalg.qr(x, full_matrices=full_matrices),
+           arg_descriptors=[RandArg(shape, dtype), StaticArg(full_matrices)],
+           polymorphic_shapes=[poly],
+-          tol=(None if config.jax2tf_default_native_serialization else 1e-5))
++          tol=(None if config.jax2tf_default_native_serialization.value else 1e-5))
+       for dtype in [np.float32, np.float64, np.complex64, np.complex128]
+       # m and n must be static for now
+       for shape, poly, full_matrices in [
+@@ -2793,7 +2787,7 @@ def f_jax(operand, start_indices, x):
+                   polymorphic_shapes=[poly],
+                   # In non-native serialization, we cannot check exact match,
+                   # we ought to check the invariants of the result.
+-                  check_result=config.jax2tf_default_native_serialization)
++                  check_result=config.jax2tf_default_native_serialization.value)
+       for dtype in [np.float32, np.float64, np.complex64, np.complex128]
+       for compute_schur_vectors in [True, False]
+       for (shape, poly) in [
+@@ -2914,7 +2908,7 @@ def f_jax(operand, start_indices, x):
+                   polymorphic_shapes=[a_poly, b_poly],
+                   # In non-native serialization, we cannot check exact match,
+                   # we ought to check the invariants of the result.
+-                  check_result=config.jax2tf_default_native_serialization)
++                  check_result=config.jax2tf_default_native_serialization.value)
+       for dtype in [np.float32, np.float64, np.complex64, np.complex128]
+       for (left_side, a_shape, b_shape, a_poly, b_poly) in [
+           (True, (3, 4, 4), (3, 4, 5), "b, ...", "b, ..."),
+@@ -3065,14 +3059,14 @@ class ShapePolyPrimitivesTest(tf_test_util.JaxToTfTestCase):
+   )
+   def test_harness(self, harness: PolyHarness):
+     if harness.expect_error == expect_error_associative_scan and (
+-        not config.jax2tf_default_native_serialization
++        not config.jax2tf_default_native_serialization.value
+         or jtu.test_device_matches(["tpu"])
+     ):
+       harness.expect_error = (None, None)
+ 
+     # Exclude some harnesses that are known to fail for native serialization
+     # FOR NATIVE SERIALIZATION
+-    if config.jax2tf_default_native_serialization:
++    if config.jax2tf_default_native_serialization.value:
+       if not harness.enable_xla:
+         raise unittest.SkipTest("disabled for native_serialization and enable_xla=False")
+ 
+@@ -3123,7 +3117,7 @@ def test_harness(self, harness: PolyHarness):
+             "native serialization with shape polymorphism not implemented for window_reductions on CPU and GPU")
+ 
+     # FOR GRAPH SERIALIZATION
+-    if not config.jax2tf_default_native_serialization:
++    if not config.jax2tf_default_native_serialization.value:
+       if ("random_gamma_threefry_non_partitionable" in harness.fullname and
+           jtu.test_device_matches(["cpu"])):
+         harness.tol = 1e-6
+diff --git a/jax/experimental/jax2tf/tests/sharding_test.py b/jax/experimental/jax2tf/tests/sharding_test.py
+index 09a6dcf7daa7..c6cdd3c081fd 100644
+--- a/jax/experimental/jax2tf/tests/sharding_test.py
++++ b/jax/experimental/jax2tf/tests/sharding_test.py
+@@ -30,8 +30,11 @@
+ from absl.testing import absltest
+ 
+ import jax
++from jax._src import compiler
+ from jax._src import config
++from jax._src import maps
+ from jax._src import test_util as jtu
++from jax._src import xla_bridge
+ from jax import lax
+ from jax.experimental import jax2tf
+ from jax.experimental import pjit
+@@ -40,19 +43,18 @@
+ from jax.sharding import Mesh
+ from jax.sharding import PartitionSpec as P
+ import jax.numpy as jnp
+-from jax._src import compiler
+-from jax._src import xla_bridge
+ 
+ import numpy as np
+ 
+ import tensorflow as tf  # type: ignore[import]
+ 
+-jax.config.parse_flags_with_absl()
++config.parse_flags_with_absl()
+ 
+ # Must come after initializing the flags
+ from jax.experimental.jax2tf.tests import tf_test_util
+ 
+ prev_xla_flags = None
++prev_spmd_lowering_flag = None
+ 
+ topology = None
+ 
+@@ -74,7 +76,9 @@ def setUpModule():
+                                " --xla_force_host_platform_device_count=8")
+   # Clear any cached backends so new CPU backend will pick up the env var.
+   xla_bridge.get_backend.cache_clear()
+-  jtu.set_spmd_lowering_flag(True)
++  global prev_spmd_lowering_flag
++  prev_spmd_lowering_flag = maps._SPMD_LOWERING.value
++  config.update('experimental_xmap_spmd_lowering', True)
+ 
+ 
+ def tearDownModule():
+@@ -83,7 +87,7 @@ def tearDownModule():
+   else:
+     os.environ["XLA_FLAGS"] = prev_xla_flags
+   xla_bridge.get_backend.cache_clear()
+-  jtu.restore_spmd_lowering_flag()
++  config.update('experimental_xmap_spmd_lowering', prev_spmd_lowering_flag)
+ 
+ 
+ class ShardingTest(tf_test_util.JaxToTfTestCase):
+diff --git a/jax/experimental/sparse/bcoo.py b/jax/experimental/sparse/bcoo.py
+index 73002fce5b1b..3d92ea714121 100644
+--- a/jax/experimental/sparse/bcoo.py
++++ b/jax/experimental/sparse/bcoo.py
+@@ -29,7 +29,6 @@
+ from jax import lax
+ from jax import tree_util
+ from jax import vmap
+-from jax import config
+ from jax.experimental.sparse._base import JAXSparse
+ from jax.experimental.sparse.util import (
+   nfold_vmap, _count_stored_elements,
+@@ -41,6 +40,7 @@
+ import jax.numpy as jnp
+ from jax.util import safe_zip, unzip2, split_list
+ from jax._src import api_util
++from jax._src import config
+ from jax._src import core
+ from jax._src import dispatch
+ from jax._src.interpreters import ad
+@@ -784,7 +784,7 @@ def _bcoo_dot_general_fallback(data, indices, spinfo):
+ def _bcoo_dot_general_gpu_impl(lhs_data, lhs_indices, rhs, *,
+                                dimension_numbers, preferred_element_type,
+                                lhs_spinfo):
+-  if not config.jax_bcoo_cusparse_lowering:
++  if not config.bcoo_cusparse_lowering.value:
+     return _bcoo_dot_general_impl(lhs_data, lhs_indices, rhs,
+         dimension_numbers=dimension_numbers,
+         preferred_element_type=preferred_element_type,
+diff --git a/jax/experimental/sparse/bcsr.py b/jax/experimental/sparse/bcsr.py
+index ed42031e836a..67c1ee72257d 100644
+--- a/jax/experimental/sparse/bcsr.py
++++ b/jax/experimental/sparse/bcsr.py
+@@ -25,7 +25,6 @@
+ 
+ import jax
+ import jax.numpy as jnp
+-from jax import config
+ from jax import lax
+ from jax import tree_util
+ from jax.experimental.sparse._base import JAXSparse
+@@ -37,6 +36,7 @@
+ from jax.util import split_list, safe_zip
+ 
+ from jax._src import api_util
++from jax._src import config
+ from jax._src import core
+ from jax._src import dispatch
+ from jax._src.lax.lax import DotDimensionNumbers, _dot_general_batch_dim_nums
+@@ -623,7 +623,7 @@ def _bcsr_dot_general_gpu_lowering(
+     ctx, lhs_data, lhs_indices, lhs_indptr, rhs, *, dimension_numbers,
+     preferred_element_type, lhs_spinfo: SparseInfo):
+ 
+-  if not config.jax_bcoo_cusparse_lowering:
++  if not config.bcoo_cusparse_lowering.value:
+     return _bcsr_dot_general_default_lowering(
+       ctx, lhs_data, lhs_indices, lhs_indptr, rhs,
+       dimension_numbers=dimension_numbers,
+diff --git a/tests/api_test.py b/tests/api_test.py
+index f5dfe5bc3920..11bdf8e36b08 100644
+--- a/tests/api_test.py
++++ b/tests/api_test.py
+@@ -40,14 +40,13 @@
+ from absl import logging
+ from absl.testing import absltest, parameterized
+ import jax
+-from jax import config
+ from jax import custom_derivatives as custom_derivatives_public
+ from jax import device_put, float0, grad, hessian, jacfwd, jacrev, jit
+ from jax import lax
+ from jax import tree_util
+ from jax._src import api, api_util, dtypes, lib
+ from jax._src import array
+-from jax._src import config as config_internal
++from jax._src import config
+ from jax._src import core
+ from jax._src import custom_derivatives
+ from jax._src import linear_util as lu
+@@ -76,7 +75,6 @@
+ import numpy as np
+ 
+ config.parse_flags_with_absl()
+-FLAGS = config.FLAGS
+ 
+ 
+ def _check_instance(self, x):
+@@ -233,7 +231,7 @@ def f(x, y, z):
+     assert len(side) == 2  # but should still cache
+ 
+     f(one, two, z=np.zeros(3))  # doesn't crash
+-    if config.x64_enabled:
++    if config.enable_x64.value:
+       # In the above call, three is of a new type (int64), thus it should
+       # trigger a new compilation.
+       assert len(side) == 3
+@@ -879,7 +877,7 @@ def test_omnistaging(self):
+     # TODO(frostig): remove `wrap` once we always enable_custom_prng
+     def wrap(arr):
+       arr = np.array(arr, dtype=np.uint32)
+-      if config.jax_enable_custom_prng:
++      if config.enable_custom_prng.value:
+         return prng.random_wrap(arr, impl=jax.random.default_prng_impl())
+       else:
+         return arr
+@@ -1057,7 +1055,7 @@ def f(x):
+     compiled = lowered.compile()
+     self.assertAllClose(compiled(1.), 2.)
+     self.assertEqual(lowered.in_avals, compiled.in_avals)
+-    expected_dtype = np.float64 if config.x64_enabled else np.float32
++    expected_dtype = np.float64 if config.enable_x64.value else np.float32
+     for obj in [lowered, compiled]:
+       self.assertEqual(
+           obj.in_avals,
+@@ -2913,7 +2911,7 @@ def test_dtype_from_builtin_types(self):
+ 
+   def test_dtype_warning(self):
+     # cf. issue #1230
+-    if config.x64_enabled:
++    if config.enable_x64.value:
+       raise unittest.SkipTest("test only applies when x64 is disabled")
+ 
+     def check_warning(warn, nowarn):
+@@ -4029,25 +4027,15 @@ def test_dot_precision_context_manager(self):
+   def test_dot_precision_flag(self):
+     x = jnp.zeros((2, 2))
+ 
+-    prev_val = config._read("jax_default_matmul_precision")
+-    try:
+-      config.FLAGS.jax_default_matmul_precision = "tensorfloat32"
++    with config.default_matmul_precision("tensorfloat32"):
+       jnp.dot(x, x)  # doesn't crash
+       jaxpr = jax.make_jaxpr(jnp.dot)(x, x)
+-    finally:
+-      config.FLAGS.jax_default_matmul_precision = prev_val
+     self.assertIn('Precision.HIGH', str(jaxpr))
+-    self.assertEqual(prev_val, config._read("jax_default_matmul_precision"))
+ 
+-    prev_val = config._read("jax_default_matmul_precision")
+-    try:
+-      config.update('jax_default_matmul_precision','tensorfloat32')
++    with config.default_matmul_precision("tensorfloat32"):
+       jnp.dot(x, x)  # doesn't crash
+       jaxpr = jax.make_jaxpr(jnp.dot)(x, x)
+-    finally:
+-      config.update('jax_default_matmul_precision', prev_val)
+     self.assertIn('Precision.HIGH', str(jaxpr))
+-    self.assertEqual(prev_val, config._read("jax_default_matmul_precision"))
+ 
+   def test_dot_precision_forces_retrace(self):
+     num_traces = 0
+@@ -4067,7 +4055,7 @@ def f_jit(x):
+ 
+     for f in [f_jit, f_cond]:
+       # Use _read() to read the flag value rather than threadlocal value.
+-      precision = config._read('jax_default_matmul_precision')
++      precision = config._read("jax_default_matmul_precision")
+       try:
+         num_traces = 0
+         x = jnp.zeros((2, 2))
+@@ -4078,7 +4066,7 @@ def f_jit(x):
+         with jax.default_matmul_precision("tensorfloat32"):
+           f(x)
+           self.assertEqual(num_traces, 2)
+-          FLAGS.jax_default_matmul_precision = "float32"
++          config.update("jax_default_matmul_precision", "float32")
+           f(x)
+           self.assertGreaterEqual(num_traces, 2)
+         nt = num_traces
+@@ -4087,7 +4075,7 @@ def f_jit(x):
+         f(x)
+         self.assertEqual(num_traces, nt + 1)
+       finally:
+-        FLAGS.jax_default_matmul_precision = precision
++        config.update("jax_default_matmul_precision", precision)
+ 
+   def test_backward_pass_ref_dropping(self):
+     refs = []
+@@ -4239,9 +4227,9 @@ def f_jit(x):
+ 
+     for f in [f_jit, f_cond]:
+       # Use _read() to read the flag value rather than threadlocal value.
+-      allow_promotion = config._read('jax_numpy_rank_promotion')
++      allow_promotion = config._read("jax_numpy_rank_promotion")
+       try:
+-        FLAGS.jax_numpy_rank_promotion = "allow"
++        config.update("jax_numpy_rank_promotion", "allow")
+         num_traces = 0
+         @jax.jit
+         def f(x):
+@@ -4256,7 +4244,7 @@ def f(x):
+         with jax.numpy_rank_promotion("warn"):
+           f(x)
+           self.assertEqual(num_traces, 2)
+-          FLAGS.jax_numpy_rank_promotion = "raise"
++          config.update("jax_numpy_rank_promotion", "raise")
+           f(x)
+           self.assertGreaterEqual(num_traces, 2)
+         nt = num_traces
+@@ -4265,7 +4253,7 @@ def f(x):
+         f(x)
+         self.assertEqual(num_traces, nt + 1)
+       finally:
+-        FLAGS.jax_numpy_rank_promotion = allow_promotion
++        config.update("jax_numpy_rank_promotion", allow_promotion)
+ 
+   def test_grad_negative_argnums(self):
+     def f(x, y):
+@@ -4409,7 +4397,7 @@ def add(x):
+ 
+     inp = jnp.arange(8)
+ 
+-    with config_internal.log_compiles(True):
++    with config.log_compiles(True):
+       with self.assertLogs(level='WARNING') as cm:
+         add(inp)
+         jax.clear_caches()
+@@ -6217,7 +6205,7 @@ def f():
+   def test_elide_trivial_convert_element_types(self):
+     # since we apply convert_element_type to a numpy.ndarray, the primitive is
+     # still bound and thus would appear in the jaxpr if we didn't clean it up
+-    if config.x64_enabled:
++    if config.enable_x64.value:
+       x = np.arange(3, dtype='float64')
+     else:
+       x = np.arange(3, dtype='float32')
+@@ -7464,7 +7452,7 @@ def energy_fn(box):
+ 
+   def test_custom_jvp_implicit_broadcasting(self):
+     # https://github.com/google/jax/issues/6357
+-    if config.x64_enabled:
++    if config.enable_x64.value:
+       raise unittest.SkipTest("test only applies when x64 is disabled")
+ 
+     @jax.custom_jvp
+diff --git a/tests/array_interoperability_test.py b/tests/array_interoperability_test.py
+index 6634a971d08b..149ee06b9871 100644
+--- a/tests/array_interoperability_test.py
++++ b/tests/array_interoperability_test.py
+@@ -17,9 +17,9 @@
+ from absl.testing import absltest
+ 
+ import jax
+-from jax import config
+ import jax.dlpack
+ import jax.numpy as jnp
++from jax._src import config
+ from jax._src import test_util as jtu
+ from jax._src.lib import xla_extension_version
+ 
+@@ -115,7 +115,8 @@ def testJaxArrayRoundTrip(self, shape, dtype, gpu):
+   )
+   @unittest.skipIf(not tf, "Test requires TensorFlow")
+   def testTensorFlowToJax(self, shape, dtype):
+-    if not config.x64_enabled and dtype in [jnp.int64, jnp.uint64, jnp.float64]:
++    if (not config.enable_x64.value and
++        dtype in [jnp.int64, jnp.uint64, jnp.float64]):
+       raise self.skipTest("x64 types are disabled by jax_enable_x64")
+     if (jtu.test_device_matches(["gpu"]) and
+         not tf.config.list_physical_devices("GPU")):
+@@ -138,8 +139,8 @@ def testTensorFlowToJax(self, shape, dtype):
+   )
+   @unittest.skipIf(not tf, "Test requires TensorFlow")
+   def testJaxToTensorFlow(self, shape, dtype):
+-    if not config.x64_enabled and dtype in [jnp.int64, jnp.uint64,
+-                                              jnp.float64]:
++    if (not config.enable_x64.value and
++        dtype in [jnp.int64, jnp.uint64, jnp.float64]):
+       self.skipTest("x64 types are disabled by jax_enable_x64")
+     if (jtu.test_device_matches(["gpu"]) and
+         not tf.config.list_physical_devices("GPU")):
+@@ -159,7 +160,7 @@ def testTensorFlowToJaxInt64(self):
+     # See https://github.com/google/jax/issues/11895
+     x = jax.dlpack.from_dlpack(
+         tf.experimental.dlpack.to_dlpack(tf.ones((2, 3), tf.int64)))
+-    dtype_expected = jnp.int64 if config.x64_enabled else jnp.int32
++    dtype_expected = jnp.int64 if config.enable_x64.value else jnp.int32
+     self.assertEqual(x.dtype, dtype_expected)
+ 
+   @jtu.sample_product(
+diff --git a/tests/cache_key_test.py b/tests/cache_key_test.py
+index 9220e75dcd49..845129e4bd1c 100644
+--- a/tests/cache_key_test.py
++++ b/tests/cache_key_test.py
+@@ -35,7 +35,6 @@
+ 
+ 
+ config.parse_flags_with_absl()
+-FLAGS = config.FLAGS
+ 
+ 
+ class CacheKeyTest(jtu.JaxTestCase):
+diff --git a/tests/checkify_test.py b/tests/checkify_test.py
+index ab823c51cac3..730f14ddcdd1 100644
+--- a/tests/checkify_test.py
++++ b/tests/checkify_test.py
+@@ -21,15 +21,15 @@
+ 
+ import jax
+ from jax import lax
+-import jax._src.test_util as jtu
+-from jax._src.lib import xla_extension
+-from jax import config
+ from jax.experimental import checkify
+ from jax.experimental import pjit
+ from jax.sharding import NamedSharding
+ from jax._src import array
++from jax._src import config
+ from jax._src import core
++from jax._src import test_util as jtu
+ from jax._src.checkify import JaxRuntimeError, FailedCheckError, ErrorEffect, OOBError
++from jax._src.lib import xla_extension
+ import jax.numpy as jnp
+ 
+ config.parse_flags_with_absl()
+@@ -1305,12 +1305,7 @@ def test_check_pp_rule(self):
+ class LowerableChecksTest(jtu.JaxTestCase):
+   def setUp(self):
+     super().setUp()
+-    self.prev = config.jax_experimental_unsafe_xla_runtime_errors
+-    config.update("jax_experimental_unsafe_xla_runtime_errors", True)
+-
+-  def tearDown(self):
+-    config.update("jax_experimental_unsafe_xla_runtime_errors", self.prev)
+-    super().tearDown()
++    self.enter_context(config.xla_runtime_errors(True))
+ 
+   @jtu.run_on_devices("cpu", "gpu")
+   def test_jit(self):
+diff --git a/tests/compilation_cache_test.py b/tests/compilation_cache_test.py
+index 86e392659fbc..b073368865e6 100644
+--- a/tests/compilation_cache_test.py
++++ b/tests/compilation_cache_test.py
+@@ -23,18 +23,15 @@
+ 
+ from absl.testing import absltest
+ import jax
+-from jax import config
+ from jax import jit
+ from jax import lax
+ from jax import pmap
+ from jax._src import compilation_cache as cc
+ from jax._src import compiler
++from jax._src import config
+ from jax._src import monitoring
+ from jax._src import test_util as jtu
+ from jax._src import xla_bridge
+-from jax._src.config import persistent_cache_min_compile_time_secs
+-from jax._src.config import raise_persistent_cache_errors
+-from jax._src.config import use_original_compilation_cache_key_generation
+ from jax._src.lib import xla_client
+ from jax.experimental.maps import xmap
+ from jax.experimental.pjit import pjit
+@@ -43,7 +40,6 @@
+ 
+ 
+ config.parse_flags_with_absl()
+-FLAGS = config.FLAGS
+ 
+ FAKE_COMPILE_TIME = 10
+ _counts = Counter()  # Map event name to count
+@@ -228,9 +224,11 @@ def test_cache_write_warning(self):
+       cc.initialize_cache(tmpdir)
+       f = jit(lambda x: x * x)
+ 
+-      with raise_persistent_cache_errors(False), mock.patch.object(
+-          cc._cache.__class__, "put"
+-      ) as mock_put, warnings.catch_warnings(record=True) as w:
++      with (
++        config.raise_persistent_cache_errors(False),
++        mock.patch.object(cc._cache.__class__, "put") as mock_put,
++        warnings.catch_warnings(record=True) as w,
++      ):
+         mock_put.side_effect = RuntimeError("test error")
+         self.assertEqual(f(2), 4)
+         self.assertLen(w, 1)
+@@ -247,9 +245,11 @@ def test_cache_read_warning(self):
+       cc.initialize_cache(tmpdir)
+       f = jit(lambda x: x * x)
+ 
+-      with raise_persistent_cache_errors(False), mock.patch.object(
+-          cc._cache.__class__, "get"
+-      ) as mock_get, warnings.catch_warnings(record=True) as w:
++      with (
++        config.raise_persistent_cache_errors(False),
++        mock.patch.object(cc._cache.__class__, "get") as mock_get,
++        warnings.catch_warnings(record=True) as w,
++      ):
+         mock_get.side_effect = RuntimeError("test error")
+         self.assertEqual(f(2), 4)
+         if len(w) > 1:
+@@ -264,8 +264,9 @@ def test_cache_read_warning(self):
+         )
+ 
+   def test_min_compile_time(self):
+-    with tempfile.TemporaryDirectory() as tmpdir, persistent_cache_min_compile_time_secs(
+-        2
++    with (
++      tempfile.TemporaryDirectory() as tmpdir,
++      config.persistent_cache_min_compile_time_secs(2),
+     ):
+       cc.initialize_cache(tmpdir)
+ 
+@@ -282,8 +283,10 @@ def test_min_compile_time(self):
+         self.assertEqual(files_in_cache, 1)
+ 
+   def test_cache_saving_metric(self):
+-    with tempfile.TemporaryDirectory() as tmpdir, persistent_cache_min_compile_time_secs(
+-        2):
++    with (
++      tempfile.TemporaryDirectory() as tmpdir,
++      config.persistent_cache_min_compile_time_secs(2),
++    ):
+       cc.initialize_cache(tmpdir)
+ 
+       durations = Counter()  # Map metric name to time duration.
+@@ -346,8 +349,10 @@ def test_compile_requests_use_cache_metric(self):
+ 
+   def test_cache_misses_metric(self):
+     previous_counts = Counter(_counts)
+-    with tempfile.TemporaryDirectory() as tmpdir, persistent_cache_min_compile_time_secs(
+-        2):
++    with (
++      tempfile.TemporaryDirectory() as tmpdir,
++      config.persistent_cache_min_compile_time_secs(2),
++    ):
+       cc.initialize_cache(tmpdir)
+ 
+       # Mock time to create a long compilation time and make cache misses.
+@@ -362,8 +367,11 @@ def test_cache_misses_metric(self):
+ 
+   def test_cache_hits_original_metric(self):
+     previous_counts = Counter(_counts)
+-    with tempfile.TemporaryDirectory() as tmpdir, persistent_cache_min_compile_time_secs(
+-        2), use_original_compilation_cache_key_generation(True):
++    with (
++      tempfile.TemporaryDirectory() as tmpdir,
++      config.persistent_cache_min_compile_time_secs(2),
++      config.use_original_compilation_cache_key_generation(True),
++    ):
+       cc.initialize_cache(tmpdir)
+ 
+       # Mock time to create a long compilation time, cache saved.
+diff --git a/tests/dtypes_test.py b/tests/dtypes_test.py
+index efc3439123c4..6e3b45d5f6cf 100644
+--- a/tests/dtypes_test.py
++++ b/tests/dtypes_test.py
+@@ -24,17 +24,14 @@
+ import numpy as np
+ 
+ import jax
+-from jax._src import dtypes
+ from jax import numpy as jnp
+-
++from jax._src import config
++from jax._src import dtypes
+ from jax._src import test_util as jtu
+ from jax._src.lax import lax as lax_internal
+ 
+-from jax._src.config import config
+ config.parse_flags_with_absl()
+ 
+-FLAGS = config.FLAGS
+-
+ bool_dtypes = [np.dtype('bool')]
+ 
+ np_signed_dtypes = [np.dtype('int8'), np.dtype('int16'), np.dtype('int32'),
+@@ -102,7 +99,7 @@ def test_canonicalize_type(self):
+         True: _EXPECTED_CANONICALIZE_X64,
+         False: _EXPECTED_CANONICALIZE_X32,
+     }
+-    for in_dtype, expected_dtype in expected[config.x64_enabled].items():
++    for in_dtype, expected_dtype in expected[config.enable_x64.value].items():
+       self.assertEqual(dtypes.canonicalize_dtype(in_dtype), expected_dtype)
+ 
+   @parameterized.named_parameters(
+@@ -371,7 +368,7 @@ def testDtypeFromNone(self):
+       dtypes.dtype(None)
+ 
+   def testDefaultDtypes(self):
+-    precision = config.jax_default_dtype_bits
++    precision = config.default_dtype_bits.value
+     assert precision in ['32', '64']
+     self.assertEqual(dtypes.bool_, np.bool_)
+     self.assertEqual(dtypes.int_, np.int32 if precision == '32' else np.int64)
+@@ -450,7 +447,7 @@ def testObservedPromotionTable(self):
+     # Note: * here refers to weakly-typed values
+     typecodes = \
+         ['b1','u1','u2','u4','u8','i1','i2','i4','i8','bf','f2','f4','f8','c4','c8','i*','f*','c*']
+-    if config.x64_enabled:
++    if config.enable_x64.value:
+       expected = [
+         ['b1','u1','u2','u4','u8','i1','i2','i4','i8','bf','f2','f4','f8','c4','c8','i*','f*','c*'],
+         ['u1','u1','u2','u4','u8','i2','i2','i4','i8','bf','f2','f4','f8','c4','c8','u1','f*','c*'],
+diff --git a/tests/dynamic_api_test.py b/tests/dynamic_api_test.py
+index 1f1d862dfc94..d412e1c9f0d3 100644
+--- a/tests/dynamic_api_test.py
++++ b/tests/dynamic_api_test.py
+@@ -32,7 +32,6 @@
+ from jax._src import test_util as jtu
+ 
+ config.parse_flags_with_absl()
+-FLAGS = config.FLAGS
+ 
+ 
+ @jtu.with_config(jax_dynamic_shapes=True, jax_numpy_rank_promotion="allow")
+diff --git a/tests/errors_test.py b/tests/errors_test.py
+index c90a8fdfe199..fa2dec95f0fa 100644
+--- a/tests/errors_test.py
++++ b/tests/errors_test.py
+@@ -22,16 +22,14 @@
+ import jax
+ import jax.numpy as jnp
+ from jax import grad, jit, vmap, lax
+-from jax._src import config as jax_config
++from jax._src import config
+ from jax._src import core
+-from jax._src import test_util as jtu
+ from jax._src import source_info_util
++from jax._src import test_util as jtu
+ from jax._src import traceback_util
+ 
+ 
+-from jax import config
+ config.parse_flags_with_absl()
+-FLAGS = config.FLAGS
+ 
+ 
+ def get_exception(etype, f):
+@@ -43,7 +41,7 @@ def get_exception(etype, f):
+ 
+ def check_filtered_stack_trace(test, etype, f, frame_patterns=(),
+                                filter_mode="remove_frames"):
+-  with jax_config.traceback_filtering(filter_mode):
++  with config.traceback_filtering(filter_mode):
+     test.assertRaises(etype, f)
+     e = get_exception(etype, f)
+   c = e.__cause__
+diff --git a/tests/export_test.py b/tests/export_test.py
+index 0034674cf422..0c1ceefe5f2b 100644
+--- a/tests/export_test.py
++++ b/tests/export_test.py
+@@ -25,12 +25,12 @@
+ import jax
+ from jax import numpy as jnp
+ from jax import tree_util
+-from jax.config import config
+ from jax.experimental.export import export
+ from jax.experimental import pjit
+ from jax.sharding import Mesh
+ from jax.sharding import PartitionSpec as P
+ 
++from jax._src import config
+ from jax._src import core
+ from jax._src import test_util as jtu
+ from jax._src import xla_bridge as xb
+@@ -97,15 +97,12 @@ def _testing_multi_platform_fun_expected(x,
+ class JaxExportTest(jtu.JaxTestCase):
+ 
+   def override_serialization_version(self, version_override: int):
+-      version = config.jax_serialization_version
++      version = config.jax_serialization_version.value
+       if version != version_override:
+-        self.addCleanup(functools.partial(config.update,
+-                                          "jax_serialization_version",
+-                                          version_override))
+-        config.update("jax_serialization_version", version_override)
++        self.enter_context(config.jax_serialization_version(version_override))
+       logging.info(
+         "Using JAX serialization version %s",
+-        config.jax_serialization_version)
++        config.jax_serialization_version.value)
+ 
+   @classmethod
+   def setUpClass(cls):
+@@ -123,7 +120,7 @@ def setUp(self):
+     super().setUp()
+     # Run tests with the maximum supported version by default
+     self.override_serialization_version(
+-      export.maximum_supported_serialization_version)
++        export.maximum_supported_serialization_version)
+ 
+   def test_basic_export_only(self):
+     def my_fun(x):
+@@ -381,7 +378,7 @@ def test_shape_poly_basic_versions(self, v: int):
+         export.poly_spec((3, 4), np.float32, "w, h"))
+       # Peek at the module
+       module_str = exp.mlir_module()
+-      self.assertEqual(config.jax_serialization_version >= 7,
++      self.assertEqual(config.jax_serialization_version.value >= 7,
+                        "shape_assertion" in module_str)
+       self.assertIn("jax.uses_shape_polymorphism = true",
+                     module_str)
+diff --git a/tests/fft_test.py b/tests/fft_test.py
+index b4cddee3b716..032865a51117 100644
+--- a/tests/fft_test.py
++++ b/tests/fft_test.py
+@@ -23,11 +23,11 @@
+ import jax
+ from jax import lax
+ from jax import numpy as jnp
++from jax._src import config
+ from jax._src import dtypes
+ from jax._src import test_util as jtu
+ from jax._src.numpy.util import promote_dtypes_complex
+ 
+-from jax import config
+ config.parse_flags_with_absl()
+ 
+ FFT_NORMS = [None, "ortho", "forward", "backward"]
+@@ -129,7 +129,7 @@ def testLaxFftErrors(self):
+ 
+   @parameterized.parameters((np.float32,), (np.float64,))
+   def testLaxIrfftDoesNotMutateInputs(self, dtype):
+-    if dtype == np.float64 and not config.x64_enabled:
++    if dtype == np.float64 and not config.enable_x64.value:
+       raise self.skipTest("float64 requires jax_enable_x64=true")
+     x = (1 + 1j) * jnp.array([[1.0, 2.0], [3.0, 4.0]],
+                              dtype=dtypes.to_complex_dtype(dtype))
+@@ -162,7 +162,7 @@ def testFftn(self, inverse, real, shape, dtype, axes, s, norm):
+                             tol=1e-4)
+     self._CompileAndCheck(jnp_fn, args_maker)
+     # Test gradient for differentiable types.
+-    if (config.x64_enabled and
++    if (config.enable_x64.value and
+         dtype in (float_dtypes if real and not inverse else inexact_dtypes)):
+       # TODO(skye): can we be more precise?
+       tol = 0.15
+diff --git a/tests/host_callback_test.py b/tests/host_callback_test.py
+index 8eea27d34046..c2acd4f974f2 100644
+--- a/tests/host_callback_test.py
++++ b/tests/host_callback_test.py
+@@ -28,17 +28,17 @@
+ 
+ import jax
+ from jax import ad_checkpoint
+-from jax._src import core
+ from jax import config
+ from jax import dtypes
+-from jax.experimental import host_callback as hcb
+-from jax.sharding import PartitionSpec as P
+-from jax.experimental import pjit
+ from jax import lax
+ from jax import numpy as jnp
+-from jax._src import test_util as jtu
+ from jax import tree_util
++from jax.experimental import host_callback as hcb
++from jax.experimental import pjit
++from jax.sharding import PartitionSpec as P
++from jax._src import core
+ from jax._src import xla_bridge
++from jax._src import test_util as jtu
+ from jax._src.lib import xla_client
+ 
+ xops = xla_client.ops
+@@ -46,7 +46,6 @@
+ import numpy as np
+ 
+ config.parse_flags_with_absl()
+-FLAGS = config.FLAGS
+ 
+ 
+ class _TestingOutputStream:
+@@ -333,7 +332,7 @@ def func2(x):
+       ( 6.00 9.00 )""")
+ 
+   def test_tap_eval_exception(self):
+-    if not FLAGS.jax_host_callback_outfeed:
++    if not hcb._HOST_CALLBACK_OUTFEED.value:
+       raise SkipTest("TODO: implement error handling for customcall")
+     # Simulate a tap error
+     def tap_err(*args, **kwargs):
+@@ -818,7 +817,7 @@ def func(x, count):
+     self.assertEqual(100, count)
+ 
+   def test_tap_jit_tap_exception(self):
+-    if not FLAGS.jax_host_callback_outfeed:
++    if not hcb._HOST_CALLBACK_OUTFEED.value:
+       raise SkipTest("TODO: implement error handling for customcall")
+     # Simulate a tap error
+     def tap_err(*args, **kwargs):
+@@ -1541,7 +1540,7 @@ def fun2(cond, xv, do_print=False):
+   @jtu.sample_product(device_index=[0, 1])
+   def test_tap_pjit(self, device_index=0):
+     if (device_index != 0 and
+-        not FLAGS.jax_host_callback_outfeed and
++        not hcb._HOST_CALLBACK_OUTFEED.value and
+         jtu.test_device_matches(["cpu"])):
+       # See comment in host_callback.py.
+       raise SkipTest("device_index works only with outfeed on CPU")
+diff --git a/tests/host_callback_to_tf_test.py b/tests/host_callback_to_tf_test.py
+index ce66e0ce2348..c8858e14084c 100644
+--- a/tests/host_callback_to_tf_test.py
++++ b/tests/host_callback_to_tf_test.py
+@@ -39,7 +39,6 @@
+   tf = None
+ 
+ config.parse_flags_with_absl()
+-FLAGS = config.FLAGS
+ 
+ 
+ def call_tf_no_ad(tf_fun: Callable, arg, *, result_shape):
+diff --git a/tests/jax_jit_test.py b/tests/jax_jit_test.py
+index 3ffd88288ef9..df7bbc7fa22a 100644
+--- a/tests/jax_jit_test.py
++++ b/tests/jax_jit_test.py
+@@ -17,14 +17,14 @@
+ from absl.testing import absltest
+ from absl.testing import parameterized
+ import jax
+-from jax._src import core
+-from jax._src import api_util
+-from jax._src.interpreters import pxla
+ from jax import dtypes
+-from jax._src import lib as jaxlib
+ from jax import numpy as jnp
++from jax._src import api_util
++from jax._src import config
++from jax._src import core
++from jax._src import lib as jaxlib
+ from jax._src import test_util as jtu
+-from jax import config
++from jax._src.interpreters import pxla
+ import numpy as np
+ 
+ config.parse_flags_with_absl()
+@@ -136,7 +136,7 @@ def test_device_put_on_python_scalars(self):
+       self.assertEqual(jnp.asarray(bool_value).dtype, res.dtype)
+ 
+     # Complex
+-    if not (config.x64_enabled and jtu.test_device_matches(["tpu"])):
++    if not (config.enable_x64.value and jtu.test_device_matches(["tpu"])):
+       # No TPU support for complex128.
+       res = np.asarray(_cpp_device_put(1 + 1j, device))
+       self.assertEqual(res, 1 + 1j)
+@@ -145,7 +145,7 @@ def test_device_put_on_python_scalars(self):
+ 
+   def test_arg_signature_of_value(self):
+     """Tests the C++ code-path."""
+-    jax_enable_x64 = config.x64_enabled
++    jax_enable_x64 = config.enable_x64.value
+ 
+     # 1. Numpy scalar types
+     for dtype in jtu.supported_dtypes():
+diff --git a/tests/jaxpr_effects_test.py b/tests/jaxpr_effects_test.py
+index 51c264b13cab..890a63d16c88 100644
+--- a/tests/jaxpr_effects_test.py
++++ b/tests/jaxpr_effects_test.py
+@@ -19,20 +19,20 @@
+ from absl.testing import absltest
+ import jax
+ import jax.numpy as jnp
+-from jax._src import core
+ from jax import lax
+-from jax._src import effects
+-from jax._src import linear_util as lu
+-from jax import config
+ from jax.experimental import maps
+ from jax.experimental import pjit
+-from jax._src.interpreters import ad
+-from jax._src.interpreters import partial_eval as pe
+-from jax._src.interpreters import mlir
+ from jax._src import ad_checkpoint
+ from jax._src import dispatch
++from jax._src import config
++from jax._src import core
++from jax._src import effects
++from jax._src import linear_util as lu
+ from jax._src import test_util as jtu
+ from jax._src import util
++from jax._src.interpreters import ad
++from jax._src.interpreters import mlir
++from jax._src.interpreters import partial_eval as pe
+ import numpy as np
+ 
+ config.parse_flags_with_absl()
+@@ -297,8 +297,7 @@ class EffectfulJaxprLoweringTest(jtu.JaxTestCase):
+ 
+   def setUp(self):
+     super().setUp()
+-    self.old_x64 = config.jax_enable_x64
+-    config.update('jax_enable_x64', False)
++    self.enter_context(config.enable_x64(False))
+     self._old_lowering = mlir._lowerings[effect_p]
+     def _effect_lowering(ctx, *, effect):
+       if effects.ordered_effects.contains(effect):
+@@ -315,7 +314,6 @@ def _effect_lowering(ctx, *, effect):
+   def tearDown(self):
+     super().tearDown()
+     dispatch.runtime_tokens.clear()
+-    config.update('jax_enable_x64', self.old_x64)
+     mlir.register_lowering(effect_p, self._old_lowering)
+ 
+   def test_can_lower_lowerable_effect(self):
+diff --git a/tests/jaxpr_util_test.py b/tests/jaxpr_util_test.py
+index 660c5328a36a..a8df5a325b3d 100644
+--- a/tests/jaxpr_util_test.py
++++ b/tests/jaxpr_util_test.py
+@@ -20,10 +20,10 @@
+ 
+ import jax
+ from jax import jit, make_jaxpr, numpy as jnp
++from jax._src import config
+ from jax._src import jaxpr_util
+-from jax._src.lib import xla_client
+ from jax._src import test_util as jtu
+-from jax import config
++from jax._src.lib import xla_client
+ 
+ 
+ config.parse_flags_with_absl()
+@@ -67,15 +67,15 @@ def sub(x, y):
+ 
+     hist = jaxpr_util.primitives_by_shape(make_jaxpr(f)(1., 1.).jaxpr)
+ 
+-    t = '64' if config.x64_enabled else '32'
++    t = '64' if config.enable_x64.value else '32'
+     shapes = [
+         f'add :: float{t}[]',
+         f'sin :: float{t}[]',
+         f'cos :: float{t}[]',
+         f'reduce_sum :: float{t}[]',
+         f'concatenate :: float{t}[2]',
++        f'pjit :: float{t}[] *',
+     ]
+-    shapes.append(f'pjit :: float{t}[] *')
+     for k in shapes:
+       self.assertEqual(hist[k], 1)
+ 
+diff --git a/tests/lax_autodiff_test.py b/tests/lax_autodiff_test.py
+index ca42a1481185..da62e4e802bc 100644
+--- a/tests/lax_autodiff_test.py
++++ b/tests/lax_autodiff_test.py
+@@ -33,7 +33,6 @@
+ 
+ from jax import config
+ config.parse_flags_with_absl()
+-FLAGS = config.FLAGS
+ 
+ 
+ compatible_shapes = [[(3,)],
+diff --git a/tests/lax_numpy_indexing_test.py b/tests/lax_numpy_indexing_test.py
+index 67272def93a7..6f88f14ad1f1 100644
+--- a/tests/lax_numpy_indexing_test.py
++++ b/tests/lax_numpy_indexing_test.py
+@@ -30,13 +30,13 @@
+ from jax import numpy as jnp
+ from jax import ops
+ 
++from jax._src import config
+ from jax._src import dtypes
+ from jax._src import test_util as jtu
+ from jax._src import util
+-from jax._src.util import NumpyComplexWarning
+ from jax._src.lax import lax as lax_internal
++from jax._src.util import NumpyComplexWarning
+ 
+-from jax import config
+ config.parse_flags_with_absl()
+ 
+ # We disable the whitespace continuation check in this file because otherwise it
+@@ -60,7 +60,7 @@ class IndexSpec(typing.NamedTuple):
+ 
+ def check_grads(f, args, order, atol=None, rtol=None, eps=None):
+   # TODO(mattjj,dougalm): add higher-order check
+-  default_tol = 1e-6 if config.x64_enabled else 1e-2
++  default_tol = 1e-6 if config.enable_x64.value else 1e-2
+   atol = atol or default_tol
+   rtol = rtol or default_tol
+   eps = eps or default_tol
+diff --git a/tests/lax_numpy_operators_test.py b/tests/lax_numpy_operators_test.py
+index a90cefb1c2de..694e693b57fc 100644
+--- a/tests/lax_numpy_operators_test.py
++++ b/tests/lax_numpy_operators_test.py
+@@ -31,12 +31,11 @@
+ from jax import lax
+ from jax import numpy as jnp
+ 
++from jax._src import config
+ from jax._src import dtypes
+ from jax._src import test_util as jtu
+ 
+-from jax import config
+ config.parse_flags_with_absl()
+-FLAGS = config.FLAGS
+ 
+ nonempty_nonscalar_array_shapes = [(4,), (3, 4), (3, 1), (1, 4), (2, 1, 4), (2, 3, 4)]
+ nonempty_array_shapes = [()] + nonempty_nonscalar_array_shapes
+@@ -612,7 +611,7 @@ def testShiftOpAgainstNumpy(self, op, dtypes, shapes):
+                  np.issubdtype(shift_dtype, np.signedinteger)
+     has_32 = any(np.iinfo(d).bits == 32 for d in dtypes)
+     promoting_to_64 = has_32 and signed_mix
+-    if promoting_to_64 and not config.x64_enabled:
++    if promoting_to_64 and not config.enable_x64.value:
+       self.skipTest("np.right_shift/left_shift promoting to int64"
+                     "differs from jnp in 32 bit mode.")
+ 
+diff --git a/tests/lax_numpy_reducers_test.py b/tests/lax_numpy_reducers_test.py
+index 3082b2a13ab0..5e31b3d697d3 100644
+--- a/tests/lax_numpy_reducers_test.py
++++ b/tests/lax_numpy_reducers_test.py
+@@ -31,8 +31,7 @@
+ from jax._src import test_util as jtu
+ from jax._src.util import NumpyComplexWarning
+ 
+-jax.config.parse_flags_with_absl()
+-FLAGS = config.FLAGS
++config.parse_flags_with_absl()
+ 
+ numpy_version = jtu.numpy_version()
+ 
+diff --git a/tests/lax_numpy_test.py b/tests/lax_numpy_test.py
+index 3f14d206ee72..567cce8bfcb1 100644
+--- a/tests/lax_numpy_test.py
++++ b/tests/lax_numpy_test.py
+@@ -43,17 +43,16 @@
+ from jax import tree_util
+ from jax.test_util import check_grads
+ 
++from jax._src import array
++from jax._src import config
+ from jax._src import core
+ from jax._src import dtypes
+ from jax._src import test_util as jtu
+ from jax._src.lax import lax as lax_internal
+ from jax._src.numpy.util import _parse_numpydoc, ParsedDoc, _wraps
+ from jax._src.util import safe_zip, NumpyComplexWarning
+-from jax._src import array
+ 
+-from jax import config
+ config.parse_flags_with_absl()
+-FLAGS = config.FLAGS
+ 
+ numpy_version = jtu.numpy_version()
+ 
+@@ -2333,7 +2332,7 @@ def np_fun(x1, x2):
+   def testFrexp(self, shape, dtype, rng_factory):
+     # integer types are converted to float64 in numpy's implementation
+     if (dtype not in [jnp.bfloat16, np.float16, np.float32]
+-        and not config.x64_enabled):
++        and not config.enable_x64.value):
+       self.skipTest("Only run float64 testcase when float64 is enabled.")
+     rng = rng_factory(self.rng())
+     args_maker = lambda: [rng(shape, dtype)]
+@@ -2405,7 +2404,7 @@ def testSearchsortedDtype(self):
+     out_int32 = jax.eval_shape(jnp.searchsorted, a_int32, v)
+     self.assertEqual(out_int32.dtype, np.int32)
+ 
+-    if config.x64_enabled:
++    if config.enable_x64.value:
+       out_int64 = jax.eval_shape(jnp.searchsorted, a_int64, v)
+       self.assertEqual(out_int64.dtype, np.int64)
+     else:
+@@ -3160,7 +3159,7 @@ def testArrayFromInteger(self):
+       jnp.array(val)
+ 
+     # explicit uint64 should work
+-    if config.x64_enabled:
++    if config.enable_x64.value:
+       self.assertEqual(np.uint64(val), jnp.array(val, dtype='uint64'))
+ 
+   def testArrayFromList(self):
+@@ -3534,7 +3533,7 @@ def testItemsize(self, shape, dtype):
+     # Final dimension must be a multiple of 16 to ensure compatibilty of all dtype pairs.
+     shape=[(0,), (32,), (2, 16)],
+     a_dtype=all_dtypes,
+-    dtype=(*all_dtypes, None) if config.x64_enabled else all_dtypes,
++    dtype=(*all_dtypes, None) if config.enable_x64.value else all_dtypes,
+   )
+   def testView(self, shape, a_dtype, dtype):
+     if jtu.test_device_matches(["tpu"]):
+@@ -4645,7 +4644,7 @@ def testLogspace(self, start_shape, stop_shape, num,
+                    endpoint, base, dtype):
+     if (dtype in int_dtypes and
+         jtu.test_device_matches(["gpu", "tpu"]) and
+-        not config.x64_enabled):
++        not config.enable_x64.value):
+       raise unittest.SkipTest("GPUx32 truncated exponentiation"
+                               " doesn't exactly match other platforms.")
+     rng = jtu.rand_default(self.rng())
+@@ -4724,29 +4723,17 @@ def np_op(start, stop):
+                             check_dtypes=False, atol=tol, rtol=tol)
+ 
+   def testDisableNumpyRankPromotionBroadcasting(self):
+-    try:
+-      prev_flag = config._read('jax_numpy_rank_promotion')
+-      FLAGS.jax_numpy_rank_promotion = "allow"
++    with jax.numpy_rank_promotion('allow'):
+       jnp.ones(2) + jnp.ones((1, 2))  # works just fine
+-    finally:
+-      FLAGS.jax_numpy_rank_promotion = prev_flag
+ 
+-    try:
+-      prev_flag = config._read('jax_numpy_rank_promotion')
+-      FLAGS.jax_numpy_rank_promotion = "raise"
++    with jax.numpy_rank_promotion('raise'):
+       self.assertRaises(ValueError, lambda: jnp.ones(2) + jnp.ones((1, 2)))
+       jnp.ones(2) + 3  # don't want to raise for scalars
+-    finally:
+-      FLAGS.jax_numpy_rank_promotion = prev_flag
+ 
+-    try:
+-      prev_flag = config._read('jax_numpy_rank_promotion')
+-      FLAGS.jax_numpy_rank_promotion = "warn"
++    with jax.numpy_rank_promotion('warn'):
+       self.assertWarnsRegex(UserWarning, "Following NumPy automatic rank promotion for add on "
+                             r"shapes \(2,\) \(1, 2\).*", lambda: jnp.ones(2) + jnp.ones((1, 2)))
+       jnp.ones(2) + 3  # don't want to warn for scalars
+-    finally:
+-      FLAGS.jax_numpy_rank_promotion = prev_flag
+ 
+   @unittest.skip("Test fails on CI, perhaps due to JIT caching")
+   def testDisableNumpyRankPromotionBroadcastingDecorator(self):
+@@ -5077,7 +5064,7 @@ def np_op(x1, x2):
+       self._CompileAndCheck(jnp.logaddexp2, args_maker, rtol=tol, atol=tol)
+ 
+   def testDefaultDtypes(self):
+-    precision = config.jax_default_dtype_bits
++    precision = config.default_dtype_bits.value
+     assert precision in ['32', '64']
+     self.assertEqual(jnp.bool_, np.bool_)
+     self.assertEqual(jnp.int_, np.int32 if precision == '32' else np.int64)
+diff --git a/tests/lax_numpy_ufuncs_test.py b/tests/lax_numpy_ufuncs_test.py
+index 8f90a997eeef..1dcdf34dea8a 100644
+--- a/tests/lax_numpy_ufuncs_test.py
++++ b/tests/lax_numpy_ufuncs_test.py
+@@ -26,7 +26,6 @@
+ 
+ from jax import config
+ config.parse_flags_with_absl()
+-FLAGS = config.FLAGS
+ 
+ 
+ def scalar_add(x, y):
+diff --git a/tests/lax_scipy_sparse_test.py b/tests/lax_scipy_sparse_test.py
+index 9017bdd56924..d2e64833b964 100644
+--- a/tests/lax_scipy_sparse_test.py
++++ b/tests/lax_scipy_sparse_test.py
+@@ -31,7 +31,7 @@
+ from jax._src import dtypes
+ from jax._src import test_util as jtu
+ 
+-jax.config.parse_flags_with_absl()
++config.parse_flags_with_absl()
+ 
+ 
+ float_types = jtu.dtypes.floating
+diff --git a/tests/lax_scipy_special_functions_test.py b/tests/lax_scipy_special_functions_test.py
+index 1efb2b82c2db..751cbfde951b 100644
+--- a/tests/lax_scipy_special_functions_test.py
++++ b/tests/lax_scipy_special_functions_test.py
+@@ -28,7 +28,6 @@
+ 
+ from jax import config
+ config.parse_flags_with_absl()
+-FLAGS = config.FLAGS
+ 
+ 
+ all_shapes = [(), (4,), (3, 4), (3, 1), (1, 4), (2, 1, 4)]
+diff --git a/tests/lax_scipy_spectral_dac_test.py b/tests/lax_scipy_spectral_dac_test.py
+index 3b736e31f21f..2d353d5909e2 100644
+--- a/tests/lax_scipy_spectral_dac_test.py
++++ b/tests/lax_scipy_spectral_dac_test.py
+@@ -23,7 +23,6 @@
+ 
+ from jax import config
+ config.parse_flags_with_absl()
+-FLAGS = config.FLAGS
+ 
+ 
+ linear_sizes = [16, 97, 128]
+diff --git a/tests/lax_scipy_test.py b/tests/lax_scipy_test.py
+index f99270b43d18..e4d0e9015655 100644
+--- a/tests/lax_scipy_test.py
++++ b/tests/lax_scipy_test.py
+@@ -37,7 +37,6 @@
+ 
+ from jax import config
+ config.parse_flags_with_absl()
+-FLAGS = config.FLAGS
+ 
+ all_shapes = [(), (4,), (3, 4), (3, 1), (1, 4), (2, 1, 4)]
+ compatible_shapes = [[(), ()],
+diff --git a/tests/lax_test.py b/tests/lax_test.py
+index 158935cf45c6..16b4ab205a3f 100644
+--- a/tests/lax_test.py
++++ b/tests/lax_test.py
+@@ -34,21 +34,21 @@
+ from jax import tree_util
+ import jax.util
+ 
+-from jax.interpreters import xla
+-from jax._src.interpreters import mlir
+ from jax.interpreters import batching
++from jax.interpreters import xla
+ from jax._src import array
++from jax._src import config
+ from jax._src import dtypes
+-from jax._src.interpreters import pxla
+-from jax._src import test_util as jtu
+ from jax._src import lax_reference
++from jax._src import test_util as jtu
++from jax._src.interpreters import mlir
++from jax._src.interpreters import pxla
++from jax._src.internal_test_util import lax_test_util
+ from jax._src.lax import lax as lax_internal
+ from jax._src.lib import xla_client as xc
+ from jax._src.lib import xla_extension_version
+-from jax._src.internal_test_util import lax_test_util
+ from jax._src.util import NumpyComplexWarning
+ 
+-from jax import config
+ config.parse_flags_with_absl()
+ 
+ 
+@@ -96,7 +96,7 @@ def testOp(self, op_name, rng_factory, shapes, dtype):
+         dtype=rec.dtypes)
+       for rec in lax_test_util.lax_ops()))
+   def testOpAgainstNumpy(self, op_name, rng_factory, shapes, dtype, tol):
+-    if (not config.x64_enabled and op_name == "nextafter"
++    if (not config.enable_x64.value and op_name == "nextafter"
+         and dtype == np.float64):
+       raise SkipTest("64-bit mode disabled")
+     rng = rng_factory(self.rng())
+@@ -293,7 +293,7 @@ def fun(lhs, rhs):
+   )
+   @jax.default_matmul_precision("float32")
+   def testConvPreferredElement(self, lhs_shape, rhs_shape, dtype, preferred_element_type):
+-    if (not config.x64_enabled and
++    if (not config.enable_x64.value and
+        (dtype == np.float64 or preferred_element_type == np.float64
+         or dtype == np.int64 or preferred_element_type == np.int64
+         or dtype == np.complex128 or preferred_element_type == np.complex128)):
+@@ -1033,7 +1033,7 @@ def testDot(self, lhs_shape, rhs_shape, lhs_dtype, rhs_dtype, precision):
+   )
+   def testDotPreferredElement(self, lhs_shape, rhs_shape, dtype,
+                               preferred_element_type):
+-    if (not config.x64_enabled and
++    if (not config.enable_x64.value and
+        (dtype == np.float64 or preferred_element_type == np.float64
+         or dtype == np.int64 or preferred_element_type == np.int64)):
+       raise SkipTest("64-bit mode disabled")
+@@ -1682,7 +1682,7 @@ def testTransposeAgainstNumpy(self, shape, dtype, perm):
+       ],
+   )
+   def testReduce(self, op, reference_op, init_val, shape, dtype, dims, primitive):
+-    if not config.x64_enabled and dtype in (np.float64, np.int64, np.uint64):
++    if not config.enable_x64.value and dtype in (np.float64, np.int64, np.uint64):
+       raise SkipTest("x64 mode is disabled.")
+     def reference_fun(operand):
+       if hasattr(reference_op, "reduce"):
+@@ -2622,7 +2622,7 @@ def test_select_jvp_complexity(self):
+   def testRngBitGenerator(self):
+     # This test covers the original behavior of lax.rng_bit_generator, which
+     # required x64=True, and only checks shapes and jit invariance.
+-    if not config.x64_enabled:
++    if not config.enable_x64.value:
+       raise SkipTest("RngBitGenerator requires 64bit key")
+ 
+     key = np.array((1, 2)).astype(np.uint64)
+diff --git a/tests/lax_vmap_op_test.py b/tests/lax_vmap_op_test.py
+index 3f71671dfdb2..5d30281327d6 100644
+--- a/tests/lax_vmap_op_test.py
++++ b/tests/lax_vmap_op_test.py
+@@ -29,8 +29,6 @@
+ from jax import config
+ config.parse_flags_with_absl()
+ 
+-FLAGS = config.FLAGS
+-
+ map, unsafe_map = util.safe_map, map
+ zip, unsafe_zip = util.safe_zip, zip
+ 
+diff --git a/tests/lax_vmap_test.py b/tests/lax_vmap_test.py
+index a626d31a1604..b3fa18ed7c00 100644
+--- a/tests/lax_vmap_test.py
++++ b/tests/lax_vmap_test.py
+@@ -36,7 +36,6 @@
+ 
+ from jax import config
+ config.parse_flags_with_absl()
+-FLAGS = config.FLAGS
+ 
+ map, unsafe_map = safe_map, map
+ zip, unsafe_zip = safe_zip, zip
+diff --git a/tests/linalg_test.py b/tests/linalg_test.py
+index f6d269610456..575f5943ec0b 100644
+--- a/tests/linalg_test.py
++++ b/tests/linalg_test.py
+@@ -29,13 +29,12 @@
+ from jax import lax
+ from jax import numpy as jnp
+ from jax import scipy as jsp
+-from jax._src.numpy.util import promote_dtypes_inexact
++from jax._src import config
+ from jax._src import test_util as jtu
+ from jax._src import xla_bridge
++from jax._src.numpy.util import promote_dtypes_inexact
+ 
+-from jax import config
+ config.parse_flags_with_absl()
+-FLAGS = config.FLAGS
+ 
+ scipy_version = tuple(map(int, scipy.version.version.split('.')[:3]))
+ 
+@@ -1619,7 +1618,7 @@ def testSqrtmEdgeCase(self, diag, expected, dtype):
+   def testToeplitzConstrcution(self, rshape, rdtype, cshape, cdtype):
+     if ((rdtype in [np.float64, np.complex128]
+          or cdtype in [np.float64, np.complex128])
+-        and not config.x64_enabled):
++        and not config.enable_x64.value):
+       self.skipTest("Only run float64 testcase when float64 is enabled.")
+ 
+     int_types_excl_i8 = set(int_types) - {np.int8}
+@@ -1640,7 +1639,7 @@ def testToeplitzConstrcution(self, rshape, rdtype, cshape, cdtype):
+   @jtu.skip_on_devices("rocm")
+   def testToeplitzSymmetricConstruction(self, shape, dtype):
+     if (dtype in [np.float64, np.complex128]
+-        and not config.x64_enabled):
++        and not config.enable_x64.value):
+       self.skipTest("Only run float64 testcase when float64 is enabled.")
+ 
+     int_types_excl_i8 = set(int_types) - {np.int8}
+diff --git a/tests/logging_test.py b/tests/logging_test.py
+index 3991f6ed851d..955566c3b019 100644
+--- a/tests/logging_test.py
++++ b/tests/logging_test.py
+@@ -28,7 +28,7 @@
+ # parsing to work correctly with bazel (otherwise we could avoid importing
+ # absltest/absl logging altogether).
+ from absl.testing import absltest
+-jax.config.parse_flags_with_absl()
++config.parse_flags_with_absl()
+ 
+ 
+ @contextlib.contextmanager
+diff --git a/tests/multibackend_test.py b/tests/multibackend_test.py
+index 0b7c29ea68bd..945550813f02 100644
+--- a/tests/multibackend_test.py
++++ b/tests/multibackend_test.py
+@@ -27,7 +27,7 @@
+ 
+ from jax import config
+ config.parse_flags_with_absl()
+-FLAGS = config.FLAGS
++
+ npr.seed(0)
+ 
+ 
+diff --git a/tests/multiprocess_gpu_test.py b/tests/multiprocess_gpu_test.py
+index 4ab6f34f681d..ee952a501011 100644
+--- a/tests/multiprocess_gpu_test.py
++++ b/tests/multiprocess_gpu_test.py
+@@ -29,10 +29,11 @@
+ from jax import config
+ from jax._src import core
+ from jax._src import distributed
+-import jax.numpy as jnp
++from jax._src import maps
+ from jax._src import test_util as jtu
+ from jax._src import util
+ from jax.experimental import pjit
++import jax.numpy as jnp
+ 
+ try:
+   import portpicker
+@@ -258,7 +259,7 @@ def create_2d_non_contiguous_mesh(self):
+ 
+   def setUp(self):
+     super().setUp()
+-    self.xmap_spmd_lowering_enabled = jax.config.experimental_xmap_spmd_lowering
++    self.xmap_spmd_lowering_enabled = maps._SPMD_LOWERING.value
+     jax.config.update("experimental_xmap_spmd_lowering", True)
+ 
+   def tearDown(self):
+diff --git a/tests/nn_test.py b/tests/nn_test.py
+index 8d140dd9157b..79b30189f4a0 100644
+--- a/tests/nn_test.py
++++ b/tests/nn_test.py
+@@ -34,7 +34,7 @@
+ import jax
+ import jax.numpy as jnp
+ 
+-jax.config.parse_flags_with_absl()
++config.parse_flags_with_absl()
+ 
+ 
+ class NNFunctionsTest(jtu.JaxTestCase):
+diff --git a/tests/pallas/pallas_test.py b/tests/pallas/pallas_test.py
+index 8a0e75595ace..46172913a6dd 100644
+--- a/tests/pallas/pallas_test.py
++++ b/tests/pallas/pallas_test.py
+@@ -25,12 +25,12 @@
+ import jax
+ from jax import lax
+ from jax import random
++from jax._src import config
+ from jax._src import linear_util as lu
+ from jax._src import test_util as jtu
+ from jax._src import state
+ from jax._src.lax.control_flow.for_loop import for_loop
+ from jax._src.pallas.pallas_call import _trace_to_jaxpr
+-from jax.config import config
+ from jax.interpreters import partial_eval as pe
+ import jax.numpy as jnp
+ from jax.experimental import pallas as pl
+@@ -751,9 +751,7 @@ def test_loop_with_float64_carry(self):
+     # fori_loop handles i64 index variables, i.e. error: 'scf.for' op  along
+     # control flow edge from Region #0 to Region #0: source type #0
+     # 'tensor<4xf64>' should match input type #0 'tensor<4xf32>'
+-    orig_val = jax.config.jax_enable_x64
+-    jax.config.update("jax_enable_x64", True)
+-    try:
++    with config.enable_x64(True):
+       @functools.partial(self.pallas_call,
+                          out_shape=jax.ShapeDtypeStruct((4,), jnp.float64),
+                          grid=1,
+@@ -768,8 +766,6 @@ def body(i, acc):
+ 
+       np.testing.assert_allclose(np.arange(1, 5.) * 3,
+                                  f(jnp.arange(1, 5., dtype=jnp.float64)))
+-    finally:
+-      jax.config.update("jax_enable_x64", orig_val)
+ 
+   def test_cond_simple(self):
+     arg = jnp.float32(0.)
+diff --git a/tests/pjit_test.py b/tests/pjit_test.py
+index 21636c4f05f9..f0eee1574a66 100644
+--- a/tests/pjit_test.py
++++ b/tests/pjit_test.py
+@@ -31,6 +31,7 @@
+ import jax.numpy as jnp
+ from jax._src import core
+ from jax._src import config
++from jax._src import maps
+ from jax._src import test_util as jtu
+ from jax import dtypes
+ from jax import stages
+@@ -60,9 +61,10 @@
+ from jax._src.lib import xla_extension_version
+ from jax._src.util import curry, unzip2, safe_zip
+ 
+-jax.config.parse_flags_with_absl()
++config.parse_flags_with_absl()
+ 
+ prev_xla_flags = None
++prev_spmd_lowering_flag = None
+ 
+ 
+ def setUpModule():
+@@ -75,7 +77,9 @@ def setUpModule():
+                                " --xla_force_host_platform_device_count=8")
+   # Clear any cached backends so new CPU backend will pick up the env var.
+   xla_bridge.get_backend.cache_clear()
+-  jtu.set_spmd_lowering_flag(True)
++  global prev_spmd_lowering_flag
++  prev_spmd_lowering_flag = maps._SPMD_LOWERING.value
++  config.update('experimental_xmap_spmd_lowering', True)
+ 
+ def tearDownModule():
+   if prev_xla_flags is None:
+@@ -83,8 +87,7 @@ def tearDownModule():
+   else:
+     os.environ["XLA_FLAGS"] = prev_xla_flags
+   xla_bridge.get_backend.cache_clear()
+-
+-  jtu.restore_spmd_lowering_flag()
++  config.update('experimental_xmap_spmd_lowering', prev_spmd_lowering_flag)
+ 
+ 
+ def create_array(global_shape, global_mesh, mesh_axes, global_data=None,
+diff --git a/tests/pmap_test.py b/tests/pmap_test.py
+index 1cb0901c3b97..afbb0254e886 100644
+--- a/tests/pmap_test.py
++++ b/tests/pmap_test.py
+@@ -32,30 +32,28 @@
+ from absl.testing import parameterized
+ 
+ import jax
+-import jax.numpy as jnp
+-from jax._src import test_util as jtu
+-from jax import tree_util
++from jax import (pmap, jit, vmap, jvp, grad, make_jaxpr,
++                 linearize, device_put)
+ from jax import lax
+-from jax._src.lax import parallel
+-from jax._src import api as src_api
+ from jax import random
++from jax import tree_util
++from jax.ad_checkpoint import checkpoint as new_checkpoint
++import jax.numpy as jnp
++from jax._src import api as src_api
++from jax._src import array
+ from jax._src import core
+-from jax._src.lib import xla_extension_version
+-from jax import (pmap, jit, vmap, jvp, grad, make_jaxpr,
+-                 linearize, device_put)
+-from jax._src import config as jax_config
++from jax._src import config
+ from jax._src import sharding_impls
+ from jax._src import sharding_specs
++from jax._src import test_util as jtu
+ from jax._src import xla_bridge
+-from jax._src.lib import xla_extension
+-from jax._src.util import safe_map, safe_zip
+ from jax._src.interpreters import mlir
+ from jax._src.interpreters import pxla
+-from jax._src import array
+-from jax._src.sharding_impls import PmapSharding
+-from jax.ad_checkpoint import checkpoint as new_checkpoint
++from jax._src.lax import parallel
++from jax._src.lib import xla_extension
++from jax._src.lib import xla_extension_version
++from jax._src.util import safe_map, safe_zip
+ 
+-from jax import config
+ config.parse_flags_with_absl()
+ 
+ prev_xla_flags = None
+@@ -125,7 +123,7 @@ def create_input_array_for_pmap(input_shape, in_axes=0, input_data=None,
+   if devices is None:
+     devices = jax.devices()
+ 
+-  pmap_sharding = PmapSharding(np.array(devices), sharding_spec)
++  pmap_sharding = jax.sharding.PmapSharding(np.array(devices), sharding_spec)
+ 
+   return array.make_array_from_callback(
+       input_shape, pmap_sharding, lambda idx: input_data[idx]), input_data
+@@ -188,7 +186,7 @@ def testDefaultDeviceOrdering(self):
+     # the default order of pmap for single-host jobs.
+     device_order = jax.devices()
+     pmap_sharding = pmap(lambda x: x)(np.arange(jax.device_count())).sharding
+-    if jax.config.jax_pmap_shmap_merge:
++    if config.pmap_shmap_merge.value:
+       self.assertListEqual(device_order, pmap_sharding._device_assignment)
+     else:
+       self.assertListEqual(device_order, pmap_sharding.devices.tolist())
+@@ -1283,7 +1281,7 @@ def testPmapConstant(self):
+     expected = np.repeat(3, device_count)
+     self.assertAllClose(ans, expected, check_dtypes=False)
+ 
+-    if not config.jax_disable_jit:
++    if not config.disable_jit.value:
+       f = self.pmap(lambda x: (x, 3))
+       x = np.arange(device_count)
+       with jtu.assert_num_jit_and_pmap_compilations(1):
+@@ -1307,7 +1305,7 @@ def testPmapConstantDevices(self):
+     # Test that 'ans' was properly replicated across devices.
+     ans_devices = ans.sharding._device_assignment
+     # TODO(mattjj,sharadmv): fix physical layout with eager pmap, remove 'if'
+-    if not config.jax_disable_jit:
++    if not config.disable_jit.value:
+       self.assertEqual(ans_devices, tuple(devices))
+ 
+   def testPmapConstantError(self):
+@@ -1371,7 +1369,7 @@ def testNestedPmapConstantDevices(self):
+     self.assertTrue(ans.sharding == expected_sharded.sharding)
+ 
+   def testNestedPmapConstantError(self):
+-    if config.jax_disable_jit:
++    if config.disable_jit.value:
+       raise SkipTest("error test doesn't apply with disable_jit")
+     f = self.pmap(self.pmap(lambda x: 3))
+     shape = (2, jax.device_count() // 2 + 1, 3)
+@@ -1837,7 +1835,7 @@ def testPsumWithNoAxisDoesntLeakFunctions(self):
+   def testJitOfPmapWarningMessage(self):
+     device_count = jax.device_count()
+ 
+-    if device_count == 1 or config.jax_disable_jit:
++    if device_count == 1 or config.disable_jit.value:
+       raise SkipTest("test requires at least two devices")
+ 
+     def foo(x): return x
+@@ -1853,7 +1851,7 @@ def foo(x): return x
+   def testJitOfPmapOutputSharding(self):
+     device_count = jax.device_count()
+ 
+-    if device_count == 1 or config.jax_disable_jit:
++    if device_count == 1 or config.disable_jit.value:
+       raise SkipTest("test requires at least two devices")
+ 
+     @jax.jit
+@@ -1872,7 +1870,7 @@ def foo(x): return x + x
+   def testJitOfPmapLowerHasReplicaAttributes(self):
+     device_count = jax.device_count()
+ 
+-    if device_count == 1 or config.jax_disable_jit:
++    if device_count == 1 or config.disable_jit.value:
+       raise SkipTest("test requires at least two devices")
+ 
+     @jax.jit
+@@ -2037,7 +2035,7 @@ def test_pmap_error_on_non_hashable_static_argument(self):
+   def test_grad_of_pmap_compilation_caching(self, axis_size):
+     if len(jax.local_devices()) < axis_size:
+       raise SkipTest("too few devices for test")
+-    if config.jax_disable_jit:
++    if config.disable_jit.value:
+       raise SkipTest("caching doesn't apply with jit disabled")
+ 
+     @jax.pmap
+@@ -2059,7 +2057,7 @@ def f(x):
+     self.assertEqual(count[0], 0)  # cache hits on fwd and bwd
+ 
+   def testSizeOverflow(self):
+-    if config.jax_disable_jit:
++    if config.disable_jit.value:
+       # TODO(sharadmv, mattjj): investigate and fix this issue
+       raise SkipTest("OOMs in eager mode")
+     x = jnp.arange(1)
+@@ -2171,7 +2169,7 @@ class CppPmapTest(PythonPmapTest):
+ 
+   @property
+   def pmap(self):
+-    if jax.config.jax_pmap_shmap_merge:
++    if config.pmap_shmap_merge.value:
+       return src_api.pmap
+     return src_api._cpp_pmap
+ 
+@@ -2206,7 +2204,7 @@ def test_cache_uses_jax_key(self):
+     pmaped_f(inputs)
+     self.assertEqual(pmaped_f._cache_size, 1)
+ 
+-    jax_config.update_thread_local_jit_state()
++    config.update_thread_local_jit_state()
+ 
+     pmaped_f(inputs)
+     self.assertEqual(pmaped_f._cache_size, 1)
+@@ -2511,7 +2509,7 @@ def testBadAxisSizeError(self):
+       f(jnp.ones(jax.device_count() + 1))
+ 
+   def testBadAxisSizeErrorNested(self):
+-    if config.jax_disable_jit:
++    if config.disable_jit.value:
+       raise SkipTest("error doesn't apply when jit is disabled")
+     f = pmap(pmap(lambda x: lax.psum(x, ('i', 'j')),
+                   axis_name='j'),
+@@ -2526,7 +2524,7 @@ def testBadAxisSizeErrorNested(self):
+   def testNestedPmaps(self):
+     if jax.device_count() % 2 != 0:
+       raise SkipTest
+-    if config.jax_disable_jit:
++    if config.disable_jit.value:
+       raise SkipTest("disable_jit requires num devices to equal axis size")
+ 
+     # Devices specified in outer pmap are OK
+@@ -2545,7 +2543,7 @@ def bar(y):
+   def testNestedPmapsBools(self):
+     if jax.device_count() % 2 != 0:
+       raise SkipTest
+-    if config.jax_disable_jit:
++    if config.disable_jit.value:
+       raise SkipTest("disable_jit requires num devices to equal axis size")
+ 
+     # Devices specified in outer pmap are OK
+@@ -3150,7 +3148,7 @@ def dynamic_shape_function(y):
+     self.assertArraysEqual(w, jnp.cos(jnp.sin(x) ** 2))
+ 
+   def test_same_out_sharding_id(self):
+-    if config.jax_disable_jit:
++    if config.disable_jit.value:
+       self.skipTest('Skip this under eager pmap mode.')
+     shape = (jax.device_count(), 2)
+     arr, inp_data = create_input_array_for_pmap(shape)
+@@ -3215,8 +3213,8 @@ class EagerPmapMixin:
+ 
+   def setUp(self):
+     super().setUp()
+-    self.eager_pmap_enabled = config.jax_eager_pmap
+-    self.jit_disabled = config.jax_disable_jit
++    self.eager_pmap_enabled = config.eager_pmap.value
++    self.jit_disabled = config.disable_jit.value
+     config.update('jax_disable_jit', True)
+     config.update('jax_eager_pmap', True)
+ 
+diff --git a/tests/python_callback_test.py b/tests/python_callback_test.py
+index 036b99cf9f89..903a2dfe17a7 100644
+--- a/tests/python_callback_test.py
++++ b/tests/python_callback_test.py
+@@ -26,13 +26,13 @@
+ from jax._src import config
+ from jax._src import core
+ from jax._src import dispatch
++from jax._src import maps
+ from jax._src import test_util as jtu
+ from jax._src import util
+ from jax._src import xla_bridge
+ from jax._src.lib import xla_client
+ from jax._src.lib import xla_extension_version
+ from jax.experimental import io_callback
+-from jax.experimental import maps
+ from jax.experimental import pjit
+ from jax.experimental.maps import xmap
+ from jax.experimental.shard_map import shard_map
+@@ -40,7 +40,7 @@
+ from jax.sharding import Mesh
+ import numpy as np
+ 
+-jax.config.parse_flags_with_absl()
++config.parse_flags_with_absl()
+ 
+ 
+ def _format_multiline(text):
+@@ -632,8 +632,10 @@ def test_can_pjit_pure_callback_under_hard_xmap(self):
+     if not hasattr(xla_client.OpSharding.Type, 'MANUAL'):
+       raise unittest.SkipTest('Manual partitioning needed for pure_callback')
+ 
+-    jtu.set_spmd_lowering_flag(True)
+-    jtu.set_spmd_manual_lowering_flag(True)
++    spmd_lowering = maps._SPMD_LOWERING.value
++    spmd_manual_lowering = maps._SPMD_LOWERING_MANUAL.value
++    config.update('experimental_xmap_spmd_lowering', True)
++    config.update('experimental_xmap_spmd_lowering_manual', True)
+     try:
+       mesh = Mesh(np.array(jax.devices()), axis_names=('x',))
+ 
+@@ -659,8 +661,11 @@ def without_xmap_f(x):
+             out, np.sin(np.arange(jax.local_device_count()))
+         )
+     finally:
+-      jtu.restore_spmd_manual_lowering_flag()
+-      jtu.restore_spmd_lowering_flag()
++      config.update('experimental_xmap_spmd_lowering', spmd_lowering)
++      config.update(
++        'experimental_xmap_spmd_lowering_manual',
++        spmd_manual_lowering,
++      )
+ 
+   def test_cant_take_grad_of_pure_callback(self):
+ 
+diff --git a/tests/pytorch_interoperability_test.py b/tests/pytorch_interoperability_test.py
+index a8f38618955f..118c3ddbdba1 100644
+--- a/tests/pytorch_interoperability_test.py
++++ b/tests/pytorch_interoperability_test.py
+@@ -17,13 +17,13 @@
+ from absl.testing import absltest
+ 
+ import jax
+-from jax import config
+ import jax.dlpack
++from jax._src import config
++from jax._src import test_util as jtu
+ from jax._src import xla_bridge
+ from jax._src.lib import xla_client
+ from jax._src.lib import xla_extension_version
+ import jax.numpy as jnp
+-from jax._src import test_util as jtu
+ 
+ config.parse_flags_with_absl()
+ 
+@@ -69,8 +69,11 @@ def testTorchToJaxFailure(self):
+ 
+   @jtu.sample_product(shape=all_shapes, dtype=torch_dtypes)
+   def testJaxToTorch(self, shape, dtype):
+-    if not config.x64_enabled and dtype in [jnp.int64, jnp.float64,
+-                                            jnp.complex128]:
++    if not config.enable_x64.value and dtype in [
++        jnp.int64,
++        jnp.float64,
++        jnp.complex128,
++    ]:
+       self.skipTest("x64 types are disabled by jax_enable_x64")
+     rng = jtu.rand_default(self.rng())
+     np = rng(shape, dtype)
+@@ -89,7 +92,7 @@ def testJaxArrayToTorch(self, shape, dtype):
+     if xla_extension_version < 186:
+       self.skipTest("Need xla_extension_version >= 186")
+ 
+-    if not config.x64_enabled and dtype in [
++    if not config.enable_x64.value and dtype in [
+         jnp.int64,
+         jnp.float64,
+         jnp.complex128,
+@@ -113,13 +116,16 @@ def testTorchToJaxInt64(self):
+     # See https://github.com/google/jax/issues/11895
+     x = jax.dlpack.from_dlpack(
+         torch.utils.dlpack.to_dlpack(torch.ones((2, 3), dtype=torch.int64)))
+-    dtype_expected = jnp.int64 if config.x64_enabled else jnp.int32
++    dtype_expected = jnp.int64 if config.enable_x64.value else jnp.int32
+     self.assertEqual(x.dtype, dtype_expected)
+ 
+   @jtu.sample_product(shape=all_shapes, dtype=torch_dtypes)
+   def testTorchToJax(self, shape, dtype):
+-    if not config.x64_enabled and dtype in [jnp.int64, jnp.float64,
+-                                            jnp.complex128]:
++    if not config.enable_x64.value and dtype in [
++        jnp.int64,
++        jnp.float64,
++        jnp.complex128,
++    ]:
+       self.skipTest("x64 types are disabled by jax_enable_x64")
+ 
+     rng = jtu.rand_default(self.rng())
+@@ -142,8 +148,11 @@ def testTorchToJaxArray(self, shape, dtype):
+     if xla_extension_version < 191:
+       self.skipTest("Need xla_extension_version >= 191")
+ 
+-    if not config.x64_enabled and dtype in [jnp.int64, jnp.float64,
+-                                            jnp.complex128]:
++    if not config.enable_x64.value and dtype in [
++        jnp.int64,
++        jnp.float64,
++        jnp.complex128,
++    ]:
+       self.skipTest("x64 types are disabled by jax_enable_x64")
+ 
+     rng = jtu.rand_default(self.rng())
+diff --git a/tests/qdwh_test.py b/tests/qdwh_test.py
+index 94475d0cccd6..51179fee9b79 100644
+--- a/tests/qdwh_test.py
++++ b/tests/qdwh_test.py
+@@ -16,18 +16,18 @@
+ import functools
+ 
+ import jax
+-from jax import config
+ import jax.numpy as jnp
+ import numpy as np
+ import scipy.linalg as osp_linalg
+-from jax._src.lax import qdwh
++from jax._src import config
+ from jax._src import test_util as jtu
++from jax._src.lax import qdwh
+ 
+ from absl.testing import absltest
+ 
+ 
+ config.parse_flags_with_absl()
+-_JAX_ENABLE_X64_QDWH = config.x64_enabled
++_JAX_ENABLE_X64_QDWH = config.enable_x64.value
+ 
+ # Input matrix data type for QdwhTest.
+ _QDWH_TEST_DTYPE = np.float64 if _JAX_ENABLE_X64_QDWH else np.float32
+diff --git a/tests/random_lax_test.py b/tests/random_lax_test.py
+index 795bab09a66c..b5049874da56 100644
+--- a/tests/random_lax_test.py
++++ b/tests/random_lax_test.py
+@@ -37,7 +37,7 @@
+ 
+ from jax._src import prng as prng_internal
+ 
+-jax.config.parse_flags_with_absl()
++config.parse_flags_with_absl()
+ 
+ float_dtypes = jtu.dtypes.all_floating
+ complex_dtypes = jtu.dtypes.complex
+diff --git a/tests/random_test.py b/tests/random_test.py
+index d320a714a414..2ad03710e9d0 100644
+--- a/tests/random_test.py
++++ b/tests/random_test.py
+@@ -40,7 +40,7 @@
+ from jax._src import random as jax_random
+ from jax._src import prng as prng_internal
+ 
+-jax.config.parse_flags_with_absl()
++config.parse_flags_with_absl()
+ 
+ 
+ PRNG_IMPLS = list(prng_internal.prngs.items())
+diff --git a/tests/shard_map_test.py b/tests/shard_map_test.py
+index 90c3b64403c4..63324f221e28 100644
+--- a/tests/shard_map_test.py
++++ b/tests/shard_map_test.py
+@@ -43,7 +43,7 @@
+ 
+ from jax.experimental.shard_map import shard_map
+ 
+-jax.config.parse_flags_with_absl()
++config.parse_flags_with_absl()
+ 
+ map, unsafe_map = safe_map, map
+ zip, unsafe_zip = safe_zip, zip
+@@ -1382,7 +1382,7 @@ def make_mesh(mesh_shape):
+     return jtu.create_global_mesh(tuple(mesh_shape.values()), tuple(mesh_shape))
+ 
+   @parameterized.named_parameters(
+-      sample(config.FLAGS.jax_num_generated_cases, sample_shmap))
++      sample(jtu._NUM_GENERATED_CASES.value, sample_shmap))
+   def test_eager_against_ref(self, fun, mesh, _, in_specs, out_specs, args, ref):
+     mesh = self.make_mesh(mesh)
+     args = map(jnp.array, args)
+@@ -1391,7 +1391,7 @@ def test_eager_against_ref(self, fun, mesh, _, in_specs, out_specs, args, ref):
+     self.assertAllClose(expected, out, check_dtypes=False)
+ 
+   @parameterized.named_parameters(
+-      sample(config.FLAGS.jax_num_generated_cases, sample_shmap))
++      sample(jtu._NUM_GENERATED_CASES.value, sample_shmap))
+   def test_jit_against_ref(self, fun, mesh, _, in_specs, out_specs, args, ref):
+     mesh = self.make_mesh(mesh)
+     args = map(jnp.array, args)
+@@ -1401,7 +1401,7 @@ def test_jit_against_ref(self, fun, mesh, _, in_specs, out_specs, args, ref):
+ 
+   @parameterized.named_parameters(
+       (name + f'_check_rep={check_rep}', *params, check_rep)
+-      for (name, *params) in sample(config.FLAGS.jax_num_generated_cases, sample_shmap)
++      for (name, *params) in sample(jtu._NUM_GENERATED_CASES.value, sample_shmap)
+       for check_rep in [True, False]
+   )
+   @jax.default_matmul_precision("float32")
+@@ -1414,7 +1414,7 @@ def test_grads(self, fun, mesh, jit, in_specs, out_specs, args, _, check_rep):
+     jtu.check_grads(f, args, order=2, atol=1e-2, rtol=1e-2)
+ 
+   @parameterized.named_parameters(
+-      sample(config.FLAGS.jax_num_generated_cases, sample_shmap))
++      sample(jtu._NUM_GENERATED_CASES.value, sample_shmap))
+   @jax.default_matmul_precision("float32")
+   def test_grads_closure(self, fun, mesh, jit, in_specs, out_specs, args, _):
+     mesh = self.make_mesh(mesh)
+@@ -1433,7 +1433,7 @@ def g(*args):
+     jtu.check_grads(f, (0.2, *closed_over_args), order=2, atol=1e-2, rtol=1e-2)
+ 
+   @parameterized.named_parameters(
+-      sample(config.FLAGS.jax_num_generated_cases,
++      sample(jtu._NUM_GENERATED_CASES.value,
+              partial(sample_shmap_batched, 5)))
+   def test_vmap(self, bdims, fun, mesh, jit, in_specs, out_specs, args, ref):
+     mesh = self.make_mesh(mesh)
+@@ -1456,7 +1456,7 @@ def test_vmap(self, bdims, fun, mesh, jit, in_specs, out_specs, args, ref):
+     self.assertAllClose(ans, expected, check_dtypes=False, atol=tol, rtol=tol)
+ 
+   @parameterized.named_parameters(
+-      sample(config.FLAGS.jax_num_generated_cases,
++      sample(jtu._NUM_GENERATED_CASES.value,
+              partial(sample_shmap_batched, 5)))
+   def test_vmap_closure(self, bdims, fun, mesh, jit, in_specs, out_specs, args, _):
+     mesh = self.make_mesh(mesh)
+diff --git a/tests/sparse_bcoo_bcsr_test.py b/tests/sparse_bcoo_bcsr_test.py
+index 8ba5b22c0bb4..e9091a9b9c02 100644
+--- a/tests/sparse_bcoo_bcsr_test.py
++++ b/tests/sparse_bcoo_bcsr_test.py
+@@ -41,7 +41,6 @@
+ import numpy as np
+ 
+ config.parse_flags_with_absl()
+-FLAGS = config.FLAGS
+ 
+ COMPATIBLE_SHAPE_PAIRS = [
+     [(), ()],
+diff --git a/tests/sparse_test.py b/tests/sparse_test.py
+index d64bd76b2251..fc4c80d4bee2 100644
+--- a/tests/sparse_test.py
++++ b/tests/sparse_test.py
+@@ -46,7 +46,6 @@
+ import scipy.sparse
+ 
+ config.parse_flags_with_absl()
+-FLAGS = config.FLAGS
+ 
+ all_dtypes = jtu.dtypes.integer + jtu.dtypes.floating + jtu.dtypes.complex
+ 
+diff --git a/tests/state_test.py b/tests/state_test.py
+index d28349658557..120617e86a4b 100644
+--- a/tests/state_test.py
++++ b/tests/state_test.py
+@@ -48,7 +48,7 @@
+ from jax._src.state.types import (shaped_array_ref, ReadEffect, WriteEffect,
+                                   AccumEffect, AbstractRef)
+ 
+-jax.config.parse_flags_with_absl()
++config.parse_flags_with_absl()
+ 
+ class StatePrimitivesTest(jtu.JaxTestCase):
+ 
+@@ -831,7 +831,7 @@ class StateHypothesisTest(jtu.JaxTestCase):
+ 
+     @hp.given(get_vmap_params())
+     @hp.settings(deadline=None, print_blob=True,
+-        max_examples=config.FLAGS.jax_num_generated_cases)
++        max_examples=jtu._NUM_GENERATED_CASES.value)
+     def test_get_vmap(self, get_vmap_param: GetVmapParams):
+ 
+       indexed_dims = get_vmap_param.vmap_index_param.index_param.indexed_dims
+@@ -870,7 +870,7 @@ def f(ref, *non_slice_idx):
+ 
+     @hp.given(set_vmap_params())
+     @hp.settings(deadline=None, print_blob=True,
+-                 max_examples=config.FLAGS.jax_num_generated_cases)
++                 max_examples=jtu._NUM_GENERATED_CASES.value)
+     def test_set_vmap(self, set_vmap_param: SetVmapParams):
+       if jtu.test_device_matches(["gpu"]):
+         self.skipTest("Scatter is nondeterministic on GPU")
+@@ -915,7 +915,7 @@ def f(ref, val, *non_slice_idx):
+ 
+     @hp.given(set_vmap_params())
+     @hp.settings(deadline=None, print_blob=True,
+-                 max_examples=config.FLAGS.jax_num_generated_cases)
++                 max_examples=jtu._NUM_GENERATED_CASES.value)
+     def test_addupdate_vmap(self, set_vmap_param: SetVmapParams):
+ 
+       indexed_dims = set_vmap_param.vmap_index_param.index_param.indexed_dims
+@@ -1538,7 +1538,7 @@ class RunStateHypothesisTest(jtu.JaxTestCase):
+     @jax.legacy_prng_key('allow')
+     @hp.given(hps.data())
+     @hp.settings(deadline=None, print_blob=True,
+-                 max_examples=config.FLAGS.jax_num_generated_cases)
++                 max_examples=jtu._NUM_GENERATED_CASES.value)
+     def test_jvp(self, data):
+ 
+       spec = data.draw(func_spec())
+@@ -1563,7 +1563,7 @@ def ref(x):
+     @jax.legacy_prng_key('allow')
+     @hp.given(hps.data())
+     @hp.settings(deadline=None, print_blob=True,
+-                 max_examples=config.FLAGS.jax_num_generated_cases)
++                 max_examples=jtu._NUM_GENERATED_CASES.value)
+     def test_linearize(self, data):
+ 
+       spec = data.draw(func_spec())
+@@ -1589,7 +1589,7 @@ def ref(x):
+     @jax.legacy_prng_key('allow')
+     @hp.given(hps.data())
+     @hp.settings(deadline=None, print_blob=True,
+-                 max_examples=config.FLAGS.jax_num_generated_cases)
++                 max_examples=jtu._NUM_GENERATED_CASES.value)
+     def test_vjp(self, data):
+ 
+       spec = data.draw(func_spec())
+diff --git a/tests/svd_test.py b/tests/svd_test.py
+index 58c912cb0121..5838349ee356 100644
+--- a/tests/svd_test.py
++++ b/tests/svd_test.py
+@@ -16,18 +16,18 @@
+ import functools
+ 
+ import jax
+-from jax import config
+ import jax.numpy as jnp
+ import numpy as np
+ import scipy.linalg as osp_linalg
+-from jax._src.lax import svd
++from jax._src import config
+ from jax._src import test_util as jtu
++from jax._src.lax import svd
+ 
+ from absl.testing import absltest
+ 
+ 
+ config.parse_flags_with_absl()
+-_JAX_ENABLE_X64 = config.x64_enabled
++_JAX_ENABLE_X64 = config.enable_x64.value
+ 
+ # Input matrix data type for SvdTest.
+ _SVD_TEST_DTYPE = np.float64 if _JAX_ENABLE_X64 else np.float32
+diff --git a/tests/util_test.py b/tests/util_test.py
+index 4cba26e87326..e06df8b3fa70 100644
+--- a/tests/util_test.py
++++ b/tests/util_test.py
+@@ -23,7 +23,6 @@
+ from jax import config
+ from jax._src.util import weakref_lru_cache
+ config.parse_flags_with_absl()
+-FLAGS = config.FLAGS
+ 
+ try:
+   from jax._src.lib import utils as jaxlib_utils
+diff --git a/tests/xla_bridge_test.py b/tests/xla_bridge_test.py
+index 873c52e5ba5e..5aff19bf58bb 100644
+--- a/tests/xla_bridge_test.py
++++ b/tests/xla_bridge_test.py
+@@ -20,17 +20,16 @@
+ 
+ from absl import logging
+ from absl.testing import absltest
++
+ from jax._src import compiler
+-from jax._src import config as jax_config
++from jax._src import config
+ from jax._src import test_util as jtu
+ from jax._src import xla_bridge as xb
+-from jax._src.config import config
+ from jax._src.interpreters import xla
+-from jax._src.lib import xla_client as xc
+ from jax._src.lib import xla_extension_version
++from jax._src.lib import xla_client as xc
+ 
+ config.parse_flags_with_absl()
+-FLAGS = config.FLAGS
+ 
+ mock = absltest.mock
+ 
+@@ -65,7 +64,7 @@ def test_autofdo_profile(self):
+     # --jax_xla_profile_version takes precedence.
+     jax_flag_profile = 1
+     another_profile = 2
+-    with jax_config.jax_xla_profile_version(jax_flag_profile):
++    with config.jax_xla_profile_version(jax_flag_profile):
+       with mock.patch.object(compiler, "get_latest_profile_version",
+                              side_effect=lambda: another_profile):
+         self.assertEqual(
+@@ -283,10 +282,10 @@ def factory():
+                                 fail_quietly=False, experimental=experimental)
+ 
+   def setUp(self):
++    super().setUp()
+     self._orig_factories = xb._backend_factories
+     xb._backend_factories = {}
+-    self._orig_jax_platforms = config._read("jax_platforms")
+-    config.FLAGS.jax_platforms = ""
++    self.enter_context(config.jax_platforms(""))
+     self._save_backend_state()
+     self._reset_backend_state()
+ 
+@@ -294,8 +293,8 @@ def setUp(self):
+     self._register_factory("cpu", 0)
+ 
+   def tearDown(self):
++    super().tearDown()
+     xb._backend_factories = self._orig_factories
+-    config.FLAGS.jax_platforms = self._orig_jax_platforms
+     self._restore_backend_state()
+ 
+   def _save_backend_state(self):
+@@ -380,10 +379,7 @@ def test_jax_platforms_flag(self):
+     self._register_factory("platform_A", 20, assert_used_at_most_once=True)
+     self._register_factory("platform_B", 10, assert_used_at_most_once=True)
+ 
+-    orig_jax_platforms = config._read("jax_platforms")
+-    try:
+-      config.FLAGS.jax_platforms = "cpu,platform_A"
+-
++    with config.jax_platforms("cpu,platform_A"):
+       backend = xb.get_backend()
+       self.assertEqual(backend.platform, "cpu")
+       # Only specified backends initialized.
+@@ -395,10 +391,6 @@ def test_jax_platforms_flag(self):
+       with self.assertRaisesRegex(RuntimeError, "Unknown backend platform_B"):
+         backend = xb.get_backend("platform_B")
+ 
+-    finally:
+-      config.FLAGS.jax_platforms = orig_jax_platforms
+-
+-
+   def test_experimental_warning(self):
+     self._register_factory("platform_A", 20, experimental=True)
+ 
+diff --git a/tests/xmap_test.py b/tests/xmap_test.py
+index 76fa9c22e3d4..40c0537d4f50 100644
+--- a/tests/xmap_test.py
++++ b/tests/xmap_test.py
+@@ -33,24 +33,24 @@
+ from jax._src import test_util as jtu
+ from jax import vmap
+ from jax import lax
+-from jax._src import core
+-from jax._src.core import NamedShape
+-from jax.experimental import maps
+-from jax._src import array
+-from jax._src.sharding_impls import NamedSharding
++from jax.ad_checkpoint import checkpoint
++from jax.errors import JAXTypeError
++from jax.experimental.maps import xmap, serial_loop, SerialLoop
+ from jax.experimental.pjit import pjit
++from jax.interpreters import batching
+ from jax.sharding import PartitionSpec as P
+-from jax.experimental.maps import xmap, serial_loop, SerialLoop
+-from jax.errors import JAXTypeError
+-from jax._src.nn import initializers as nn_initializers
++from jax._src import array
++from jax._src import core
++from jax._src import maps
+ from jax._src import xla_bridge
++from jax._src.core import NamedShape
++from jax._src.lax import parallel as lax_parallel
++from jax._src.lax.parallel import pgather
+ from jax._src.lib import xla_client
+ from jax._src.lib import xla_extension_version
++from jax._src.nn import initializers as nn_initializers
++from jax._src.sharding_impls import NamedSharding
+ from jax._src.util import unzip2
+-from jax._src.lax import parallel as lax_parallel
+-from jax._src.lax.parallel import pgather
+-from jax.interpreters import batching
+-from jax.ad_checkpoint import checkpoint
+ 
+ from jax import config
+ config.parse_flags_with_absl()
+@@ -246,10 +246,11 @@ class XMapTestCase(jtu.BufferDonationTestCase):
+ class SPMDTestMixin:
+   def setUp(self):
+     super().setUp()
+-    jtu.set_spmd_lowering_flag(True)
++    self.spmd_lowering = maps._SPMD_LOWERING.value
++    config.update('experimental_xmap_spmd_lowering', True)
+ 
+   def tearDown(self):
+-    jtu.restore_spmd_lowering_flag()
++    config.update('experimental_xmap_spmd_lowering', self.spmd_lowering)
+ 
+ 
+ class ManualSPMDTestMixin:
+@@ -257,12 +258,14 @@ def setUp(self):
+     if not hasattr(xla_client.OpSharding.Type, "MANUAL"):
+       raise SkipTest
+     super().setUp()
+-    jtu.set_spmd_lowering_flag(True)
+-    jtu.set_spmd_manual_lowering_flag(True)
++    self.spmd_lowering = maps._SPMD_LOWERING.value
++    self.spmd_manual_lowering = maps._SPMD_LOWERING_MANUAL.value
++    config.update('experimental_xmap_spmd_lowering', True)
++    config.update('experimental_xmap_spmd_lowering_manual', True)
+ 
+   def tearDown(self):
+-    jtu.restore_spmd_manual_lowering_flag()
+-    jtu.restore_spmd_lowering_flag()
++    config.update('experimental_xmap_spmd_lowering', self.spmd_lowering)
++    config.update('experimental_xmap_spmd_lowering_manual', self.spmd_manual_lowering)
+ 
+ 
+ @jtu.pytest_mark_if_available('multiaccelerator')
+@@ -433,7 +436,7 @@ def h(y):
+     m_size = math.prod([2] + [2] * (len(mesh) - 2))
+     self.assertListEqual(y_op_sharding.tile_assignment_dimensions(),
+                          [2, 1, 1, m_size])
+-    if config.experimental_xmap_spmd_lowering:
++    if maps._SPMD_LOWERING.value:
+       hlo = f.lower(x).compiler_ir(dialect="hlo").as_hlo_text()
+       # Make sure that there are non-partial sharding specs in the HLO
+       if xla_extension_version >= 180:
+@@ -746,7 +749,7 @@ def testLowerPartitionsAttribute(self):
+              axis_resources={'i': 'x'})
+     x = jnp.arange(4, dtype=jnp.float32).reshape((2, 2))
+     hlo = f.lower(x).as_text(dialect='stablehlo')
+-    if config.experimental_xmap_spmd_lowering:
++    if maps._SPMD_LOWERING.value:
+       self.assertIn("mhlo.num_partitions = 2", hlo)
+       self.assertIn("mhlo.num_replicas = 1", hlo)
+     else:
+@@ -1201,7 +1204,7 @@ def testGatherPositional(self):
+ 
+   @jtu.with_and_without_mesh
+   def testGather(self, mesh, axis_resources):
+-    if axis_resources and not config.experimental_xmap_spmd_lowering:
++    if axis_resources and not maps._SPMD_LOWERING.value:
+       raise SkipTest("pgather over mesh axes without SPMD lowering not implemented")
+     x = jnp.arange(12, dtype=np.float32).reshape((4, 3))
+     y = jnp.arange(35).reshape((5, 7)) % 3

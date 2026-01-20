@@ -1,0 +1,1 @@
+Replace Lucene's `SetOnce` utility with local implementation

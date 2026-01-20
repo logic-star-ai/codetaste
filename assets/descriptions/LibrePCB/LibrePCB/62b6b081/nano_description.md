@@ -1,0 +1,1 @@
+Remove QtWidgets dependency from CLI and core library

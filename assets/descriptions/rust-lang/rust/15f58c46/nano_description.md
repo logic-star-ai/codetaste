@@ -1,0 +1,1 @@
+Remove `Nonterminal` and `TokenKind::Interpolated`

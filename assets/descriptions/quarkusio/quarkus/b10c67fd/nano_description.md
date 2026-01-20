@@ -1,0 +1,1 @@
+Move `@AccessToken` annotation to new package to fix split package issue

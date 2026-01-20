@@ -1,0 +1,1 @@
+Rename "chill mode" to "safe mode" across HDDS/Ozone codebase

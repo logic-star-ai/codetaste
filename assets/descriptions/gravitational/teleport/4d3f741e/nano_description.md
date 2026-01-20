@@ -1,0 +1,1 @@
+Refactor `tbot` CLI architecture for better maintainability and extensibility

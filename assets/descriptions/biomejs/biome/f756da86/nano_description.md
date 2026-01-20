@@ -1,0 +1,1 @@
+Remove `NeedsParentheses::needs_parentheses_with_parent` method

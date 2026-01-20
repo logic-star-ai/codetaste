@@ -1,6 +1,5 @@
 """Main entry point for running inference on benchmark instances."""
 
-import csv
 import sys
 from pathlib import Path
 
@@ -13,7 +12,7 @@ from refactoring_benchmark.inference.validation import (
     validate_agent_dir,
 )
 from refactoring_benchmark.utils.logger import get_logger, setup_logging
-from refactoring_benchmark.utils.models import InstanceRow
+from refactoring_benchmark.utils.common import load_instances_from_csv
 
 
 def main():
@@ -49,6 +48,7 @@ def main():
         logger.error(f"Invalid agent configuration: {e}")
         sys.exit(1)
 
+    logger.info(f"Description Type: {args.description_type}")
     # Sanitize agent ID for filesystem use
     try:
         sanitized_agent_id = sanitize_agent_id(agent_config.id)
@@ -63,12 +63,8 @@ def main():
         logger.error(f"Instances CSV not found: {args.instances_csv}")
         sys.exit(1)
 
-    instances = []
     try:
-        with open(args.instances_csv, "r") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                instances.append(InstanceRow(**row))
+        instances = load_instances_from_csv(args.instances_csv)
     except Exception as e:
         logger.error(f"Failed to load instances from CSV: {e}")
         sys.exit(1)
@@ -97,6 +93,9 @@ def main():
         force=args.force,
         agent_config=agent_config,
         sanitized_agent_id=sanitized_agent_id,
+        env_vars=args.env_vars,
+        description_type=args.description_type,
+        force_unsuccessful=args.force_unsuccessful,
     )
 
     # Create and run orchestrator

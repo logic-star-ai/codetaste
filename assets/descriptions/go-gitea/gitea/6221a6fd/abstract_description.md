@@ -1,0 +1,1 @@
+Standardize element visibility handling

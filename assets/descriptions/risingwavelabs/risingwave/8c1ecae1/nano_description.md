@@ -1,0 +1,1 @@
+refactor(stream): refactor `trait Executor` to get rid of `info()`

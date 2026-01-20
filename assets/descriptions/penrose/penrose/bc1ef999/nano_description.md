@@ -1,0 +1,1 @@
+Consolidate shape types

@@ -1,0 +1,1 @@
+Consolidate terminology: Use `binaryTarget` consistently instead of `platform`

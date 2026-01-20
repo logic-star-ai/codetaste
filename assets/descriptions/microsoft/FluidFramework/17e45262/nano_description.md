@@ -1,0 +1,1 @@
+Move telemetry interfaces to core-interfaces

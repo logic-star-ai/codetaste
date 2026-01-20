@@ -4,7 +4,6 @@ set -e
 # --- Configuration ---
 REPO_ROOT="/testbed"
 AGENT_SCRIPT="/agent/run_agent"
-AGENT_SETUP_SCRIPT="/agent/setup_agent.sh"
 AGENT_SYSTEM_SETUP_SCRIPT="/agent/setup_system.sh"
 DIFF_INPUT="/input/patch.diff"
 DIFF_OUTPUT="/output/prediction.diff"
@@ -63,8 +62,6 @@ if [ -d "/output" ]; then sudo chmod -R 777 "/output"; fi
 if [ -d "/agent" ]; then sudo chmod -R 755 "/agent"; fi
 if [ -d "/scripts" ]; then sudo chmod -R 755 "/scripts"; fi
 if [ -d "/task_description" ]; then sudo chmod -R 755 "/task_description"; fi
-sudo chmod -R 777 /home/benchmarker
-sudo chmod -R 777 /opt
 sudo chmod -R 700 /rules
 
 # basic setup
@@ -76,25 +73,43 @@ setup_env
 case "$1" in
     "inference")
         echo "=== Mode: Inference ==="
-        block_network
-        create_restricted_user
-        
         if [ ! -f "$AGENT_SCRIPT" ]; then
             echo "Error: Agent script not found at $AGENT_SCRIPT"
             exit 1
         fi
-        
+        SRC_FILE="$TASK_DESC_DIR/${DESCRIPTION_TYPE}_description.md"
+        DEST_FILE="$TASK_DESC_DIR/description.md"
+        if [[ ! -f "$SRC_FILE" ]]; then
+            echo "Error: Description file for type '${DESCRIPTION_TYPE}' not found: $SRC_FILE"
+            exit 1
+        fi
+        case "$DESCRIPTION_TYPE" in
+            standard|minimal|nano)
+                echo "Using ${DESCRIPTION_TYPE} description with header"
+                echo "Perform the task described below. You are required to implement **all** the required changes, without user feedback. The changes must be performed directly on the codebase." > "$DEST_FILE"
+                cat "$SRC_FILE" >> "$DEST_FILE"
+                ;;
+            *)
+                echo "Using ${DESCRIPTION_TYPE} description without header"
+                mv "$SRC_FILE" "$DEST_FILE"
+                ;;
+        esac
+
+        rm -f "$TASK_DESC_DIR"/*_description.md
+        create_restricted_user
+        # Agent System Setup Script Can Still Use Github
         if [ -f "$AGENT_SYSTEM_SETUP_SCRIPT" ]; then
             echo "=== Running Agent System Setup Script ==="
             sudo bash "$AGENT_SYSTEM_SETUP_SCRIPT"
         fi
+        block_network
+        
 
         echo "[Security] Transferring repo ownership to agent_user..."
         sudo chown -R agent_user:agent_user "$REPO_ROOT"
+        sudo chown -R agent_user:agent_user /tmp
         
         # Restricted Execution
-        echo "=== Dropping Privileges: Switching to 'agent_user' ==="
-        [ -f \"$AGENT_SETUP_SCRIPT\" ] && sudo \"$AGENT_SETUP_SCRIPT\"
         if sudo -E -u agent_user bash -c "
             [ -f /scripts/setup_shell.sh ] && source /scripts/setup_shell.sh
             bash \"$AGENT_SCRIPT\"
@@ -123,7 +138,7 @@ case "$1" in
         git checkout "$PRE_AGENT_HASH"
         if [ -f "$DIFF_INPUT" ]; then
             echo "Applying patch from $DIFF_INPUT..."
-            git apply --allow-binary-replacement --3way "$DIFF_INPUT"
+            git apply --allow-empty --allow-binary-replacement --3way "$DIFF_INPUT"
         else
             echo "No diff file found at $DIFF_INPUT"
         fi
@@ -147,7 +162,7 @@ case "$1" in
         git checkout "$PRE_AGENT_HASH"
         if [ -f "$DIFF_INPUT" ]; then
             echo "Applying patch from $DIFF_INPUT..."
-            git apply --allow-binary-replacement --3way "$DIFF_INPUT"
+            git apply --allow-empty --allow-binary-replacement --3way "$DIFF_INPUT"
         else
             echo "No diff file found at $DIFF_INPUT"
         fi
@@ -160,6 +175,10 @@ case "$1" in
 
         echo "Running Opengrep with positive rules..."
         sudo chmod -R 755 "$RULES_DIR"
+
+        # Setup default .semgrepignore
+        cat /rules/default.semgrepignore > /testbed/.semgrepignore
+        echo "-> Applied default .semgrepignore to /testbed"
 
         # Scan with positive rules
         if [ -f "$RULES_POSITIVE" ]; then

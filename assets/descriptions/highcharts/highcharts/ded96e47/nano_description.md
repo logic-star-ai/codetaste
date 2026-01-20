@@ -1,0 +1,1 @@
+Refactor exporting modules to class pattern

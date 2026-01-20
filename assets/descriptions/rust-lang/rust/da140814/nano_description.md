@@ -1,0 +1,1 @@
+Remove redundant `u32` indices from `BrAnon` and `BoundTyKind::Anon`, store `BoundVar` in `Placeholder` types

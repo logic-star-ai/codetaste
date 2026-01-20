@@ -1,0 +1,1 @@
+Merge `Style` into `Node` and introduce `ComputedNode` for computed properties

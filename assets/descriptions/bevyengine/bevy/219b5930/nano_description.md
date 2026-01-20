@@ -1,0 +1,1 @@
+Migrate `bevy_sprite` to Required Components

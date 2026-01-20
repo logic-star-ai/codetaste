@@ -1,0 +1,1 @@
+Simplify state management architecture

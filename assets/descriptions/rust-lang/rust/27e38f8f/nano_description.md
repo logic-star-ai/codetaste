@@ -1,0 +1,1 @@
+Remove enum variant glob-imports from `rustc_middle::ty`

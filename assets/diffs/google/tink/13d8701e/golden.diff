@@ -1,0 +1,3796 @@
+diff --git a/go/aead/BUILD.bazel b/go/aead/BUILD.bazel
+index 2af814a918..51f355e2d7 100644
+--- a/go/aead/BUILD.bazel
++++ b/go/aead/BUILD.bazel
+@@ -23,6 +23,7 @@ go_library(
+         "//go/format:go_default_library",
+         "//go/keyset:go_default_library",
+         "//go/primitiveset:go_default_library",
++        "//go/registry:go_default_library",
+         "//go/subtle/aead:go_default_library",
+         "//go/subtle/mac:go_default_library",
+         "//go/subtle/random:go_default_library",
+@@ -54,9 +55,11 @@ go_test(
+     embed = [":go_default_library"],
+     deps = [
+         "//go/format:go_default_library",
+-        "//go/insecure:go_default_library",
++        "//go/keyset:go_default_library",
++        "//go/registry:go_default_library",
+         "//go/subtle/aead:go_default_library",
+         "//go/subtle/random:go_default_library",
++        "//go/testkeyset:go_default_library",
+         "//go/testutil:go_default_library",
+         "//go/tink:go_default_library",
+         "//proto:aes_ctr_hmac_aead_go_proto",
+diff --git a/go/aead/aead_factory.go b/go/aead/aead_factory.go
+index b3d3fb9f9b..1eabc1aac4 100644
+--- a/go/aead/aead_factory.go
++++ b/go/aead/aead_factory.go
+@@ -18,18 +18,20 @@ import (
+ 	"fmt"
+ 
+ 	"github.com/google/tink/go/format"
++	"github.com/google/tink/go/keyset"
+ 	"github.com/google/tink/go/primitiveset"
++	"github.com/google/tink/go/registry"
+ 	"github.com/google/tink/go/tink"
+ )
+ 
+ // New returns a AEAD primitive from the given keyset handle.
+-func New(handle *tink.KeysetHandle) (tink.AEAD, error) {
+-	return NewWithKeyManager(handle, nil /*keyManager*/)
++func New(h *keyset.Handle) (tink.AEAD, error) {
++	return NewWithKeyManager(h, nil /*keyManager*/)
+ }
+ 
+ // NewWithKeyManager returns a AEAD primitive from the given keyset handle and custom key manager.
+-func NewWithKeyManager(kh *tink.KeysetHandle, km tink.KeyManager) (tink.AEAD, error) {
+-	ps, err := tink.PrimitivesWithKeyManager(kh, km)
++func NewWithKeyManager(h *keyset.Handle, km registry.KeyManager) (tink.AEAD, error) {
++	ps, err := h.PrimitivesWithKeyManager(km)
+ 	if err != nil {
+ 		return nil, fmt.Errorf("aead_factory: cannot obtain primitive set: %s", err)
+ 	}
+diff --git a/go/aead/aead_factory_test.go b/go/aead/aead_factory_test.go
+index 60bcba826a..818156ca1f 100644
+--- a/go/aead/aead_factory_test.go
++++ b/go/aead/aead_factory_test.go
+@@ -22,8 +22,8 @@ import (
+ 
+ 	"github.com/google/tink/go/aead"
+ 	"github.com/google/tink/go/format"
+-	"github.com/google/tink/go/insecure"
+ 	"github.com/google/tink/go/subtle/random"
++	"github.com/google/tink/go/testkeyset"
+ 	"github.com/google/tink/go/testutil"
+ 	"github.com/google/tink/go/tink"
+ 
+@@ -38,7 +38,7 @@ func TestFactoryMultipleKeys(t *testing.T) {
+ 	if primaryKey.OutputPrefixType == tinkpb.OutputPrefixType_RAW {
+ 		t.Errorf("expect a non-raw key")
+ 	}
+-	keysetHandle, _ := insecure.NewKeysetHandleFromReader(&tink.MemKeyset{Keyset: keyset})
++	keysetHandle, _ := testkeyset.NewHandle(keyset)
+ 	a, err := aead.New(keysetHandle)
+ 	if err != nil {
+ 		t.Errorf("aead.New failed: %s", err)
+@@ -54,7 +54,7 @@ func TestFactoryMultipleKeys(t *testing.T) {
+ 		t.Errorf("expect a raw key")
+ 	}
+ 	keyset2 := testutil.NewKeyset(rawKey.KeyId, []*tinkpb.Keyset_Key{rawKey})
+-	keysetHandle2, _ := insecure.NewKeysetHandleFromReader(&tink.MemKeyset{Keyset: keyset2})
++	keysetHandle2, _ := testkeyset.NewHandle(keyset2)
+ 	a2, err := aead.New(keysetHandle2)
+ 	if err != nil {
+ 		t.Errorf("aead.New failed: %s", err)
+@@ -67,7 +67,7 @@ func TestFactoryMultipleKeys(t *testing.T) {
+ 	keyset2 = testutil.NewTestAESGCMKeyset(tinkpb.OutputPrefixType_TINK)
+ 	primaryKey = keyset2.Key[0]
+ 	expectedPrefix, _ = format.OutputPrefix(primaryKey)
+-	keysetHandle2, _ = insecure.NewKeysetHandleFromReader(&tink.MemKeyset{Keyset: keyset2})
++	keysetHandle2, _ = testkeyset.NewHandle(keyset2)
+ 	a2, err = aead.New(keysetHandle2)
+ 	if err != nil {
+ 		t.Errorf("aead.New failed: %s", err)
+@@ -83,7 +83,7 @@ func TestFactoryRawKeyAsPrimary(t *testing.T) {
+ 	if keyset.Key[0].OutputPrefixType != tinkpb.OutputPrefixType_RAW {
+ 		t.Errorf("primary key is not a raw key")
+ 	}
+-	keysetHandle, _ := insecure.NewKeysetHandleFromReader(&tink.MemKeyset{Keyset: keyset})
++	keysetHandle, _ := testkeyset.NewHandle(keyset)
+ 
+ 	a, err := aead.New(keysetHandle)
+ 	if err != nil {
+diff --git a/go/aead/aead_key_templates_test.go b/go/aead/aead_key_templates_test.go
+index e6e92bd0d0..b6b809c4e0 100644
+--- a/go/aead/aead_key_templates_test.go
++++ b/go/aead/aead_key_templates_test.go
+@@ -22,6 +22,7 @@ import (
+ 
+ 	"github.com/golang/protobuf/proto"
+ 	"github.com/google/tink/go/aead"
++	"github.com/google/tink/go/registry"
+ 	"github.com/google/tink/go/tink"
+ 	ctrhmacpb "github.com/google/tink/proto/aes_ctr_hmac_aead_go_proto"
+ 	gcmpb "github.com/google/tink/proto/aes_gcm_go_proto"
+@@ -113,7 +114,7 @@ func checkAESCTRHMACAEADKeyTemplate(template *tinkpb.KeyTemplate, keySize, ivSiz
+ }
+ 
+ func testEncryptDecrypt(template *tinkpb.KeyTemplate, typeURL string) error {
+-	key, err := tink.NewKey(template)
++	key, err := registry.NewKey(template)
+ 	if err != nil {
+ 		return fmt.Errorf("failed to get key from template, error: %v", err)
+ 	}
+@@ -123,7 +124,7 @@ func testEncryptDecrypt(template *tinkpb.KeyTemplate, typeURL string) error {
+ 		return fmt.Errorf("failed to serialize key, error: %v", err)
+ 	}
+ 
+-	p, err := tink.Primitive(typeURL, sk)
++	p, err := registry.Primitive(typeURL, sk)
+ 	if err != nil {
+ 		return fmt.Errorf("failed to get primitive from serialized key, error: %v", err)
+ 	}
+diff --git a/go/aead/aes_ctr_hmac_aead_key_manager.go b/go/aead/aes_ctr_hmac_aead_key_manager.go
+index aebe6b1c3a..5c236e8dad 100644
+--- a/go/aead/aes_ctr_hmac_aead_key_manager.go
++++ b/go/aead/aes_ctr_hmac_aead_key_manager.go
+@@ -19,11 +19,11 @@ import (
+ 	"fmt"
+ 
+ 	"github.com/golang/protobuf/proto"
++	"github.com/google/tink/go/keyset"
++	"github.com/google/tink/go/registry"
+ 	"github.com/google/tink/go/subtle/aead"
+ 	"github.com/google/tink/go/subtle/mac"
+ 	"github.com/google/tink/go/subtle/random"
+-	"github.com/google/tink/go/tink"
+-	"github.com/google/tink/go/keyset"
+ 	ctrpb "github.com/google/tink/proto/aes_ctr_go_proto"
+ 	aeadpb "github.com/google/tink/proto/aes_ctr_hmac_aead_go_proto"
+ 	commonpb "github.com/google/tink/proto/common_go_proto"
+@@ -51,7 +51,7 @@ var errInvalidAESCTRHMACAEADKeyFormat = fmt.Errorf("aes_ctr_hmac_aead_key_manage
+ type aesCTRHMACAEADKeyManager struct{}
+ 
+ // Assert that aesCTRHMACAEADKeyManager implements the KeyManager interface.
+-var _ tink.KeyManager = (*aesCTRHMACAEADKeyManager)(nil)
++var _ registry.KeyManager = (*aesCTRHMACAEADKeyManager)(nil)
+ 
+ // newAESCTRHMACAEADKeyManager creates a new aesCTRHMACAEADKeyManager.
+ func newAESCTRHMACAEADKeyManager() *aesCTRHMACAEADKeyManager {
+diff --git a/go/aead/aes_ctr_hmac_aead_key_manager_test.go b/go/aead/aes_ctr_hmac_aead_key_manager_test.go
+index 81d48791a8..329a699134 100644
+--- a/go/aead/aes_ctr_hmac_aead_key_manager_test.go
++++ b/go/aead/aes_ctr_hmac_aead_key_manager_test.go
+@@ -19,7 +19,7 @@ import (
+ 
+ 	"github.com/golang/protobuf/proto"
+ 	"github.com/google/tink/go/aead"
+-	"github.com/google/tink/go/tink"
++	"github.com/google/tink/go/registry"
+ 	ctrhmacpb "github.com/google/tink/proto/aes_ctr_hmac_aead_go_proto"
+ 	tinkpb "github.com/google/tink/proto/tink_go_proto"
+ )
+@@ -31,7 +31,7 @@ func TestNewKeyMultipleTimes(t *testing.T) {
+ 		t.Fatalf("cannot unmarshal AES128CTRHMACSHA256 key template")
+ 	}
+ 
+-	keyManager, err := tink.GetKeyManager(aead.AESCTRHMACAEADTypeURL)
++	keyManager, err := registry.GetKeyManager(aead.AESCTRHMACAEADTypeURL)
+ 	if err != nil {
+ 		t.Errorf("cannot obtain AES-CTR-HMAC-AEAD key manager: %s", err)
+ 	}
+@@ -68,7 +68,7 @@ func TestNewKeyWithCorruptedFormat(t *testing.T) {
+ 	keyTemplate.TypeUrl = aead.AESCTRHMACAEADTypeURL
+ 	keyTemplate.Value = make([]byte, 128)
+ 
+-	keyManager, err := tink.GetKeyManager(aead.AESCTRHMACAEADTypeURL)
++	keyManager, err := registry.GetKeyManager(aead.AESCTRHMACAEADTypeURL)
+ 	if err != nil {
+ 		t.Errorf("cannot obtain AES-CTR-HMAC-AEAD key manager: %s", err)
+ 	}
+diff --git a/go/aead/aes_gcm_key_manager.go b/go/aead/aes_gcm_key_manager.go
+index 205805c5b6..6643d0abac 100644
+--- a/go/aead/aes_gcm_key_manager.go
++++ b/go/aead/aes_gcm_key_manager.go
+@@ -18,10 +18,10 @@ import (
+ 	"fmt"
+ 
+ 	"github.com/golang/protobuf/proto"
++	"github.com/google/tink/go/keyset"
++	"github.com/google/tink/go/registry"
+ 	"github.com/google/tink/go/subtle/aead"
+ 	"github.com/google/tink/go/subtle/random"
+-	"github.com/google/tink/go/tink"
+-	"github.com/google/tink/go/keyset"
+ 	gcmpb "github.com/google/tink/proto/aes_gcm_go_proto"
+ 	tinkpb "github.com/google/tink/proto/tink_go_proto"
+ )
+@@ -43,7 +43,7 @@ var errInvalidAESGCMKeyFormat = fmt.Errorf("aes_gcm_key_manager: invalid key for
+ type aesGCMKeyManager struct{}
+ 
+ // Assert that aesGCMKeyManager implements the KeyManager interface.
+-var _ tink.KeyManager = (*aesGCMKeyManager)(nil)
++var _ registry.KeyManager = (*aesGCMKeyManager)(nil)
+ 
+ // newAESGCMKeyManager creates a new aesGcmKeyManager.
+ func newAESGCMKeyManager() *aesGCMKeyManager {
+diff --git a/go/aead/aes_gcm_key_manager_test.go b/go/aead/aes_gcm_key_manager_test.go
+index 30c1c224ee..ef4284105f 100644
+--- a/go/aead/aes_gcm_key_manager_test.go
++++ b/go/aead/aes_gcm_key_manager_test.go
+@@ -21,10 +21,10 @@ import (
+ 
+ 	"github.com/golang/protobuf/proto"
+ 	"github.com/google/tink/go/aead"
++	"github.com/google/tink/go/registry"
+ 	subteAEAD "github.com/google/tink/go/subtle/aead"
+ 	"github.com/google/tink/go/subtle/random"
+ 	"github.com/google/tink/go/testutil"
+-	"github.com/google/tink/go/tink"
+ 	gcmpb "github.com/google/tink/proto/aes_gcm_go_proto"
+ 	tinkpb "github.com/google/tink/proto/tink_go_proto"
+ )
+@@ -32,7 +32,7 @@ import (
+ var keySizes = []uint32{16, 32}
+ 
+ func TestAESGCMGetPrimitiveBasic(t *testing.T) {
+-	keyManager, err := tink.GetKeyManager(aead.AESGCMTypeURL)
++	keyManager, err := registry.GetKeyManager(aead.AESGCMTypeURL)
+ 	if err != nil {
+ 		t.Errorf("cannot obtain AES-GCM key manager: %s", err)
+ 	}
+@@ -50,7 +50,7 @@ func TestAESGCMGetPrimitiveBasic(t *testing.T) {
+ }
+ 
+ func TestAESGCMGetPrimitiveWithInvalidInput(t *testing.T) {
+-	keyManager, err := tink.GetKeyManager(aead.AESGCMTypeURL)
++	keyManager, err := registry.GetKeyManager(aead.AESGCMTypeURL)
+ 	if err != nil {
+ 		t.Errorf("cannot obtain AES-GCM key manager: %s", err)
+ 	}
+@@ -73,7 +73,7 @@ func TestAESGCMGetPrimitiveWithInvalidInput(t *testing.T) {
+ }
+ 
+ func TestAESGCMNewKeyMultipleTimes(t *testing.T) {
+-	keyManager, err := tink.GetKeyManager(aead.AESGCMTypeURL)
++	keyManager, err := registry.GetKeyManager(aead.AESGCMTypeURL)
+ 	if err != nil {
+ 		t.Errorf("cannot obtain AES-GCM key manager: %s", err)
+ 	}
+@@ -96,7 +96,7 @@ func TestAESGCMNewKeyMultipleTimes(t *testing.T) {
+ }
+ 
+ func TestAESGCMNewKeyBasic(t *testing.T) {
+-	keyManager, err := tink.GetKeyManager(aead.AESGCMTypeURL)
++	keyManager, err := registry.GetKeyManager(aead.AESGCMTypeURL)
+ 	if err != nil {
+ 		t.Errorf("cannot obtain AES-GCM key manager: %s", err)
+ 	}
+@@ -115,7 +115,7 @@ func TestAESGCMNewKeyBasic(t *testing.T) {
+ }
+ 
+ func TestAESGCMNewKeyWithInvalidInput(t *testing.T) {
+-	keyManager, err := tink.GetKeyManager(aead.AESGCMTypeURL)
++	keyManager, err := registry.GetKeyManager(aead.AESGCMTypeURL)
+ 	if err != nil {
+ 		t.Errorf("cannot obtain AES-GCM key manager: %s", err)
+ 	}
+@@ -138,7 +138,7 @@ func TestAESGCMNewKeyWithInvalidInput(t *testing.T) {
+ }
+ 
+ func TestAESGCMNewKeyDataBasic(t *testing.T) {
+-	keyManager, err := tink.GetKeyManager(aead.AESGCMTypeURL)
++	keyManager, err := registry.GetKeyManager(aead.AESGCMTypeURL)
+ 	if err != nil {
+ 		t.Errorf("cannot obtain AES-GCM key manager: %s", err)
+ 	}
+@@ -166,7 +166,7 @@ func TestAESGCMNewKeyDataBasic(t *testing.T) {
+ }
+ 
+ func TestAESGCMNewKeyDataWithInvalidInput(t *testing.T) {
+-	keyManager, err := tink.GetKeyManager(aead.AESGCMTypeURL)
++	keyManager, err := registry.GetKeyManager(aead.AESGCMTypeURL)
+ 	if err != nil {
+ 		t.Errorf("cannot obtain AES-GCM key manager: %s", err)
+ 	}
+@@ -188,7 +188,7 @@ func TestAESGCMNewKeyDataWithInvalidInput(t *testing.T) {
+ }
+ 
+ func TestAESGCMDoesSupport(t *testing.T) {
+-	keyManager, err := tink.GetKeyManager(aead.AESGCMTypeURL)
++	keyManager, err := registry.GetKeyManager(aead.AESGCMTypeURL)
+ 	if err != nil {
+ 		t.Errorf("cannot obtain AES-GCM key manager: %s", err)
+ 	}
+@@ -201,7 +201,7 @@ func TestAESGCMDoesSupport(t *testing.T) {
+ }
+ 
+ func TestAESGCMTypeURL(t *testing.T) {
+-	keyManager, err := tink.GetKeyManager(aead.AESGCMTypeURL)
++	keyManager, err := registry.GetKeyManager(aead.AESGCMTypeURL)
+ 	if err != nil {
+ 		t.Errorf("cannot obtain AES-GCM key manager: %s", err)
+ 	}
+diff --git a/go/aead/chacha20poly1305_key_manager.go b/go/aead/chacha20poly1305_key_manager.go
+index 268f7dda94..33356c3621 100644
+--- a/go/aead/chacha20poly1305_key_manager.go
++++ b/go/aead/chacha20poly1305_key_manager.go
+@@ -19,10 +19,10 @@ import (
+ 
+ 	"github.com/golang/protobuf/proto"
+ 	"golang.org/x/crypto/chacha20poly1305"
++	"github.com/google/tink/go/keyset"
++	"github.com/google/tink/go/registry"
+ 	"github.com/google/tink/go/subtle/aead"
+ 	"github.com/google/tink/go/subtle/random"
+-	"github.com/google/tink/go/tink"
+-	"github.com/google/tink/go/keyset"
+ 
+ 	cppb "github.com/google/tink/proto/chacha20_poly1305_go_proto"
+ 	tinkpb "github.com/google/tink/proto/tink_go_proto"
+@@ -44,7 +44,7 @@ var errInvalidChaCha20Poly1305KeyFormat = fmt.Errorf("chacha20poly1305_key_manag
+ type chaCha20Poly1305KeyManager struct{}
+ 
+ // Assert that chaCha20Poly1305KeyManager implements the KeyManager interface.
+-var _ tink.KeyManager = (*chaCha20Poly1305KeyManager)(nil)
++var _ registry.KeyManager = (*chaCha20Poly1305KeyManager)(nil)
+ 
+ // newChaCha20Poly1305KeyManager creates a new chaCha20Poly1305KeyManager.
+ func newChaCha20Poly1305KeyManager() *chaCha20Poly1305KeyManager {
+diff --git a/go/aead/chacha20poly1305_key_manager_test.go b/go/aead/chacha20poly1305_key_manager_test.go
+index ab22de0389..d4e8d5003c 100644
+--- a/go/aead/chacha20poly1305_key_manager_test.go
++++ b/go/aead/chacha20poly1305_key_manager_test.go
+@@ -22,8 +22,8 @@ import (
+ 	"github.com/golang/protobuf/proto"
+ 	"golang.org/x/crypto/chacha20poly1305"
+ 	"github.com/google/tink/go/aead"
++	"github.com/google/tink/go/registry"
+ 	"github.com/google/tink/go/subtle/random"
+-	"github.com/google/tink/go/tink"
+ 
+ 	subteaead "github.com/google/tink/go/subtle/aead"
+ 	cppb "github.com/google/tink/proto/chacha20_poly1305_go_proto"
+@@ -31,7 +31,7 @@ import (
+ )
+ 
+ func TestChaCha20Poly1305GetPrimitive(t *testing.T) {
+-	km, err := tink.GetKeyManager(aead.ChaCha20Poly1305TypeURL)
++	km, err := registry.GetKeyManager(aead.ChaCha20Poly1305TypeURL)
+ 	if err != nil {
+ 		t.Errorf("cannot obtain ChaCha20Poly1305 key manager: %s", err)
+ 	}
+@@ -48,7 +48,7 @@ func TestChaCha20Poly1305GetPrimitive(t *testing.T) {
+ }
+ 
+ func TestChaCha20Poly1305GetPrimitiveWithInvalidKeys(t *testing.T) {
+-	km, err := tink.GetKeyManager(aead.ChaCha20Poly1305TypeURL)
++	km, err := registry.GetKeyManager(aead.ChaCha20Poly1305TypeURL)
+ 	if err != nil {
+ 		t.Errorf("cannot obtain ChaCha20Poly1305 key manager: %s", err)
+ 	}
+@@ -62,7 +62,7 @@ func TestChaCha20Poly1305GetPrimitiveWithInvalidKeys(t *testing.T) {
+ }
+ 
+ func TestChaCha20Poly1305NewKey(t *testing.T) {
+-	km, err := tink.GetKeyManager(aead.ChaCha20Poly1305TypeURL)
++	km, err := registry.GetKeyManager(aead.ChaCha20Poly1305TypeURL)
+ 	if err != nil {
+ 		t.Errorf("cannot obtain ChaCha20Poly1305 key manager: %s", err)
+ 	}
+@@ -77,7 +77,7 @@ func TestChaCha20Poly1305NewKey(t *testing.T) {
+ }
+ 
+ func TestChaCha20Poly1305NewKeyData(t *testing.T) {
+-	km, err := tink.GetKeyManager(aead.ChaCha20Poly1305TypeURL)
++	km, err := registry.GetKeyManager(aead.ChaCha20Poly1305TypeURL)
+ 	if err != nil {
+ 		t.Errorf("cannot obtain ChaCha20Poly1305 key manager: %s", err)
+ 	}
+@@ -101,7 +101,7 @@ func TestChaCha20Poly1305NewKeyData(t *testing.T) {
+ }
+ 
+ func TestChaCha20Poly1305DoesSupport(t *testing.T) {
+-	km, err := tink.GetKeyManager(aead.ChaCha20Poly1305TypeURL)
++	km, err := registry.GetKeyManager(aead.ChaCha20Poly1305TypeURL)
+ 	if err != nil {
+ 		t.Errorf("cannot obtain ChaCha20Poly1305 key manager: %s", err)
+ 	}
+@@ -114,7 +114,7 @@ func TestChaCha20Poly1305DoesSupport(t *testing.T) {
+ }
+ 
+ func TestChaCha20Poly1305TypeURL(t *testing.T) {
+-	km, err := tink.GetKeyManager(aead.ChaCha20Poly1305TypeURL)
++	km, err := registry.GetKeyManager(aead.ChaCha20Poly1305TypeURL)
+ 	if err != nil {
+ 		t.Errorf("cannot obtain ChaCha20Poly1305 key manager: %s", err)
+ 	}
+diff --git a/go/aead/init.go b/go/aead/init.go
+index e3e71df570..bec30468fc 100644
+--- a/go/aead/init.go
++++ b/go/aead/init.go
+@@ -18,26 +18,26 @@ package aead
+ import (
+ 	"fmt"
+ 
+-	"github.com/google/tink/go/tink"
++	"github.com/google/tink/go/registry"
+ )
+ 
+ func init() {
+-	if err := tink.RegisterKeyManager(newAESCTRHMACAEADKeyManager()); err != nil {
++	if err := registry.RegisterKeyManager(newAESCTRHMACAEADKeyManager()); err != nil {
+ 		panic(fmt.Sprintf("aead.init() failed: %v", err))
+ 	}
+ 
+-	if err := tink.RegisterKeyManager(newAESGCMKeyManager()); err != nil {
++	if err := registry.RegisterKeyManager(newAESGCMKeyManager()); err != nil {
+ 		panic(fmt.Sprintf("aead.init() failed: %v", err))
+ 	}
+ 
+-	if err := tink.RegisterKeyManager(newChaCha20Poly1305KeyManager()); err != nil {
++	if err := registry.RegisterKeyManager(newChaCha20Poly1305KeyManager()); err != nil {
+ 		panic(fmt.Sprintf("aead.init() failed: %v", err))
+ 	}
+ 
+-	if err := tink.RegisterKeyManager(newXChaCha20Poly1305KeyManager()); err != nil {
++	if err := registry.RegisterKeyManager(newXChaCha20Poly1305KeyManager()); err != nil {
+ 		panic(fmt.Sprintf("aead.init() failed: %v", err))
+ 	}
+-	if err := tink.RegisterKeyManager(newKMSEnvelopeAEADKeyManager()); err != nil {
++	if err := registry.RegisterKeyManager(newKMSEnvelopeAEADKeyManager()); err != nil {
+ 		panic(fmt.Sprintf("aead.init() failed: %v", err))
+ 	}
+ }
+diff --git a/go/aead/init_test.go b/go/aead/init_test.go
+index cae6277c93..00a809511c 100644
+--- a/go/aead/init_test.go
++++ b/go/aead/init_test.go
+@@ -18,24 +18,24 @@ import (
+ 	"testing"
+ 
+ 	"github.com/google/tink/go/aead"
+-	"github.com/google/tink/go/tink"
++	"github.com/google/tink/go/registry"
+ )
+ 
+ func TestAeadInit(t *testing.T) {
+ 	// Check for AES-GCM key manager.
+-	_, err := tink.GetKeyManager(aead.AESGCMTypeURL)
++	_, err := registry.GetKeyManager(aead.AESGCMTypeURL)
+ 	if err != nil {
+ 		t.Errorf("unexpected error: %s", err)
+ 	}
+ 
+ 	// Check for ChaCha20Poly1305 key manager.
+-	_, err = tink.GetKeyManager(aead.ChaCha20Poly1305TypeURL)
++	_, err = registry.GetKeyManager(aead.ChaCha20Poly1305TypeURL)
+ 	if err != nil {
+ 		t.Errorf("unexpected error: %s", err)
+ 	}
+ 
+ 	// Check for XChaCha20Poly1305 key manager.
+-	_, err = tink.GetKeyManager(aead.XChaCha20Poly1305TypeURL)
++	_, err = registry.GetKeyManager(aead.XChaCha20Poly1305TypeURL)
+ 	if err != nil {
+ 		t.Errorf("unexpected error: %s", err)
+ 	}
+diff --git a/go/aead/kms_envelope_aead.go b/go/aead/kms_envelope_aead.go
+index d590f37fbd..fba0a3f7bc 100644
+--- a/go/aead/kms_envelope_aead.go
++++ b/go/aead/kms_envelope_aead.go
+@@ -20,6 +20,7 @@ import (
+ 	"errors"
+ 
+ 	"github.com/golang/protobuf/proto"
++	"github.com/google/tink/go/registry"
+ 	"github.com/google/tink/go/tink"
+ 	tinkpb "github.com/google/tink/proto/tink_go_proto"
+ )
+@@ -46,7 +47,7 @@ func NewKMSEnvelopeAEAD(kt tinkpb.KeyTemplate, remote tink.AEAD) *KMSEnvelopeAEA
+ 
+ // Encrypt implements the tink.AEAD interface for encryption.
+ func (a *KMSEnvelopeAEAD) Encrypt(pt, aad []byte) ([]byte, error) {
+-	dekM, err := tink.NewKey(a.dekTemplate)
++	dekM, err := registry.NewKey(a.dekTemplate)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+@@ -58,7 +59,7 @@ func (a *KMSEnvelopeAEAD) Encrypt(pt, aad []byte) ([]byte, error) {
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	p, err := tink.Primitive(a.dekTemplate.TypeUrl, dek)
++	p, err := registry.Primitive(a.dekTemplate.TypeUrl, dek)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+@@ -104,7 +105,7 @@ func (a *KMSEnvelopeAEAD) Decrypt(ct, aad []byte) ([]byte, error) {
+ 	if err != nil {
+ 		return nil, errors.New("decryption failed")
+ 	}
+-	p, err := tink.Primitive(a.dekTemplate.TypeUrl, dek)
++	p, err := registry.Primitive(a.dekTemplate.TypeUrl, dek)
+ 	if err != nil {
+ 		return nil, errors.New("decryption failed")
+ 	}
+diff --git a/go/aead/kms_envelope_aead_key_manager.go b/go/aead/kms_envelope_aead_key_manager.go
+index 0d83c15ab7..4d1dcc7e9e 100644
+--- a/go/aead/kms_envelope_aead_key_manager.go
++++ b/go/aead/kms_envelope_aead_key_manager.go
+@@ -20,7 +20,7 @@ import (
+ 
+ 	"github.com/golang/protobuf/proto"
+ 	"github.com/google/tink/go/keyset"
+-	"github.com/google/tink/go/tink"
++	"github.com/google/tink/go/registry"
+ 	kmsepb "github.com/google/tink/proto/kms_envelope_go_proto"
+ 	tinkpb "github.com/google/tink/proto/tink_go_proto"
+ )
+@@ -38,7 +38,7 @@ const (
+ type kmsEnvelopeAEADKeyManager struct{}
+ 
+ // Assert that kmsEnvelopeAEADKeyManager implements the KeyManager interface.
+-var _ tink.KeyManager = (*kmsEnvelopeAEADKeyManager)(nil)
++var _ registry.KeyManager = (*kmsEnvelopeAEADKeyManager)(nil)
+ 
+ // newKMSEnvelopeAEADKeyManager creates a new aesGcmKeyManager.
+ func newKMSEnvelopeAEADKeyManager() *kmsEnvelopeAEADKeyManager {
+@@ -58,7 +58,7 @@ func (km *kmsEnvelopeAEADKeyManager) Primitive(serializedKey []byte) (interface{
+ 		return nil, err
+ 	}
+ 	uri := key.Params.KekUri
+-	kmsClient, err := tink.GetKMSClient(uri)
++	kmsClient, err := registry.GetKMSClient(uri)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+diff --git a/go/aead/xchacha20poly1305_key_manager.go b/go/aead/xchacha20poly1305_key_manager.go
+index 210a8b157a..2dcb8e01a3 100644
+--- a/go/aead/xchacha20poly1305_key_manager.go
++++ b/go/aead/xchacha20poly1305_key_manager.go
+@@ -19,10 +19,10 @@ import (
+ 
+ 	"github.com/golang/protobuf/proto"
+ 	"golang.org/x/crypto/chacha20poly1305"
++	"github.com/google/tink/go/keyset"
++	"github.com/google/tink/go/registry"
+ 	"github.com/google/tink/go/subtle/aead"
+ 	"github.com/google/tink/go/subtle/random"
+-	"github.com/google/tink/go/tink"
+-	"github.com/google/tink/go/keyset"
+ 
+ 	tinkpb "github.com/google/tink/proto/tink_go_proto"
+ 	xcppb "github.com/google/tink/proto/xchacha20_poly1305_go_proto"
+@@ -43,7 +43,7 @@ var errInvalidXChaCha20Poly1305Key = fmt.Errorf("xchacha20poly1305_key_manager:
+ type xChaCha20Poly1305KeyManager struct{}
+ 
+ // Assert that xChaCha20Poly1305KeyManager implements the KeyManager interface.
+-var _ tink.KeyManager = (*xChaCha20Poly1305KeyManager)(nil)
++var _ registry.KeyManager = (*xChaCha20Poly1305KeyManager)(nil)
+ 
+ // newXChaCha20Poly1305KeyManager creates a new xChaCha20Poly1305KeyManager.
+ func newXChaCha20Poly1305KeyManager() *xChaCha20Poly1305KeyManager {
+diff --git a/go/aead/xchacha20poly1305_key_manager_test.go b/go/aead/xchacha20poly1305_key_manager_test.go
+index a56111cc01..aace88b093 100644
+--- a/go/aead/xchacha20poly1305_key_manager_test.go
++++ b/go/aead/xchacha20poly1305_key_manager_test.go
+@@ -22,8 +22,8 @@ import (
+ 	"github.com/golang/protobuf/proto"
+ 	"golang.org/x/crypto/chacha20poly1305"
+ 	"github.com/google/tink/go/aead"
++	"github.com/google/tink/go/registry"
+ 	"github.com/google/tink/go/subtle/random"
+-	"github.com/google/tink/go/tink"
+ 
+ 	subteaead "github.com/google/tink/go/subtle/aead"
+ 	tinkpb "github.com/google/tink/proto/tink_go_proto"
+@@ -31,7 +31,7 @@ import (
+ )
+ 
+ func TestXChaCha20Poly1305GetPrimitive(t *testing.T) {
+-	km, err := tink.GetKeyManager(aead.XChaCha20Poly1305TypeURL)
++	km, err := registry.GetKeyManager(aead.XChaCha20Poly1305TypeURL)
+ 	if err != nil {
+ 		t.Errorf("cannot obtain XChaCha20Poly1305 key manager: %s", err)
+ 	}
+@@ -48,7 +48,7 @@ func TestXChaCha20Poly1305GetPrimitive(t *testing.T) {
+ }
+ 
+ func TestXChaCha20Poly1305GetPrimitiveWithInvalidKeys(t *testing.T) {
+-	km, err := tink.GetKeyManager(aead.XChaCha20Poly1305TypeURL)
++	km, err := registry.GetKeyManager(aead.XChaCha20Poly1305TypeURL)
+ 	if err != nil {
+ 		t.Errorf("cannot obtain XChaCha20Poly1305 key manager: %s", err)
+ 	}
+@@ -62,7 +62,7 @@ func TestXChaCha20Poly1305GetPrimitiveWithInvalidKeys(t *testing.T) {
+ }
+ 
+ func TestXChaCha20Poly1305NewKey(t *testing.T) {
+-	km, err := tink.GetKeyManager(aead.XChaCha20Poly1305TypeURL)
++	km, err := registry.GetKeyManager(aead.XChaCha20Poly1305TypeURL)
+ 	if err != nil {
+ 		t.Errorf("cannot obtain XChaCha20Poly1305 key manager: %s", err)
+ 	}
+@@ -77,7 +77,7 @@ func TestXChaCha20Poly1305NewKey(t *testing.T) {
+ }
+ 
+ func TestXChaCha20Poly1305NewKeyData(t *testing.T) {
+-	km, err := tink.GetKeyManager(aead.XChaCha20Poly1305TypeURL)
++	km, err := registry.GetKeyManager(aead.XChaCha20Poly1305TypeURL)
+ 	if err != nil {
+ 		t.Errorf("cannot obtain XChaCha20Poly1305 key manager: %s", err)
+ 	}
+@@ -101,7 +101,7 @@ func TestXChaCha20Poly1305NewKeyData(t *testing.T) {
+ }
+ 
+ func TestXChaCha20Poly1305DoesSupport(t *testing.T) {
+-	km, err := tink.GetKeyManager(aead.XChaCha20Poly1305TypeURL)
++	km, err := registry.GetKeyManager(aead.XChaCha20Poly1305TypeURL)
+ 	if err != nil {
+ 		t.Errorf("cannot obtain XChaCha20Poly1305 key manager: %s", err)
+ 	}
+@@ -114,7 +114,7 @@ func TestXChaCha20Poly1305DoesSupport(t *testing.T) {
+ }
+ 
+ func TestXChaCha20Poly1305TypeURL(t *testing.T) {
+-	km, err := tink.GetKeyManager(aead.XChaCha20Poly1305TypeURL)
++	km, err := registry.GetKeyManager(aead.XChaCha20Poly1305TypeURL)
+ 	if err != nil {
+ 		t.Errorf("cannot obtain XChaCha20Poly1305 key manager: %s", err)
+ 	}
+diff --git a/go/daead/BUILD.bazel b/go/daead/BUILD.bazel
+index ad8c519350..5c189cb9dd 100644
+--- a/go/daead/BUILD.bazel
++++ b/go/daead/BUILD.bazel
+@@ -15,6 +15,7 @@ go_library(
+     deps = [
+         "//go/format:go_default_library",
+         "//go/keyset:go_default_library",
++        "//go/registry:go_default_library",
+         "//go/primitiveset:go_default_library",
+         "//go/subtle/daead:go_default_library",
+         "//go/subtle/random:go_default_library",
+@@ -34,9 +35,11 @@ go_test(
+     embed = [":go_default_library"],
+     deps = [
+         "//go/format:go_default_library",
+-        "//go/insecure:go_default_library",
++        "//go/keyset:go_default_library",
++        "//go/registry:go_default_library",
+         "//go/subtle/daead:go_default_library",
+         "//go/subtle/random:go_default_library",
++        "//go/testkeyset:go_default_library",
+         "//go/testutil:go_default_library",
+         "//go/tink:go_default_library",
+         "//proto:aes_siv_go_proto",
+diff --git a/go/daead/aes_siv_key_manager.go b/go/daead/aes_siv_key_manager.go
+index b5fce8e3c7..7cbd6000c0 100644
+--- a/go/daead/aes_siv_key_manager.go
++++ b/go/daead/aes_siv_key_manager.go
+@@ -18,10 +18,10 @@ import (
+ 	"fmt"
+ 
+ 	"github.com/golang/protobuf/proto"
++	"github.com/google/tink/go/keyset"
++	"github.com/google/tink/go/registry"
+ 	"github.com/google/tink/go/subtle/daead"
+ 	"github.com/google/tink/go/subtle/random"
+-	"github.com/google/tink/go/tink"
+-	"github.com/google/tink/go/keyset"
+ 
+ 	aspb "github.com/google/tink/proto/aes_siv_go_proto"
+ 	tinkpb "github.com/google/tink/proto/tink_go_proto"
+@@ -39,7 +39,7 @@ const (
+ type aesSIVKeyManager struct{}
+ 
+ // Assert that aesSIVKeyManager implements the KeyManager interface.
+-var _ tink.KeyManager = (*aesSIVKeyManager)(nil)
++var _ registry.KeyManager = (*aesSIVKeyManager)(nil)
+ 
+ // newAESSIVKeyManager creates a new aesSIVKeyManager.
+ func newAESSIVKeyManager() *aesSIVKeyManager {
+diff --git a/go/daead/aes_siv_key_manager_test.go b/go/daead/aes_siv_key_manager_test.go
+index e75de7cd3b..20b4917644 100644
+--- a/go/daead/aes_siv_key_manager_test.go
++++ b/go/daead/aes_siv_key_manager_test.go
+@@ -21,8 +21,8 @@ import (
+ 
+ 	"github.com/golang/protobuf/proto"
+ 	"github.com/google/tink/go/daead"
++	"github.com/google/tink/go/registry"
+ 	"github.com/google/tink/go/subtle/random"
+-	"github.com/google/tink/go/tink"
+ 
+ 	subtedaead "github.com/google/tink/go/subtle/daead"
+ 	aspb "github.com/google/tink/proto/aes_siv_go_proto"
+@@ -30,7 +30,7 @@ import (
+ )
+ 
+ func TestAESSIVPrimitive(t *testing.T) {
+-	km, err := tink.GetKeyManager(daead.AESSIVTypeURL)
++	km, err := registry.GetKeyManager(daead.AESSIVTypeURL)
+ 	if err != nil {
+ 		t.Fatalf("cannot obtain AESSIV key manager: %s", err)
+ 	}
+@@ -50,7 +50,7 @@ func TestAESSIVPrimitive(t *testing.T) {
+ }
+ 
+ func TestAESSIVPrimitiveWithInvalidKeys(t *testing.T) {
+-	km, err := tink.GetKeyManager(daead.AESSIVTypeURL)
++	km, err := registry.GetKeyManager(daead.AESSIVTypeURL)
+ 	if err != nil {
+ 		t.Errorf("cannot obtain AESSIV key manager: %s", err)
+ 	}
+@@ -64,7 +64,7 @@ func TestAESSIVPrimitiveWithInvalidKeys(t *testing.T) {
+ }
+ 
+ func TestAESSIVNewKey(t *testing.T) {
+-	km, err := tink.GetKeyManager(daead.AESSIVTypeURL)
++	km, err := registry.GetKeyManager(daead.AESSIVTypeURL)
+ 	if err != nil {
+ 		t.Errorf("cannot obtain AESSIV key manager: %s", err)
+ 	}
+@@ -79,7 +79,7 @@ func TestAESSIVNewKey(t *testing.T) {
+ }
+ 
+ func TestAESSIVNewKeyData(t *testing.T) {
+-	km, err := tink.GetKeyManager(daead.AESSIVTypeURL)
++	km, err := registry.GetKeyManager(daead.AESSIVTypeURL)
+ 	if err != nil {
+ 		t.Errorf("cannot obtain AESSIV key manager: %s", err)
+ 	}
+@@ -103,7 +103,7 @@ func TestAESSIVNewKeyData(t *testing.T) {
+ }
+ 
+ func TestAESSIVDoesSupport(t *testing.T) {
+-	km, err := tink.GetKeyManager(daead.AESSIVTypeURL)
++	km, err := registry.GetKeyManager(daead.AESSIVTypeURL)
+ 	if err != nil {
+ 		t.Errorf("cannot obtain AESSIV key manager: %s", err)
+ 	}
+@@ -116,7 +116,7 @@ func TestAESSIVDoesSupport(t *testing.T) {
+ }
+ 
+ func TestAESSIVTypeURL(t *testing.T) {
+-	km, err := tink.GetKeyManager(daead.AESSIVTypeURL)
++	km, err := registry.GetKeyManager(daead.AESSIVTypeURL)
+ 	if err != nil {
+ 		t.Errorf("cannot obtain AESSIV key manager: %s", err)
+ 	}
+diff --git a/go/daead/daead_factory.go b/go/daead/daead_factory.go
+index ef3d141bec..d0a3068839 100644
+--- a/go/daead/daead_factory.go
++++ b/go/daead/daead_factory.go
+@@ -18,18 +18,20 @@ import (
+ 	"fmt"
+ 
+ 	"github.com/google/tink/go/format"
++	"github.com/google/tink/go/keyset"
+ 	"github.com/google/tink/go/primitiveset"
++	"github.com/google/tink/go/registry"
+ 	"github.com/google/tink/go/tink"
+ )
+ 
+ // New returns a DeterministicAEAD primitive from the given keyset handle.
+-func New(handle *tink.KeysetHandle) (tink.DeterministicAEAD, error) {
+-	return NewWithKeyManager(handle, nil /*keyManager*/)
++func New(h *keyset.Handle) (tink.DeterministicAEAD, error) {
++	return NewWithKeyManager(h, nil /*keyManager*/)
+ }
+ 
+ // NewWithKeyManager returns a DeterministicAEAD primitive from the given keyset handle and custom key manager.
+-func NewWithKeyManager(kh *tink.KeysetHandle, km tink.KeyManager) (tink.DeterministicAEAD, error) {
+-	ps, err := tink.PrimitivesWithKeyManager(kh, km)
++func NewWithKeyManager(h *keyset.Handle, km registry.KeyManager) (tink.DeterministicAEAD, error) {
++	ps, err := h.PrimitivesWithKeyManager(km)
+ 	if err != nil {
+ 		return nil, fmt.Errorf("daead_factory: cannot obtain primitive set: %s", err)
+ 	}
+diff --git a/go/daead/daead_factory_test.go b/go/daead/daead_factory_test.go
+index 399f95bcc6..2f2d4d7c37 100644
+--- a/go/daead/daead_factory_test.go
++++ b/go/daead/daead_factory_test.go
+@@ -22,8 +22,8 @@ import (
+ 
+ 	"github.com/google/tink/go/daead"
+ 	"github.com/google/tink/go/format"
+-	"github.com/google/tink/go/insecure"
+ 	"github.com/google/tink/go/subtle/random"
++	"github.com/google/tink/go/testkeyset"
+ 	"github.com/google/tink/go/testutil"
+ 	"github.com/google/tink/go/tink"
+ 
+@@ -37,7 +37,7 @@ func TestFactoryMultipleKeys(t *testing.T) {
+ 	if primaryKey.OutputPrefixType == tinkpb.OutputPrefixType_RAW {
+ 		t.Errorf("expect a non-raw key")
+ 	}
+-	keysetHandle, _ := insecure.NewKeysetHandleFromReader(&tink.MemKeyset{Keyset: keyset})
++	keysetHandle, _ := testkeyset.NewHandle(keyset)
+ 	d, err := daead.New(keysetHandle)
+ 	if err != nil {
+ 		t.Errorf("daead.New failed: %s", err)
+@@ -54,7 +54,7 @@ func TestFactoryMultipleKeys(t *testing.T) {
+ 			t.Errorf("expect a raw key")
+ 		}
+ 		keyset2 := testutil.NewKeyset(rawKey.KeyId, []*tinkpb.Keyset_Key{rawKey})
+-		keysetHandle2, _ := insecure.NewKeysetHandleFromReader(&tink.MemKeyset{Keyset: keyset2})
++		keysetHandle2, _ := testkeyset.NewHandle(keyset2)
+ 		d2, err := daead.New(keysetHandle2)
+ 		if err != nil {
+ 			t.Errorf("daead.New failed: %s", err)
+@@ -71,7 +71,7 @@ func TestFactoryMultipleKeys(t *testing.T) {
+ 		if newPK.OutputPrefixType == tinkpb.OutputPrefixType_RAW {
+ 			t.Errorf("expect a non-raw key")
+ 		}
+-		keysetHandle2, _ := insecure.NewKeysetHandleFromReader(&tink.MemKeyset{Keyset: keyset2})
++		keysetHandle2, _ := testkeyset.NewHandle(keyset2)
+ 		d2, err := daead.New(keysetHandle2)
+ 		if err != nil {
+ 			t.Errorf("daead.New failed: %s", err)
+@@ -89,7 +89,7 @@ func TestFactoryRawKeyAsPrimary(t *testing.T) {
+ 	if keyset.Key[0].OutputPrefixType != tinkpb.OutputPrefixType_RAW {
+ 		t.Errorf("primary key is not a raw key")
+ 	}
+-	keysetHandle, _ := insecure.NewKeysetHandleFromReader(&tink.MemKeyset{Keyset: keyset})
++	keysetHandle, _ := testkeyset.NewHandle(keyset)
+ 
+ 	d, err := daead.New(keysetHandle)
+ 	if err != nil {
+diff --git a/go/daead/init.go b/go/daead/init.go
+index 0cf7313643..4516ae2fe3 100644
+--- a/go/daead/init.go
++++ b/go/daead/init.go
+@@ -18,11 +18,11 @@ package daead
+ import (
+ 	"fmt"
+ 
+-	"github.com/google/tink/go/tink"
++	"github.com/google/tink/go/registry"
+ )
+ 
+ func init() {
+-	if err := tink.RegisterKeyManager(newAESSIVKeyManager()); err != nil {
++	if err := registry.RegisterKeyManager(newAESSIVKeyManager()); err != nil {
+ 		panic(fmt.Sprintf("daead.init() failed: %v", err))
+ 	}
+ }
+diff --git a/go/daead/init_test.go b/go/daead/init_test.go
+index 903195e6c7..1e8efb6a4e 100644
+--- a/go/daead/init_test.go
++++ b/go/daead/init_test.go
+@@ -18,12 +18,12 @@ import (
+ 	"testing"
+ 
+ 	"github.com/google/tink/go/daead"
+-	"github.com/google/tink/go/tink"
++	"github.com/google/tink/go/registry"
+ )
+ 
+ func TestDeterministicAEADInit(t *testing.T) {
+ 	// Check for AES-SIV key manager.
+-	_, err := tink.GetKeyManager(daead.AESSIVTypeURL)
++	_, err := registry.GetKeyManager(daead.AESSIVTypeURL)
+ 	if err != nil {
+ 		t.Errorf("unexpected error: %s", err)
+ 	}
+diff --git a/go/insecure/BUILD.bazel b/go/insecurecleartextkeyset/BUILD.bazel
+similarity index 71%
+rename from go/insecure/BUILD.bazel
+rename to go/insecurecleartextkeyset/BUILD.bazel
+index 5ec1183fd6..2edcfcb55c 100644
+--- a/go/insecure/BUILD.bazel
++++ b/go/insecurecleartextkeyset/BUILD.bazel
+@@ -6,23 +6,23 @@ load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
+ 
+ go_library(
+     name = "go_default_library",
+-    srcs = ["cleartext_keyset_handle.go"],
+-    importpath = "github.com/google/tink/go/insecure",
++    srcs = ["insecurecleartextkeyset.go"],
++    importpath = "github.com/google/tink/go/insecurecleartextkeyset",
+     deps = [
+         "//go/internal:go_default_library",
+-        "//go/tink:go_default_library",
++        "//go/keyset:go_default_library",
+         "//proto:tink_go_proto",
+     ],
+ )
+ 
+ go_test(
+     name = "go_default_test",
+-    srcs = ["cleartext_keyset_handle_test.go"],
++    srcs = ["insecurecleartextkeyset_test.go"],
+     embed = [":go_default_library"],
+     deps = [
+         "//go/mac:go_default_library",
+         "//go/testutil:go_default_library",
+-        "//go/tink:go_default_library",
++        "//go/keyset:go_default_library",
+         "//proto:tink_go_proto",
+         "@com_github_golang_protobuf//proto:go_default_library",
+     ],
+diff --git a/go/insecure/cleartext_keyset_handle.go b/go/insecurecleartextkeyset/insecurecleartextkeyset.go
+similarity index 60%
+rename from go/insecure/cleartext_keyset_handle.go
+rename to go/insecurecleartextkeyset/insecurecleartextkeyset.go
+index aaf2ba9a3f..f14e7313fa 100644
+--- a/go/insecure/cleartext_keyset_handle.go
++++ b/go/insecurecleartextkeyset/insecurecleartextkeyset.go
+@@ -12,30 +12,32 @@
+ //
+ ////////////////////////////////////////////////////////////////////////////////
+ 
+-// Package insecure provides functions that create KeysetHandle from cleartext key material.
++// Package insecurecleartextkeyset provides functions that create keyset.Handle from cleartext key material.
+ //
+ // This package contains dangerous functions, and is separate from the rest of Tink so that its
+ // usage can be restricted and audited.
+-package insecure
++package insecurecleartextkeyset
+ 
+ import (
+ 	"errors"
+ 
+ 	"github.com/google/tink/go/internal"
+-	"github.com/google/tink/go/tink"
++	"github.com/google/tink/go/keyset"
+ 	tinkpb "github.com/google/tink/proto/tink_go_proto"
+ )
+ 
+ var (
+-	keysetHandle     = internal.KeysetHandle.(func(*tinkpb.Keyset) *tink.KeysetHandle)
+-	errInvalidKeyset = errors.New("KeysetHandle: invalid keyset")
+-	errInvalidWriter = errors.New("KeysetWriter: invalid writer")
++	keysetHandle     = internal.KeysetHandle.(func(*tinkpb.Keyset) *keyset.Handle)
++	errInvalidKeyset = errors.New("insecurecleartextkeyset: invalid keyset")
++	errInvalidHandle = errors.New("insecurecleartextkeyset: invalid handle")
++	errInvalidReader = errors.New("insecurecleartextkeyset: invalid reader")
++	errInvalidWriter = errors.New("insecurecleartextkeyset: invalid writer")
+ )
+ 
+-// NewKeysetHandleFromReader creates a KeysetHandle from an unencrypted keyset obtained via r.
+-func NewKeysetHandleFromReader(r tink.KeysetReader) (*tink.KeysetHandle, error) {
++// Read creates a keyset.Handle from a a cleartext keyset obtained via r.
++func Read(r keyset.Reader) (*keyset.Handle, error) {
+ 	if r == nil {
+-		return nil, errInvalidKeyset
++		return nil, errInvalidReader
+ 	}
+ 	ks, err := r.Read()
+ 	if err != nil || ks == nil || len(ks.Key) == 0 {
+@@ -44,12 +46,12 @@ func NewKeysetHandleFromReader(r tink.KeysetReader) (*tink.KeysetHandle, error)
+ 	return keysetHandle(ks), nil
+ }
+ 
+-// WriteUnencryptedKeysetHandle exports the keyset from h to the given writer w without encrypting it.
++// Write exports the keyset from h to the given writer w without encrypting it.
+ // Storing secret key material in an unencrypted fashion is dangerous. If feasible, you should use
+-// func KeysetHandle.Write() instead.
+-func WriteUnencryptedKeysetHandle(h *tink.KeysetHandle, w tink.KeysetWriter) error {
++// func keyset.Handle.Write() instead.
++func Write(h *keyset.Handle, w keyset.Writer) error {
+ 	if h == nil {
+-		return errInvalidKeyset
++		return errInvalidHandle
+ 	}
+ 	if w == nil {
+ 		return errInvalidWriter
+diff --git a/go/insecure/cleartext_keyset_handle_test.go b/go/insecurecleartextkeyset/insecurecleartextkeyset_test.go
+similarity index 60%
+rename from go/insecure/cleartext_keyset_handle_test.go
+rename to go/insecurecleartextkeyset/insecurecleartextkeyset_test.go
+index 5c37a5bd63..f3a53d7fbd 100644
+--- a/go/insecure/cleartext_keyset_handle_test.go
++++ b/go/insecurecleartextkeyset/insecurecleartextkeyset_test.go
+@@ -12,39 +12,39 @@
+ //
+ ////////////////////////////////////////////////////////////////////////////////
+ 
+-package insecure_test
++package insecureinsecurecleartextkeyset_test
+ 
+ import (
+ 	"testing"
+ 
+ 	"github.com/golang/protobuf/proto"
+-	"github.com/google/tink/go/insecure"
++	"github.com/google/tink/go/insecurecleartextkeyset"
++	"github.com/google/tink/go/keyset"
+ 	"github.com/google/tink/go/testutil"
+-	"github.com/google/tink/go/tink"
+ 
+ 	tinkpb "github.com/google/tink/proto/tink_go_proto"
+ )
+ 
+ func TestInvalidInput(t *testing.T) {
+-	if _, err := insecure.NewKeysetHandleFromReader(nil); err == nil {
+-		t.Error("NewKeysetHandleFromReader should not accept nil as keyset")
++	if _, err := insecurecleartextkeyset.Read(nil); err == nil {
++		t.Error("insecurecleartextkeyset.Read should not accept nil as keyset")
+ 	}
+-	if err := insecure.WriteUnencryptedKeysetHandle(nil, &tink.MemKeyset{}); err == nil {
+-		t.Error("WriteUnencryptedKeysetHandle should not accept nil as keyset")
++	if err := insecurecleartextkeyset.Write(nil, &keyset.MemReaderWriter{}); err == nil {
++		t.Error("insecurecleartextkeyset.Write should not accept nil as keyset")
+ 	}
+-	if err := insecure.WriteUnencryptedKeysetHandle(&tink.KeysetHandle{}, nil); err == nil {
+-		t.Error("WriteUnencryptedKeysetHandle should not accept nil as writer")
++	if err := insecurecleartextkeyset.Write(&keyset.Handle{}, nil); err == nil {
++		t.Error("insecurecleartextkeyset.Write should not accept nil as writer")
+ 	}
+ }
+ 
+-func TestKeysetHandleFromReader(t *testing.T) {
++func TestHandleFromReader(t *testing.T) {
+ 	// Create a keyset that contains a single HmacKey.
+ 	manager := testutil.NewHMACKeysetManager()
+-	handle, err := manager.KeysetHandle()
++	handle, err := manager.Handle()
+ 	if handle == nil || err != nil {
+ 		t.Fatalf("cannot get keyset handle: %v", err)
+ 	}
+-	parsedHandle, err := insecure.NewKeysetHandleFromReader(&tink.MemKeyset{Keyset: handle.Keyset()})
++	parsedHandle, err := insecurecleartextkeyset.Read(&keyset.MemReaderWriter{Keyset: handle.Keyset()})
+ 	if err != nil {
+ 		t.Fatalf("unexpected error reading keyset: %v", err)
+ 	}
+@@ -53,19 +53,19 @@ func TestKeysetHandleFromReader(t *testing.T) {
+ 	}
+ }
+ 
+-func TestWriteUnencryptedKeysetHandle(t *testing.T) {
++func TestWrite(t *testing.T) {
+ 	keyData := testutil.NewKeyData("some type url", []byte{0}, tinkpb.KeyData_SYMMETRIC)
+ 	key := testutil.NewKey(keyData, tinkpb.KeyStatusType_ENABLED, 1, tinkpb.OutputPrefixType_TINK)
+-	keyset := testutil.NewKeyset(1, []*tinkpb.Keyset_Key{key})
+-	h, err := insecure.NewKeysetHandleFromReader(&tink.MemKeyset{Keyset: keyset})
++	ks := testutil.NewKeyset(1, []*tinkpb.Keyset_Key{key})
++	h, err := insecurecleartextkeyset.Read(&keyset.MemReaderWriter{Keyset: ks})
+ 	if err != nil {
+ 		t.Fatalf("unexpected error creating new KeysetHandle: %v", err)
+ 	}
+-	exported := &tink.MemKeyset{}
+-	if err := insecure.WriteUnencryptedKeysetHandle(h, exported); err != nil {
++	exported := &keyset.MemReaderWriter{}
++	if err := insecurecleartextkeyset.Write(h, exported); err != nil {
+ 		t.Fatalf("unexpected error writing keyset: %v", err)
+ 	}
+-	if !proto.Equal(exported.Keyset, keyset) {
+-		t.Errorf("exported keyset (%s) doesn't match original keyset (%s)", exported.Keyset, keyset)
++	if !proto.Equal(exported.Keyset, ks) {
++		t.Errorf("exported keyset (%s) doesn't match original keyset (%s)", exported.Keyset, ks)
+ 	}
+ }
+diff --git a/go/integration/gcpkms/gcp_kms_aead_test.go b/go/integration/gcpkms/gcp_kms_aead_test.go
+index 11992fb13b..fcc8e6481d 100644
+--- a/go/integration/gcpkms/gcp_kms_aead_test.go
++++ b/go/integration/gcpkms/gcp_kms_aead_test.go
+@@ -24,6 +24,8 @@ import (
+ 	"google3/base/go/google"
+ 	"google3/base/go/runfiles"
+ 	"github.com/google/tink/go/aead"
++	"github.com/google/tink/go/keyset"
++	"github.com/google/tink/go/registry"
+ 	"github.com/google/tink/go/subtle/random"
+ 	"github.com/google/tink/go/tink"
+ )
+@@ -50,7 +52,7 @@ func setupKMS(t *testing.T) {
+ 	if err != nil {
+ 		t.Errorf("error loading credentials : %v", err)
+ 	}
+-	tink.RegisterKMSClient(g)
++	registry.RegisterKMSClient(g)
+ }
+ 
+ func basicAeadTest(t *testing.T, a tink.AEAD) error {
+@@ -75,7 +77,7 @@ func basicAeadTest(t *testing.T, a tink.AEAD) error {
+ func TestBasicAead(t *testing.T) {
+ 	setupKMS(t)
+ 	dek := aead.AES128CTRHMACSHA256KeyTemplate()
+-	kh, err := tink.NewKeysetHandle(aead.KMSEnvelopeAeadKeyTemplate(keyURI, dek))
++	kh, err := keyset.NewHandle(aead.KMSEnvelopeAeadKeyTemplate(keyURI, dek))
+ 	if err != nil {
+ 		t.Errorf("error getting a new keyset handle: %v", err)
+ 	}
+diff --git a/go/integration/gcpkms/gcp_kms_client.go b/go/integration/gcpkms/gcp_kms_client.go
+index b26e83b973..0d8125a33b 100644
+--- a/go/integration/gcpkms/gcp_kms_client.go
++++ b/go/integration/gcpkms/gcp_kms_client.go
+@@ -26,6 +26,7 @@ import (
+ 	"google3/third_party/golang/google_api/cloudkms/v1/cloudkms"
+ 	"google3/third_party/golang/oauth2/google/google"
+ 	"google3/third_party/golang/oauth2/oauth2"
++	"github.com/google/tink/go/registry"
+ 	"github.com/google/tink/go/tink"
+ )
+ 
+@@ -43,12 +44,12 @@ type GCPClient struct {
+ 	kms    *cloudkms.Service
+ }
+ 
+-var _ tink.KMSClient = (*GCPClient)(nil)
++var _ registry.KMSClient = (*GCPClient)(nil)
+ 
+ // NewGCPClient returns a new client to GCP KMS. It does not have an established session.
+ func NewGCPClient(URI string) (*GCPClient, error) {
+ 	if !strings.HasPrefix(strings.ToLower(URI), gcpPrefix) {
+-		return nil, errors.New(fmt.Sprintf("key URI must start with %s", gcpPrefix))
++		return nil, fmt.Errorf("key URI must start with %s", gcpPrefix)
+ 	}
+ 
+ 	return &GCPClient{
+@@ -108,7 +109,7 @@ func (g *GCPClient) LoadDefaultCredentials() (interface{}, error) {
+ // GetAead  gets an Aead backend by keyURI.
+ func (g *GCPClient) GetAead(keyURI string) (tink.AEAD, error) {
+ 	if len(g.keyURI) > 0 && strings.Compare(strings.ToLower(g.keyURI), strings.ToLower(keyURI)) != 0 {
+-		return nil, errors.New(fmt.Sprintf("this client is bound to %s, cannot load keys bound to %s", g.keyURI, keyURI))
++		return nil, fmt.Errorf("this client is bound to %s, cannot load keys bound to %s", g.keyURI, keyURI)
+ 	}
+ 	uri, err := validateTrimKMSPrefix(g.keyURI, gcpPrefix)
+ 	if err != nil {
+@@ -126,7 +127,7 @@ func validateKMSPrefix(keyURI, prefix string) bool {
+ 
+ func validateTrimKMSPrefix(keyURI, prefix string) (string, error) {
+ 	if !validateKMSPrefix(keyURI, prefix) {
+-		return "", errors.New(fmt.Sprintf("key URI must start with %s", prefix))
++		return "", fmt.Errorf("key URI must start with %s", prefix)
+ 	}
+ 	return strings.TrimPrefix(keyURI, prefix), nil
+ }
+diff --git a/go/internal/BUILD.bazel b/go/internal/BUILD.bazel
+index b99895eb81..b8f931d219 100644
+--- a/go/internal/BUILD.bazel
++++ b/go/internal/BUILD.bazel
+@@ -9,8 +9,8 @@ go_library(
+     srcs = ["internal.go"],
+     importpath = "github.com/google/tink/go/internal",
+     visibility = [
+-        "//go/insecure:__pkg__",
+-        "//go/testkeysethandle:__pkg__",
+-        "//go/tink:__pkg__",
++        "//go/insecurecleartextkeyset:__pkg__",
++        "//go/keyset:__pkg__",
++        "//go/testkeyset:__pkg__",
+     ],
+ )
+diff --git a/go/internal/internal.go b/go/internal/internal.go
+index 5f1e6e615c..f644270d2c 100644
+--- a/go/internal/internal.go
++++ b/go/internal/internal.go
+@@ -12,10 +12,9 @@
+ //
+ ////////////////////////////////////////////////////////////////////////////////
+ 
+-// Package internal provides a coordination point for package tink, package insecure,
+-// and package testkeysethandle.
++// Package internal provides a coordination point for package keyset, package insecurecleartextkeyset, and package testkeyset.
+ // internal must only be imported by these three packages.
+ package internal
+ 
+-// KeysetHandle is the raw constructor for a tink.KeysetHandle.
++// KeysetHandle is the raw constructor for a keyset.Handle.
+ var KeysetHandle interface{}
+diff --git a/go/keyset/BUILD.bazel b/go/keyset/BUILD.bazel
+index c54fc6d038..baa55f0c63 100644
+--- a/go/keyset/BUILD.bazel
++++ b/go/keyset/BUILD.bazel
+@@ -1,21 +1,49 @@
++package(default_visibility = ["//tools/build_defs:internal_pkg"])
++
++licenses(["notice"])  # Apache 2.0
++
+ load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
+ 
+ go_library(
+     name = "go_default_library",
+-    srcs = ["util.go"],
++    srcs = [
++        "binary_io.go",
++        "handle.go",
++        "init.go",
++        "manager.go",
++        "mem_io.go",
++        "reader.go",
++        "util.go",
++        "writer.go",
++    ],
+     importpath = "github.com/google/tink/go/keyset",
+-    visibility = ["//visibility:public"],
+     deps = [
++        "//go/internal:go_default_library",
++        "//go/primitiveset:go_default_library",
++        "//go/registry:go_default_library",
++        "//go/subtle/random:go_default_library",
++        "//go/tink:go_default_library",
+         "//proto:tink_go_proto",
++        "@com_github_golang_protobuf//proto:go_default_library",
+     ],
+ )
+ 
+ go_test(
+     name = "go_default_test",
+-    srcs = ["util_test.go"],
++    srcs = [
++        "binary_io_test.go",
++        "handle_test.go",
++        "manager_test.go",
++        "util_test.go",
++    ],
+     deps = [
+-        "//go/testutil:go_default_library",
+         "//go/keyset:go_default_library",
++        "//go/mac:go_default_library",
++        "//go/subtle/aead:go_default_library",
++        "//go/testkeyset:go_default_library",
++        "//go/testutil:go_default_library",
+         "//proto:tink_go_proto",
++        "@com_github_golang_protobuf//proto:go_default_library",
+     ],
+ )
++
+diff --git a/go/tink/binary_keyset_io.go b/go/keyset/binary_io.go
+similarity index 66%
+rename from go/tink/binary_keyset_io.go
+rename to go/keyset/binary_io.go
+index c02704ccba..d898fd3e3c 100644
+--- a/go/tink/binary_keyset_io.go
++++ b/go/keyset/binary_io.go
+@@ -12,7 +12,7 @@
+ //
+ ////////////////////////////////////////////////////////////////////////////////
+ 
+-package tink
++package keyset
+ 
+ import (
+ 	"io"
+@@ -23,18 +23,18 @@ import (
+ 	tinkpb "github.com/google/tink/proto/tink_go_proto"
+ )
+ 
+-// BinaryKeysetReader deserializes a keyset from binary proto format.
+-type BinaryKeysetReader struct {
++// BinaryReader deserializes a keyset from binary proto format.
++type BinaryReader struct {
+ 	r io.Reader
+ }
+ 
+-// NewBinaryKeysetReader returns new BinaryKeysetReader that will read from r.
+-func NewBinaryKeysetReader(r io.Reader) *BinaryKeysetReader {
+-	return &BinaryKeysetReader{r: r}
++// NewBinaryReader returns new BinaryReader that will read from r.
++func NewBinaryReader(r io.Reader) *BinaryReader {
++	return &BinaryReader{r: r}
+ }
+ 
+ // Read parses a (cleartext) keyset from the underlying io.Reader.
+-func (bkr *BinaryKeysetReader) Read() (*tinkpb.Keyset, error) {
++func (bkr *BinaryReader) Read() (*tinkpb.Keyset, error) {
+ 	keyset := &tinkpb.Keyset{}
+ 
+ 	if err := read(bkr.r, keyset); err != nil {
+@@ -44,7 +44,7 @@ func (bkr *BinaryKeysetReader) Read() (*tinkpb.Keyset, error) {
+ }
+ 
+ // ReadEncrypted parses an EncryptedKeyset from the underlying io.Reader.
+-func (bkr *BinaryKeysetReader) ReadEncrypted() (*tinkpb.EncryptedKeyset, error) {
++func (bkr *BinaryReader) ReadEncrypted() (*tinkpb.EncryptedKeyset, error) {
+ 	keyset := &tinkpb.EncryptedKeyset{}
+ 
+ 	if err := read(bkr.r, keyset); err != nil {
+@@ -62,23 +62,23 @@ func read(r io.Reader, msg proto.Message) error {
+ 	return proto.Unmarshal(data, msg)
+ }
+ 
+-// BinaryKeysetWriter serializes a keyset into binary proto format.
+-type BinaryKeysetWriter struct {
++// BinaryWriter serializes a keyset into binary proto format.
++type BinaryWriter struct {
+ 	w io.Writer
+ }
+ 
+-// NewBinaryKeysetWriter returns a new BinaryKeysetWriter that will write to w.
+-func NewBinaryKeysetWriter(w io.Writer) *BinaryKeysetWriter {
+-	return &BinaryKeysetWriter{w: w}
++// NewBinaryWriter returns a new BinaryWriter that will write to w.
++func NewBinaryWriter(w io.Writer) *BinaryWriter {
++	return &BinaryWriter{w: w}
+ }
+ 
+ // Write writes the keyset to the underlying io.Writer.
+-func (bkw *BinaryKeysetWriter) Write(keyset *tinkpb.Keyset) error {
++func (bkw *BinaryWriter) Write(keyset *tinkpb.Keyset) error {
+ 	return write(bkw.w, keyset)
+ }
+ 
+ // WriteEncrypted writes the encrypted keyset to the underlying io.Writer.
+-func (bkw *BinaryKeysetWriter) WriteEncrypted(keyset *tinkpb.EncryptedKeyset) error {
++func (bkw *BinaryWriter) WriteEncrypted(keyset *tinkpb.EncryptedKeyset) error {
+ 	return write(bkw.w, keyset)
+ }
+ 
+diff --git a/go/tink/binary_keyset_io_test.go b/go/keyset/binary_io_test.go
+similarity index 88%
+rename from go/tink/binary_keyset_io_test.go
+rename to go/keyset/binary_io_test.go
+index 426ff84eef..cfa6d2cf30 100644
+--- a/go/tink/binary_keyset_io_test.go
++++ b/go/keyset/binary_io_test.go
+@@ -12,7 +12,7 @@
+ //
+ ////////////////////////////////////////////////////////////////////////////////
+ 
+-package tink_test
++package keyset_test
+ 
+ import (
+ 	"bytes"
+@@ -20,19 +20,19 @@ import (
+ 	"testing"
+ 
+ 	"github.com/golang/protobuf/proto"
++	"github.com/google/tink/go/keyset"
+ 	"github.com/google/tink/go/testutil"
+-	"github.com/google/tink/go/tink"
+ 
+ 	tinkpb "github.com/google/tink/proto/tink_go_proto"
+ )
+ 
+ func TestBinaryIOUnencrypted(t *testing.T) {
+ 	buf := new(bytes.Buffer)
+-	w := tink.NewBinaryKeysetWriter(buf)
+-	r := tink.NewBinaryKeysetReader(buf)
++	w := keyset.NewBinaryWriter(buf)
++	r := keyset.NewBinaryReader(buf)
+ 
+ 	manager := testutil.NewHMACKeysetManager()
+-	h, err := manager.KeysetHandle()
++	h, err := manager.Handle()
+ 	if h == nil || err != nil {
+ 		t.Fatalf("cannot get keyset handle: %v", err)
+ 	}
+@@ -53,8 +53,8 @@ func TestBinaryIOUnencrypted(t *testing.T) {
+ 
+ func TestBinaryIOEncrypted(t *testing.T) {
+ 	buf := new(bytes.Buffer)
+-	w := tink.NewBinaryKeysetWriter(buf)
+-	r := tink.NewBinaryKeysetReader(buf)
++	w := keyset.NewBinaryWriter(buf)
++	r := keyset.NewBinaryReader(buf)
+ 
+ 	kse1 := &tinkpb.EncryptedKeyset{EncryptedKeyset: []byte(strings.Repeat("A", 32))}
+ 
+diff --git a/go/tink/keyset_handle.go b/go/keyset/handle.go
+similarity index 50%
+rename from go/tink/keyset_handle.go
+rename to go/keyset/handle.go
+index 9acc5edb8a..125d8851bf 100644
+--- a/go/tink/keyset_handle.go
++++ b/go/keyset/handle.go
+@@ -12,7 +12,7 @@
+ //
+ ////////////////////////////////////////////////////////////////////////////////
+ 
+-package tink
++package keyset
+ 
+ import (
+ 	"errors"
+@@ -20,34 +20,48 @@ import (
+ 
+ 	"github.com/golang/protobuf/proto"
+ 
++	"github.com/google/tink/go/primitiveset"
++	"github.com/google/tink/go/registry"
++	"github.com/google/tink/go/tink"
+ 	tinkpb "github.com/google/tink/proto/tink_go_proto"
+ )
+ 
+-var errInvalidKeyset = fmt.Errorf("keyset_handle: invalid keyset")
++var errInvalidKeyset = fmt.Errorf("keyset.Handle: invalid keyset")
+ 
+-// KeysetHandle provides access to a Keyset protobuf, to limit the exposure of actual protocol
++// Handle provides access to a Keyset protobuf, to limit the exposure of actual protocol
+ // buffers that hold sensitive key material.
+-type KeysetHandle struct {
++type Handle struct {
+ 	ks *tinkpb.Keyset
+ }
+ 
+-// NewKeysetHandle creates a keyset handle that contains a single fresh key generated according
++// NewHandle creates a keyset handle that contains a single fresh key generated according
+ // to the given KeyTemplate.
+-func NewKeysetHandle(kt *tinkpb.KeyTemplate) (*KeysetHandle, error) {
+-	ksm := NewKeysetManager()
++func NewHandle(kt *tinkpb.KeyTemplate) (*Handle, error) {
++	ksm := NewManager()
+ 	err := ksm.Rotate(kt)
+ 	if err != nil {
+-		return nil, fmt.Errorf("keyset_handle: cannot generate new keyset: %s", err)
++		return nil, fmt.Errorf("keyset.Handle: cannot generate new keyset: %s", err)
+ 	}
+-	handle, err := ksm.KeysetHandle()
++	handle, err := ksm.Handle()
+ 	if err != nil {
+-		return nil, fmt.Errorf("keyset_handle: cannot get keyset handle: %s", err)
++		return nil, fmt.Errorf("keyset.Handle: cannot get keyset handle: %s", err)
+ 	}
+ 	return handle, nil
+ }
+ 
+-// NewKeysetHandleFromReader tries to create a KeysetHandle from an encrypted keyset obtained via reader.
+-func NewKeysetHandleFromReader(reader KeysetReader, masterKey AEAD) (*KeysetHandle, error) {
++// NewHandleWithNoSecrets creates a new instance of KeysetHandle using the given keyset which does
++// not contain any secret key material.
++func NewHandleWithNoSecrets(ks *tinkpb.Keyset) (*Handle, error) {
++	h := &Handle{ks}
++	if h.hasSecrets() {
++		// If you need to do this, you have to use func insecurecleartextkeyset.Read() instead.
++		return nil, errors.New("importing unencrypted secret key material is forbidden")
++	}
++	return h, nil
++}
++
++// Read tries to create a Handle from an encrypted keyset obtained via reader.
++func Read(reader Reader, masterKey tink.AEAD) (*Handle, error) {
+ 	encryptedKeyset, err := reader.ReadEncrypted()
+ 	if err != nil {
+ 		return nil, err
+@@ -56,58 +70,20 @@ func NewKeysetHandleFromReader(reader KeysetReader, masterKey AEAD) (*KeysetHand
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	return &KeysetHandle{ks}, nil
++	return &Handle{ks}, nil
+ }
+ 
+-// NewKeysetHandleFromReaderWithNoSecrets tries to create a KeysetHandle from a keyset obtained via reader.
+-func NewKeysetHandleFromReaderWithNoSecrets(reader KeysetReader) (*KeysetHandle, error) {
++// ReadWithNoSecrets tries to create a keyset.Handle from a keyset obtained via reader.
++func ReadWithNoSecrets(reader Reader) (*Handle, error) {
+ 	ks, err := reader.Read()
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-
+-	h := &KeysetHandle{ks}
+-	if h.hasSecrets() {
+-		// If you need to do this, you have to use func insecure.NewKeysetHandleFromReader() instead.
+-		return nil, errors.New("importing unencrypted secret key material is forbidden")
+-	}
+-	return &KeysetHandle{ks}, nil
++	return NewHandleWithNoSecrets(ks)
+ }
+ 
+-// hasSecrets checks if the keyset handle contains any key material considered secret.
+-// Both symmetric keys and the private key of an assymmetric crypto system are considered secret keys.
+-// Also returns true when encountering any errors.
+-func (h KeysetHandle) hasSecrets() bool {
+-	for _, k := range h.ks.Key {
+-		if k == nil || k.KeyData == nil {
+-			continue
+-		}
+-		if k.KeyData.KeyMaterialType == tinkpb.KeyData_ASYMMETRIC_PRIVATE || k.KeyData.KeyMaterialType == tinkpb.KeyData_SYMMETRIC {
+-			return true
+-		}
+-	}
+-	return false
+-}
+-
+-// KeysetHandleWithNoSecret creates a new instance of KeysetHandle using the given keyset which does
+-// not contain any secret key material.
+-func KeysetHandleWithNoSecret(ks *tinkpb.Keyset) (*KeysetHandle, error) {
+-	for i := 0; i < len(ks.Key); i++ {
+-		if ks.Key[i] == nil || ks.Key[i].KeyData == nil {
+-			return nil, errInvalidKeyset
+-		}
+-		if ks.Key[i].KeyData.KeyMaterialType == tinkpb.KeyData_ASYMMETRIC_PRIVATE || ks.Key[i].KeyData.KeyMaterialType == tinkpb.KeyData_SYMMETRIC {
+-			return nil, fmt.Errorf("keyset_handle: keyset contains secret key material")
+-		}
+-		if err := validateKeyData(ks.Key[i].KeyData); err != nil {
+-			return nil, fmt.Errorf("keyset_handle: %s", err)
+-		}
+-	}
+-	return &KeysetHandle{ks}, nil
+-}
+-
+-// Public returns a KeysetHandle of the public keys if the managed keyset contains private keys.
+-func (h *KeysetHandle) Public() (*KeysetHandle, error) {
++// Public returns a Handle of the public keys if the managed keyset contains private keys.
++func (h *Handle) Public() (*Handle, error) {
+ 	privKeys := h.ks.Key
+ 	pubKeys := make([]*tinkpb.Keyset_Key, len(privKeys))
+ 
+@@ -118,10 +94,7 @@ func (h *KeysetHandle) Public() (*KeysetHandle, error) {
+ 		privKeyData := privKeys[i].KeyData
+ 		pubKeyData, err := publicKeyData(privKeyData)
+ 		if err != nil {
+-			return nil, fmt.Errorf("keyset_handle: %s", err)
+-		}
+-		if err := validateKeyData(pubKeyData); err != nil {
+-			return nil, fmt.Errorf("keyset_handle: %s", err)
++			return nil, fmt.Errorf("keyset.Handle: %s", err)
+ 		}
+ 		pubKeys[i] = &tinkpb.Keyset_Key{
+ 			KeyData:          pubKeyData,
+@@ -134,17 +107,17 @@ func (h *KeysetHandle) Public() (*KeysetHandle, error) {
+ 		PrimaryKeyId: h.ks.PrimaryKeyId,
+ 		Key:          pubKeys,
+ 	}
+-	return &KeysetHandle{ks}, nil
++	return &Handle{ks}, nil
+ }
+ 
+ // Keyset returns the Keyset managed by this handle.
+-func (h *KeysetHandle) Keyset() *tinkpb.Keyset {
++func (h *Handle) Keyset() *tinkpb.Keyset {
+ 	return h.ks
+ }
+ 
+ // String returns a string representation of the managed keyset.
+ // The result does not contain any sensitive key material.
+-func (h *KeysetHandle) String() string {
++func (h *Handle) String() string {
+ 	info, err := getKeysetInfo(h.ks)
+ 	if err != nil {
+ 		return ""
+@@ -152,18 +125,18 @@ func (h *KeysetHandle) String() string {
+ 	return info.String()
+ }
+ 
+-// Write encrypts and writes an encrypted keyset.
+-func (h *KeysetHandle) Write(w KeysetWriter, masterKey AEAD) error {
+-	encrypted, err := encrypt(h.ks, masterKey)
++// Write encrypts and writes the enclosing keyset.
++func (h *Handle) Write(writer Writer, masterKey tink.AEAD) error {
++	encrypted, err := encrypt(h.Keyset(), masterKey)
+ 	if err != nil {
+ 		return err
+ 	}
+-	return w.WriteEncrypted(encrypted)
++	return writer.WriteEncrypted(encrypted)
+ }
+ 
+-// WriteWithNoSecrets exports the keyset in h to the given KeysetWriter w returning an error if the keyset
++// WriteWithNoSecrets exports the keyset in h to the given Writer w returning an error if the keyset
+ // contains secret key material.
+-func (h *KeysetHandle) WriteWithNoSecrets(w KeysetWriter) error {
++func (h *Handle) WriteWithNoSecrets(w Writer) error {
+ 	if h.hasSecrets() {
+ 		return errors.New("exporting unencrypted secret key material is forbidden")
+ 	}
+@@ -171,33 +144,96 @@ func (h *KeysetHandle) WriteWithNoSecrets(w KeysetWriter) error {
+ 	return w.Write(h.ks)
+ }
+ 
++// Primitives creates a set of primitives corresponding to the keys with
++// status=ENABLED in the keyset of the given keyset handle, assuming all the
++// corresponding key managers are present (keys with status!=ENABLED are skipped).
++//
++// The returned set is usually later "wrapped" into a class that implements
++// the corresponding Primitive-interface.
++func (h *Handle) Primitives() (*primitiveset.PrimitiveSet, error) {
++	return h.PrimitivesWithKeyManager(nil)
++}
++
++// PrimitivesWithKeyManager creates a set of primitives corresponding to
++// the keys with status=ENABLED in the keyset of the given keysetHandle, using
++// the given key manager (instead of registered key managers) for keys supported
++// by it.  Keys not supported by the key manager are handled by matching registered
++// key managers (if present), and keys with status!=ENABLED are skipped.
++//
++// This enables custom treatment of keys, for example providing extra context
++// (e.g. credentials for accessing keys managed by a KMS), or gathering custom
++// monitoring/profiling information.
++//
++// The returned set is usually later "wrapped" into a class that implements
++// the corresponding Primitive-interface.
++func (h *Handle) PrimitivesWithKeyManager(km registry.KeyManager) (*primitiveset.PrimitiveSet, error) {
++	ks := h.Keyset()
++	if err := Validate(ks); err != nil {
++		return nil, fmt.Errorf("registry.PrimitivesWithKeyManager: invalid keyset: %s", err)
++	}
++	primitiveSet := primitiveset.New()
++	for _, key := range ks.Key {
++		if key.Status != tinkpb.KeyStatusType_ENABLED {
++			continue
++		}
++		var primitive interface{}
++		var err error
++		if km != nil && km.DoesSupport(key.KeyData.TypeUrl) {
++			primitive, err = km.Primitive(key.KeyData.Value)
++		} else {
++			primitive, err = registry.PrimitiveFromKeyData(key.KeyData)
++		}
++		if err != nil {
++			return nil, fmt.Errorf("registry.PrimitivesWithKeyManager: cannot get primitive from key: %s", err)
++		}
++		entry, err := primitiveSet.Add(primitive, key)
++		if err != nil {
++			return nil, fmt.Errorf("registry.PrimitivesWithKeyManager: cannot add primitive: %s", err)
++		}
++		if key.KeyId == ks.PrimaryKeyId {
++			primitiveSet.Primary = entry
++		}
++	}
++	return primitiveSet, nil
++}
++
++// hasSecrets checks if the keyset handle contains any key material considered secret.
++// Both symmetric keys and the private key of an assymmetric crypto system are considered secret keys.
++// Also returns true when encountering any errors.
++func (h *Handle) hasSecrets() bool {
++	for _, k := range h.ks.Key {
++		if k == nil || k.KeyData == nil {
++			continue
++		}
++		if k.KeyData.KeyMaterialType == tinkpb.KeyData_ASYMMETRIC_PRIVATE || k.KeyData.KeyMaterialType == tinkpb.KeyData_SYMMETRIC {
++			return true
++		}
++	}
++	return false
++}
++
+ func publicKeyData(privKeyData *tinkpb.KeyData) (*tinkpb.KeyData, error) {
+ 	if privKeyData.KeyMaterialType != tinkpb.KeyData_ASYMMETRIC_PRIVATE {
+-		return nil, fmt.Errorf("keyset_handle: keyset contains a non-private key")
++		return nil, fmt.Errorf("keyset.Handle: keyset contains a non-private key")
+ 	}
+-	km, err := GetKeyManager(privKeyData.TypeUrl)
++	km, err := registry.GetKeyManager(privKeyData.TypeUrl)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	pkm, ok := km.(PrivateKeyManager)
++	pkm, ok := km.(registry.PrivateKeyManager)
+ 	if !ok {
+-		return nil, fmt.Errorf("keyset_handle: %s does not belong to a PrivateKeyManager", privKeyData.TypeUrl)
++		return nil, fmt.Errorf("keyset.Handle: %s does not belong to a PrivateKeyManager", privKeyData.TypeUrl)
+ 	}
+ 	return pkm.PublicKeyData(privKeyData.Value)
+ }
+ 
+-func validateKeyData(keyData *tinkpb.KeyData) error {
+-	_, err := PrimitiveFromKeyData(keyData)
+-	return err
+-}
+-
+-func decrypt(encryptedKeyset *tinkpb.EncryptedKeyset, masterKey AEAD) (*tinkpb.Keyset, error) {
++func decrypt(encryptedKeyset *tinkpb.EncryptedKeyset, masterKey tink.AEAD) (*tinkpb.Keyset, error) {
+ 	if encryptedKeyset == nil || masterKey == nil {
+-		return nil, fmt.Errorf("keyset_handle: invalid encrypted keyset")
++		return nil, fmt.Errorf("keyset.Handle: invalid encrypted keyset")
+ 	}
+ 	decrypted, err := masterKey.Decrypt(encryptedKeyset.EncryptedKeyset, []byte{})
+ 	if err != nil {
+-		return nil, fmt.Errorf("keyset_handle: decryption failed: %s", err)
++		return nil, fmt.Errorf("keyset.Handle: decryption failed: %s", err)
+ 	}
+ 	keyset := new(tinkpb.Keyset)
+ 	if err := proto.Unmarshal(decrypted, keyset); err != nil {
+@@ -206,19 +242,19 @@ func decrypt(encryptedKeyset *tinkpb.EncryptedKeyset, masterKey AEAD) (*tinkpb.K
+ 	return keyset, nil
+ }
+ 
+-func encrypt(keyset *tinkpb.Keyset, masterKey AEAD) (*tinkpb.EncryptedKeyset, error) {
++func encrypt(keyset *tinkpb.Keyset, masterKey tink.AEAD) (*tinkpb.EncryptedKeyset, error) {
+ 	serializedKeyset, err := proto.Marshal(keyset)
+ 	if err != nil {
+ 		return nil, errInvalidKeyset
+ 	}
+ 	encrypted, err := masterKey.Encrypt(serializedKeyset, []byte{})
+ 	if err != nil {
+-		return nil, fmt.Errorf("keyset_handle: encrypted failed: %s", err)
++		return nil, fmt.Errorf("keyset.Handle: encrypted failed: %s", err)
+ 	}
+ 	// get keyset info
+ 	info, err := getKeysetInfo(keyset)
+ 	if err != nil {
+-		return nil, fmt.Errorf("keyset_handle: cannot get keyset info: %s", err)
++		return nil, fmt.Errorf("keyset.Handle: cannot get keyset info: %s", err)
+ 	}
+ 	encryptedKeyset := &tinkpb.EncryptedKeyset{
+ 		EncryptedKeyset: encrypted,
+@@ -230,7 +266,7 @@ func encrypt(keyset *tinkpb.Keyset, masterKey AEAD) (*tinkpb.EncryptedKeyset, er
+ // getKeysetInfo returns a KeysetInfo from a Keyset protobuf.
+ func getKeysetInfo(keyset *tinkpb.Keyset) (*tinkpb.KeysetInfo, error) {
+ 	if keyset == nil {
+-		return nil, errors.New("keyset_handle: keyset must be non nil")
++		return nil, errors.New("keyset.Handle: keyset must be non nil")
+ 	}
+ 	nKey := len(keyset.Key)
+ 	keyInfos := make([]*tinkpb.KeysetInfo_KeyInfo, nKey)
+@@ -250,7 +286,7 @@ func getKeysetInfo(keyset *tinkpb.Keyset) (*tinkpb.KeysetInfo, error) {
+ // getKeyInfo returns a KeyInfo from a Key protobuf.
+ func getKeyInfo(key *tinkpb.Keyset_Key) (*tinkpb.KeysetInfo_KeyInfo, error) {
+ 	if key == nil {
+-		return nil, errors.New("keyset_handle: keyset must be non nil")
++		return nil, errors.New("keyset.Handle: keyset must be non nil")
+ 	}
+ 	return &tinkpb.KeysetInfo_KeyInfo{
+ 		TypeUrl:          key.KeyData.TypeUrl,
+diff --git a/go/tink/keyset_handle_test.go b/go/keyset/handle_test.go
+similarity index 64%
+rename from go/tink/keyset_handle_test.go
+rename to go/keyset/handle_test.go
+index ed44a26697..9679b8c639 100644
+--- a/go/tink/keyset_handle_test.go
++++ b/go/keyset/handle_test.go
+@@ -12,25 +12,25 @@
+ //
+ ////////////////////////////////////////////////////////////////////////////////
+ 
+-package tink_test
++package keyset_test
+ 
+ import (
+ 	"strings"
+ 	"testing"
+ 
+ 	"github.com/golang/protobuf/proto"
++	"github.com/google/tink/go/keyset"
+ 	"github.com/google/tink/go/mac"
+ 	"github.com/google/tink/go/subtle/aead"
+-	"github.com/google/tink/go/testkeysethandle"
++	"github.com/google/tink/go/testkeyset"
+ 	"github.com/google/tink/go/testutil"
+-	"github.com/google/tink/go/tink"
+ 
+ 	tinkpb "github.com/google/tink/proto/tink_go_proto"
+ )
+ 
+-func TestNewKeysetHandle(t *testing.T) {
++func TestNewHandle(t *testing.T) {
+ 	kt := mac.HMACSHA256Tag128KeyTemplate()
+-	kh, err := tink.NewKeysetHandle(kt)
++	kh, err := keyset.NewHandle(kt)
+ 	if err != nil {
+ 		t.Errorf("unexpected error: %s", err)
+ 	}
+@@ -50,31 +50,20 @@ func TestNewKeysetHandle(t *testing.T) {
+ 	}
+ }
+ 
+-func TestNewKeysetHandleWithInvalidInput(t *testing.T) {
++func TestNewHandleWithInvalidInput(t *testing.T) {
+ 	// template unregistered TypeUrl
+ 	template := mac.HMACSHA256Tag128KeyTemplate()
+ 	template.TypeUrl = "some unknown TypeUrl"
+-	if _, err := tink.NewKeysetHandle(template); err == nil {
++	if _, err := keyset.NewHandle(template); err == nil {
+ 		t.Errorf("expect an error when TypeUrl is not registered")
+ 	}
+ 	// nil
+-	if _, err := tink.NewKeysetHandle(nil); err == nil {
++	if _, err := keyset.NewHandle(nil); err == nil {
+ 		t.Errorf("expect an error when template is nil")
+ 	}
+ }
+ 
+-func TestFromKeyset(t *testing.T) {
+-	keyData := testutil.NewKeyData("some type url", []byte{0}, tinkpb.KeyData_SYMMETRIC)
+-	key := testutil.NewKey(keyData, tinkpb.KeyStatusType_ENABLED, 1, tinkpb.OutputPrefixType_TINK)
+-	keyset := testutil.NewKeyset(1, []*tinkpb.Keyset_Key{key})
+-	h, _ := testkeysethandle.KeysetHandle(keyset)
+-	// test Keyset
+-	if h.Keyset() != keyset {
+-		t.Errorf("Keyset is incorrect")
+-	}
+-}
+-
+-func TestNewKeysetHandleFromReader(t *testing.T) {
++func TestRead(t *testing.T) {
+ 	masterKey, err := aead.NewAESGCM([]byte(strings.Repeat("A", 32)))
+ 	if err != nil {
+ 		t.Errorf("aead.NewAESGCM(): %v", err)
+@@ -83,36 +72,36 @@ func TestNewKeysetHandleFromReader(t *testing.T) {
+ 	// Create a keyset
+ 	keyData := testutil.NewKeyData("some type url", []byte{0}, tinkpb.KeyData_SYMMETRIC)
+ 	key := testutil.NewKey(keyData, tinkpb.KeyStatusType_ENABLED, 1, tinkpb.OutputPrefixType_TINK)
+-	keyset := testutil.NewKeyset(1, []*tinkpb.Keyset_Key{key})
+-	h, _ := testkeysethandle.KeysetHandle(keyset)
++	ks := testutil.NewKeyset(1, []*tinkpb.Keyset_Key{key})
++	h, _ := testkeyset.NewHandle(ks)
+ 
+-	memKeyset := &tink.MemKeyset{}
++	memKeyset := &keyset.MemReaderWriter{}
+ 	if err := h.Write(memKeyset, masterKey); err != nil {
+ 		t.Fatalf("handle.Write(): %v", err)
+ 	}
+-	h2, err := tink.NewKeysetHandleFromReader(memKeyset, masterKey)
++	h2, err := keyset.Read(memKeyset, masterKey)
+ 	if err != nil {
+-		t.Fatalf("NewKeysetHandleFromReader(): %v", err)
++		t.Fatalf("keyset.Read(): %v", err)
+ 	}
+ 	if !proto.Equal(h.Keyset(), h2.Keyset()) {
+ 		t.Fatalf("Decrypt failed: got %v, want %v", h2, h)
+ 	}
+ }
+ 
+-func TestNewKeysetHandleFromReaderWithNoSecrets(t *testing.T) {
++func TestReadWithNoSecrets(t *testing.T) {
+ 	// Create a keyset containing public key material
+ 	keyData := testutil.NewKeyData("some type url", []byte{0}, tinkpb.KeyData_ASYMMETRIC_PUBLIC)
+ 	key := testutil.NewKey(keyData, tinkpb.KeyStatusType_ENABLED, 1, tinkpb.OutputPrefixType_TINK)
+-	keyset := testutil.NewKeyset(1, []*tinkpb.Keyset_Key{key})
+-	h, _ := testkeysethandle.KeysetHandle(keyset)
++	ks := testutil.NewKeyset(1, []*tinkpb.Keyset_Key{key})
++	h, _ := testkeyset.NewHandle(ks)
+ 
+-	memKeyset := &tink.MemKeyset{}
++	memKeyset := &keyset.MemReaderWriter{}
+ 	if err := h.WriteWithNoSecrets(memKeyset); err != nil {
+ 		t.Fatalf("handle.WriteWithNoSecrets(): %v", err)
+ 	}
+-	h2, err := tink.NewKeysetHandleFromReaderWithNoSecrets(memKeyset)
++	h2, err := keyset.ReadWithNoSecrets(memKeyset)
+ 	if err != nil {
+-		t.Fatalf("NewKeysetHandleFromReaderWithNoSecrets(): %v", err)
++		t.Fatalf("keyset.ReadWithNoSecrets(): %v", err)
+ 	}
+ 	if !proto.Equal(h.Keyset(), h2.Keyset()) {
+ 		t.Fatalf("Decrypt failed: got %v, want %v", h2, h)
+@@ -123,14 +112,14 @@ func TestWithNoSecretsFunctionsFailWhenHandlingSecretKeyMaterial(t *testing.T) {
+ 	// Create a keyset containing secret key material (symmetric)
+ 	keyData := testutil.NewKeyData("some type url", []byte{0}, tinkpb.KeyData_SYMMETRIC)
+ 	key := testutil.NewKey(keyData, tinkpb.KeyStatusType_ENABLED, 1, tinkpb.OutputPrefixType_TINK)
+-	keyset := testutil.NewKeyset(1, []*tinkpb.Keyset_Key{key})
+-	h, _ := testkeysethandle.KeysetHandle(keyset)
++	ks := testutil.NewKeyset(1, []*tinkpb.Keyset_Key{key})
++	h, _ := testkeyset.NewHandle(ks)
+ 
+-	if err := h.WriteWithNoSecrets(&tink.MemKeyset{}); err == nil {
++	if err := h.WriteWithNoSecrets(&keyset.MemReaderWriter{}); err == nil {
+ 		t.Error("handle.WriteWithNoSecrets() should fail when exporting secret key material")
+ 	}
+ 
+-	if _, err := tink.NewKeysetHandleFromReaderWithNoSecrets(&tink.MemKeyset{Keyset: h.Keyset()}); err == nil {
+-		t.Error("NewKeysetHandleFromReaderWithNoSecrets should fail when importing secret key material")
++	if _, err := keyset.ReadWithNoSecrets(&keyset.MemReaderWriter{Keyset: h.Keyset()}); err == nil {
++		t.Error("keyset.ReadWithNoSecrets should fail when importing secret key material")
+ 	}
+ }
+diff --git a/go/tink/init.go b/go/keyset/init.go
+similarity index 84%
+rename from go/tink/init.go
+rename to go/keyset/init.go
+index 742c63360a..36f1c9b07e 100644
+--- a/go/tink/init.go
++++ b/go/keyset/init.go
+@@ -12,8 +12,8 @@
+ //
+ ////////////////////////////////////////////////////////////////////////////////
+ 
+-// Package tink defines interfaces for the crypto primitives that Tink supports.
+-package tink
++// Package keyset provides methods to read, write and validate keysets.
++package keyset
+ 
+ import (
+ 	"github.com/google/tink/go/internal"
+@@ -22,8 +22,8 @@ import (
+ 
+ // keysetHandle is used by package insecure and package testkeysethandle (via package internal)
+ // to create KeysetHandle from cleartext key material.
+-func keysetHandle(ks *tinkpb.Keyset) *KeysetHandle {
+-	return &KeysetHandle{ks}
++func keysetHandle(ks *tinkpb.Keyset) *Handle {
++	return &Handle{ks}
+ }
+ 
+ func init() {
+diff --git a/go/tink/keyset_manager.go b/go/keyset/manager.go
+similarity index 71%
+rename from go/tink/keyset_manager.go
+rename to go/keyset/manager.go
+index 13ac052066..bca390252a 100644
+--- a/go/tink/keyset_manager.go
++++ b/go/keyset/manager.go
+@@ -12,42 +12,43 @@
+ //
+ ////////////////////////////////////////////////////////////////////////////////
+ 
+-package tink
++package keyset
+ 
+ import (
+ 	"fmt"
+ 
++	"github.com/google/tink/go/registry"
+ 	"github.com/google/tink/go/subtle/random"
+ 	tinkpb "github.com/google/tink/proto/tink_go_proto"
+ )
+ 
+-// KeysetManager manages a Keyset-proto, with convenience methods that rotate, disable, enable or destroy keys.
++// Manager manages a Keyset-proto, with convenience methods that rotate, disable, enable or destroy keys.
+ // Note: It is not thread-safe.
+-type KeysetManager struct {
++type Manager struct {
+ 	ks *tinkpb.Keyset
+ }
+ 
+-// NewKeysetManager creates a new instance with an empty Keyset.
+-func NewKeysetManager() *KeysetManager {
+-	ret := new(KeysetManager)
++// NewManager creates a new instance with an empty Keyset.
++func NewManager() *Manager {
++	ret := new(Manager)
+ 	ret.ks = new(tinkpb.Keyset)
+ 	return ret
+ }
+ 
+-// FromKeysetHandle creates a new instance from the given KeysetHandle.
+-func FromKeysetHandle(kh *KeysetHandle) *KeysetManager {
+-	ret := new(KeysetManager)
++// NewManagerFromHandle creates a new instance from the given Handle.
++func NewManagerFromHandle(kh *Handle) *Manager {
++	ret := new(Manager)
+ 	ret.ks = kh.ks
+ 	return ret
+ }
+ 
+ // Rotate generates a fresh key using the given key template and
+ // sets the new key as the primary key.
+-func (km *KeysetManager) Rotate(kt *tinkpb.KeyTemplate) error {
++func (km *Manager) Rotate(kt *tinkpb.KeyTemplate) error {
+ 	if kt == nil {
+ 		return fmt.Errorf("keyset_manager: cannot rotate, need key template")
+ 	}
+-	keyData, err := NewKeyData(kt)
++	keyData, err := registry.NewKeyData(kt)
+ 	if err != nil {
+ 		return fmt.Errorf("keyset_manager: cannot create KeyData: %s", err)
+ 	}
+@@ -68,13 +69,13 @@ func (km *KeysetManager) Rotate(kt *tinkpb.KeyTemplate) error {
+ 	return nil
+ }
+ 
+-// KeysetHandle creates a new KeysetHandle for the managed keyset.
+-func (km *KeysetManager) KeysetHandle() (*KeysetHandle, error) {
+-	return &KeysetHandle{km.ks}, nil
++// Handle creates a new Handle for the managed keyset.
++func (km *Manager) Handle() (*Handle, error) {
++	return &Handle{km.ks}, nil
+ }
+ 
+ // newKeyID generates a key id that has not been used by any key in the keyset.
+-func (km *KeysetManager) newKeyID() uint32 {
++func (km *Manager) newKeyID() uint32 {
+ 	for {
+ 		ret := random.GetRandomUint32()
+ 		ok := true
+diff --git a/go/tink/keyset_manager_test.go b/go/keyset/manager_test.go
+similarity index 65%
+rename from go/tink/keyset_manager_test.go
+rename to go/keyset/manager_test.go
+index dc3a8972e7..d51bac1ff3 100644
+--- a/go/tink/keyset_manager_test.go
++++ b/go/keyset/manager_test.go
+@@ -12,69 +12,69 @@
+ //
+ ////////////////////////////////////////////////////////////////////////////////
+ 
+-package tink_test
++package keyset_test
+ 
+ import (
+ 	"testing"
+ 
++	"github.com/google/tink/go/keyset"
+ 	"github.com/google/tink/go/mac"
+-	"github.com/google/tink/go/tink"
+ 	tinkpb "github.com/google/tink/proto/tink_go_proto"
+ )
+ 
+ func TestKeysetManagerBasic(t *testing.T) {
+ 	// Create a keyset that contains a single HmacKey.
+-	ksm := tink.NewKeysetManager()
++	ksm := keyset.NewManager()
+ 	kt := mac.HMACSHA256Tag128KeyTemplate()
+ 	err := ksm.Rotate(kt)
+ 	if err != nil {
+ 		t.Errorf("cannot rotate when key template is available: %s", err)
+ 	}
+-	handle, err := ksm.KeysetHandle()
++	h, err := ksm.Handle()
+ 	if err != nil {
+ 		t.Errorf("cannot get keyset handle: %s", err)
+ 	}
+-	keyset := handle.Keyset()
+-	if len(keyset.Key) != 1 {
++	ks := h.Keyset()
++	if len(ks.Key) != 1 {
+ 		t.Errorf("expect the number of keys in the keyset is 1")
+ 	}
+-	if keyset.Key[0].KeyId != keyset.PrimaryKeyId ||
+-		keyset.Key[0].KeyData.TypeUrl != mac.HMACTypeURL ||
+-		keyset.Key[0].Status != tinkpb.KeyStatusType_ENABLED ||
+-		keyset.Key[0].OutputPrefixType != tinkpb.OutputPrefixType_TINK {
+-		t.Errorf("incorrect key information: %s", keyset.Key[0])
++	if ks.Key[0].KeyId != ks.PrimaryKeyId ||
++		ks.Key[0].KeyData.TypeUrl != mac.HMACTypeURL ||
++		ks.Key[0].Status != tinkpb.KeyStatusType_ENABLED ||
++		ks.Key[0].OutputPrefixType != tinkpb.OutputPrefixType_TINK {
++		t.Errorf("incorrect key information: %s", ks.Key[0])
+ 	}
+ }
+ 
+ func TestExistingKeyset(t *testing.T) {
+ 	// Create a keyset that contains a single HmacKey.
+-	ksm1 := tink.NewKeysetManager()
++	ksm1 := keyset.NewManager()
+ 	kt := mac.HMACSHA256Tag128KeyTemplate()
+ 	err := ksm1.Rotate(kt)
+ 	if err != nil {
+ 		t.Errorf("cannot rotate when key template is available: %s", err)
+ 	}
+ 
+-	handle1, err := ksm1.KeysetHandle()
++	h1, err := ksm1.Handle()
+ 	if err != nil {
+ 		t.Errorf("cannot get keyset handle: %s", err)
+ 	}
+-	keyset1 := handle1.Keyset()
++	ks1 := h1.Keyset()
+ 
+-	ksm2 := tink.FromKeysetHandle(handle1)
++	ksm2 := keyset.NewManagerFromHandle(h1)
+ 	ksm2.Rotate(kt)
+-	handle2, err := ksm2.KeysetHandle()
++	h2, err := ksm2.Handle()
+ 	if err != nil {
+ 		t.Errorf("cannot get keyset handle: %s", err)
+ 	}
+-	keyset2 := handle2.Keyset()
+-	if len(keyset2.Key) != 2 {
+-		t.Errorf("expect the number of keys to be 2, got %d", len(keyset2.Key))
++	ks2 := h2.Keyset()
++	if len(ks2.Key) != 2 {
++		t.Errorf("expect the number of keys to be 2, got %d", len(ks2.Key))
+ 	}
+-	if keyset1.Key[0].String() != keyset2.Key[0].String() {
++	if ks1.Key[0].String() != ks2.Key[0].String() {
+ 		t.Errorf("expect the first key in two keysets to be the same")
+ 	}
+-	if keyset2.Key[1].KeyId != keyset2.PrimaryKeyId {
++	if ks2.Key[1].KeyId != ks2.PrimaryKeyId {
+ 		t.Errorf("expect the second key to be primary")
+ 	}
+ }
+diff --git a/go/tink/mem_keyset.go b/go/keyset/mem_io.go
+similarity index 66%
+rename from go/tink/mem_keyset.go
+rename to go/keyset/mem_io.go
+index 4216effac4..18d6097f55 100644
+--- a/go/tink/mem_keyset.go
++++ b/go/keyset/mem_io.go
+@@ -12,39 +12,38 @@
+ //
+ ////////////////////////////////////////////////////////////////////////////////
+ 
+-package tink
++package keyset
+ 
+ import tinkpb "github.com/google/tink/proto/tink_go_proto"
+ 
+-// MemKeyset implements KeysetReader and KeysetWriter for
+-// *tinkpb.Keyset and *tinkpb.EncryptedKeyset
+-type MemKeyset struct {
++// MemReaderWriter implements keyset.Reader and keyset.Writer for *tinkpb.Keyset and *tinkpb.EncryptedKeyset.
++type MemReaderWriter struct {
+ 	Keyset          *tinkpb.Keyset
+ 	EncryptedKeyset *tinkpb.EncryptedKeyset
+ }
+ 
+-// MemKeyset implements KeysetReader
+-var _ KeysetReader = &MemKeyset{}
+-var _ KeysetWriter = &MemKeyset{}
++// MemReaderWriter implements Reader and Writer.
++var _ Reader = &MemReaderWriter{}
++var _ Writer = &MemReaderWriter{}
+ 
+ // Read returns *tinkpb.Keyset from memory.
+-func (m *MemKeyset) Read() (*tinkpb.Keyset, error) {
++func (m *MemReaderWriter) Read() (*tinkpb.Keyset, error) {
+ 	return m.Keyset, nil
+ }
+ 
+ // ReadEncrypted returns *tinkpb.EncryptedKeyset from memory.
+-func (m *MemKeyset) ReadEncrypted() (*tinkpb.EncryptedKeyset, error) {
++func (m *MemReaderWriter) ReadEncrypted() (*tinkpb.EncryptedKeyset, error) {
+ 	return m.EncryptedKeyset, nil
+ }
+ 
+ // Write keyset to memory.
+-func (m *MemKeyset) Write(keyset *tinkpb.Keyset) error {
++func (m *MemReaderWriter) Write(keyset *tinkpb.Keyset) error {
+ 	m.Keyset = keyset
+ 	return nil
+ }
+ 
+ // WriteEncrypted keyset to memory.
+-func (m *MemKeyset) WriteEncrypted(keyset *tinkpb.EncryptedKeyset) error {
++func (m *MemReaderWriter) WriteEncrypted(keyset *tinkpb.EncryptedKeyset) error {
+ 	m.EncryptedKeyset = keyset
+ 	return nil
+ }
+diff --git a/go/tink/keyset_reader.go b/go/keyset/reader.go
+similarity index 76%
+rename from go/tink/keyset_reader.go
+rename to go/keyset/reader.go
+index 86fa69a036..5bbc387c2f 100644
+--- a/go/tink/keyset_reader.go
++++ b/go/keyset/reader.go
+@@ -12,14 +12,14 @@
+ //
+ ////////////////////////////////////////////////////////////////////////////////
+ 
+-package tink
++package keyset
+ 
+ import tinkpb "github.com/google/tink/proto/tink_go_proto"
+ 
+-// KeysetReader knows how to read a Keyset or an EncryptedKeyset from some source.
+-// In order to turn a KeysetReader into a KeysetHandle for use, callers must use
+-// insecure.KeysetHandle or by tink.NewKeysetHandleFromReader (with encryption).
+-type KeysetReader interface {
++// Reader knows how to read a Keyset or an EncryptedKeyset from some source.
++// In order to turn a Reader into a KeysetHandle for use, callers must use
++// insecure.KeysetHandle or by keyset.Read (with encryption).
++type Reader interface {
+ 	// Read returns a (cleartext) Keyset object from the underlying source.
+ 	Read() (*tinkpb.Keyset, error)
+ 
+diff --git a/go/keyset/util.go b/go/keyset/util.go
+index 8296477ab8..4c5c8cff08 100644
+--- a/go/keyset/util.go
++++ b/go/keyset/util.go
+@@ -12,7 +12,6 @@
+ //
+ ////////////////////////////////////////////////////////////////////////////////
+ 
+-// Package keyset provides methods to read, write and validate keys and keysets.
+ package keyset
+ 
+ import (
+diff --git a/go/tink/keyset_writer.go b/go/keyset/writer.go
+similarity index 87%
+rename from go/tink/keyset_writer.go
+rename to go/keyset/writer.go
+index 5386fef127..129120fa0b 100644
+--- a/go/tink/keyset_writer.go
++++ b/go/keyset/writer.go
+@@ -12,12 +12,12 @@
+ //
+ ////////////////////////////////////////////////////////////////////////////////
+ 
+-package tink
++package keyset
+ 
+ import tinkpb "github.com/google/tink/proto/tink_go_proto"
+ 
+-// KeysetWriter knows how to write a Keyset or an EncryptedKeyset to some source.
+-type KeysetWriter interface {
++// Writer knows how to write a Keyset or an EncryptedKeyset to some source.
++type Writer interface {
+ 	// Write keyset to some storage system.
+ 	Write(Keyset *tinkpb.Keyset) error
+ 
+diff --git a/go/mac/BUILD.bazel b/go/mac/BUILD.bazel
+index d74359dd21..a8e48b1e7f 100644
+--- a/go/mac/BUILD.bazel
++++ b/go/mac/BUILD.bazel
+@@ -18,6 +18,7 @@ go_library(
+         "//go/format:go_default_library",
+         "//go/keyset:go_default_library",
+         "//go/primitiveset:go_default_library",
++        "//go/registry:go_default_library",
+         "//go/subtle/mac:go_default_library",
+         "//go/subtle/random:go_default_library",
+         "//go/tink:go_default_library",
+@@ -39,10 +40,11 @@ go_test(
+     embed = [":go_default_library"],
+     deps = [
+         "//go/format:go_default_library",
+-        "//go/testkeysethandle:go_default_library",
++        "//go/registry:go_default_library",
+         "//go/subtle:go_default_library",
+         "//go/subtle/mac:go_default_library",
+         "//go/subtle/random:go_default_library",
++        "//go/testkeyset:go_default_library",
+         "//go/testutil:go_default_library",
+         "//go/tink:go_default_library",
+         "//proto:common_go_proto",
+diff --git a/go/mac/hmac_key_manager.go b/go/mac/hmac_key_manager.go
+index 843ccfc262..bd4ff0ff2d 100644
+--- a/go/mac/hmac_key_manager.go
++++ b/go/mac/hmac_key_manager.go
+@@ -19,10 +19,10 @@ import (
+ 	"fmt"
+ 
+ 	"github.com/golang/protobuf/proto"
++	"github.com/google/tink/go/keyset"
++	"github.com/google/tink/go/registry"
+ 	"github.com/google/tink/go/subtle/mac"
+ 	"github.com/google/tink/go/subtle/random"
+-	"github.com/google/tink/go/tink"
+-	"github.com/google/tink/go/keyset"
+ 	commonpb "github.com/google/tink/proto/common_go_proto"
+ 	hmacpb "github.com/google/tink/proto/hmac_go_proto"
+ 	tinkpb "github.com/google/tink/proto/tink_go_proto"
+@@ -43,7 +43,7 @@ var errInvalidHMACKeyFormat = errors.New("hmac_key_manager: invalid key format")
+ type hmacKeyManager struct{}
+ 
+ // Assert that hmacKeyManager implements the KeyManager interface.
+-var _ tink.KeyManager = (*hmacKeyManager)(nil)
++var _ registry.KeyManager = (*hmacKeyManager)(nil)
+ 
+ // newHMACKeyManager returns a new hmacKeyManager.
+ func newHMACKeyManager() *hmacKeyManager {
+diff --git a/go/mac/hmac_key_manager_test.go b/go/mac/hmac_key_manager_test.go
+index cca76f3d80..593d4be331 100644
+--- a/go/mac/hmac_key_manager_test.go
++++ b/go/mac/hmac_key_manager_test.go
+@@ -22,18 +22,18 @@ import (
+ 
+ 	"github.com/golang/protobuf/proto"
+ 	"github.com/google/tink/go/mac"
++	"github.com/google/tink/go/registry"
+ 	subtleMac "github.com/google/tink/go/subtle/mac"
+ 	"github.com/google/tink/go/subtle/random"
+ 	"github.com/google/tink/go/subtle"
+ 	"github.com/google/tink/go/testutil"
+-	"github.com/google/tink/go/tink"
+ 	commonpb "github.com/google/tink/proto/common_go_proto"
+ 	hmacpb "github.com/google/tink/proto/hmac_go_proto"
+ 	tinkpb "github.com/google/tink/proto/tink_go_proto"
+ )
+ 
+ func TestGetPrimitiveBasic(t *testing.T) {
+-	km, err := tink.GetKeyManager(mac.HMACTypeURL)
++	km, err := registry.GetKeyManager(mac.HMACTypeURL)
+ 	if err != nil {
+ 		t.Errorf("HMAC key manager not found: %s", err)
+ 	}
+@@ -51,7 +51,7 @@ func TestGetPrimitiveBasic(t *testing.T) {
+ }
+ 
+ func TestGetPrimitiveWithInvalidInput(t *testing.T) {
+-	km, err := tink.GetKeyManager(mac.HMACTypeURL)
++	km, err := registry.GetKeyManager(mac.HMACTypeURL)
+ 	if err != nil {
+ 		t.Errorf("cannot obtain HMAC key manager: %s", err)
+ 	}
+@@ -73,7 +73,7 @@ func TestGetPrimitiveWithInvalidInput(t *testing.T) {
+ }
+ 
+ func TestNewKeyMultipleTimes(t *testing.T) {
+-	km, err := tink.GetKeyManager(mac.HMACTypeURL)
++	km, err := registry.GetKeyManager(mac.HMACTypeURL)
+ 	if err != nil {
+ 		t.Errorf("cannot obtain HMAC key manager: %s", err)
+ 	}
+@@ -95,7 +95,7 @@ func TestNewKeyMultipleTimes(t *testing.T) {
+ }
+ 
+ func TestNewKeyBasic(t *testing.T) {
+-	km, err := tink.GetKeyManager(mac.HMACTypeURL)
++	km, err := registry.GetKeyManager(mac.HMACTypeURL)
+ 	if err != nil {
+ 		t.Errorf("cannot obtain HMAC key manager: %s", err)
+ 	}
+@@ -113,7 +113,7 @@ func TestNewKeyBasic(t *testing.T) {
+ }
+ 
+ func TestNewKeyWithInvalidInput(t *testing.T) {
+-	km, err := tink.GetKeyManager(mac.HMACTypeURL)
++	km, err := registry.GetKeyManager(mac.HMACTypeURL)
+ 	if err != nil {
+ 		t.Errorf("cannot obtain HMAC key manager: %s", err)
+ 	}
+@@ -138,7 +138,7 @@ func TestNewKeyWithInvalidInput(t *testing.T) {
+ }
+ 
+ func TestNewKeyDataBasic(t *testing.T) {
+-	km, err := tink.GetKeyManager(mac.HMACTypeURL)
++	km, err := registry.GetKeyManager(mac.HMACTypeURL)
+ 	if err != nil {
+ 		t.Errorf("cannot obtain HMAC key manager: %s", err)
+ 	}
+@@ -166,7 +166,7 @@ func TestNewKeyDataBasic(t *testing.T) {
+ }
+ 
+ func TestNewKeyDataWithInvalidInput(t *testing.T) {
+-	km, err := tink.GetKeyManager(mac.HMACTypeURL)
++	km, err := registry.GetKeyManager(mac.HMACTypeURL)
+ 	if err != nil {
+ 		t.Errorf("HMAC key manager not found: %s", err)
+ 	}
+@@ -185,7 +185,7 @@ func TestNewKeyDataWithInvalidInput(t *testing.T) {
+ }
+ 
+ func TestDoesSupport(t *testing.T) {
+-	km, err := tink.GetKeyManager(mac.HMACTypeURL)
++	km, err := registry.GetKeyManager(mac.HMACTypeURL)
+ 	if err != nil {
+ 		t.Errorf("HMAC key manager not found: %s", err)
+ 	}
+@@ -198,7 +198,7 @@ func TestDoesSupport(t *testing.T) {
+ }
+ 
+ func TestTypeURL(t *testing.T) {
+-	km, err := tink.GetKeyManager(mac.HMACTypeURL)
++	km, err := registry.GetKeyManager(mac.HMACTypeURL)
+ 	if err != nil {
+ 		t.Errorf("HMAC key manager not found: %s", err)
+ 	}
+diff --git a/go/mac/init.go b/go/mac/init.go
+index 1a0d73cba4..d6a5487394 100644
+--- a/go/mac/init.go
++++ b/go/mac/init.go
+@@ -18,11 +18,11 @@ package mac
+ import (
+ 	"fmt"
+ 
+-	"github.com/google/tink/go/tink"
++	"github.com/google/tink/go/registry"
+ )
+ 
+ func init() {
+-	if err := tink.RegisterKeyManager(newHMACKeyManager()); err != nil {
++	if err := registry.RegisterKeyManager(newHMACKeyManager()); err != nil {
+ 		panic(fmt.Sprintf("mac.init() failed: %v", err))
+ 	}
+ }
+diff --git a/go/mac/init_test.go b/go/mac/init_test.go
+index 66873f31ec..4a410b0706 100644
+--- a/go/mac/init_test.go
++++ b/go/mac/init_test.go
+@@ -18,11 +18,11 @@ import (
+ 	"testing"
+ 
+ 	"github.com/google/tink/go/mac"
+-	"github.com/google/tink/go/tink"
++	"github.com/google/tink/go/registry"
+ )
+ 
+ func TestMacInit(t *testing.T) {
+-	_, err := tink.GetKeyManager(mac.HMACTypeURL)
++	_, err := registry.GetKeyManager(mac.HMACTypeURL)
+ 	if err != nil {
+ 		t.Errorf("unexpected error: %s", err)
+ 	}
+diff --git a/go/mac/mac_factory.go b/go/mac/mac_factory.go
+index d92fcb3475..560b0243b6 100644
+--- a/go/mac/mac_factory.go
++++ b/go/mac/mac_factory.go
+@@ -18,18 +18,20 @@ import (
+ 	"fmt"
+ 
+ 	"github.com/google/tink/go/format"
++	"github.com/google/tink/go/keyset"
+ 	"github.com/google/tink/go/primitiveset"
++	"github.com/google/tink/go/registry"
+ 	"github.com/google/tink/go/tink"
+ )
+ 
+ // New creates a MAC primitive from the given keyset handle.
+-func New(kh *tink.KeysetHandle) (tink.MAC, error) {
+-	return NewWithKeyManager(kh, nil /*keyManager*/)
++func New(h *keyset.Handle) (tink.MAC, error) {
++	return NewWithKeyManager(h, nil /*keyManager*/)
+ }
+ 
+ // NewWithKeyManager creates a MAC primitive from the given keyset handle and a custom key manager.
+-func NewWithKeyManager(kh *tink.KeysetHandle, km tink.KeyManager) (tink.MAC, error) {
+-	ps, err := tink.PrimitivesWithKeyManager(kh, km)
++func NewWithKeyManager(h *keyset.Handle, km registry.KeyManager) (tink.MAC, error) {
++	ps, err := h.PrimitivesWithKeyManager(km)
+ 	if err != nil {
+ 		return nil, fmt.Errorf("mac_factory: cannot obtain primitive set: %s", err)
+ 	}
+diff --git a/go/mac/mac_factory_test.go b/go/mac/mac_factory_test.go
+index e0f67758d2..243dc97712 100644
+--- a/go/mac/mac_factory_test.go
++++ b/go/mac/mac_factory_test.go
+@@ -21,7 +21,7 @@ import (
+ 
+ 	"github.com/google/tink/go/format"
+ 	"github.com/google/tink/go/mac"
+-	"github.com/google/tink/go/testkeysethandle"
++	"github.com/google/tink/go/testkeyset"
+ 	"github.com/google/tink/go/testutil"
+ 	"github.com/google/tink/go/tink"
+ 
+@@ -35,9 +35,9 @@ func TestFactoryMultipleKeys(t *testing.T) {
+ 	if primaryKey.OutputPrefixType != tinkpb.OutputPrefixType_TINK {
+ 		t.Errorf("expect a tink key")
+ 	}
+-	keysetHandle, err := testkeysethandle.KeysetHandle(keyset)
++	keysetHandle, err := testkeyset.NewHandle(keyset)
+ 	if err != nil {
+-		t.Errorf("testkeysethandle.KeysetHandle failed: %s", err)
++		t.Errorf("testkeyset.NewHandle failed: %s", err)
+ 	}
+ 
+ 	p, err := mac.New(keysetHandle)
+@@ -59,9 +59,9 @@ func TestFactoryMultipleKeys(t *testing.T) {
+ 		t.Errorf("expect a raw key")
+ 	}
+ 	keyset2 := testutil.NewKeyset(rawKey.KeyId, []*tinkpb.Keyset_Key{rawKey})
+-	keysetHandle2, err := testkeysethandle.KeysetHandle(keyset2)
++	keysetHandle2, err := testkeyset.NewHandle(keyset2)
+ 	if err != nil {
+-		t.Errorf("testkeysethandle.KeysetHandle failed: %s", err)
++		t.Errorf("testkeyset.NewHandle failed: %s", err)
+ 	}
+ 
+ 	p2, err := mac.New(keysetHandle2)
+@@ -76,9 +76,9 @@ func TestFactoryMultipleKeys(t *testing.T) {
+ 	keyset2 = testutil.NewTestHMACKeyset(tagSize, tinkpb.OutputPrefixType_TINK)
+ 	primaryKey = keyset2.Key[0]
+ 	expectedPrefix, _ = format.OutputPrefix(primaryKey)
+-	keysetHandle2, err = testkeysethandle.KeysetHandle(keyset2)
++	keysetHandle2, err = testkeyset.NewHandle(keyset2)
+ 	if err != nil {
+-		t.Errorf("testkeysethandle.KeysetHandle failed: %s", err)
++		t.Errorf("testkeyset.NewHandle failed: %s", err)
+ 	}
+ 
+ 	p2, err = mac.New(keysetHandle2)
+@@ -98,9 +98,9 @@ func TestFactoryRawKey(t *testing.T) {
+ 	if primaryKey.OutputPrefixType != tinkpb.OutputPrefixType_RAW {
+ 		t.Errorf("expect a raw key")
+ 	}
+-	keysetHandle, err := testkeysethandle.KeysetHandle(keyset)
++	keysetHandle, err := testkeyset.NewHandle(keyset)
+ 	if err != nil {
+-		t.Errorf("testkeysethandle.KeysetHandle failed: %s", err)
++		t.Errorf("testkeyset.NewHandle failed: %s", err)
+ 	}
+ 	p, err := mac.New(keysetHandle)
+ 	if err != nil {
+diff --git a/go/registry/BUILD.bazel b/go/registry/BUILD.bazel
+new file mode 100644
+index 0000000000..8241efcaa9
+--- /dev/null
++++ b/go/registry/BUILD.bazel
+@@ -0,0 +1,39 @@
++package(default_visibility = ["//tools/build_defs:internal_pkg"])  # keep
++
++licenses(["notice"])  # Apache 2.0 # keep
++
++load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
++
++go_library(
++    name = "go_default_library",
++    srcs = [
++        "key_manager.go",
++        "kms_client.go",
++        "private_key_manager.go",
++        "registry.go",
++    ],
++    importpath = "github.com/google/tink/go/registry",
++    deps = [
++        "//go/tink:go_default_library",
++        "//proto:tink_go_proto",
++        "@com_github_golang_protobuf//proto:go_default_library",
++    ],
++)
++
++go_test(
++    name = "tink_test",
++    size = "small",
++    srcs = ["registry_test.go"],
++    deps = [
++        "//go/aead:go_default_library",
++        "//go/mac:go_default_library",
++        "//go/registry:go_default_library",
++        "//go/subtle/mac:go_default_library",
++        "//go/testutil:go_default_library",
++        "//proto:aes_gcm_go_proto",
++        "//proto:common_go_proto",
++        "//proto:hmac_go_proto",
++        "//proto:tink_go_proto",
++        "@com_github_golang_protobuf//proto:go_default_library",
++    ],
++)
+diff --git a/go/tink/key_manager.go b/go/registry/key_manager.go
+similarity index 99%
+rename from go/tink/key_manager.go
+rename to go/registry/key_manager.go
+index 691f06d3a9..1b74aab97c 100644
+--- a/go/tink/key_manager.go
++++ b/go/registry/key_manager.go
+@@ -12,7 +12,7 @@
+ //
+ ////////////////////////////////////////////////////////////////////////////////
+ 
+-package tink
++package registry
+ 
+ import (
+ 	"github.com/golang/protobuf/proto"
+diff --git a/go/tink/kms_client.go b/go/registry/kms_client.go
+similarity index 92%
+rename from go/tink/kms_client.go
+rename to go/registry/kms_client.go
+index 2800539300..28e8a7eae3 100644
+--- a/go/tink/kms_client.go
++++ b/go/registry/kms_client.go
+@@ -12,7 +12,9 @@
+ //
+ ////////////////////////////////////////////////////////////////////////////////
+ 
+-package tink
++package registry
++
++import "github.com/google/tink/go/tink"
+ 
+ // KMSClient knows how to produce primitives backed by keys stored in remote
+ // KMS services.
+@@ -28,5 +30,5 @@ type KMSClient interface {
+ 	LoadDefaultCredentials() (interface{}, error)
+ 
+ 	// GetAEAD  gets an Aead backend by keyURI.
+-	GetAead(keyURI string) (AEAD, error)
++	GetAead(keyURI string) (tink.AEAD, error)
+ }
+diff --git a/go/tink/private_key_manager.go b/go/registry/private_key_manager.go
+similarity index 98%
+rename from go/tink/private_key_manager.go
+rename to go/registry/private_key_manager.go
+index ab579b0781..13abffdb2f 100644
+--- a/go/tink/private_key_manager.go
++++ b/go/registry/private_key_manager.go
+@@ -12,7 +12,7 @@
+ //
+ ////////////////////////////////////////////////////////////////////////////////
+ 
+-package tink
++package registry
+ 
+ import (
+ 	tinkpb "github.com/google/tink/proto/tink_go_proto"
+diff --git a/go/tink/registry.go b/go/registry/registry.go
+similarity index 53%
+rename from go/tink/registry.go
+rename to go/registry/registry.go
+index f03070ff0e..624095f5bc 100644
+--- a/go/tink/registry.go
++++ b/go/registry/registry.go
+@@ -12,15 +12,27 @@
+ //
+ ////////////////////////////////////////////////////////////////////////////////
+ 
+-package tink
++// Package registry is essentially a big container (map) that for each supported key type holds
++// a corresponding KeyManager object, which "understands" the key type (i.e. the KeyManager
++// can instantiate the primitive corresponding to given key, or can generate new keys
++// of the supported key type).
++//
++// Registry is initialized at startup, and is later used to instantiate primitives for given keys
++// or keysets. Keeping KeyManagers for all primitives in a single Registry (rather than having a
++// separate KeyManager per primitive) enables modular construction of compound primitives from
++// "simple" ones, e.g., AES-CTR-HMAC AEAD encryption uses IND-CPA encryption and a MAC.
++//
++// Note that regular users will usually not work directly with Registry, but rather
++// via primitive factories, which in the background query the Registry for specific
++// KeyManagers. Registry is public though, to enable configurations with custom
++// primitives and KeyManagers.
++package registry
+ 
+ import (
+ 	"fmt"
+ 	"sync"
+ 
+ 	"github.com/golang/protobuf/proto"
+-	"github.com/google/tink/go/keyset"
+-	"github.com/google/tink/go/primitiveset"
+ 	tinkpb "github.com/google/tink/proto/tink_go_proto"
+ )
+ 
+@@ -38,7 +50,7 @@ func RegisterKeyManager(km KeyManager) error {
+ 	defer keyManagersMu.Unlock()
+ 	typeURL := km.TypeURL()
+ 	if _, existed := keyManagers[typeURL]; existed {
+-		return fmt.Errorf("tink.RegisterKeyManager: type %s already registered", typeURL)
++		return fmt.Errorf("registry.RegisterKeyManager: type %s already registered", typeURL)
+ 	}
+ 	keyManagers[typeURL] = km
+ 	return nil
+@@ -50,7 +62,7 @@ func GetKeyManager(typeURL string) (KeyManager, error) {
+ 	defer keyManagersMu.RUnlock()
+ 	km, existed := keyManagers[typeURL]
+ 	if !existed {
+-		return nil, fmt.Errorf("tink.GetKeyManager: unsupported key type: %s", typeURL)
++		return nil, fmt.Errorf("registry.GetKeyManager: unsupported key type: %s", typeURL)
+ 	}
+ 	return km, nil
+ }
+@@ -58,7 +70,7 @@ func GetKeyManager(typeURL string) (KeyManager, error) {
+ // NewKeyData generates a new KeyData for the given key template.
+ func NewKeyData(kt *tinkpb.KeyTemplate) (*tinkpb.KeyData, error) {
+ 	if kt == nil {
+-		return nil, fmt.Errorf("registry: invalid key template")
++		return nil, fmt.Errorf("registry.NewKeyData: invalid key template")
+ 	}
+ 	km, err := GetKeyManager(kt.TypeUrl)
+ 	if err != nil {
+@@ -70,7 +82,7 @@ func NewKeyData(kt *tinkpb.KeyTemplate) (*tinkpb.KeyData, error) {
+ // NewKey generates a new key for the given key template.
+ func NewKey(kt *tinkpb.KeyTemplate) (proto.Message, error) {
+ 	if kt == nil {
+-		return nil, fmt.Errorf("registry: invalid key template")
++		return nil, fmt.Errorf("registry.NewKey: invalid key template")
+ 	}
+ 	km, err := GetKeyManager(kt.TypeUrl)
+ 	if err != nil {
+@@ -82,7 +94,7 @@ func NewKey(kt *tinkpb.KeyTemplate) (proto.Message, error) {
+ // PrimitiveFromKeyData creates a new primitive for the key given in the given KeyData.
+ func PrimitiveFromKeyData(kd *tinkpb.KeyData) (interface{}, error) {
+ 	if kd == nil {
+-		return nil, fmt.Errorf("registry: invalid key data")
++		return nil, fmt.Errorf("registry.PrimitiveFromKeyData: invalid key data")
+ 	}
+ 	return Primitive(kd.TypeUrl, kd.Value)
+ }
+@@ -91,7 +103,7 @@ func PrimitiveFromKeyData(kd *tinkpb.KeyData) (interface{}, error) {
+ // identified by the given typeURL.
+ func Primitive(typeURL string, sk []byte) (interface{}, error) {
+ 	if len(sk) == 0 {
+-		return nil, fmt.Errorf("registry: invalid serialized key")
++		return nil, fmt.Errorf("registry.Primitive: invalid serialized key")
+ 	}
+ 	km, err := GetKeyManager(typeURL)
+ 	if err != nil {
+@@ -100,62 +112,6 @@ func Primitive(typeURL string, sk []byte) (interface{}, error) {
+ 	return km.Primitive(sk)
+ }
+ 
+-// Primitives creates a set of primitives corresponding to the keys with
+-// status=ENABLED in the keyset of the given keyset handle, assuming all the
+-// corresponding key managers are present (keys with status!=ENABLED are skipped).
+-//
+-// The returned set is usually later "wrapped" into a class that implements
+-// the corresponding Primitive-interface.
+-func Primitives(kh *KeysetHandle) (*primitiveset.PrimitiveSet, error) {
+-	return PrimitivesWithKeyManager(kh, nil)
+-}
+-
+-// PrimitivesWithKeyManager creates a set of primitives corresponding to
+-// the keys with status=ENABLED in the keyset of the given keysetHandle, using
+-// the given key manager (instead of registered key managers) for keys supported
+-// by it.  Keys not supported by the key manager are handled by matching registered
+-// key managers (if present), and keys with status!=ENABLED are skipped.
+-//
+-// This enables custom treatment of keys, for example providing extra context
+-// (e.g. credentials for accessing keys managed by a KMS), or gathering custom
+-// monitoring/profiling information.
+-//
+-// The returned set is usually later "wrapped" into a class that implements
+-// the corresponding Primitive-interface.
+-func PrimitivesWithKeyManager(kh *KeysetHandle, km KeyManager) (*primitiveset.PrimitiveSet, error) {
+-	if kh == nil {
+-		return nil, fmt.Errorf("registry: invalid keyset handle")
+-	}
+-	ks := kh.Keyset()
+-	if err := keyset.Validate(ks); err != nil {
+-		return nil, fmt.Errorf("registry: invalid keyset: %s", err)
+-	}
+-	primitiveSet := primitiveset.New()
+-	for _, key := range ks.Key {
+-		if key.Status != tinkpb.KeyStatusType_ENABLED {
+-			continue
+-		}
+-		var primitive interface{}
+-		var err error
+-		if km != nil && km.DoesSupport(key.KeyData.TypeUrl) {
+-			primitive, err = km.Primitive(key.KeyData.Value)
+-		} else {
+-			primitive, err = PrimitiveFromKeyData(key.KeyData)
+-		}
+-		if err != nil {
+-			return nil, fmt.Errorf("registry: cannot get primitive from key: %s", err)
+-		}
+-		entry, err := primitiveSet.Add(primitive, key)
+-		if err != nil {
+-			return nil, fmt.Errorf("registry: cannot add primitive: %s", err)
+-		}
+-		if key.KeyId == ks.PrimaryKeyId {
+-			primitiveSet.Primary = entry
+-		}
+-	}
+-	return primitiveSet, nil
+-}
+-
+ // RegisterKMSClient is used to register a new KMS client
+ func RegisterKMSClient(k KMSClient) {
+ 	kmsClientsMu.Lock()
+diff --git a/go/tink/registry_test.go b/go/registry/registry_test.go
+similarity index 50%
+rename from go/tink/registry_test.go
+rename to go/registry/registry_test.go
+index 03be957cf8..1e0b113fdb 100644
+--- a/go/tink/registry_test.go
++++ b/go/registry/registry_test.go
+@@ -12,7 +12,7 @@
+ //
+ ////////////////////////////////////////////////////////////////////////////////
+ 
+-package tink_test
++package registry_test
+ 
+ import (
+ 	"testing"
+@@ -20,11 +20,9 @@ import (
+ 	"github.com/golang/protobuf/proto"
+ 	"github.com/google/tink/go/aead"
+ 	"github.com/google/tink/go/mac"
+-	subtleAEAD "github.com/google/tink/go/subtle/aead"
++	"github.com/google/tink/go/registry"
+ 	subtleMac "github.com/google/tink/go/subtle/mac"
+-	"github.com/google/tink/go/testkeysethandle"
+ 	"github.com/google/tink/go/testutil"
+-	"github.com/google/tink/go/tink"
+ 	gcmpb "github.com/google/tink/proto/aes_gcm_go_proto"
+ 	commonpb "github.com/google/tink/proto/common_go_proto"
+ 	hmacpb "github.com/google/tink/proto/hmac_go_proto"
+@@ -33,36 +31,36 @@ import (
+ 
+ func TestRegisterKeyManager(t *testing.T) {
+ 	// get HMACKeyManager
+-	_, err := tink.GetKeyManager(mac.HMACTypeURL)
++	_, err := registry.GetKeyManager(mac.HMACTypeURL)
+ 	if err != nil {
+ 		t.Errorf("unexpected error: %s", err)
+ 	}
+ 	// get AESGCMKeyManager
+-	_, err = tink.GetKeyManager(aead.AESGCMTypeURL)
++	_, err = registry.GetKeyManager(aead.AESGCMTypeURL)
+ 	if err != nil {
+ 		t.Errorf("unexpected error: %s", err)
+ 	}
+ 	// some random typeurl
+-	if _, err = tink.GetKeyManager("some url"); err == nil {
++	if _, err = registry.GetKeyManager("some url"); err == nil {
+ 		t.Errorf("expect an error when a type url doesn't exist in the registry")
+ 	}
+ }
+ 
+ func TestRegisterKeyManagerWithCollision(t *testing.T) {
+ 	// dummyKeyManager's typeURL is equal to that of AESGCM
+-	var dummyKeyManager tink.KeyManager = new(testutil.DummyAEADKeyManager)
++	var dummyKeyManager registry.KeyManager = new(testutil.DummyAEADKeyManager)
+ 	// This should fail because overwriting is disallowed.
+-	err := tink.RegisterKeyManager(dummyKeyManager)
++	err := registry.RegisterKeyManager(dummyKeyManager)
+ 	if err == nil {
+ 		t.Errorf("%s shouldn't be registered again", aead.AESGCMTypeURL)
+ 	}
+ 
+-	km, err := tink.GetKeyManager(aead.AESGCMTypeURL)
++	km, err := registry.GetKeyManager(aead.AESGCMTypeURL)
+ 	if err != nil {
+ 		t.Errorf("unexpected error: %s", err)
+ 	}
+ 	// This should fail because overwriting is disallowed, even with the same key manager.
+-	err = tink.RegisterKeyManager(km)
++	err = registry.RegisterKeyManager(km)
+ 	if err == nil {
+ 		t.Errorf("%s shouldn't be registered again", aead.AESGCMTypeURL)
+ 	}
+@@ -70,7 +68,7 @@ func TestRegisterKeyManagerWithCollision(t *testing.T) {
+ 
+ func TestNewKeyData(t *testing.T) {
+ 	// new Keydata from a Hmac KeyTemplate
+-	keyData, err := tink.NewKeyData(mac.HMACSHA256Tag128KeyTemplate())
++	keyData, err := registry.NewKeyData(mac.HMACSHA256Tag128KeyTemplate())
+ 	if err != nil {
+ 		t.Errorf("unexpected error: %s", err)
+ 	}
+@@ -82,12 +80,12 @@ func TestNewKeyData(t *testing.T) {
+ 		t.Errorf("unexpected error when unmarshal HmacKey: %s", err)
+ 	}
+ 	// nil
+-	if _, err := tink.NewKeyData(nil); err == nil {
++	if _, err := registry.NewKeyData(nil); err == nil {
+ 		t.Errorf("expect an error when key template is nil")
+ 	}
+ 	// unregistered type url
+ 	template := &tinkpb.KeyTemplate{TypeUrl: "some url", Value: []byte{0}}
+-	if _, err := tink.NewKeyData(template); err == nil {
++	if _, err := registry.NewKeyData(template); err == nil {
+ 		t.Errorf("expect an error when key template contains unregistered typeURL")
+ 	}
+ }
+@@ -95,7 +93,7 @@ func TestNewKeyData(t *testing.T) {
+ func TestNewKey(t *testing.T) {
+ 	// aead template
+ 	aesGcmTemplate := aead.AES128GCMKeyTemplate()
+-	key, err := tink.NewKey(aesGcmTemplate)
++	key, err := registry.NewKey(aesGcmTemplate)
+ 	if err != nil {
+ 		t.Errorf("unexpected error: %s", err)
+ 	}
+@@ -108,12 +106,12 @@ func TestNewKey(t *testing.T) {
+ 		t.Errorf("key doesn't match template")
+ 	}
+ 	//nil
+-	if _, err := tink.NewKey(nil); err == nil {
++	if _, err := registry.NewKey(nil); err == nil {
+ 		t.Errorf("expect an error when key template is nil")
+ 	}
+ 	// unregistered type url
+ 	template := &tinkpb.KeyTemplate{TypeUrl: "some url", Value: []byte{0}}
+-	if _, err := tink.NewKey(template); err == nil {
++	if _, err := registry.NewKey(template); err == nil {
+ 		t.Errorf("expect an error when key template is not registered")
+ 	}
+ }
+@@ -121,23 +119,23 @@ func TestNewKey(t *testing.T) {
+ func TestPrimitiveFromKeyData(t *testing.T) {
+ 	// hmac keydata
+ 	keyData := testutil.NewHMACKeyData(commonpb.HashType_SHA256, 16)
+-	p, err := tink.PrimitiveFromKeyData(keyData)
++	p, err := registry.PrimitiveFromKeyData(keyData)
+ 	if err != nil {
+ 		t.Errorf("unexpected error: %s", err)
+ 	}
+ 	var _ *subtleMac.HMAC = p.(*subtleMac.HMAC)
+ 	// unregistered url
+ 	keyData.TypeUrl = "some url"
+-	if _, err := tink.PrimitiveFromKeyData(keyData); err == nil {
++	if _, err := registry.PrimitiveFromKeyData(keyData); err == nil {
+ 		t.Errorf("expect an error when typeURL has not been registered")
+ 	}
+ 	// unmatched url
+ 	keyData.TypeUrl = aead.AESGCMTypeURL
+-	if _, err := tink.PrimitiveFromKeyData(keyData); err == nil {
++	if _, err := registry.PrimitiveFromKeyData(keyData); err == nil {
+ 		t.Errorf("expect an error when typeURL doesn't match key")
+ 	}
+ 	// nil
+-	if _, err := tink.PrimitiveFromKeyData(nil); err == nil {
++	if _, err := registry.PrimitiveFromKeyData(nil); err == nil {
+ 		t.Errorf("expect an error when key data is nil")
+ 	}
+ }
+@@ -146,106 +144,36 @@ func TestPrimitive(t *testing.T) {
+ 	// hmac key
+ 	key := testutil.NewHMACKey(commonpb.HashType_SHA256, 16)
+ 	serializedKey, _ := proto.Marshal(key)
+-	p, err := tink.Primitive(mac.HMACTypeURL, serializedKey)
++	p, err := registry.Primitive(mac.HMACTypeURL, serializedKey)
+ 	if err != nil {
+ 		t.Errorf("unexpected error: %s", err)
+ 	}
+ 	var _ *subtleMac.HMAC = p.(*subtleMac.HMAC)
+ 	// unregistered url
+-	if _, err := tink.Primitive("some url", serializedKey); err == nil {
++	if _, err := registry.Primitive("some url", serializedKey); err == nil {
+ 		t.Errorf("expect an error when typeURL has not been registered")
+ 	}
+ 	// unmatched url
+-	if _, err := tink.Primitive(aead.AESGCMTypeURL, serializedKey); err == nil {
++	if _, err := registry.Primitive(aead.AESGCMTypeURL, serializedKey); err == nil {
+ 		t.Errorf("expect an error when typeURL doesn't match key")
+ 	}
+ 	// void key
+-	if _, err := tink.Primitive(aead.AESGCMTypeURL, nil); err == nil {
++	if _, err := registry.Primitive(aead.AESGCMTypeURL, nil); err == nil {
+ 		t.Errorf("expect an error when key is nil")
+ 	}
+-	if _, err := tink.Primitive(aead.AESGCMTypeURL, []byte{}); err == nil {
++	if _, err := registry.Primitive(aead.AESGCMTypeURL, []byte{}); err == nil {
+ 		t.Errorf("expect an error when key is nil")
+ 	}
+-	if _, err := tink.Primitive(aead.AESGCMTypeURL, []byte{0}); err == nil {
++	if _, err := registry.Primitive(aead.AESGCMTypeURL, []byte{0}); err == nil {
+ 		t.Errorf("expect an error when key is nil")
+ 	}
+ }
+ 
+-func TestPrimitives(t *testing.T) {
+-	// valid input
+-	template1 := aead.AES128GCMKeyTemplate()
+-	template2 := aead.AES256GCMKeyTemplate()
+-	keyData1, _ := tink.NewKeyData(template1)
+-	keyData2, _ := tink.NewKeyData(template2)
+-	keyset := testutil.NewKeyset(2, []*tinkpb.Keyset_Key{
+-		testutil.NewKey(keyData1, tinkpb.KeyStatusType_ENABLED, 1, tinkpb.OutputPrefixType_TINK),
+-		testutil.NewKey(keyData2, tinkpb.KeyStatusType_ENABLED, 2, tinkpb.OutputPrefixType_TINK),
+-	})
+-	handle, _ := testkeysethandle.KeysetHandle(keyset)
+-	ps, err := tink.Primitives(handle)
+-	if err != nil {
+-		t.Errorf("unexpected error: %s", err)
+-	}
+-	var aesGcm *subtleAEAD.AESGCM = ps.Primary.Primitive.(*subtleAEAD.AESGCM)
+-	if len(aesGcm.Key) != 32 {
+-		t.Errorf("primitive doesn't match input keyset handle")
+-	}
+-	// custom manager
+-	customManager := new(testutil.DummyAEADKeyManager)
+-	ps, err = tink.PrimitivesWithKeyManager(handle, customManager)
+-	if err != nil {
+-		t.Errorf("unexpected error: %s", err)
+-	}
+-	var _ *testutil.DummyAEAD = ps.Primary.Primitive.(*testutil.DummyAEAD)
+-	// keysethandle is nil
+-	if _, err := tink.Primitives(nil); err == nil {
+-		t.Errorf("expect an error when keysethandle is nil")
+-	}
+-	// keyset is empty
+-	keyset = testutil.NewKeyset(1, []*tinkpb.Keyset_Key{})
+-	handle, _ = testkeysethandle.KeysetHandle(keyset)
+-	if _, err := tink.Primitives(handle); err == nil {
+-		t.Errorf("expect an error when keyset is empty")
+-	}
+-	keyset = testutil.NewKeyset(1, nil)
+-	handle, _ = testkeysethandle.KeysetHandle(keyset)
+-	if _, err := tink.Primitives(handle); err == nil {
+-		t.Errorf("expect an error when keyset is empty")
+-	}
+-	// no primary key
+-	keyset = testutil.NewKeyset(3, []*tinkpb.Keyset_Key{
+-		testutil.NewKey(keyData1, tinkpb.KeyStatusType_ENABLED, 1, tinkpb.OutputPrefixType_TINK),
+-		testutil.NewKey(keyData2, tinkpb.KeyStatusType_ENABLED, 2, tinkpb.OutputPrefixType_TINK),
+-	})
+-	handle, _ = testkeysethandle.KeysetHandle(keyset)
+-	if _, err := tink.Primitives(handle); err == nil {
+-		t.Errorf("expect an error when there is no primary key")
+-	}
+-	// there is primary key but it is disabled
+-	keyset = testutil.NewKeyset(1, []*tinkpb.Keyset_Key{
+-		testutil.NewKey(keyData1, tinkpb.KeyStatusType_DISABLED, 1, tinkpb.OutputPrefixType_TINK),
+-		testutil.NewKey(keyData2, tinkpb.KeyStatusType_ENABLED, 2, tinkpb.OutputPrefixType_TINK),
+-	})
+-	handle, _ = testkeysethandle.KeysetHandle(keyset)
+-	if _, err := tink.Primitives(handle); err == nil {
+-		t.Errorf("expect an error when primary key is disabled")
+-	}
+-	// multiple primary keys
+-	keyset = testutil.NewKeyset(1, []*tinkpb.Keyset_Key{
+-		testutil.NewKey(keyData1, tinkpb.KeyStatusType_ENABLED, 1, tinkpb.OutputPrefixType_TINK),
+-		testutil.NewKey(keyData2, tinkpb.KeyStatusType_ENABLED, 1, tinkpb.OutputPrefixType_TINK),
+-	})
+-	handle, _ = testkeysethandle.KeysetHandle(keyset)
+-	if _, err := tink.Primitives(handle); err == nil {
+-		t.Errorf("expect an error when there are multiple primary keys")
+-	}
+-}
+-
+ func TestRegisterKmsClient(t *testing.T) {
+ 	kms := &testutil.DummyKMSClient{}
+-	tink.RegisterKMSClient(kms)
++	registry.RegisterKMSClient(kms)
+ 
+-	_, err := tink.GetKMSClient("dummy")
++	_, err := registry.GetKMSClient("dummy")
+ 	if err != nil {
+ 		t.Errorf("error fetching dummy kms client: %s", err)
+ 	}
+diff --git a/go/signature/BUILD.bazel b/go/signature/BUILD.bazel
+index 0d2c2c0e3e..dcb2c361ab 100644
+--- a/go/signature/BUILD.bazel
++++ b/go/signature/BUILD.bazel
+@@ -23,6 +23,7 @@ go_library(
+         "//go/format:go_default_library",
+         "//go/keyset:go_default_library",
+         "//go/primitiveset:go_default_library",
++        "//go/registry:go_default_library",
+         "//go/subtle:go_default_library",
+         "//go/subtle/signature:go_default_library",
+         "//go/tink:go_default_library",
+@@ -49,9 +50,10 @@ go_test(
+     embed = [":go_default_library"],
+     deps = [
+         "//go/format:go_default_library",
+-        "//go/testkeysethandle:go_default_library",
++        "//go/registry:go_default_library",
+         "//go/subtle/random:go_default_library",
+         "//go/subtle/signature:go_default_library",
++        "//go/testkeyset:go_default_library",
+         "//go/testutil:go_default_library",
+         "//go/tink:go_default_library",
+         "//proto:common_go_proto",
+diff --git a/go/signature/ecdsa_signer_key_manager.go b/go/signature/ecdsa_signer_key_manager.go
+index 17452c5a2d..90b5caae94 100644
+--- a/go/signature/ecdsa_signer_key_manager.go
++++ b/go/signature/ecdsa_signer_key_manager.go
+@@ -21,10 +21,10 @@ import (
+ 	"fmt"
+ 
+ 	"github.com/golang/protobuf/proto"
++	"github.com/google/tink/go/keyset"
++	"github.com/google/tink/go/registry"
+ 	subtleSignature "github.com/google/tink/go/subtle/signature"
+ 	"github.com/google/tink/go/subtle"
+-	"github.com/google/tink/go/tink"
+-	"github.com/google/tink/go/keyset"
+ 	commonpb "github.com/google/tink/proto/common_go_proto"
+ 	ecdsapb "github.com/google/tink/proto/ecdsa_go_proto"
+ 	tinkpb "github.com/google/tink/proto/tink_go_proto"
+@@ -47,7 +47,7 @@ var errInvalidECDSASignKeyFormat = errors.New("ecdsa_signer_key_manager: invalid
+ type ecdsaSignerKeyManager struct{}
+ 
+ // Assert that ecdsaSignerKeyManager implements the PrivateKeyManager interface.
+-var _ tink.PrivateKeyManager = (*ecdsaSignerKeyManager)(nil)
++var _ registry.PrivateKeyManager = (*ecdsaSignerKeyManager)(nil)
+ 
+ // newECDSASignerKeyManager creates a new ecdsaSignerKeyManager.
+ func newECDSASignerKeyManager() *ecdsaSignerKeyManager {
+diff --git a/go/signature/ecdsa_signer_key_manager_test.go b/go/signature/ecdsa_signer_key_manager_test.go
+index 06b499fee2..82c7c07635 100644
+--- a/go/signature/ecdsa_signer_key_manager_test.go
++++ b/go/signature/ecdsa_signer_key_manager_test.go
+@@ -20,11 +20,11 @@ import (
+ 	"testing"
+ 
+ 	"github.com/golang/protobuf/proto"
++	"github.com/google/tink/go/registry"
+ 	"github.com/google/tink/go/signature"
+ 	"github.com/google/tink/go/subtle/random"
+ 	subtleSig "github.com/google/tink/go/subtle/signature"
+ 	"github.com/google/tink/go/testutil"
+-	"github.com/google/tink/go/tink"
+ 	commonpb "github.com/google/tink/proto/common_go_proto"
+ 	ecdsapb "github.com/google/tink/proto/ecdsa_go_proto"
+ 	tinkpb "github.com/google/tink/proto/tink_go_proto"
+@@ -37,7 +37,7 @@ type ecdsaParams struct {
+ 
+ func TestECDSASignerGetPrimitiveBasic(t *testing.T) {
+ 	testParams := genValidECDSAParams()
+-	km, err := tink.GetKeyManager(signature.ECDSASignerTypeURL)
++	km, err := registry.GetKeyManager(signature.ECDSASignerTypeURL)
+ 	if err != nil {
+ 		t.Errorf("cannot obtain ECDSASigner key manager: %s", err)
+ 	}
+@@ -54,7 +54,7 @@ func TestECDSASignerGetPrimitiveBasic(t *testing.T) {
+ func TestECDSASignGetPrimitiveWithInvalidInput(t *testing.T) {
+ 	// invalid params
+ 	testParams := genInvalidECDSAParams()
+-	km, err := tink.GetKeyManager(signature.ECDSASignerTypeURL)
++	km, err := registry.GetKeyManager(signature.ECDSASignerTypeURL)
+ 	if err != nil {
+ 		t.Errorf("cannot obtain ECDSASigner key manager: %s", err)
+ 	}
+@@ -83,7 +83,7 @@ func TestECDSASignGetPrimitiveWithInvalidInput(t *testing.T) {
+ 
+ func TestECDSASignNewKeyBasic(t *testing.T) {
+ 	testParams := genValidECDSAParams()
+-	km, err := tink.GetKeyManager(signature.ECDSASignerTypeURL)
++	km, err := registry.GetKeyManager(signature.ECDSASignerTypeURL)
+ 	if err != nil {
+ 		t.Errorf("cannot obtain ECDSASigner key manager: %s", err)
+ 	}
+@@ -103,7 +103,7 @@ func TestECDSASignNewKeyBasic(t *testing.T) {
+ }
+ 
+ func TestECDSASignNewKeyWithInvalidInput(t *testing.T) {
+-	km, err := tink.GetKeyManager(signature.ECDSASignerTypeURL)
++	km, err := registry.GetKeyManager(signature.ECDSASignerTypeURL)
+ 	if err != nil {
+ 		t.Errorf("cannot obtain ECDSASigner key manager: %s", err)
+ 	}
+@@ -137,7 +137,7 @@ func TestECDSASignNewKeyWithInvalidInput(t *testing.T) {
+ }
+ 
+ func TestECDSASignNewKeyMultipleTimes(t *testing.T) {
+-	km, err := tink.GetKeyManager(signature.ECDSASignerTypeURL)
++	km, err := registry.GetKeyManager(signature.ECDSASignerTypeURL)
+ 	if err != nil {
+ 		t.Errorf("cannot obtain ECDSASigner key manager: %s", err)
+ 	}
+@@ -165,7 +165,7 @@ func TestECDSASignNewKeyMultipleTimes(t *testing.T) {
+ }
+ 
+ func TestECDSASignNewKeyDataBasic(t *testing.T) {
+-	km, err := tink.GetKeyManager(signature.ECDSASignerTypeURL)
++	km, err := registry.GetKeyManager(signature.ECDSASignerTypeURL)
+ 	if err != nil {
+ 		t.Errorf("cannot obtain ECDSASigner key manager: %s", err)
+ 	}
+@@ -198,7 +198,7 @@ func TestECDSASignNewKeyDataBasic(t *testing.T) {
+ }
+ 
+ func TestECDSASignNewKeyDataWithInvalidInput(t *testing.T) {
+-	km, err := tink.GetKeyManager(signature.ECDSASignerTypeURL)
++	km, err := registry.GetKeyManager(signature.ECDSASignerTypeURL)
+ 	if err != nil {
+ 		t.Errorf("cannot obtain ECDSASigner key manager: %s", err)
+ 	}
+@@ -221,11 +221,11 @@ func TestECDSASignNewKeyDataWithInvalidInput(t *testing.T) {
+ 
+ func TestPublicKeyDataBasic(t *testing.T) {
+ 	testParams := genValidECDSAParams()
+-	km, err := tink.GetKeyManager(signature.ECDSASignerTypeURL)
++	km, err := registry.GetKeyManager(signature.ECDSASignerTypeURL)
+ 	if err != nil {
+ 		t.Errorf("cannot obtain ECDSASigner key manager: %s", err)
+ 	}
+-	pkm, ok := km.(tink.PrivateKeyManager)
++	pkm, ok := km.(registry.PrivateKeyManager)
+ 	if !ok {
+ 		t.Errorf("cannot obtain private key manager")
+ 	}
+@@ -251,11 +251,11 @@ func TestPublicKeyDataBasic(t *testing.T) {
+ }
+ 
+ func TestPublicKeyDataWithInvalidInput(t *testing.T) {
+-	km, err := tink.GetKeyManager(signature.ECDSASignerTypeURL)
++	km, err := registry.GetKeyManager(signature.ECDSASignerTypeURL)
+ 	if err != nil {
+ 		t.Errorf("cannot obtain ECDSASigner key manager: %s", err)
+ 	}
+-	pkm, ok := km.(tink.PrivateKeyManager)
++	pkm, ok := km.(registry.PrivateKeyManager)
+ 	if !ok {
+ 		t.Errorf("cannot obtain private key manager")
+ 	}
+diff --git a/go/signature/ecdsa_verifier_key_manager.go b/go/signature/ecdsa_verifier_key_manager.go
+index 908621a985..ff05ea162b 100644
+--- a/go/signature/ecdsa_verifier_key_manager.go
++++ b/go/signature/ecdsa_verifier_key_manager.go
+@@ -18,9 +18,9 @@ import (
+ 	"fmt"
+ 
+ 	"github.com/golang/protobuf/proto"
+-	subtleSignature "github.com/google/tink/go/subtle/signature"
+-	"github.com/google/tink/go/tink"
+ 	"github.com/google/tink/go/keyset"
++	"github.com/google/tink/go/registry"
++	subtleSignature "github.com/google/tink/go/subtle/signature"
+ 	ecdsapb "github.com/google/tink/proto/ecdsa_go_proto"
+ 	tinkpb "github.com/google/tink/proto/tink_go_proto"
+ )
+@@ -42,7 +42,7 @@ var errECDSAVerifierNotImplemented = fmt.Errorf("ecdsa_verifier_key_manager: not
+ type ecdsaVerifierKeyManager struct{}
+ 
+ // Assert that ecdsaVerifierKeyManager implements the KeyManager interface.
+-var _ tink.KeyManager = (*ecdsaVerifierKeyManager)(nil)
++var _ registry.KeyManager = (*ecdsaVerifierKeyManager)(nil)
+ 
+ // newECDSAVerifierKeyManager creates a new ecdsaVerifierKeyManager.
+ func newECDSAVerifierKeyManager() *ecdsaVerifierKeyManager {
+diff --git a/go/signature/ecdsa_verifier_key_manager_test.go b/go/signature/ecdsa_verifier_key_manager_test.go
+index d025a90dee..a37e2eb2d8 100644
+--- a/go/signature/ecdsa_verifier_key_manager_test.go
++++ b/go/signature/ecdsa_verifier_key_manager_test.go
+@@ -18,16 +18,16 @@ import (
+ 	"testing"
+ 
+ 	"github.com/golang/protobuf/proto"
++	"github.com/google/tink/go/registry"
+ 	"github.com/google/tink/go/signature"
+ 	subtleSig "github.com/google/tink/go/subtle/signature"
+ 	"github.com/google/tink/go/testutil"
+-	"github.com/google/tink/go/tink"
+ 	commonpb "github.com/google/tink/proto/common_go_proto"
+ )
+ 
+ func TestECDSAVerifyGetPrimitiveBasic(t *testing.T) {
+ 	testParams := genValidECDSAParams()
+-	km, err := tink.GetKeyManager(signature.ECDSAVerifierTypeURL)
++	km, err := registry.GetKeyManager(signature.ECDSAVerifierTypeURL)
+ 	if err != nil {
+ 		t.Errorf("cannot obtain ECDSAVerifier key manager: %s", err)
+ 	}
+@@ -43,7 +43,7 @@ func TestECDSAVerifyGetPrimitiveBasic(t *testing.T) {
+ 
+ func TestECDSAVerifyGetPrimitiveWithInvalidInput(t *testing.T) {
+ 	testParams := genInvalidECDSAParams()
+-	km, err := tink.GetKeyManager(signature.ECDSAVerifierTypeURL)
++	km, err := registry.GetKeyManager(signature.ECDSAVerifierTypeURL)
+ 	if err != nil {
+ 		t.Errorf("cannot obtain ECDSAVerifier key manager: %s", err)
+ 	}
+diff --git a/go/signature/ed25519_signer_key_manager.go b/go/signature/ed25519_signer_key_manager.go
+index 89835e2aa9..c922c5360f 100644
+--- a/go/signature/ed25519_signer_key_manager.go
++++ b/go/signature/ed25519_signer_key_manager.go
+@@ -22,9 +22,9 @@ import (
+ 	"golang.org/x/crypto/ed25519"
+ 
+ 	"github.com/golang/protobuf/proto"
+-	subtleSignature "github.com/google/tink/go/subtle/signature"
+-	"github.com/google/tink/go/tink"
+ 	"github.com/google/tink/go/keyset"
++	"github.com/google/tink/go/registry"
++	subtleSignature "github.com/google/tink/go/subtle/signature"
+ 	ed25519pb "github.com/google/tink/proto/ed25519_go_proto"
+ 	tinkpb "github.com/google/tink/proto/tink_go_proto"
+ )
+@@ -45,7 +45,7 @@ var errInvalidED25519SignKeyFormat = errors.New("ed25519_signer_key_manager: inv
+ type ed25519SignerKeyManager struct{}
+ 
+ // Assert that ed25519SignerKeyManager implements the PrivateKeyManager interface.
+-var _ tink.PrivateKeyManager = (*ed25519SignerKeyManager)(nil)
++var _ registry.PrivateKeyManager = (*ed25519SignerKeyManager)(nil)
+ 
+ // newED25519SignerKeyManager creates a new ed25519SignerKeyManager.
+ func newED25519SignerKeyManager() *ed25519SignerKeyManager {
+diff --git a/go/signature/ed25519_signer_key_manager_test.go b/go/signature/ed25519_signer_key_manager_test.go
+index 46169d7baa..c19b2fbedc 100644
+--- a/go/signature/ed25519_signer_key_manager_test.go
++++ b/go/signature/ed25519_signer_key_manager_test.go
+@@ -19,17 +19,17 @@ import (
+ 	"testing"
+ 
+ 	"github.com/golang/protobuf/proto"
++	"github.com/google/tink/go/registry"
+ 	"github.com/google/tink/go/signature"
+ 	"github.com/google/tink/go/subtle/random"
+ 	subtleSig "github.com/google/tink/go/subtle/signature"
+ 	"github.com/google/tink/go/testutil"
+-	"github.com/google/tink/go/tink"
+ 	ed25519pb "github.com/google/tink/proto/ed25519_go_proto"
+ 	tinkpb "github.com/google/tink/proto/tink_go_proto"
+ )
+ 
+ func TestED25519SignerGetPrimitiveBasic(t *testing.T) {
+-	km, err := tink.GetKeyManager(signature.ED25519SignerTypeURL)
++	km, err := registry.GetKeyManager(signature.ED25519SignerTypeURL)
+ 	if err != nil {
+ 		t.Errorf("cannot obtain ED25519Signer key manager: %s", err)
+ 	}
+@@ -41,7 +41,7 @@ func TestED25519SignerGetPrimitiveBasic(t *testing.T) {
+ 	}
+ 	var s *subtleSig.ED25519Signer = tmp.(*subtleSig.ED25519Signer)
+ 
+-	kmPub, err := tink.GetKeyManager(signature.ED25519VerifierTypeURL)
++	kmPub, err := registry.GetKeyManager(signature.ED25519VerifierTypeURL)
+ 	if err != nil {
+ 		t.Errorf("cannot obtain ED25519Signer key manager: %s", err)
+ 	}
+@@ -67,7 +67,7 @@ func TestED25519SignerGetPrimitiveBasic(t *testing.T) {
+ 
+ func TestED25519SignGetPrimitiveWithInvalidInput(t *testing.T) {
+ 	// invalid params
+-	km, err := tink.GetKeyManager(signature.ED25519SignerTypeURL)
++	km, err := registry.GetKeyManager(signature.ED25519SignerTypeURL)
+ 	if err != nil {
+ 		t.Errorf("cannot obtain ED25519Signer key manager: %s", err)
+ 	}
+@@ -89,7 +89,7 @@ func TestED25519SignGetPrimitiveWithInvalidInput(t *testing.T) {
+ }
+ 
+ func TestED25519SignNewKeyBasic(t *testing.T) {
+-	km, err := tink.GetKeyManager(signature.ED25519SignerTypeURL)
++	km, err := registry.GetKeyManager(signature.ED25519SignerTypeURL)
+ 	if err != nil {
+ 		t.Errorf("cannot obtain ED25519Signer key manager: %s", err)
+ 	}
+@@ -105,11 +105,11 @@ func TestED25519SignNewKeyBasic(t *testing.T) {
+ }
+ 
+ func TestED25519PublicKeyDataBasic(t *testing.T) {
+-	km, err := tink.GetKeyManager(signature.ED25519SignerTypeURL)
++	km, err := registry.GetKeyManager(signature.ED25519SignerTypeURL)
+ 	if err != nil {
+ 		t.Errorf("cannot obtain ED25519Signer key manager: %s", err)
+ 	}
+-	pkm, ok := km.(tink.PrivateKeyManager)
++	pkm, ok := km.(registry.PrivateKeyManager)
+ 	if !ok {
+ 		t.Errorf("cannot obtain private key manager")
+ 	}
+@@ -134,11 +134,11 @@ func TestED25519PublicKeyDataBasic(t *testing.T) {
+ }
+ 
+ func TestED25519PublicKeyDataWithInvalidInput(t *testing.T) {
+-	km, err := tink.GetKeyManager(signature.ED25519SignerTypeURL)
++	km, err := registry.GetKeyManager(signature.ED25519SignerTypeURL)
+ 	if err != nil {
+ 		t.Errorf("cannot obtain ED25519Signer key manager: %s", err)
+ 	}
+-	pkm, ok := km.(tink.PrivateKeyManager)
++	pkm, ok := km.(registry.PrivateKeyManager)
+ 	if !ok {
+ 		t.Errorf("cannot obtain private key manager")
+ 	}
+diff --git a/go/signature/ed25519_verifier_key_manager.go b/go/signature/ed25519_verifier_key_manager.go
+index d8cc1f82f7..88bb85948b 100644
+--- a/go/signature/ed25519_verifier_key_manager.go
++++ b/go/signature/ed25519_verifier_key_manager.go
+@@ -19,9 +19,9 @@ import (
+ 
+ 	"github.com/golang/protobuf/proto"
+ 	"golang.org/x/crypto/ed25519"
+-	subtleSignature "github.com/google/tink/go/subtle/signature"
+-	"github.com/google/tink/go/tink"
+ 	"github.com/google/tink/go/keyset"
++	"github.com/google/tink/go/registry"
++	subtleSignature "github.com/google/tink/go/subtle/signature"
+ 	ed25519pb "github.com/google/tink/proto/ed25519_go_proto"
+ 	tinkpb "github.com/google/tink/proto/tink_go_proto"
+ )
+@@ -43,7 +43,7 @@ var errED25519VerifierNotImplemented = fmt.Errorf("ed25519_verifier_key_manager:
+ type ed25519VerifierKeyManager struct{}
+ 
+ // Assert that ed25519VerifierKeyManager implements the KeyManager interface.
+-var _ tink.KeyManager = (*ed25519VerifierKeyManager)(nil)
++var _ registry.KeyManager = (*ed25519VerifierKeyManager)(nil)
+ 
+ // newED25519VerifierKeyManager creates a new ed25519VerifierKeyManager.
+ func newED25519VerifierKeyManager() *ed25519VerifierKeyManager {
+diff --git a/go/signature/ed25519_verifier_key_manager_test.go b/go/signature/ed25519_verifier_key_manager_test.go
+index 8e4f002729..8c0440eca4 100644
+--- a/go/signature/ed25519_verifier_key_manager_test.go
++++ b/go/signature/ed25519_verifier_key_manager_test.go
+@@ -18,14 +18,14 @@ import (
+ 	"testing"
+ 
+ 	"github.com/golang/protobuf/proto"
++	"github.com/google/tink/go/registry"
+ 	"github.com/google/tink/go/signature"
+ 	subtleSig "github.com/google/tink/go/subtle/signature"
+ 	"github.com/google/tink/go/testutil"
+-	"github.com/google/tink/go/tink"
+ )
+ 
+ func TestED25519VerifyGetPrimitiveBasic(t *testing.T) {
+-	km, err := tink.GetKeyManager(signature.ED25519VerifierTypeURL)
++	km, err := registry.GetKeyManager(signature.ED25519VerifierTypeURL)
+ 	if err != nil {
+ 		t.Errorf("cannot obtain ED25519Verifier key manager: %s", err)
+ 	}
+@@ -38,7 +38,7 @@ func TestED25519VerifyGetPrimitiveBasic(t *testing.T) {
+ }
+ 
+ func TestED25519VerifyGetPrimitiveWithInvalidInput(t *testing.T) {
+-	km, err := tink.GetKeyManager(signature.ED25519VerifierTypeURL)
++	km, err := registry.GetKeyManager(signature.ED25519VerifierTypeURL)
+ 	if err != nil {
+ 		t.Errorf("cannot obtain ED25519Verifier key manager: %s", err)
+ 	}
+diff --git a/go/signature/init.go b/go/signature/init.go
+index 976680aedb..47059ac346 100644
+--- a/go/signature/init.go
++++ b/go/signature/init.go
+@@ -18,23 +18,23 @@ package signature
+ import (
+ 	"fmt"
+ 
+-	"github.com/google/tink/go/tink"
++	"github.com/google/tink/go/registry"
+ )
+ 
+ func init() {
+ 	// ECDSA
+-	if err := tink.RegisterKeyManager(newECDSASignerKeyManager()); err != nil {
++	if err := registry.RegisterKeyManager(newECDSASignerKeyManager()); err != nil {
+ 		panic(fmt.Sprintf("signature.init() failed: %v", err))
+ 	}
+-	if err := tink.RegisterKeyManager(newECDSAVerifierKeyManager()); err != nil {
++	if err := registry.RegisterKeyManager(newECDSAVerifierKeyManager()); err != nil {
+ 		panic(fmt.Sprintf("signature.init() failed: %v", err))
+ 	}
+ 
+ 	// ED25519
+-	if err := tink.RegisterKeyManager(newED25519SignerKeyManager()); err != nil {
++	if err := registry.RegisterKeyManager(newED25519SignerKeyManager()); err != nil {
+ 		panic(fmt.Sprintf("signature.init() failed: %v", err))
+ 	}
+-	if err := tink.RegisterKeyManager(newED25519VerifierKeyManager()); err != nil {
++	if err := registry.RegisterKeyManager(newED25519VerifierKeyManager()); err != nil {
+ 		panic(fmt.Sprintf("signature.init() failed: %v", err))
+ 	}
+ }
+diff --git a/go/signature/init_test.go b/go/signature/init_test.go
+index 90b2ba3995..fd34f36174 100644
+--- a/go/signature/init_test.go
++++ b/go/signature/init_test.go
+@@ -17,19 +17,19 @@ package signature_test
+ import (
+ 	"testing"
+ 
++	"github.com/google/tink/go/registry"
+ 	"github.com/google/tink/go/signature"
+-	"github.com/google/tink/go/tink"
+ )
+ 
+ func TestSignatureInit(t *testing.T) {
+ 	// check for ECDSASignerKeyManager
+-	_, err := tink.GetKeyManager(signature.ECDSASignerTypeURL)
++	_, err := registry.GetKeyManager(signature.ECDSASignerTypeURL)
+ 	if err != nil {
+ 		t.Errorf("unexpected error: %s", err)
+ 	}
+ 
+ 	// check for ECDSAVerifierKeyManager
+-	_, err = tink.GetKeyManager(signature.ECDSAVerifierTypeURL)
++	_, err = registry.GetKeyManager(signature.ECDSAVerifierTypeURL)
+ 	if err != nil {
+ 		t.Errorf("unexpected error: %s", err)
+ 	}
+diff --git a/go/signature/signature_factory_test.go b/go/signature/signature_factory_test.go
+index e191097251..d914717976 100644
+--- a/go/signature/signature_factory_test.go
++++ b/go/signature/signature_factory_test.go
+@@ -20,7 +20,7 @@ import (
+ 	"github.com/golang/protobuf/proto"
+ 	"github.com/google/tink/go/signature"
+ 	"github.com/google/tink/go/subtle/random"
+-	"github.com/google/tink/go/testkeysethandle"
++	"github.com/google/tink/go/testkeyset"
+ 	"github.com/google/tink/go/testutil"
+ 	commonpb "github.com/google/tink/proto/common_go_proto"
+ 	tinkpb "github.com/google/tink/proto/tink_go_proto"
+@@ -45,10 +45,10 @@ func TestSignerVerifyFactory(t *testing.T) {
+ 		4)
+ 	privKeys := []*tinkpb.Keyset_Key{tinkPriv, legacyPriv, rawPriv, crunchyPriv}
+ 	privKeyset := testutil.NewKeyset(privKeys[0].KeyId, privKeys)
+-	privKeysetHandle, _ := testkeysethandle.KeysetHandle(privKeyset)
++	privKeysetHandle, _ := testkeyset.NewHandle(privKeyset)
+ 	pubKeys := []*tinkpb.Keyset_Key{tinkPub, legacyPub, rawPub, crunchyPub}
+ 	pubKeyset := testutil.NewKeyset(pubKeys[0].KeyId, pubKeys)
+-	pubKeysetHandle, _ := testkeysethandle.KeysetHandle(pubKeyset)
++	pubKeysetHandle, _ := testkeyset.NewHandle(pubKeyset)
+ 
+ 	// sign some random data
+ 	signer, err := signature.NewSigner(privKeysetHandle)
+@@ -75,7 +75,7 @@ func TestSignerVerifyFactory(t *testing.T) {
+ 		1)
+ 	pubKeys = []*tinkpb.Keyset_Key{randomPub}
+ 	pubKeyset = testutil.NewKeyset(pubKeys[0].KeyId, pubKeys)
+-	pubKeysetHandle, _ = testkeysethandle.KeysetHandle(pubKeyset)
++	pubKeysetHandle, _ = testkeyset.NewHandle(pubKeyset)
+ 	verifier, err = signature.NewVerifier(pubKeysetHandle)
+ 	if err != nil {
+ 		t.Errorf("getting verify primitive failed: %s", err)
+diff --git a/go/signature/signer_factory.go b/go/signature/signer_factory.go
+index a3c61d3e70..d3f275bed8 100644
+--- a/go/signature/signer_factory.go
++++ b/go/signature/signer_factory.go
+@@ -18,20 +18,21 @@ import (
+ 	"fmt"
+ 
+ 	"github.com/google/tink/go/format"
++	"github.com/google/tink/go/keyset"
+ 	"github.com/google/tink/go/primitiveset"
++	"github.com/google/tink/go/registry"
+ 	"github.com/google/tink/go/tink"
+ 	tinkpb "github.com/google/tink/proto/tink_go_proto"
+ )
+ 
+ // NewSigner returns a Signer primitive from the given keyset handle.
+-func NewSigner(kh *tink.KeysetHandle) (tink.Signer, error) {
+-	return NewSignerWithKeyManager(kh, nil /*keyManager*/)
++func NewSigner(h *keyset.Handle) (tink.Signer, error) {
++	return NewSignerWithKeyManager(h, nil /*keyManager*/)
+ }
+ 
+-// NewSignerWithKeyManager returns a Signer primitive from the given keyset handle and custom
+-// key manager.
+-func NewSignerWithKeyManager(kh *tink.KeysetHandle, km tink.KeyManager) (tink.Signer, error) {
+-	ps, err := tink.PrimitivesWithKeyManager(kh, km)
++// NewSignerWithKeyManager returns a Signer primitive from the given keyset handle and custom key manager.
++func NewSignerWithKeyManager(h *keyset.Handle, km registry.KeyManager) (tink.Signer, error) {
++	ps, err := h.PrimitivesWithKeyManager(km)
+ 	if err != nil {
+ 		return nil, fmt.Errorf("public_key_sign_factory: cannot obtain primitive set: %s", err)
+ 	}
+diff --git a/go/signature/verifier_factory.go b/go/signature/verifier_factory.go
+index 619a13edc6..8375479962 100644
+--- a/go/signature/verifier_factory.go
++++ b/go/signature/verifier_factory.go
+@@ -19,20 +19,21 @@ import (
+ 	"fmt"
+ 
+ 	"github.com/google/tink/go/format"
++	"github.com/google/tink/go/keyset"
+ 	"github.com/google/tink/go/primitiveset"
++	"github.com/google/tink/go/registry"
+ 	"github.com/google/tink/go/tink"
+ 	tinkpb "github.com/google/tink/proto/tink_go_proto"
+ )
+ 
+ // NewVerifier returns a Verifier primitive from the given keyset handle.
+-func NewVerifier(handle *tink.KeysetHandle) (tink.Verifier, error) {
+-	return NewVerifierWithKeyManager(handle, nil /*keyManager*/)
++func NewVerifier(h *keyset.Handle) (tink.Verifier, error) {
++	return NewVerifierWithKeyManager(h, nil /*keyManager*/)
+ }
+ 
+-// NewVerifierWithKeyManager returns a Verifier primitive from the given keyset handle and
+-// custom key manager.
+-func NewVerifierWithKeyManager(kh *tink.KeysetHandle, km tink.KeyManager) (tink.Verifier, error) {
+-	ps, err := tink.PrimitivesWithKeyManager(kh, km)
++// NewVerifierWithKeyManager returns a Verifier primitive from the given keyset handle and custom key manager.
++func NewVerifierWithKeyManager(h *keyset.Handle, km registry.KeyManager) (tink.Verifier, error) {
++	ps, err := h.PrimitivesWithKeyManager(km)
+ 	if err != nil {
+ 		return nil, fmt.Errorf("verifier_factory: cannot obtain primitive set: %s", err)
+ 	}
+diff --git a/go/subtle/aead/BUILD.bazel b/go/subtle/aead/BUILD.bazel
+index 246c12ed79..8076eb163d 100644
+--- a/go/subtle/aead/BUILD.bazel
++++ b/go/subtle/aead/BUILD.bazel
+@@ -15,10 +15,8 @@ go_library(
+     visibility = ["//visibility:public"],
+     deps = [
+         "//go/subtle/random:go_default_library",
+-        "//proto:tink_go_proto",
+         "//go/tink:go_default_library",
+         "@org_golang_x_crypto//chacha20poly1305:go_default_library",
+-        "@com_github_golang_protobuf//proto:go_default_library",
+     ],
+ )
+ 
+diff --git a/go/testkeysethandle/BUILD.bazel b/go/testkeyset/BUILD.bazel
+similarity index 74%
+rename from go/testkeysethandle/BUILD.bazel
+rename to go/testkeyset/BUILD.bazel
+index 34f3e6bdd8..b11683aea3 100644
+--- a/go/testkeysethandle/BUILD.bazel
++++ b/go/testkeyset/BUILD.bazel
+@@ -7,11 +7,11 @@ load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
+ go_library(
+     name = "go_default_library",
+     testonly = 1,
+-    srcs = ["testkeysethandle.go"],
+-    importpath = "github.com/google/tink/go/testkeysethandle",
++    srcs = ["testkeyset.go"],
++    importpath = "github.com/google/tink/go/testkeyset",
+     deps = [
+         "//go/internal:go_default_library",
+-        "//go/tink:go_default_library",
++        "//go/keyset:go_default_library",
+         "//proto:tink_go_proto",
+         "@com_github_golang_protobuf//proto:go_default_library",
+     ],
+diff --git a/go/testkeyset/testkeyset.go b/go/testkeyset/testkeyset.go
+new file mode 100644
+index 0000000000..79b2bc0989
+--- /dev/null
++++ b/go/testkeyset/testkeyset.go
+@@ -0,0 +1,65 @@
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//      http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++//
++////////////////////////////////////////////////////////////////////////////////
++
++// Package testkeyset provides functions that create keyset.Handle from cleartext key material in tests.
++package testkeyset
++
++import (
++	"errors"
++
++	"github.com/google/tink/go/internal"
++	"github.com/google/tink/go/keyset"
++	tinkpb "github.com/google/tink/proto/tink_go_proto"
++)
++
++var (
++	keysetHandle     = internal.KeysetHandle.(func(*tinkpb.Keyset) *keyset.Handle)
++	errInvalidKeyset = errors.New("cleartextkeyset: invalid keyset")
++	errInvalidHandle = errors.New("cleartextkeyset: invalid handle")
++	errInvalidReader = errors.New("cleartextkeyset: invalid reader")
++	errInvalidWriter = errors.New("cleartextkeyset: invalid writer")
++)
++
++// NewHandle creates a new instance of NewHandle using the given keyset.
++func NewHandle(ks *tinkpb.Keyset) (*keyset.Handle, error) {
++	if ks == nil || len(ks.Key) == 0 {
++		return nil, errInvalidKeyset
++	}
++	return keysetHandle(ks), nil
++}
++
++// Read creates a keyset.Handle from a cleartext keyset obtained via r.
++func Read(r keyset.Reader) (*keyset.Handle, error) {
++	if r == nil {
++		return nil, errInvalidReader
++	}
++	ks, err := r.Read()
++	if err != nil || ks == nil || len(ks.Key) == 0 {
++		return nil, errInvalidKeyset
++	}
++	return keysetHandle(ks), nil
++}
++
++// Write exports the keyset from h to the given writer w without encrypting it.
++// Storing secret key material in an unencrypted fashion is dangerous. If feasible, you should use
++// func keyset.Handle.Write() instead.
++func Write(h *keyset.Handle, w keyset.Writer) error {
++	if h == nil {
++		return errInvalidHandle
++	}
++	if w == nil {
++		return errInvalidWriter
++	}
++	return w.Write(h.Keyset())
++}
+diff --git a/go/testkeysethandle/testkeysethandle.go b/go/testkeysethandle/testkeysethandle.go
+deleted file mode 100644
+index 1669786fcd..0000000000
+--- a/go/testkeysethandle/testkeysethandle.go
++++ /dev/null
+@@ -1,53 +0,0 @@
+-// Licensed under the Apache License, Version 2.0 (the "License");
+-// you may not use this file except in compliance with the License.
+-// You may obtain a copy of the License at
+-//
+-//      http://www.apache.org/licenses/LICENSE-2.0
+-//
+-// Unless required by applicable law or agreed to in writing, software
+-// distributed under the License is distributed on an "AS IS" BASIS,
+-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+-// See the License for the specific language governing permissions and
+-// limitations under the License.
+-//
+-////////////////////////////////////////////////////////////////////////////////
+-
+-// Package testkeysethandle provides functions that create KeysetHandle from cleartext key material.
+-//
+-// This package contains dangerous functions, and is separate from the rest of Tink and must be used
+-// only for testing.
+-package testkeysethandle
+-
+-import (
+-	"errors"
+-
+-	"github.com/golang/protobuf/proto"
+-	"github.com/google/tink/go/internal"
+-	"github.com/google/tink/go/tink"
+-	tinkpb "github.com/google/tink/proto/tink_go_proto"
+-)
+-
+-var keysetHandle = internal.KeysetHandle.(func(*tinkpb.Keyset) *tink.KeysetHandle)
+-
+-var errInvalidKeyset = errors.New("keyset_handle: invalid keyset")
+-
+-// KeysetHandleFromSerializedProto creates a new instance of KeysetHandle from the given serialized
+-// keyset proto.
+-func KeysetHandleFromSerializedProto(serialized []byte) (*tink.KeysetHandle, error) {
+-	if len(serialized) == 0 {
+-		return nil, errInvalidKeyset
+-	}
+-	ks := new(tinkpb.Keyset)
+-	if err := proto.Unmarshal(serialized, ks); err != nil {
+-		return nil, errInvalidKeyset
+-	}
+-	return keysetHandle(ks), nil
+-}
+-
+-// KeysetHandle creates a new instance of KeysetHandle using the given keyset.
+-func KeysetHandle(ks *tinkpb.Keyset) (*tink.KeysetHandle, error) {
+-	if ks == nil || len(ks.Key) == 0 {
+-		return nil, errInvalidKeyset
+-	}
+-	return keysetHandle(ks), nil
+-}
+diff --git a/go/testutil/BUILD.bazel b/go/testutil/BUILD.bazel
+index eefdb666c1..8b4679d981 100644
+--- a/go/testutil/BUILD.bazel
++++ b/go/testutil/BUILD.bazel
+@@ -10,6 +10,7 @@ go_library(
+         "//go/daead:go_default_library",
+         "//go/keyset:go_default_library",
+         "//go/mac:go_default_library",
++        "//go/registry:go_default_library",
+         "//go/signature:go_default_library",
+         "//go/subtle:go_default_library",
+         "//go/subtle/daead:go_default_library",
+diff --git a/go/testutil/testutil.go b/go/testutil/testutil.go
+index 127ccb6957..f286af2abb 100644
+--- a/go/testutil/testutil.go
++++ b/go/testutil/testutil.go
+@@ -24,7 +24,9 @@ import (
+ 	"golang.org/x/crypto/ed25519"
+ 	"github.com/google/tink/go/aead"
+ 	"github.com/google/tink/go/daead"
++	"github.com/google/tink/go/keyset"
+ 	"github.com/google/tink/go/mac"
++	"github.com/google/tink/go/registry"
+ 	"github.com/google/tink/go/signature"
+ 	"github.com/google/tink/go/subtle/random"
+ 	"github.com/google/tink/go/subtle"
+@@ -44,7 +46,7 @@ import (
+ // It returns DummyAEAD when GetPrimitive() functions are called.
+ type DummyAEADKeyManager struct{}
+ 
+-var _ tink.KeyManager = (*DummyAEADKeyManager)(nil)
++var _ registry.KeyManager = (*DummyAEADKeyManager)(nil)
+ 
+ // Primitive constructs a primitive instance for the key given in
+ // serializedKey, which must be a serialized key protocol buffer handled by this manager.
+@@ -106,7 +108,7 @@ func (h *DummyMAC) VerifyMAC(mac []byte, data []byte) error {
+ // DummyKMSClient is a dummy implementation of a KMS Client.
+ type DummyKMSClient struct{}
+ 
+-var _ tink.KMSClient = (*DummyKMSClient)(nil)
++var _ registry.KMSClient = (*DummyKMSClient)(nil)
+ 
+ // Supported true if this client does support keyURI
+ func (d *DummyKMSClient) Supported(keyURI string) bool {
+@@ -345,8 +347,8 @@ func NewHMACKeyFormat(hashType commonpb.HashType, tagSize uint32) *hmacpb.HmacKe
+ }
+ 
+ // NewHMACKeysetManager returns a new KeysetManager that contains a HMACKey.
+-func NewHMACKeysetManager() *tink.KeysetManager {
+-	ksm := tink.NewKeysetManager()
++func NewHMACKeysetManager() *keyset.Manager {
++	ksm := keyset.NewManager()
+ 	kt := mac.HMACSHA256Tag128KeyTemplate()
+ 	err := ksm.Rotate(kt)
+ 	if err != nil {
+diff --git a/go/tink/BUILD.bazel b/go/tink/BUILD.bazel
+index e20b40e504..e78b7db690 100644
+--- a/go/tink/BUILD.bazel
++++ b/go/tink/BUILD.bazel
+@@ -8,59 +8,13 @@ go_library(
+     name = "go_default_library",
+     srcs = [
+         "aead.go",
+-        "binary_keyset_io.go",
+         "deterministic_aead.go",
+         "hybrid_decrypt.go",
+         "hybrid_encrypt.go",
+-        "init.go",
+-        "key_manager.go",
+-        "keyset_handle.go",
+-        "keyset_manager.go",
+-        "keyset_reader.go",
+-        "keyset_writer.go",
+-        "kms_client.go",
+         "mac.go",
+-        "mem_keyset.go",
+-        "private_key_manager.go",
+-        "registry.go",
+         "signer.go",
+         "verifier.go",
+     ],
+     importpath = "github.com/google/tink/go/tink",
+     visibility = ["//visibility:public"],
+-    deps = [
+-        "//go/format:go_default_library",
+-        "//go/keyset:go_default_library",
+-        "//go/primitiveset:go_default_library",
+-        "//go/internal:go_default_library",
+-        "//go/subtle/random:go_default_library",
+-        "//proto:tink_go_proto",
+-        "@com_github_golang_protobuf//proto:go_default_library",
+-    ],
+ )
+-
+-go_test(
+-    name = "go_default_test",
+-    srcs = [
+-        "binary_keyset_io_test.go",
+-        "keyset_handle_test.go",
+-        "keyset_manager_test.go",
+-        "registry_test.go",
+-    ],
+-    embed = [":go_default_library"],
+-    deps = [
+-        "//go/aead:go_default_library",
+-        "//go/internal:go_default_library",
+-        "//go/mac:go_default_library",
+-        "//go/subtle/aead:go_default_library",
+-        "//go/subtle/mac:go_default_library",
+-        "//go/testkeysethandle:go_default_library",
+-        "//go/testutil:go_default_library",
+-        "//proto:aes_gcm_go_proto",
+-        "//proto:common_go_proto",
+-        "//proto:hmac_go_proto",
+-        "//proto:tink_go_proto",
+-        "@com_github_golang_protobuf//proto:go_default_library",
+-    ],
+-)
+-

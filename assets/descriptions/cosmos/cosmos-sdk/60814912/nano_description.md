@@ -1,0 +1,1 @@
+Rename NFT module to use vanity URL

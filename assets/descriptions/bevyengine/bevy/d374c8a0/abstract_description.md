@@ -1,0 +1,1 @@
+Refactor messaging API terminology

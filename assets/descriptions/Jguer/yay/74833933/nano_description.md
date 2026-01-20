@@ -1,0 +1,1 @@
+Refactor: Invert configuration-runtime relationship and eliminate global logger

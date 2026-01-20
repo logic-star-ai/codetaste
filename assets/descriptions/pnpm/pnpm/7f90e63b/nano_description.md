@@ -1,0 +1,1 @@
+Refactor: Create centralized `@pnpm/error` package

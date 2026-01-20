@@ -1,0 +1,1 @@
+Refactor: Use `process.chdir()` in mockNpm instead of mocking `process.cwd()`

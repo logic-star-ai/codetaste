@@ -2,9 +2,11 @@
 
 import json
 import logging
+from typing import Optional
 from podman.domain.containers import Container as PodmanContainer
 
 from refactoring_benchmark.utils.models import Metrics
+from refactoring_benchmark.bootstrap.models import ExecutionInstanceMetadata
 import refactoring_benchmark.podman.utils as podman_utils
 
 
@@ -14,7 +16,11 @@ class BootstrapError(Exception):
     pass
 
 
-def validate_container_size(container: PodmanContainer, max_size_bytes: int = 5 * (1024**3)) -> None:
+def validate_container_size(
+    container: PodmanContainer,
+    metadata: Optional[ExecutionInstanceMetadata] = None,
+    max_size_bytes: int = 5 * (1024**3),
+) -> None:
     """
     Validate container storage size does not exceed limit.
 
@@ -28,11 +34,20 @@ def validate_container_size(container: PodmanContainer, max_size_bytes: int = 5 
     storage_info = podman_utils.get_container_storage(container)
     container_size = storage_info["writable_bytes"]
     if container_size > max_size_bytes:
+        if metadata:
+            metadata.has_execution_environment = False
+            metadata.reason_no_execution_environment += (
+                f"Container size {container_size / (1024**3):.2f}GB exceeds limit. "
+            )
         raise BootstrapError(f"Container additional size exceeded {max_size_bytes / (1024**3):.2f}GB limit.")
 
 
 def validate_and_commit_container(
-    container: PodmanContainer, image_name: str, max_size_bytes: int = 5 * (1024**3), **commit_kwargs
+    container: PodmanContainer,
+    image_name: str,
+    logger: logging.Logger,
+    max_size_bytes: int = 5 * (1024**3),
+    **commit_kwargs,
 ) -> None:
     """
     Validate container size then commit if within limits.
@@ -46,8 +61,9 @@ def validate_and_commit_container(
     Raises:
         BootstrapError: If container exceeds size limit
     """
-    validate_container_size(container, max_size_bytes)
+    validate_container_size(container, max_size_bytes=max_size_bytes)
     podman_utils.commit_container(container, image_name, **commit_kwargs)
+    logger.info(f"Committed container to image: {image_name}")
 
 
 def setup_testbed_container(
@@ -79,6 +95,7 @@ def setup_testbed_container(
         environment={"ANTHROPIC_API_KEY": api_key},
         working_dir="/testbed",
         remove=True,
+        nano_cpus=int(16e9)
     )
 
     for cmd in [
@@ -116,7 +133,9 @@ def run_metrics(container: PodmanContainer, commit_hash: str, logger: logging.Lo
         logger,
         timeout=300,
     )
-
+    # TODO: VALIDATE THIS?
+    cleanup_tmp = ["bash", "-c", "sudo find /tmp -mindepth 1 -delete"]
+    podman_utils.podman_exec_logged(container, cleanup_tmp, logger)
     command = "sudo /scripts/setup_system.sh || true; source /scripts/setup_shell.sh || true; /scripts/run_tests"
     try:
         exit_code, (stdout_bytes, stderr_bytes) = podman_utils.podman_timed_exec_bash_logged(

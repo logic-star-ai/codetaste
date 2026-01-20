@@ -1,0 +1,1 @@
+Migrate reactive SQL client extensions from vendor-specific Pool types to generic Pool type

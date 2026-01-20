@@ -1,0 +1,1 @@
+[CPU] Migrate CPU Plugin to Plugin API 2.0

@@ -1,5 +1,6 @@
 """Container execution for test and rule evaluation."""
 
+import logging
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -16,6 +17,7 @@ def run_test_evaluation(
     prediction_diff: Path,
     eval_dir: Path,
     timeout: int,
+    logger: logging.Logger,
 ) -> Tuple[Optional[TestMetrics], str]:
     """
     Run test evaluation using the runtime container.
@@ -30,7 +32,7 @@ def run_test_evaluation(
         Tuple of (TestMetrics or None, stdout)
     """
     container: Optional[PodmanContainer] = None
-    client = podman_utils.get_local_client()
+    client = podman_utils.get_local_client(timeout=timeout)
 
     if not client:
         return None, "Failed to connect to Podman daemon"
@@ -52,33 +54,33 @@ def run_test_evaluation(
                 str(prediction_diff): {"bind": "/input/patch.diff", "mode": "ro"},
                 str(eval_dir): {"bind": "/output", "mode": "rw"},
             },
-            remove=True,
+            remove=False,
+            nano_cpus=int(16e9)
         )
-
-        # Stream and collect output
-        stdout_lines = []
-        try:
-            for log_line in container.logs(stream=True, follow=True):
-                line = log_line.decode("utf-8", errors="replace").rstrip()
-                stdout_lines.append(line)
-        except Exception:
-            pass
-
-        # Wait for completion with timeout
+        logger.debug(f"Running equivalent to: podman run --detach -v {prediction_diff}:/input/patch.diff -v {eval_dir}:/output {instance.runtime_image} eval_test")
         try:
             exit_code = container.wait(timeout=timeout)
-        except Exception:
-            return None, f"Test evaluation timed out after {timeout}s"
+        except Exception as e:
+            logger.error(f"Error while waiting for container: {e}")
+            return None, f"Error while waiting ({timeout}s) for container."
 
-        stdout = "\n".join(stdout_lines)
-        return None, stdout  # Parser will handle extracting metrics
+        logger.debug(f"Container {container.id} exited with code {exit_code}.")
+        raw_logs = container.logs(stream=False, follow=False)
+        raw_logs = b"".join(raw_logs) if not isinstance(raw_logs, bytes) else raw_logs
+        stdout = raw_logs.decode("utf-8", errors="replace")
+        return None, stdout
 
     except Exception as e:
+        logger.error(f"Test evaluation failed: {e}")
         return None, f"Test evaluation failed: {e}"
 
     finally:
         if container is not None:
             podman_utils.stop_container(container)
+            try:
+                container.remove(force=True)
+            except Exception as e:
+                logger.error(f"Failed to remove container: {e}")
         client.close()
 
 
@@ -87,6 +89,7 @@ def run_rule_evaluation(
     prediction_diff: Path,
     eval_dir: Path,
     timeout: int,
+    logger: logging.Logger,
 ) -> Tuple[bool, str]:
     """
     Run rule evaluation using the runtime container.
@@ -101,7 +104,7 @@ def run_rule_evaluation(
         Tuple of (success: bool, stdout: str)
     """
     container: Optional[PodmanContainer] = None
-    client = podman_utils.get_local_client()
+    client = podman_utils.get_local_client(timeout=timeout)
 
     if not client:
         return False, "Failed to connect to Podman daemon"
@@ -123,32 +126,32 @@ def run_rule_evaluation(
                 str(prediction_diff): {"bind": "/input/patch.diff", "mode": "ro"},
                 str(eval_dir): {"bind": "/output", "mode": "rw"},
             },
-            remove=True,
+            remove=False,
+            nano_cpus=int(4e9)
         )
 
-        # Stream and collect output
-        stdout_lines = []
-        try:
-            for log_line in container.logs(stream=True, follow=True):
-                line = log_line.decode("utf-8", errors="replace").rstrip()
-                stdout_lines.append(line)
-        except Exception:
-            pass
-
-        # Wait for completion with timeout
         try:
             exit_code = container.wait(timeout=timeout)
-        except Exception:
-            return False, f"Rule evaluation timed out after {timeout}s"
+        except Exception as e:
+            logger.error(f"Error while waiting for container: {e}")
+            return False, f"Error while waiting ({timeout}s) for container."
+        logger.debug(f"Container {container.id} exited with code {exit_code}.")
 
-        stdout = "\n".join(stdout_lines)
-        success = exit_code == 0
-        return success, stdout
+        raw_logs = container.logs(stream=False, follow=False)
+        raw_logs = b"".join(raw_logs) if not isinstance(raw_logs, bytes) else raw_logs
+        stdout = raw_logs.decode("utf-8", errors="replace")
+
+        return exit_code == 0, stdout
 
     except Exception as e:
+        logger.error(f"Rule evaluation failed: {e}")
         return False, f"Rule evaluation failed: {e}"
 
     finally:
         if container is not None:
             podman_utils.stop_container(container)
+            try:
+                container.remove(force=True)
+            except Exception as e:
+                logger.error(f"Failed to remove container: {e}")
         client.close()

@@ -1,0 +1,1 @@
+Restructure web-related classes for better separation of concerns

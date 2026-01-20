@@ -1,0 +1,1 @@
+Move `IsDebuggerPresent` to minipal, convert debugger methods to QCall

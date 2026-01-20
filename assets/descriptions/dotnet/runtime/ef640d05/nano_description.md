@@ -1,0 +1,1 @@
+Consolidate QueryPerformanceCounter/GetTickCount usages to minipal/time.h

@@ -1,56 +1,107 @@
-# Refactoring Benchmark
 
-A secure, isolated benchmark system for evaluating AI agents on real-world code refactoring tasks.
 
-[![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
-[![Poetry](https://img.shields.io/badge/dependency-poetry-blue)](https://python-poetry.org/)
-[![Tests](https://img.shields.io/badge/tests-passing-brightgreen.svg)](tests/)
+## Usage
 
-## Overview
-
-This benchmark evaluates AI agents on their ability to perform code refactoring tasks by:
-
-1. **Isolating the agent** in a secure container environment
-2. **Preventing cheating** through network isolation and git sanitization
-3. **Evaluating results** via test suites and static analysis rules
-
-The system ensures that agents cannot access the "golden" (correct) refactoring or fetch solutions from external sources.
-
-## Key Features
-
-- 🔒 **Security Isolation**: Network blocking, privilege separation, git sanitization
-- 📊 **Multi-Mode Evaluation**: Test-based and rule-based assessment
-- 🐳 **Containerized**: Each benchmark instance runs in a reproducible Docker container
-- 🎯 **Real-World Tasks**: Based on actual refactoring commits from major open-source projects
-- 📈 **Automated Setup**: Claude agent bootstraps environment and validates tests
-- 🔍 **Hidden Rules**: Static analysis rules remain invisible to the agent during inference
-
-## Quick Start
+### Bootstrap Benchmark Instances
 
 ```bash
-# 1. Install dependencies
-poetry install --with dev
+python -m refactoring_benchmark.scripts.bootstrap --help
+```
 
-# 2. Set API key
-export ANTHROPIC_API_KEY=your_key_here
+```
+usage: bootstrap.py [-h] [--instances INSTANCES] [--instances-csv INSTANCES_CSV] [--nr-workers NR_WORKERS] [--force-runtime-build] [--rerun-metrics] [--force-full-build]
 
-# 3. Build base images
-cd refactoring_benchmark/base_images/
-podman build -t benchmark-base-python -f Dockerfile.python .
-podman build -t benchmark-base-javascript -f Dockerfile.javascript .
+Bootstrap benchmark instances
 
-# 4. Bootstrap instances
-cd ../..
-poetry run python -m refactoring_benchmark.scripts.bootstrap
+options:
+  -h, --help            show this help message and exit
+  --instances INSTANCES
+                        Number of instances to bootstrap (default: 10)
+  --instances-csv INSTANCES_CSV
+                        Path to instances CSV file (default: ./instances.csv)
+  --nr-workers NR_WORKERS
+                        Number of parallel workers (default: 4)
+  --force-runtime-build
+                        Force rebuild of runtime images even if they exist (reuses setup image and metadata)
+  --rerun-metrics       Rerun metrics collection on existing setup images (cheap, reuses agent setup)
+  --force-full-build    Force full rebuild from scratch: setup + runtime (expensive, reruns agent)
+```
 
-# 5. Run inference
-mkdir -p agent output
-echo '#!/bin/bash\ncd /testbed\n# Your agent logic' > agent/run_agent
-chmod +x agent/run_agent
+### Inference Phase
 
-# 6. Execute benchmark container
-...
+```bash
+python -m refactoring_benchmark.scripts.inference --help
+```
 
-# 7. Evaluate results
-...
+```
+Run inference on benchmark instances using agent scripts.
+
+options:
+  -h, --help            show this help message and exit
+  --instances INSTANCES
+                        Number of instances to run from the CSV file (default: 15)
+  --instances-csv INSTANCES_CSV
+                        Path to the instances CSV file (default: instances.csv)
+  --nr-workers NR_WORKERS
+                        Number of parallel workers (threads) for inference (default: 4)
+  --agent-dir AGENT_DIR
+                        Path to the agent directory containing setup_system.sh, run_agent, and agent_config.json (default: agent)
+  --output-dir OUTPUT_DIR
+                        Base directory for inference outputs (default: None)
+  --timeout TIMEOUT     Timeout in seconds for each instance inference (default: 3600)
+  --force               Force re-run inference even if outputs already exist (default: False)
+  --env KEY=VALUE       Environment variable to pass to containers (can be specified multiple times) (default: [])
+  --description-type {standard,minimal,open,nano}
+                        Type of task description to use (standard: full description, minimal: title and summary only, open: open-ended refactoring prompt, nano: very brief description) (default: standard)
+```
+
+### Evaluation Phase
+
+```bash
+python -m refactoring_benchmark.scripts.evaluate --help
+```
+
+```
+usage: evaluate.py [-h] [--instances INSTANCES] [--instances-csv INSTANCES_CSV] --agent-id AGENT_ID [--nr-workers NR_WORKERS] [--output-dir OUTPUT_DIR] [--timeout-test TIMEOUT_TEST] [--timeout-rule TIMEOUT_RULE] [--force]
+
+Evaluate inference results using test and rule-based metrics.
+
+options:
+  -h, --help            show this help message and exit
+  --instances INSTANCES
+                        Number of instances to run from the CSV file (default: 15)
+  --instances-csv INSTANCES_CSV
+                        Path to the instances CSV file (default: instances.csv)
+  --agent-id AGENT_ID   Agent ID to evaluate (must match directory name in output) (default: None)
+  --nr-workers NR_WORKERS
+                        Number of parallel workers (threads) for evaluation (default: 4)
+  --output-dir OUTPUT_DIR
+                        Base directory for inference outputs (default: output)
+  --timeout-test TIMEOUT_TEST
+                        Timeout in seconds for test evaluation (default: 20 minutes) (default: 1200)
+  --timeout-rule TIMEOUT_RULE
+                        Timeout in seconds for rule evaluation (default: 20 minutes) (default: 1200)
+  --force               Force re-evaluation even if results already exist (default: False)
+```
+
+### Analysis Phase
+
+```bash
+python -m refactoring_benchmark.scripts.analyze --help
+```
+
+```
+Generate IFR plots from evaluation results
+
+options:
+  -h, --help            show this help message and exit
+  --output-dir OUTPUT_DIR
+                        Directory containing evaluation results (default: ./output). By default, only loads instances listed in instances.csv.
+  --include-no-exec-env
+                        Include instances without execution environment (default: False)
+  --statistics          Compute and print statistics summary for all agents
+  --successful-only     Only include inference runs with finish_reason='success'
+  --with-precision      Load and include precision metrics in statistics (requires instances.csv and null_agent)
+  --instances-csv INSTANCES_CSV
+                        Path to instances.csv file (default: ./instances.csv). Required for loading evaluation results and precision metrics.
 ```

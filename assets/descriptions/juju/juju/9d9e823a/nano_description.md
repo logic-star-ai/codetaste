@@ -1,0 +1,1 @@
+Remove juju/errors dependency from core package

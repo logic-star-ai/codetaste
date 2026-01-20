@@ -1,0 +1,1 @@
+Rename `huddle` to `direct_message_group` in non-API codebase

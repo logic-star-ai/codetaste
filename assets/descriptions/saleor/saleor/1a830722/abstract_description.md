@@ -1,0 +1,1 @@
+Simplify product-attribute relationships.

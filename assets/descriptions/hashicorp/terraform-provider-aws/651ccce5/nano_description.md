@@ -1,0 +1,1 @@
+Remove `errs.Must` from service packages to prevent runtime panics

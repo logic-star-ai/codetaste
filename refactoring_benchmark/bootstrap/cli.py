@@ -32,7 +32,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--force-runtime-build",
         action="store_true",
-        help="Force rebuild of runtime images even if they exist",
+        help="Force rebuild of runtime images even if they exist (reuses setup image and metadata)",
+    )
+
+    parser.add_argument(
+        "--rerun-metrics",
+        action="store_true",
+        help="Rerun metrics collection on existing setup images (cheap, reuses agent setup)",
+    )
+
+    parser.add_argument(
+        "--force-full-build",
+        action="store_true",
+        help="Force full rebuild from scratch: setup + runtime (expensive, reruns agent)",
     )
 
     return parser.parse_args()

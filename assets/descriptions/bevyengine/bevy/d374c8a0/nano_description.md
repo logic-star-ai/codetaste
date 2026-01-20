@@ -1,0 +1,1 @@
+Rename `BufferedEvent` → `Message`

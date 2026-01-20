@@ -1,0 +1,2565 @@
+diff --git a/core/src/main/java/com/graphhopper/GraphHopper.java b/core/src/main/java/com/graphhopper/GraphHopper.java
+index 99fae58918b..2668034f1f1 100644
+--- a/core/src/main/java/com/graphhopper/GraphHopper.java
++++ b/core/src/main/java/com/graphhopper/GraphHopper.java
+@@ -85,7 +85,8 @@ public class GraphHopper {
+     // for custom areas:
+     private String customAreasDirectory = "";
+     // for graph:
+-    private GraphHopperStorage ghStorage;
++    private BaseGraph baseGraph;
++    private StorableProperties properties;
+     private EncodingManager encodingManager;
+     private OSMParsers osmParsers;
+     private int defaultSegmentSize = -1;
+@@ -311,18 +312,22 @@ public GraphHopper setOSMFile(String osmFile) {
+      *
+      * @throws IllegalStateException if graph is not instantiated.
+      */
+-    public GraphHopperStorage getGraphHopperStorage() {
+-        if (ghStorage == null)
++    public BaseGraph getBaseGraph() {
++        if (baseGraph == null)
+             throw new IllegalStateException("GraphHopper storage not initialized");
+ 
+-        return ghStorage;
++        return baseGraph;
+     }
+ 
+-    public void setGraphHopperStorage(GraphHopperStorage ghStorage) {
+-        this.ghStorage = ghStorage;
++    public void setBaseGraph(BaseGraph baseGraph) {
++        this.baseGraph = baseGraph;
+         setFullyLoaded();
+     }
+ 
++    public StorableProperties getProperties() {
++        return properties;
++    }
++
+     /**
+      * @return a mapping between profile names and according CH preparations. The map will be empty before loading
+      * or import.
+@@ -662,8 +667,26 @@ private static ElevationProvider createElevationProvider(GraphHopperConfig ghCon
+ 
+     private void printInfo() {
+         logger.info("version " + Constants.VERSION + "|" + Constants.BUILD_DATE + " (" + Constants.getVersions() + ")");
+-        if (ghStorage != null)
+-            logger.info("graph " + ghStorage.toString() + ", details:" + ghStorage.toDetailsString());
++        if (baseGraph != null)
++            logger.info("graph " + getBaseGraphString() + ", details:" + baseGraph.toDetailsString());
++    }
++
++    private String getBaseGraphString() {
++        return encodingManager
++                + "|" + baseGraph.getDirectory().getDefaultType()
++                + "|" + baseGraph.getNodeAccess().getDimension() + "D"
++                + "|" + (baseGraph.getTurnCostStorage() != null ? baseGraph.getTurnCostStorage() : "no_turn_cost")
++                + "|" + getVersionsString();
++    }
++
++    private String getVersionsString() {
++        return "nodes:" + Constants.VERSION_NODE +
++                ",edges:" + Constants.VERSION_EDGE +
++                ",geometry:" + Constants.VERSION_GEOMETRY +
++                ",location_index:" + Constants.VERSION_LOCATION_IDX +
++                ",string_index:" + Constants.VERSION_EDGEKV_STORAGE +
++                ",nodesCH:" + Constants.VERSION_NODE_CH +
++                ",shortcuts:" + Constants.VERSION_SHORTCUT;
+     }
+ 
+     /**
+@@ -701,9 +724,9 @@ public void importAndClose() {
+     private void process(boolean closeEarly) {
+         GHLock lock = null;
+         try {
+-            if (ghStorage == null)
+-                throw new IllegalStateException("GraphHopperStorage must be initialized before starting the import");
+-            if (ghStorage.getDirectory().getDefaultType().isStoring()) {
++            if (baseGraph == null)
++                throw new IllegalStateException("BaseGraph must be initialized before starting the import");
++            if (baseGraph.getDirectory().getDefaultType().isStoring()) {
+                 lockFactory.setLockDir(new File(ghLocation));
+                 lock = lockFactory.create(fileLockName, true);
+                 if (!lock.tryLock())
+@@ -723,10 +746,10 @@ private void process(boolean closeEarly) {
+ 
+     protected void postImport() {
+         if (sortGraph) {
+-            GraphHopperStorage newGraph = GHUtility.newStorage(ghStorage);
+-            GHUtility.sortDFS(ghStorage, newGraph);
++            BaseGraph newGraph = GHUtility.newGraph(baseGraph);
++            GHUtility.sortDFS(baseGraph, newGraph);
+             logger.info("graph sorted (" + getMemInfo() + ")");
+-            ghStorage = newGraph;
++            baseGraph = newGraph;
+         }
+ 
+         if (hasElevation())
+@@ -746,7 +769,7 @@ protected void importOSM() {
+             customAreas.addAll(readCustomAreas());
+         }
+         AreaIndex<CustomArea> areaIndex = new AreaIndex<>(customAreas);
+-        
++
+         if (countryRuleFactory == null || countryRuleFactory.getCountryToRuleMap().isEmpty()) {
+             logger.info("No country rules available");
+         } else {
+@@ -754,21 +777,31 @@ protected void importOSM() {
+         }
+ 
+         logger.info("start creating graph from " + osmFile);
+-        OSMReader reader = new OSMReader(ghStorage.getBaseGraph(), encodingManager, osmParsers, osmReaderConfig).setFile(_getOSMFile()).
++        OSMReader reader = new OSMReader(baseGraph.getBaseGraph(), encodingManager, osmParsers, osmReaderConfig).setFile(_getOSMFile()).
+                 setAreaIndex(areaIndex).
+                 setElevationProvider(eleProvider).
+                 setCountryRuleFactory(countryRuleFactory);
+-        logger.info("using " + ghStorage.toString() + ", memory:" + getMemInfo());
+-        ghStorage.create(100);
++        logger.info("using " + getBaseGraphString() + ", memory:" + getMemInfo());
++
++        createBaseGraphAndProperties();
++
+         try {
+             reader.readGraph();
+         } catch (IOException ex) {
+             throw new RuntimeException("Cannot read file " + getOSMFile(), ex);
+         }
+         DateFormat f = createFormatter();
+-        ghStorage.getProperties().put("datareader.import.date", f.format(new Date()));
++        properties.put("datareader.import.date", f.format(new Date()));
+         if (reader.getDataDate() != null)
+-            ghStorage.getProperties().put("datareader.data.date", f.format(reader.getDataDate()));
++            properties.put("datareader.data.date", f.format(reader.getDataDate()));
++    }
++
++    protected void createBaseGraphAndProperties() {
++        baseGraph.getDirectory().create();
++        baseGraph.create(100);
++        properties.create(100);
++        properties.put("graph.encoded_values", encodingManager.toEncodedValuesAsString());
++        properties.put("graph.flag_encoders", encodingManager.toFlagEncodersAsString());
+     }
+ 
+     private List<CustomArea> readCustomAreas() {
+@@ -832,12 +865,13 @@ public boolean load() {
+ 
+         GHDirectory directory = new GHDirectory(ghLocation, dataAccessDefaultType);
+         directory.configure(dataAccessConfig);
+-        ghStorage = new GraphBuilder(getEncodingManager())
++        baseGraph = new BaseGraph.Builder(getEncodingManager())
+                 .setDir(directory)
+                 .set3D(hasElevation())
+                 .withTurnCosts(encodingManager.needsTurnCostsSupport())
+                 .setSegmentSize(defaultSegmentSize)
+                 .build();
++        properties = new StorableProperties(directory);
+         checkProfilesConsistency();
+ 
+         if (!new File(ghLocation).exists())
+@@ -847,23 +881,23 @@ public boolean load() {
+         try {
+             // create locks only if writes are allowed, if they are not allowed a lock cannot be created
+             // (e.g. on a read only filesystem locks would fail)
+-            if (ghStorage.getDirectory().getDefaultType().isStoring() && isAllowWrites()) {
++            if (baseGraph.getDirectory().getDefaultType().isStoring() && isAllowWrites()) {
+                 lockFactory.setLockDir(new File(ghLocation));
+                 lock = lockFactory.create(fileLockName, false);
+                 if (!lock.tryLock())
+                     throw new RuntimeException("To avoid reading partial data we need to obtain the read lock but it failed. In " + ghLocation, lock.getObtainFailedReason());
+             }
+ 
+-            if (!ghStorage.loadExisting())
++            if (!loadBaseGraphAndProperties())
+                 return false;
+ 
+-            String storedProfiles = ghStorage.getProperties().get("profiles");
++            String storedProfiles = properties.get("profiles");
+             String configuredProfiles = getProfilesString();
+             if (!storedProfiles.equals(configuredProfiles))
+                 throw new IllegalStateException("Profiles do not match:"
+                         + "\nGraphhopper config: " + configuredProfiles
+                         + "\nGraph: " + storedProfiles
+-                        + "\nChange configuration to match the graph or delete " + ghStorage.getDirectory().getLocation());
++                        + "\nChange configuration to match the graph or delete " + baseGraph.getDirectory().getLocation());
+ 
+             postProcessing(false);
+             directory.loadMMap();
+@@ -875,6 +909,34 @@ public boolean load() {
+         }
+     }
+ 
++    private boolean loadBaseGraphAndProperties() {
++        if (properties.loadExisting()) {
++            if (properties.containsVersion())
++                throw new IllegalStateException("The GraphHopper file format is not compatible with the data you are " +
++                        "trying to load. You either need to use an older version of GraphHopper or run a new import");
++            // check encoding for compatibility
++            String flagEncodersStr = properties.get("graph.flag_encoders");
++
++            if (!encodingManager.toFlagEncodersAsString().equalsIgnoreCase(flagEncodersStr)) {
++                throw new IllegalStateException("Flag encoders do not match:"
++                        + "\nGraphhopper config: " + encodingManager.toFlagEncodersAsString()
++                        + "\nLoaded graph:       " + flagEncodersStr
++                        + "\nChange configuration to match the graph or delete " + baseGraph.getDirectory().getLocation());
++            }
++
++            String encodedValueStr = properties.get("graph.encoded_values");
++            if (!encodingManager.toEncodedValuesAsString().equalsIgnoreCase(encodedValueStr)) {
++                throw new IllegalStateException("Encoded values do not match:"
++                        + "\nGraphhopper config: " + encodingManager.toEncodedValuesAsString()
++                        + "\nLoaded graph:       " + encodedValueStr
++                        + "\nChange configuration to match the graph or delete " + baseGraph.getDirectory().getLocation());
++            }
++            baseGraph.loadExisting();
++            return true;
++        }
++        return false;
++    }
++
+     private String getProfilesString() {
+         return profilesByName.values().stream().map(p -> p.getName() + "|" + p.getVersion()).collect(Collectors.joining(","));
+     }
+@@ -996,7 +1058,7 @@ protected void postProcessing(boolean closeEarly) {
+             if (!includesCustomProfiles)
+                 // when there are custom profiles we must not close way geometry or EdgeKVStorage, because
+                 // they might be needed to evaluate the custom weightings for the following preparations
+-                ghStorage.flushAndCloseGeometryAndNameStorage();
++                baseGraph.flushAndCloseGeometryAndNameStorage();
+         }
+ 
+         if (lmPreparationHandler.isEnabled())
+@@ -1014,18 +1076,18 @@ protected void importPublicTransit() {
+     }
+ 
+     void interpolateBridgesTunnelsAndFerries() {
+-        if (ghStorage.getEncodingManager().hasEncodedValue(RoadEnvironment.KEY)) {
+-            EnumEncodedValue<RoadEnvironment> roadEnvEnc = ghStorage.getEncodingManager().getEnumEncodedValue(RoadEnvironment.KEY, RoadEnvironment.class);
++        if (encodingManager.hasEncodedValue(RoadEnvironment.KEY)) {
++            EnumEncodedValue<RoadEnvironment> roadEnvEnc = encodingManager.getEnumEncodedValue(RoadEnvironment.KEY, RoadEnvironment.class);
+             StopWatch sw = new StopWatch().start();
+-            new EdgeElevationInterpolator(ghStorage.getBaseGraph(), roadEnvEnc, RoadEnvironment.TUNNEL).execute();
++            new EdgeElevationInterpolator(baseGraph.getBaseGraph(), roadEnvEnc, RoadEnvironment.TUNNEL).execute();
+             float tunnel = sw.stop().getSeconds();
+             sw = new StopWatch().start();
+-            new EdgeElevationInterpolator(ghStorage.getBaseGraph(), roadEnvEnc, RoadEnvironment.BRIDGE).execute();
++            new EdgeElevationInterpolator(baseGraph.getBaseGraph(), roadEnvEnc, RoadEnvironment.BRIDGE).execute();
+             float bridge = sw.stop().getSeconds();
+             // The SkadiProvider contains bathymetric data. For ferries this can result in bigger elevation changes
+             // See #2098 for mor information
+             sw = new StopWatch().start();
+-            new EdgeElevationInterpolator(ghStorage.getBaseGraph(), roadEnvEnc, RoadEnvironment.FERRY).execute();
++            new EdgeElevationInterpolator(baseGraph.getBaseGraph(), roadEnvEnc, RoadEnvironment.FERRY).execute();
+             logger.info("Bridge interpolation " + (int) bridge + "s, " + "tunnel interpolation " + (int) tunnel + "s, ferry interpolation " + (int) sw.stop().getSeconds() + "s");
+         }
+     }
+@@ -1039,7 +1101,7 @@ public final Weighting createWeighting(Profile profile, PMap hints, boolean disa
+     }
+ 
+     protected WeightingFactory createWeightingFactory() {
+-        return new DefaultWeightingFactory(ghStorage.getBaseGraph(), getEncodingManager());
++        return new DefaultWeightingFactory(baseGraph.getBaseGraph(), getEncodingManager());
+     }
+ 
+     public GHResponse route(GHRequest request) {
+@@ -1047,27 +1109,27 @@ public GHResponse route(GHRequest request) {
+     }
+ 
+     private Router createRouter() {
+-        if (ghStorage == null || !fullyLoaded)
++        if (baseGraph == null || !fullyLoaded)
+             throw new IllegalStateException("Do a successful call to load or importOrLoad before routing");
+-        if (ghStorage.isClosed())
++        if (baseGraph.isClosed())
+             throw new IllegalStateException("You need to create a new GraphHopper instance as it is already closed");
+         if (locationIndex == null)
+             throw new IllegalStateException("Location index not initialized");
+ 
+-        return doCreateRouter(ghStorage, locationIndex, profilesByName, pathBuilderFactory,
++        return doCreateRouter(baseGraph, encodingManager, locationIndex, profilesByName, pathBuilderFactory,
+                 trMap, routerConfig, createWeightingFactory(), chGraphs, landmarks);
+     }
+ 
+-    protected Router doCreateRouter(GraphHopperStorage ghStorage, LocationIndex locationIndex, Map<String, Profile> profilesByName,
++    protected Router doCreateRouter(BaseGraph baseGraph, EncodingManager encodingManager, LocationIndex locationIndex, Map<String, Profile> profilesByName,
+                                     PathDetailsBuilderFactory pathBuilderFactory, TranslationMap trMap, RouterConfig routerConfig,
+                                     WeightingFactory weightingFactory, Map<String, RoutingCHGraph> chGraphs, Map<String, LandmarkStorage> landmarks) {
+-        return new Router(ghStorage.getBaseGraph(), ghStorage.getEncodingManager(), locationIndex, profilesByName, pathBuilderFactory,
++        return new Router(baseGraph, encodingManager, locationIndex, profilesByName, pathBuilderFactory,
+                 trMap, routerConfig, weightingFactory, chGraphs, landmarks
+         );
+     }
+ 
+     protected LocationIndex createLocationIndex(Directory dir) {
+-        LocationIndexTree tmpIndex = new LocationIndexTree(ghStorage, dir);
++        LocationIndexTree tmpIndex = new LocationIndexTree(baseGraph, dir);
+         tmpIndex.setResolution(preciseIndexResolution);
+         tmpIndex.setMaxRegionSearch(maxRegionSearch);
+         if (!tmpIndex.loadExisting()) {
+@@ -1085,23 +1147,23 @@ protected void initLocationIndex() {
+         if (locationIndex != null)
+             throw new IllegalStateException("Cannot initialize locationIndex twice!");
+ 
+-        locationIndex = createLocationIndex(ghStorage.getDirectory());
++        locationIndex = createLocationIndex(baseGraph.getDirectory());
+     }
+ 
+     private String getCHProfileVersion(String profile) {
+-        return ghStorage.getProperties().get("graph.profiles.ch." + profile + ".version");
++        return properties.get("graph.profiles.ch." + profile + ".version");
+     }
+ 
+     private void setCHProfileVersion(String profile, int version) {
+-        ghStorage.getProperties().put("graph.profiles.ch." + profile + ".version", version);
++        properties.put("graph.profiles.ch." + profile + ".version", version);
+     }
+ 
+     private String getLMProfileVersion(String profile) {
+-        return ghStorage.getProperties().get("graph.profiles.lm." + profile + ".version");
++        return properties.get("graph.profiles.lm." + profile + ".version");
+     }
+ 
+     private void setLMProfileVersion(String profile, int version) {
+-        ghStorage.getProperties().put("graph.profiles.lm." + profile + ".version", version);
++        properties.put("graph.profiles.lm." + profile + ".version", version);
+     }
+ 
+     protected void loadOrPrepareCH(boolean closeEarly) {
+@@ -1112,7 +1174,7 @@ protected void loadOrPrepareCH(boolean closeEarly) {
+ 
+         // we load ch graphs that already exist and prepare the other ones
+         List<CHConfig> chConfigs = createCHConfigs(chPreparationHandler.getCHProfiles());
+-        Map<String, RoutingCHGraph> loaded = chPreparationHandler.load(ghStorage.getBaseGraph(), chConfigs);
++        Map<String, RoutingCHGraph> loaded = chPreparationHandler.load(baseGraph.getBaseGraph(), chConfigs);
+         List<CHConfig> configsToPrepare = chConfigs.stream().filter(c -> !loaded.containsKey(c.getName())).collect(Collectors.toList());
+         Map<String, PrepareContractionHierarchies.Result> prepared = prepareCH(closeEarly, configsToPrepare);
+ 
+@@ -1124,7 +1186,7 @@ protected void loadOrPrepareCH(boolean closeEarly) {
+             else if (prepared.containsKey(profile.getProfile())) {
+                 setCHProfileVersion(profile.getProfile(), profilesByName.get(profile.getProfile()).getVersion());
+                 PrepareContractionHierarchies.Result res = prepared.get(profile.getProfile());
+-                chGraphs.put(profile.getProfile(), RoutingCHGraphImpl.fromGraph(ghStorage.getBaseGraph(), res.getCHStorage(), res.getCHConfig()));
++                chGraphs.put(profile.getProfile(), RoutingCHGraphImpl.fromGraph(baseGraph.getBaseGraph(), res.getCHStorage(), res.getCHConfig()));
+             } else if (loaded.containsKey(profile.getProfile())) {
+                 chGraphs.put(profile.getProfile(), loaded.get(profile.getProfile()));
+             } else
+@@ -1135,8 +1197,9 @@ else if (prepared.containsKey(profile.getProfile())) {
+     protected Map<String, PrepareContractionHierarchies.Result> prepareCH(boolean closeEarly, List<CHConfig> configsToPrepare) {
+         if (!configsToPrepare.isEmpty())
+             ensureWriteAccess();
+-        ghStorage.freeze();
+-        return chPreparationHandler.prepare(ghStorage, configsToPrepare, closeEarly);
++        if (!baseGraph.isFrozen())
++            baseGraph.freeze();
++        return chPreparationHandler.prepare(baseGraph, properties, configsToPrepare, closeEarly);
+     }
+ 
+     /**
+@@ -1150,7 +1213,7 @@ protected void loadOrPrepareLM(boolean closeEarly) {
+ 
+         // we load landmark storages that already exist and prepare the other ones
+         List<LMConfig> lmConfigs = createLMConfigs(lmPreparationHandler.getLMProfiles());
+-        List<LandmarkStorage> loaded = lmPreparationHandler.load(lmConfigs, ghStorage.getBaseGraph(), ghStorage.getEncodingManager());
++        List<LandmarkStorage> loaded = lmPreparationHandler.load(lmConfigs, baseGraph, encodingManager);
+         List<LMConfig> loadedConfigs = loaded.stream().map(LandmarkStorage::getLMConfig).collect(Collectors.toList());
+         List<LMConfig> configsToPrepare = lmConfigs.stream().filter(c -> !loadedConfigs.contains(c)).collect(Collectors.toList());
+         List<PrepareLandmarks> prepared = prepareLM(closeEarly, configsToPrepare);
+@@ -1175,19 +1238,20 @@ else if (preparedLMS.isPresent()) {
+     protected List<PrepareLandmarks> prepareLM(boolean closeEarly, List<LMConfig> configsToPrepare) {
+         if (!configsToPrepare.isEmpty())
+             ensureWriteAccess();
+-        ghStorage.freeze();
+-        return lmPreparationHandler.prepare(configsToPrepare, ghStorage, locationIndex, closeEarly);
++        if (!baseGraph.isFrozen())
++            baseGraph.freeze();
++        return lmPreparationHandler.prepare(configsToPrepare, baseGraph, encodingManager, properties, locationIndex, closeEarly);
+     }
+ 
+     /**
+      * Internal method to clean up the graph.
+      */
+     protected void cleanUp() {
+-        PrepareRoutingSubnetworks preparation = new PrepareRoutingSubnetworks(ghStorage.getBaseGraph(), buildSubnetworkRemovalJobs());
++        PrepareRoutingSubnetworks preparation = new PrepareRoutingSubnetworks(baseGraph.getBaseGraph(), buildSubnetworkRemovalJobs());
+         preparation.setMinNetworkSize(minNetworkSize);
+         preparation.doWork();
+-        ghStorage.getProperties().put("profiles", getProfilesString());
+-        logger.info("nodes: " + Helper.nf(ghStorage.getNodes()) + ", edges: " + Helper.nf(ghStorage.getEdges()));
++        properties.put("profiles", getProfilesString());
++        logger.info("nodes: " + Helper.nf(baseGraph.getNodes()) + ", edges: " + Helper.nf(baseGraph.getEdges()));
+     }
+ 
+     private List<PrepareJob> buildSubnetworkRemovalJobs() {
+@@ -1201,9 +1265,10 @@ private List<PrepareJob> buildSubnetworkRemovalJobs() {
+     }
+ 
+     protected void flush() {
+-        logger.info("flushing graph " + ghStorage.toString() + ", details:" + ghStorage.toDetailsString() + ", "
++        logger.info("flushing graph " + getBaseGraphString() + ", details:" + baseGraph.toDetailsString() + ", "
+                 + getMemInfo() + ")");
+-        ghStorage.flush();
++        baseGraph.flush();
++        properties.flush();
+         logger.info("flushed graph " + getMemInfo() + ")");
+         setFullyLoaded();
+     }
+@@ -1213,8 +1278,10 @@ protected void flush() {
+      * remove the files created in graphhopperLocation you have to call clean().
+      */
+     public void close() {
+-        if (ghStorage != null)
+-            ghStorage.close();
++        if (baseGraph != null)
++            baseGraph.close();
++        if (properties != null)
++            properties.close();
+ 
+         chGraphs.values().forEach(RoutingCHGraph::close);
+         landmarks.values().forEach(LandmarkStorage::close);
+diff --git a/core/src/main/java/com/graphhopper/routing/Router.java b/core/src/main/java/com/graphhopper/routing/Router.java
+index c82571760fc..feb1a394345 100644
+--- a/core/src/main/java/com/graphhopper/routing/Router.java
++++ b/core/src/main/java/com/graphhopper/routing/Router.java
+@@ -65,8 +65,6 @@ public class Router {
+     private final TranslationMap translationMap;
+     private final RouterConfig routerConfig;
+     private final WeightingFactory weightingFactory;
+-    // todo: these should not be necessary anymore as soon as GraphHopperStorage (or something that replaces) it acts
+-    // like a 'graph database'
+     private final Map<String, RoutingCHGraph> chGraphs;
+     private final Map<String, LandmarkStorage> landmarks;
+     private final boolean chEnabled;
+diff --git a/core/src/main/java/com/graphhopper/routing/ch/CHPreparationHandler.java b/core/src/main/java/com/graphhopper/routing/ch/CHPreparationHandler.java
+index 8d45bb2e629..3a39fbf1bbe 100644
+--- a/core/src/main/java/com/graphhopper/routing/ch/CHPreparationHandler.java
++++ b/core/src/main/java/com/graphhopper/routing/ch/CHPreparationHandler.java
+@@ -115,14 +115,14 @@ public Map<String, RoutingCHGraph> load(BaseGraph graph, List<CHConfig> chConfig
+         return loaded;
+     }
+ 
+-    public Map<String, PrepareContractionHierarchies.Result> prepare(GraphHopperStorage ghStorage, List<CHConfig> chConfigs, final boolean closeEarly) {
++    public Map<String, PrepareContractionHierarchies.Result> prepare(BaseGraph baseGraph, StorableProperties properties, List<CHConfig> chConfigs, final boolean closeEarly) {
+         if (chConfigs.isEmpty()) {
+             LOGGER.info("There are no CHs to prepare");
+             return Collections.emptyMap();
+         }
+         LOGGER.info("Creating CH preparations, {}", getMemInfo());
+         List<PrepareContractionHierarchies> preparations = chConfigs.stream()
+-                .map(c -> createCHPreparation(ghStorage.getBaseGraph(), c))
++                .map(c -> createCHPreparation(baseGraph, c))
+                 .collect(Collectors.toList());
+         Map<String, PrepareContractionHierarchies.Result> results = Collections.synchronizedMap(new LinkedHashMap<>());
+         List<Callable<String>> callables = new ArrayList<>(preparations.size());
+@@ -139,7 +139,7 @@ public Map<String, PrepareContractionHierarchies.Result> prepare(GraphHopperStor
+                 prepare.flush();
+                 if (closeEarly)
+                     prepare.close();
+-                ghStorage.getProperties().put(CH.PREPARE + "date." + name, createFormatter().format(new Date()));
++                properties.put(CH.PREPARE + "date." + name, createFormatter().format(new Date()));
+                 return name;
+             });
+         }
+diff --git a/core/src/main/java/com/graphhopper/routing/ch/PrepareContractionHierarchies.java b/core/src/main/java/com/graphhopper/routing/ch/PrepareContractionHierarchies.java
+index b95d86c687b..55d92e99d4f 100644
+--- a/core/src/main/java/com/graphhopper/routing/ch/PrepareContractionHierarchies.java
++++ b/core/src/main/java/com/graphhopper/routing/ch/PrepareContractionHierarchies.java
+@@ -123,7 +123,7 @@ public Result doWork() {
+             throw new IllegalStateException("Call doWork only once!");
+         prepared = true;
+         if (!graph.isFrozen()) {
+-            throw new IllegalStateException("Given GraphHopperStorage has not been frozen yet");
++            throw new IllegalStateException("Given BaseGraph has not been frozen yet");
+         }
+         if (chStore.getShortcuts() > 0) {
+             throw new IllegalStateException("Given CHStore already contains shortcuts");
+diff --git a/core/src/main/java/com/graphhopper/routing/lm/LMPreparationHandler.java b/core/src/main/java/com/graphhopper/routing/lm/LMPreparationHandler.java
+index 1ff78c3e4cc..7e5ecbb626f 100644
+--- a/core/src/main/java/com/graphhopper/routing/lm/LMPreparationHandler.java
++++ b/core/src/main/java/com/graphhopper/routing/lm/LMPreparationHandler.java
+@@ -23,8 +23,9 @@
+ import com.graphhopper.config.LMProfile;
+ import com.graphhopper.routing.ev.EncodedValueLookup;
+ import com.graphhopper.routing.util.AreaIndex;
++import com.graphhopper.routing.util.EncodingManager;
+ import com.graphhopper.storage.BaseGraph;
+-import com.graphhopper.storage.GraphHopperStorage;
++import com.graphhopper.storage.StorableProperties;
+ import com.graphhopper.storage.index.LocationIndex;
+ import com.graphhopper.util.GHUtility;
+ import com.graphhopper.util.JsonFeatureCollection;
+@@ -172,8 +173,8 @@ public List<LandmarkStorage> load(List<LMConfig> lmConfigs, BaseGraph baseGraph,
+     /**
+      * Prepares the landmark data for all given configs
+      */
+-    public List<PrepareLandmarks> prepare(List<LMConfig> lmConfigs, GraphHopperStorage ghStorage, LocationIndex locationIndex, final boolean closeEarly) {
+-        List<PrepareLandmarks> preparations = createPreparations(lmConfigs, ghStorage.getBaseGraph(), ghStorage.getEncodingManager(), locationIndex);
++    public List<PrepareLandmarks> prepare(List<LMConfig> lmConfigs, BaseGraph baseGraph, EncodingManager encodingManager, StorableProperties properties, LocationIndex locationIndex, final boolean closeEarly) {
++        List<PrepareLandmarks> preparations = createPreparations(lmConfigs, baseGraph, encodingManager, locationIndex);
+         List<Callable<String>> prepareCallables = new ArrayList<>();
+         for (int i = 0; i < preparations.size(); i++) {
+             PrepareLandmarks prepare = preparations.get(i);
+@@ -186,7 +187,7 @@ public List<PrepareLandmarks> prepare(List<LMConfig> lmConfigs, GraphHopperStora
+                 if (closeEarly)
+                     prepare.close();
+                 LOGGER.info("LM {} finished {}", name, getMemInfo());
+-                ghStorage.getProperties().put(Landmark.PREPARE + "date." + name, createFormatter().format(new Date()));
++                properties.put(Landmark.PREPARE + "date." + name, createFormatter().format(new Date()));
+                 return name;
+             });
+         }
+diff --git a/core/src/main/java/com/graphhopper/routing/querygraph/QueryGraph.java b/core/src/main/java/com/graphhopper/routing/querygraph/QueryGraph.java
+index cf7dd1825f0..f8b84fab864 100644
+--- a/core/src/main/java/com/graphhopper/routing/querygraph/QueryGraph.java
++++ b/core/src/main/java/com/graphhopper/routing/querygraph/QueryGraph.java
+@@ -67,28 +67,10 @@ public static QueryGraph create(BaseGraph graph, Snap snap) {
+         return QueryGraph.create(graph, Collections.singletonList(snap));
+     }
+ 
+-    /**
+-     * @deprecated currently we use this only for easier GraphHopperStorage -> BaseGraph migration
+-     * instead of just calling graph.getBaseGraph() better try to convert graph to a BaseGraph
+-     */
+-    @Deprecated
+-    public static QueryGraph create(Graph graph, Snap snap) {
+-        return create(graph.getBaseGraph(), snap);
+-    }
+-
+     public static QueryGraph create(BaseGraph graph, Snap fromSnap, Snap toSnap) {
+         return QueryGraph.create(graph.getBaseGraph(), Arrays.asList(fromSnap, toSnap));
+     }
+ 
+-    /**
+-     * @deprecated currently we use this only for easier GraphHopperStorage -> BaseGraph migration
+-     * instead of just calling graph.getBaseGraph() better try to convert graph to a BaseGraph
+-     */
+-    @Deprecated
+-    public static QueryGraph create(Graph graph, Snap fromSnap, Snap toSnap) {
+-        return create(graph.getBaseGraph(), fromSnap, toSnap);
+-    }
+-
+     public static QueryGraph create(BaseGraph graph, List<Snap> snaps) {
+         return new QueryGraph(graph, snaps);
+     }
+diff --git a/core/src/main/java/com/graphhopper/routing/util/VehicleTagParser.java b/core/src/main/java/com/graphhopper/routing/util/VehicleTagParser.java
+index 68e87bb1553..1bb796941f3 100644
+--- a/core/src/main/java/com/graphhopper/routing/util/VehicleTagParser.java
++++ b/core/src/main/java/com/graphhopper/routing/util/VehicleTagParser.java
+@@ -36,8 +36,7 @@
+ 
+ /**
+  * Abstract class which handles flag decoding and encoding. Every encoder should be registered to a
+- * EncodingManager to be usable. If you want the full long to be stored you need to enable this in
+- * the GraphHopperStorage.
++ * EncodingManager to be usable.
+  *
+  * @author Peter Karich
+  * @author Nop
+diff --git a/core/src/main/java/com/graphhopper/storage/BaseGraph.java b/core/src/main/java/com/graphhopper/storage/BaseGraph.java
+index 2e2e2deeb93..bbf7869d29b 100644
+--- a/core/src/main/java/com/graphhopper/storage/BaseGraph.java
++++ b/core/src/main/java/com/graphhopper/storage/BaseGraph.java
+@@ -169,7 +169,11 @@ public BaseGraph create(long initSize) {
+         return this;
+     }
+ 
+-    String toDetailsString() {
++    public int getIntsForFlags() {
++        return store.getIntsForFlags();
++    }
++
++    public String toDetailsString() {
+         return store.toDetailsString() + ", "
+                 + "name:(" + edgeKVStorage.getCapacity() / Helper.MB + "MB), "
+                 + "geo:" + nf(maxGeoRef) + "(" + wayGeometry.getCapacity() / Helper.MB + "MB)";
+@@ -178,7 +182,7 @@ String toDetailsString() {
+     /**
+      * Flush and free resources that are not needed for post-processing (way geometries and EdgeKVStorage).
+      */
+-    void flushAndCloseGeometryAndNameStorage() {
++    public void flushAndCloseGeometryAndNameStorage() {
+         setWayGeometryHeader();
+ 
+         wayGeometry.flush();
+diff --git a/core/src/main/java/com/graphhopper/storage/CHStorage.java b/core/src/main/java/com/graphhopper/storage/CHStorage.java
+index 0a1c356ce8e..a54a178048e 100644
+--- a/core/src/main/java/com/graphhopper/storage/CHStorage.java
++++ b/core/src/main/java/com/graphhopper/storage/CHStorage.java
+@@ -83,12 +83,11 @@ public static CHStorage fromGraph(BaseGraph baseGraph, CHConfig chConfig) {
+                     " nodeA (" + nodeAccess.getLat(s.nodeA) + "," + nodeAccess.getLon(s.nodeA) +
+                     " nodeB " + nodeAccess.getLat(s.nodeB) + "," + nodeAccess.getLon(s.nodeB));
+         });
+-        store.create();
+         // we use a rather small value here. this might result in more allocations later, but they should
+         // not matter that much. if we expect a too large value the shortcuts DataAccess will end up
+         // larger than needed, because we do not do something like trimToSize in the end.
+         double expectedShortcuts = 0.3 * baseGraph.getEdges();
+-        store.init(baseGraph.getNodes(), (int) expectedShortcuts);
++        store.create(baseGraph.getNodes(), (int) expectedShortcuts);
+         return store;
+     }
+ 
+@@ -123,30 +122,21 @@ public void setLowShortcutWeightConsumer(Consumer<LowWeightShortcut> lowWeightSh
+ 
+     /**
+      * Creates a new storage. Alternatively we could load an existing one using {@link #loadExisting()}}.
+-     */
+-    public void create() {
+-        // We have to create the DataAccess here before we flush it. Otherwise we get an error when calling
+-        // loadExisting() later, see #2384
+-        nodesCH.create(0);
+-        shortcuts.create(0);
+-    }
+-
+-    /**
+-     * Initializes the storage. The number of nodes must be given here while the expected number of shortcuts can
++     * The number of nodes must be given here while the expected number of shortcuts can
+      * be given to prevent some memory allocations, but is not a requirement. When in doubt rather use a small value
+      * so the resulting files/byte arrays won't be unnecessarily large.
+      * todo: we could also trim down the shortcuts DataAccess when we are done adding shortcuts
+      */
+-    public void init(int nodes, int expectedShortcuts) {
++    public void create(int nodes, int expectedShortcuts) {
+         if (nodeCount >= 0)
+-            throw new IllegalStateException("CHStorage can only be initialized once");
++            throw new IllegalStateException("CHStorage can only be created once");
+         if (nodes < 0)
+-            throw new IllegalStateException("CHStorage must be initialized with a positive number of nodes");
+-        nodesCH.ensureCapacity((long) nodes * nodeCHEntryBytes);
++            throw new IllegalStateException("CHStorage must be created with a positive number of nodes");
++        nodesCH.create((long) nodes * nodeCHEntryBytes);
+         nodeCount = nodes;
+-        shortcuts.ensureCapacity((long) expectedShortcuts * shortcutEntryBytes);
+         for (int node = 0; node < nodes; node++)
+             setLastShortcut(toNodePointer(node), -1);
++        shortcuts.create((long) expectedShortcuts * shortcutEntryBytes);
+     }
+ 
+     public void flush() {
+diff --git a/core/src/main/java/com/graphhopper/storage/CHStorageBuilder.java b/core/src/main/java/com/graphhopper/storage/CHStorageBuilder.java
+index 8aa941241e2..c382ef517c0 100644
+--- a/core/src/main/java/com/graphhopper/storage/CHStorageBuilder.java
++++ b/core/src/main/java/com/graphhopper/storage/CHStorageBuilder.java
+@@ -31,9 +31,7 @@ public class CHStorageBuilder {
+     private final CHStorage storage;
+ 
+     public CHStorageBuilder(CHStorage chStorage) {
+-        // todo: currently we create a GraphHopperStorage which creates a CHStorage for us, but really we should rather
+-        // be able to create a GraphHopperStorage and build a CHStorage on top. So if anything CHStorageBuilder should
+-        // create CHStorage, not receive it here.
++        // todo: maybe CHStorageBuilder should create CHStorage, not receive it here
+         this.storage = chStorage;
+     }
+ 
+diff --git a/core/src/main/java/com/graphhopper/storage/GHNodeAccess.java b/core/src/main/java/com/graphhopper/storage/GHNodeAccess.java
+index 9d0d396e4a0..ace800d23d7 100644
+--- a/core/src/main/java/com/graphhopper/storage/GHNodeAccess.java
++++ b/core/src/main/java/com/graphhopper/storage/GHNodeAccess.java
+@@ -18,9 +18,6 @@
+ package com.graphhopper.storage;
+ 
+ /**
+- * A helper class for GraphHopperStorage for its node access.
+- * <p>
+- *
+  * @author Peter Karich
+  */
+ class GHNodeAccess implements NodeAccess {
+diff --git a/core/src/main/java/com/graphhopper/storage/GraphBuilder.java b/core/src/main/java/com/graphhopper/storage/GraphBuilder.java
+deleted file mode 100644
+index 57e39f2308c..00000000000
+--- a/core/src/main/java/com/graphhopper/storage/GraphBuilder.java
++++ /dev/null
+@@ -1,97 +0,0 @@
+-/*
+- *  Licensed to GraphHopper GmbH under one or more contributor
+- *  license agreements. See the NOTICE file distributed with this work for
+- *  additional information regarding copyright ownership.
+- *
+- *  GraphHopper GmbH licenses this file to you under the Apache License,
+- *  Version 2.0 (the "License"); you may not use this file except in
+- *  compliance with the License. You may obtain a copy of the License at
+- *
+- *       http://www.apache.org/licenses/LICENSE-2.0
+- *
+- *  Unless required by applicable law or agreed to in writing, software
+- *  distributed under the License is distributed on an "AS IS" BASIS,
+- *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+- *  See the License for the specific language governing permissions and
+- *  limitations under the License.
+- */
+-package com.graphhopper.storage;
+-
+-import com.graphhopper.routing.util.EncodingManager;
+-
+-/**
+- * Used to build {@link GraphHopperStorage}
+- *
+- * @author Peter Karich
+- * @author easbar
+- */
+-public class GraphBuilder {
+-    private final EncodingManager encodingManager;
+-    private Directory dir = new RAMDirectory();
+-    private boolean elevation;
+-    private boolean turnCosts;
+-    private long bytes = 100;
+-    private int segmentSize = -1;
+-
+-    public static GraphBuilder start(EncodingManager encodingManager) {
+-        return new GraphBuilder(encodingManager);
+-    }
+-
+-    public GraphBuilder(EncodingManager encodingManager) {
+-        this.encodingManager = encodingManager;
+-        this.turnCosts = encodingManager.needsTurnCostsSupport();
+-    }
+-
+-    public GraphBuilder setDir(Directory dir) {
+-        this.dir = dir;
+-        return this;
+-    }
+-
+-    public GraphBuilder setMMap(String location) {
+-        return setDir(new MMapDirectory(location));
+-    }
+-
+-    public GraphBuilder setRAM() {
+-        return setDir(new RAMDirectory());
+-    }
+-
+-    public GraphBuilder setRAM(String location) {
+-        return setDir(new RAMDirectory(location));
+-    }
+-
+-    public GraphBuilder setRAM(String location, boolean store) {
+-        return setDir(new RAMDirectory(location, store));
+-    }
+-
+-    public GraphBuilder set3D(boolean withElevation) {
+-        this.elevation = withElevation;
+-        return this;
+-    }
+-
+-    public GraphBuilder withTurnCosts(boolean turnCosts) {
+-        this.turnCosts = turnCosts;
+-        return this;
+-    }
+-
+-    public GraphBuilder setSegmentSize(int segmentSize) {
+-        this.segmentSize = segmentSize;
+-        return this;
+-    }
+-
+-    /**
+-     * Default graph is a {@link GraphHopperStorage} with an in memory directory and disabled storing on flush.
+-     * Afterwards you'll need to call {@link GraphHopperStorage#create} to have a usable object. Better use
+-     * {@link #create} directly.
+-     */
+-    public GraphHopperStorage build() {
+-        return new GraphHopperStorage(dir, encodingManager, elevation, turnCosts, segmentSize);
+-    }
+-
+-    /**
+-     * Default graph is a {@link GraphHopperStorage} with an in memory directory and disabled storing on flush.
+-     */
+-    public GraphHopperStorage create() {
+-        return build().create(bytes);
+-    }
+-
+-}
+diff --git a/core/src/main/java/com/graphhopper/storage/GraphHopperStorage.java b/core/src/main/java/com/graphhopper/storage/GraphHopperStorage.java
+deleted file mode 100644
+index fc3c73dbfd2..00000000000
+--- a/core/src/main/java/com/graphhopper/storage/GraphHopperStorage.java
++++ /dev/null
+@@ -1,258 +0,0 @@
+-/*
+- *  Licensed to GraphHopper GmbH under one or more contributor
+- *  license agreements. See the NOTICE file distributed with this work for
+- *  additional information regarding copyright ownership.
+- *
+- *  GraphHopper GmbH licenses this file to you under the Apache License,
+- *  Version 2.0 (the "License"); you may not use this file except in
+- *  compliance with the License. You may obtain a copy of the License at
+- *
+- *       http://www.apache.org/licenses/LICENSE-2.0
+- *
+- *  Unless required by applicable law or agreed to in writing, software
+- *  distributed under the License is distributed on an "AS IS" BASIS,
+- *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+- *  See the License for the specific language governing permissions and
+- *  limitations under the License.
+- */
+-package com.graphhopper.storage;
+-
+-import com.graphhopper.routing.util.AllEdgesIterator;
+-import com.graphhopper.routing.util.EdgeFilter;
+-import com.graphhopper.routing.util.EncodingManager;
+-import com.graphhopper.routing.weighting.Weighting;
+-import com.graphhopper.util.Constants;
+-import com.graphhopper.util.EdgeExplorer;
+-import com.graphhopper.util.EdgeIteratorState;
+-import com.graphhopper.util.shapes.BBox;
+-
+-import java.io.Closeable;
+-
+-/**
+- * This class manages all storage related methods and delegates the calls to the associated graphs.
+- * The associated graphs manage their own necessary data structures and are used to provide e.g.
+- * different traversal methods. By default this class implements the graph interface and results in
+- * identical behavior as the Graph instance from getBaseGraph()
+- * <p>
+- *
+- * @author Peter Karich
+- */
+-public final class GraphHopperStorage implements Graph, Closeable {
+-    private final Directory dir;
+-    private final EncodingManager encodingManager;
+-    private final StorableProperties properties;
+-    private final BaseGraph baseGraph;
+-
+-    /**
+-     * Use {@link GraphBuilder} to create a graph
+-     */
+-    public GraphHopperStorage(Directory dir, EncodingManager encodingManager, boolean withElevation, boolean withTurnCosts, int segmentSize) {
+-        if (encodingManager == null)
+-            throw new IllegalArgumentException("EncodingManager needs to be non-null since 0.7. Create one using EncodingManager.create or EncodingManager.create(flagEncoderFactory, ghLocation)");
+-
+-        this.encodingManager = encodingManager;
+-        this.dir = dir;
+-        this.properties = new StorableProperties(dir);
+-        baseGraph = new BaseGraph(dir, encodingManager.getIntsForFlags(), withElevation, withTurnCosts, segmentSize);
+-    }
+-
+-    /**
+-     * @return the directory where this graph is stored.
+-     */
+-    public Directory getDirectory() {
+-        return dir;
+-    }
+-
+-    /**
+-     * After configuring this storage you need to create it explicitly.
+-     */
+-    public GraphHopperStorage create(long byteCount) {
+-        baseGraph.checkNotInitialized();
+-        if (encodingManager == null)
+-            throw new IllegalStateException("EncodingManager can only be null if you call loadExisting");
+-
+-        dir.create();
+-
+-        properties.create(100);
+-        properties.put("graph.encoded_values", encodingManager.toEncodedValuesAsString());
+-        properties.put("graph.flag_encoders", encodingManager.toFlagEncodersAsString());
+-
+-        baseGraph.create(Math.max(byteCount, 100));
+-        return this;
+-    }
+-
+-    public EncodingManager getEncodingManager() {
+-        return encodingManager;
+-    }
+-
+-    public StorableProperties getProperties() {
+-        return properties;
+-    }
+-
+-    public boolean loadExisting() {
+-        baseGraph.checkNotInitialized();
+-        if (properties.loadExisting()) {
+-            if (properties.containsVersion())
+-                throw new IllegalStateException("The GraphHopper file format is not compatible with the data you are " +
+-                        "trying to load. You either need to use an older version of GraphHopper or run a new import");
+-            // check encoding for compatibility
+-            String flagEncodersStr = properties.get("graph.flag_encoders");
+-
+-            if (!encodingManager.toFlagEncodersAsString().equalsIgnoreCase(flagEncodersStr)) {
+-                throw new IllegalStateException("Flag encoders do not match:"
+-                        + "\nGraphhopper config: " + encodingManager.toFlagEncodersAsString()
+-                        + "\nLoaded graph:       " + flagEncodersStr
+-                        + "\nChange configuration to match the graph or delete " + dir.getLocation());
+-            }
+-
+-            String encodedValueStr = properties.get("graph.encoded_values");
+-            if (!encodingManager.toEncodedValuesAsString().equalsIgnoreCase(encodedValueStr)) {
+-                throw new IllegalStateException("Encoded values do not match:"
+-                        + "\nGraphhopper config: " + encodingManager.toEncodedValuesAsString()
+-                        + "\nLoaded graph:       " + encodedValueStr
+-                        + "\nChange configuration to match the graph or delete " + dir.getLocation());
+-            }
+-            baseGraph.loadExisting();
+-            return true;
+-        }
+-        return false;
+-    }
+-
+-    public void flush() {
+-        baseGraph.flush();
+-        properties.flush();
+-    }
+-
+-    @Override
+-    public void close() {
+-        properties.close();
+-        baseGraph.close();
+-    }
+-
+-    public boolean isClosed() {
+-        return baseGraph.isClosed();
+-    }
+-
+-    public long getCapacity() {
+-        return baseGraph.getCapacity() + properties.getCapacity();
+-    }
+-
+-    /**
+-     * Avoid that edges and nodes of the base graph are further modified. Necessary as hook for e.g.
+-     * ch graphs on top to initialize themselves
+-     */
+-    public synchronized void freeze() {
+-        if (isFrozen())
+-            return;
+-        baseGraph.freeze();
+-    }
+-
+-    public boolean isFrozen() {
+-        return baseGraph.isFrozen();
+-    }
+-
+-    public String toDetailsString() {
+-        return baseGraph.toDetailsString();
+-    }
+-
+-    @Override
+-    public String toString() {
+-        return encodingManager
+-                + "|" + getDirectory().getDefaultType()
+-                + "|" + baseGraph.nodeAccess.getDimension() + "D"
+-                + "|" + (baseGraph.supportsTurnCosts() ? baseGraph.turnCostStorage : "no_turn_cost")
+-                + "|" + getVersionsString();
+-    }
+-
+-    private String getVersionsString() {
+-        return "nodes:" + Constants.VERSION_NODE +
+-                ",edges:" + Constants.VERSION_EDGE +
+-                ",geometry:" + Constants.VERSION_GEOMETRY +
+-                ",location_index:" + Constants.VERSION_LOCATION_IDX +
+-                ",string_index:" + Constants.VERSION_EDGEKV_STORAGE +
+-                ",nodesCH:" + Constants.VERSION_NODE_CH +
+-                ",shortcuts:" + Constants.VERSION_SHORTCUT;
+-    }
+-
+-    // now delegate all Graph methods to BaseGraph to avoid ugly programming flow ala
+-    // GraphHopperStorage storage = ..;
+-    // Graph g = storage.getBaseGraph();
+-    // instead directly the storage can be used to traverse the base graph
+-    @Override
+-    public BaseGraph getBaseGraph() {
+-        return baseGraph;
+-    }
+-
+-    @Override
+-    public int getNodes() {
+-        return baseGraph.getNodes();
+-    }
+-
+-    @Override
+-    public int getEdges() {
+-        return baseGraph.getEdges();
+-    }
+-
+-    @Override
+-    public NodeAccess getNodeAccess() {
+-        return baseGraph.getNodeAccess();
+-    }
+-
+-    @Override
+-    public BBox getBounds() {
+-        return baseGraph.getBounds();
+-    }
+-
+-    @Override
+-    public EdgeIteratorState edge(int a, int b) {
+-        return baseGraph.edge(a, b);
+-    }
+-
+-    @Override
+-    public EdgeIteratorState getEdgeIteratorState(int edgeId, int adjNode) {
+-        return baseGraph.getEdgeIteratorState(edgeId, adjNode);
+-    }
+-
+-    @Override
+-    public EdgeIteratorState getEdgeIteratorStateForKey(int edgeKey) {
+-        return baseGraph.getEdgeIteratorStateForKey(edgeKey);
+-    }
+-
+-    @Override
+-    public AllEdgesIterator getAllEdges() {
+-        return baseGraph.getAllEdges();
+-    }
+-
+-    @Override
+-    public EdgeExplorer createEdgeExplorer(EdgeFilter filter) {
+-        return baseGraph.createEdgeExplorer(filter);
+-    }
+-
+-    @Override
+-    public TurnCostStorage getTurnCostStorage() {
+-        return baseGraph.getTurnCostStorage();
+-    }
+-
+-    @Override
+-    public Weighting wrapWeighting(Weighting weighting) {
+-        return weighting;
+-    }
+-
+-    @Override
+-    public int getOtherNode(int edge, int node) {
+-        return baseGraph.getOtherNode(edge, node);
+-    }
+-
+-    @Override
+-    public boolean isAdjacentToNode(int edge, int node) {
+-        return baseGraph.isAdjacentToNode(edge, node);
+-    }
+-
+-    /**
+-     * Flush and free base graph resources like way geometries and EdgeKVStorage
+-     */
+-    public void flushAndCloseGeometryAndNameStorage() {
+-        baseGraph.flushAndCloseGeometryAndNameStorage();
+-    }
+-
+-}
+diff --git a/core/src/main/java/com/graphhopper/util/GHUtility.java b/core/src/main/java/com/graphhopper/util/GHUtility.java
+index c5ce254dc64..b06687f6e85 100644
+--- a/core/src/main/java/com/graphhopper/util/GHUtility.java
++++ b/core/src/main/java/com/graphhopper/util/GHUtility.java
+@@ -423,28 +423,25 @@ static Graph createSortedGraph(Graph fromGraph, Graph toSortedGraph, final IntIn
+         return toSortedGraph;
+     }
+ 
+-    static Directory guessDirectory(GraphHopperStorage store) {
+-        if (store.getDirectory() instanceof MMapDirectory) {
++    static Directory guessDirectory(BaseGraph graph) {
++        if (graph.getDirectory() instanceof MMapDirectory) {
+             throw new IllegalStateException("not supported yet: mmap will overwrite existing storage at the same location");
+         }
+-        String location = store.getDirectory().getLocation();
+-        boolean isStoring = ((GHDirectory) store.getDirectory()).isStoring();
++        String location = graph.getDirectory().getLocation();
++        boolean isStoring = ((GHDirectory) graph.getDirectory()).isStoring();
+         return new RAMDirectory(location, isStoring);
+     }
+ 
+     /**
+      * Create a new storage from the specified one without copying the data. CHGraphs won't be copied.
+      */
+-    public static GraphHopperStorage newStorage(GraphHopperStorage store) {
+-        Directory outdir = guessDirectory(store);
+-        boolean is3D = store.getNodeAccess().is3D();
+-        GraphHopperStorage copy = new GraphBuilder(store.getEncodingManager())
+-                .withTurnCosts(store.getTurnCostStorage() != null)
+-                .set3D(is3D)
++    public static BaseGraph newGraph(BaseGraph baseGraph) {
++        Directory outdir = guessDirectory(baseGraph);
++        return new BaseGraph.Builder(baseGraph.getIntsForFlags())
++                .withTurnCosts(baseGraph.getTurnCostStorage() != null)
++                .set3D(baseGraph.getNodeAccess().is3D())
+                 .setDir(outdir)
+                 .create();
+-        copy.getProperties().putAll(store.getProperties().getAll());
+-        return copy;
+     }
+ 
+     public static int getAdjNode(Graph g, int edge, int adjNode) {
+diff --git a/core/src/test/java/com/graphhopper/GraphHopperTest.java b/core/src/test/java/com/graphhopper/GraphHopperTest.java
+index 83b2af87a46..95d53002d45 100644
+--- a/core/src/test/java/com/graphhopper/GraphHopperTest.java
++++ b/core/src/test/java/com/graphhopper/GraphHopperTest.java
+@@ -1763,7 +1763,7 @@ public void testCompareAlgos(boolean turnCosts) {
+         long seed = System.nanoTime();
+         Random rnd = new Random(seed);
+         for (int i = 0; i < 100; i++) {
+-            BBox bounds = hopper.getGraphHopperStorage().getBounds();
++            BBox bounds = hopper.getBaseGraph().getBounds();
+             double lat1 = bounds.minLat + rnd.nextDouble() * (bounds.maxLat - bounds.minLat);
+             double lat2 = bounds.minLat + rnd.nextDouble() * (bounds.maxLat - bounds.minLat);
+             double lon1 = bounds.minLon + rnd.nextDouble() * (bounds.maxLon - bounds.minLon);
+@@ -2031,10 +2031,10 @@ public void testEdgeCount() {
+                 setProfiles(new Profile("car").setVehicle("car").setWeighting("fastest"));
+         hopper.importOrLoad();
+         int count = 0;
+-        AllEdgesIterator iter = hopper.getGraphHopperStorage().getAllEdges();
++        AllEdgesIterator iter = hopper.getBaseGraph().getAllEdges();
+         while (iter.next())
+             count++;
+-        assertEquals(hopper.getGraphHopperStorage().getEdges(), count);
++        assertEquals(hopper.getBaseGraph().getEdges(), count);
+     }
+ 
+     @Test
+@@ -2542,7 +2542,7 @@ public void testLoadGraph_implicitEncodedValues_issue1862() {
+                 .setGraphHopperLocation(GH_LOCATION)
+                 .setOSMFile(BAYREUTH);
+         hopper.importOrLoad();
+-        int nodes = hopper.getGraphHopperStorage().getNodes();
++        int nodes = hopper.getBaseGraph().getNodes();
+         hopper.close();
+ 
+         // load without configured FlagEncoders
+@@ -2553,8 +2553,8 @@ public void testLoadGraph_implicitEncodedValues_issue1862() {
+         );
+         hopper.setGraphHopperLocation(GH_LOCATION);
+         assertTrue(hopper.load());
+-        hopper.getGraphHopperStorage();
+-        assertEquals(nodes, hopper.getGraphHopperStorage().getNodes());
++        hopper.getBaseGraph();
++        assertEquals(nodes, hopper.getBaseGraph().getNodes());
+         hopper.close();
+ 
+         // load via explicitly configured FlagEncoders
+@@ -2566,7 +2566,7 @@ public void testLoadGraph_implicitEncodedValues_issue1862() {
+         );
+         hopper.setGraphHopperLocation(GH_LOCATION);
+         assertTrue(hopper.load());
+-        assertEquals(nodes, hopper.getGraphHopperStorage().getNodes());
++        assertEquals(nodes, hopper.getBaseGraph().getNodes());
+         hopper.close();
+     }
+ 
+diff --git a/core/src/test/java/com/graphhopper/reader/osm/GraphHopperOSMTest.java b/core/src/test/java/com/graphhopper/reader/osm/GraphHopperOSMTest.java
+index 734444ea1c2..12fdbbce2d0 100644
+--- a/core/src/test/java/com/graphhopper/reader/osm/GraphHopperOSMTest.java
++++ b/core/src/test/java/com/graphhopper/reader/osm/GraphHopperOSMTest.java
+@@ -164,13 +164,13 @@ public void testQueryLocationIndexWithBBox() {
+                 setOSMFile("../core/files/monaco.osm.gz");
+         gh.importOrLoad();
+ 
+-        final NodeAccess na = gh.getGraphHopperStorage().getNodeAccess();
++        final NodeAccess na = gh.getBaseGraph().getNodeAccess();
+         final Collection<Integer> indexNodeList = new TreeSet<>();
+         LocationIndexTree index = (LocationIndexTree) gh.getLocationIndex();
+-        final EdgeExplorer edgeExplorer = gh.getGraphHopperStorage().createEdgeExplorer();
++        final EdgeExplorer edgeExplorer = gh.getBaseGraph().createEdgeExplorer();
+         final BBox bbox = new BBox(7.422, 7.429, 43.729, 43.734);
+         index.query(bbox, edgeId -> {
+-            EdgeIteratorState edge = gh.getGraphHopperStorage().getEdgeIteratorStateForKey(edgeId * 2);
++            EdgeIteratorState edge = gh.getBaseGraph().getEdgeIteratorStateForKey(edgeId * 2);
+             for (int i = 0; i < 2; i++) {
+                 int nodeId = i == 0 ? edge.getBaseNode() : edge.getAdjNode();
+                 double lat = na.getLat(nodeId);
+@@ -190,7 +190,7 @@ public void testQueryLocationIndexWithBBox() {
+         new BreadthFirstSearch() {
+             @Override
+             protected GHBitSet createBitSet() {
+-                return new GHBitSetImpl(gh.getGraphHopperStorage().getNodes());
++                return new GHBitSetImpl(gh.getBaseGraph().getNodes());
+             }
+ 
+             @Override
+@@ -417,8 +417,8 @@ public void testFootAndCar() {
+         // Now it doesn't work like that anymore, so I set this parameter so the test doesn't fail.
+         ((LocationIndexTree) instance.getLocationIndex()).setMaxRegionSearch(300);
+ 
+-        assertEquals(5, instance.getGraphHopperStorage().getNodes());
+-        assertEquals(8, instance.getGraphHopperStorage().getEdges());
++        assertEquals(5, instance.getBaseGraph().getNodes());
++        assertEquals(8, instance.getBaseGraph().getEdges());
+ 
+         // A to D
+         GHResponse grsp = instance.route(new GHRequest(11.1, 50, 11.3, 51).setProfile(profile1));
+@@ -466,7 +466,7 @@ public void testFailsForWrongConfig() {
+                                 ))).
+                 setGraphHopperLocation(ghLoc);
+         instance.importOrLoad();
+-        assertEquals(5, instance.getGraphHopperStorage().getNodes());
++        assertEquals(5, instance.getBaseGraph().getNodes());
+         instance.close();
+ 
+         // different config (flagEncoder list)
+@@ -540,9 +540,9 @@ public void testFailsForWrongEVConfig() {
+                 setGraphHopperLocation(ghLoc);
+         instance.importOrLoad();
+         // older versions <= 0.12 did not store this property, ensure that we fail to load it
+-        instance.getGraphHopperStorage().getProperties().remove("graph.encoded_values");
+-        instance.getGraphHopperStorage().flush();
+-        assertEquals(5, instance.getGraphHopperStorage().getNodes());
++        instance.getProperties().remove("graph.encoded_values");
++        instance.getBaseGraph().flush();
++        assertEquals(5, instance.getBaseGraph().getNodes());
+         instance.close();
+ 
+         // different encoded values should fail to load
+@@ -647,8 +647,8 @@ public void testFootOnly() {
+ 
+         ((LocationIndexTree) instance.getLocationIndex()).setMaxRegionSearch(300);
+ 
+-        assertEquals(2, instance.getGraphHopperStorage().getNodes());
+-        assertEquals(2, instance.getGraphHopperStorage().getAllEdges().length());
++        assertEquals(2, instance.getBaseGraph().getNodes());
++        assertEquals(2, instance.getBaseGraph().getAllEdges().length());
+ 
+         // A to E only for foot
+         GHResponse grsp = instance.route(new GHRequest(11.1, 50, 11.19, 52).setProfile(profile));
+@@ -732,11 +732,11 @@ public void testMultipleCHPreparationsInParallel() {
+                     assertEquals((long) shortcutCount, chGraph.getValue().getShortcuts());
+ 
+                 String keyError = Parameters.CH.PREPARE + "error." + name;
+-                String valueError = hopper.getGraphHopperStorage().getProperties().get(keyError);
++                String valueError = hopper.getProperties().get(keyError);
+                 assertTrue(valueError.isEmpty(), "Properties for " + name + " should NOT contain error " + valueError + " [" + threadCount + "]");
+ 
+                 String key = Parameters.CH.PREPARE + "date." + name;
+-                String value = hopper.getGraphHopperStorage().getProperties().get(key);
++                String value = hopper.getProperties().get(key);
+                 assertFalse(value.isEmpty(), "Properties for " + name + " did NOT contain finish date [" + threadCount + "]");
+             }
+             hopper.close();
+@@ -781,11 +781,11 @@ public void testMultipleLMPreparationsInParallel() {
+                     assertEquals((int) landmarksCount, landmarks.getValue().getSubnetworksWithLandmarks());
+ 
+                 String keyError = Parameters.Landmark.PREPARE + "error." + name;
+-                String valueError = hopper.getGraphHopperStorage().getProperties().get(keyError);
++                String valueError = hopper.getProperties().get(keyError);
+                 assertTrue(valueError.isEmpty(), "Properties for " + name + " should NOT contain error " + valueError + " [" + threadCount + "]");
+ 
+                 String key = Parameters.Landmark.PREPARE + "date." + name;
+-                String value = hopper.getGraphHopperStorage().getProperties().get(key);
++                String value = hopper.getProperties().get(key);
+                 assertFalse(value.isEmpty(), "Properties for " + name + " did NOT contain finish date [" + threadCount + "]");
+             }
+             hopper.close();
+@@ -846,8 +846,7 @@ public void testProfilesMustNotBeChanged() {
+                     new Profile("car2").setVehicle("car").setWeighting("fastest")
+             ));
+             IllegalStateException e = assertThrows(IllegalStateException.class, hopper::importOrLoad);
+-            // so far we get another error message in this case, because GraphHopperStorage checks the encoded values
+-            // in loadExisting already
++            // so far we get another error message in this case, because we check the encoded values and encoders first
+             assertTrue(e.getMessage().contains("Flag encoders do not match"), e.getMessage());
+             hopper.close();
+         }
+diff --git a/core/src/test/java/com/graphhopper/reader/osm/OSMReaderTest.java b/core/src/test/java/com/graphhopper/reader/osm/OSMReaderTest.java
+index 8f70263eaf8..25ea3b1402b 100644
+--- a/core/src/test/java/com/graphhopper/reader/osm/OSMReaderTest.java
++++ b/core/src/test/java/com/graphhopper/reader/osm/OSMReaderTest.java
+@@ -82,12 +82,13 @@ public void tearDown() {
+     @Test
+     public void testMain() {
+         GraphHopper hopper = new GraphHopperFacade(file1).importOrLoad();
+-        GraphHopperStorage graph = hopper.getGraphHopperStorage();
++        BaseGraph graph = hopper.getBaseGraph();
++        StorableProperties properties = hopper.getProperties();
+ 
+-        assertNotNull(graph.getProperties().get("datareader.import.date"));
+-        assertNotEquals("", graph.getProperties().get("datareader.import.date"));
++        assertNotNull(properties.get("datareader.import.date"));
++        assertNotEquals("", properties.get("datareader.import.date"));
+ 
+-        assertEquals("2013-01-02T01:10:14Z", graph.getProperties().get("datareader.data.date"));
++        assertEquals("2013-01-02T01:10:14Z", properties.get("datareader.data.date"));
+ 
+         assertEquals(4, graph.getNodes());
+         int n20 = AbstractGraphStorageTester.getIdOf(graph, 52);
+@@ -143,7 +144,7 @@ protected int findID(LocationIndex index, double lat, double lon) {
+     @Test
+     public void testSort() {
+         GraphHopper hopper = new GraphHopperFacade(file1).setSortGraph(true).importOrLoad();
+-        NodeAccess na = hopper.getGraphHopperStorage().getNodeAccess();
++        NodeAccess na = hopper.getBaseGraph().getNodeAccess();
+         assertEquals(10, na.getLon(findID(hopper.getLocationIndex(), 49, 10)), 1e-3);
+         assertEquals(51.249, na.getLat(findID(hopper.getLocationIndex(), 51.2492152, 9.4317166)), 1e-3);
+     }
+@@ -153,9 +154,10 @@ public void testOneWay() {
+         GraphHopper hopper = new GraphHopperFacade(file2)
+                 .setMinNetworkSize(0)
+                 .importOrLoad();
+-        GraphHopperStorage graph = hopper.getGraphHopperStorage();
++        BaseGraph graph = hopper.getBaseGraph();
++        StorableProperties properties = hopper.getProperties();
+ 
+-        assertEquals("2014-01-02T01:10:14Z", graph.getProperties().get("datareader.data.date"));
++        assertEquals("2014-01-02T01:10:14Z", properties.get("datareader.data.date"));
+ 
+         int n20 = AbstractGraphStorageTester.getIdOf(graph, 52.0);
+         int n22 = AbstractGraphStorageTester.getIdOf(graph, 52.133);
+@@ -205,7 +207,7 @@ public void testFerry() {
+             public void cleanUp() {
+             }
+         }.importOrLoad();
+-        Graph graph = hopper.getGraphHopperStorage();
++        Graph graph = hopper.getBaseGraph();
+ 
+         int n40 = AbstractGraphStorageTester.getIdOf(graph, 54.0);
+         int n50 = AbstractGraphStorageTester.getIdOf(graph, 55.0);
+@@ -231,7 +233,7 @@ public void testMaxSpeed() {
+             public void cleanUp() {
+             }
+         }.importOrLoad();
+-        Graph graph = hopper.getGraphHopperStorage();
++        Graph graph = hopper.getBaseGraph();
+ 
+         int n60 = AbstractGraphStorageTester.getIdOf(graph, 56.0);
+         EdgeIterator iter = carOutExplorer.setBaseNode(n60);
+@@ -242,7 +244,7 @@ public void cleanUp() {
+     @Test
+     public void testWayReferencesNotExistingAdjNode_issue19() {
+         GraphHopper hopper = new GraphHopperFacade(file4).importOrLoad();
+-        Graph graph = hopper.getGraphHopperStorage();
++        Graph graph = hopper.getBaseGraph();
+ 
+         assertEquals(2, graph.getNodes());
+         // the missing node is ignored, but the separated nodes are still connected
+@@ -256,7 +258,7 @@ public void testWayReferencesNotExistingAdjNode_issue19() {
+     @Test
+     public void testDoNotRejectEdgeIfFirstNodeIsMissing_issue2221() {
+         GraphHopper hopper = new GraphHopperFacade("test-osm9.xml").importOrLoad();
+-        GraphHopperStorage graph = hopper.getGraphHopperStorage();
++        BaseGraph graph = hopper.getBaseGraph();
+         assertEquals(2, graph.getNodes());
+         assertEquals(1, graph.getEdges());
+         AllEdgesIterator iter = graph.getAllEdges();
+@@ -276,7 +278,7 @@ public void testDoNotRejectEdgeIfFirstNodeIsMissing_issue2221() {
+     @Test
+     public void test_edgeDistanceWhenFirstNodeIsMissing_issue2221() {
+         GraphHopper hopper = new GraphHopperFacade("test-osm10.xml").importOrLoad();
+-        GraphHopperStorage graph = hopper.getGraphHopperStorage();
++        BaseGraph graph = hopper.getBaseGraph();
+         assertEquals(3, graph.getNodes());
+         assertEquals(3, graph.getEdges());
+         AllEdgesIterator iter = graph.getAllEdges();
+@@ -293,7 +295,7 @@ public void testFoot() {
+         GraphHopper hopper = new GraphHopperFacade(file3)
+                 .setMinNetworkSize(0)
+                 .importOrLoad();
+-        Graph graph = hopper.getGraphHopperStorage();
++        Graph graph = hopper.getBaseGraph();
+ 
+         int n10 = AbstractGraphStorageTester.getIdOf(graph, 11.1);
+         int n20 = AbstractGraphStorageTester.getIdOf(graph, 12);
+@@ -316,7 +318,7 @@ public void testFoot() {
+     public void testNegativeIds() {
+         String fileNegIds = "test-osm-negative-ids.xml";
+         GraphHopper hopper = new GraphHopperFacade(fileNegIds).importOrLoad();
+-        Graph graph = hopper.getGraphHopperStorage();
++        Graph graph = hopper.getBaseGraph();
+         assertEquals(4, graph.getNodes());
+         int n20 = AbstractGraphStorageTester.getIdOf(graph, 52);
+         int n10 = AbstractGraphStorageTester.getIdOf(graph, 51.2492152);
+@@ -343,7 +345,7 @@ public void testBarriers() {
+                 setMinNetworkSize(0).
+                 importOrLoad();
+ 
+-        Graph graph = hopper.getGraphHopperStorage();
++        Graph graph = hopper.getBaseGraph();
+         // we ignore the barrier at node 50, but not the one at node 20
+         assertEquals(7, graph.getNodes());
+         assertEquals(7, graph.getEdges());
+@@ -382,7 +384,7 @@ public void testBarrierBetweenWays() {
+                 setMinNetworkSize(0).
+                 importOrLoad();
+ 
+-        Graph graph = hopper.getGraphHopperStorage();
++        Graph graph = hopper.getBaseGraph();
+         // there are seven ways, but there should also be six barrier edges
+         // we first split the loop way into two parts, and then we split the barrier node => 3 edges total
+         assertEquals(7 + 6, graph.getEdges());
+@@ -408,7 +410,7 @@ public void testFords() {
+                 ).
+                 setMinNetworkSize(0).
+                 importOrLoad();
+-        Graph graph = hopper.getGraphHopperStorage();
++        Graph graph = hopper.getBaseGraph();
+         // our way is split into five edges, because there are two ford nodes
+         assertEquals(5, graph.getEdges());
+         FlagEncoder encoder = hopper.getEncodingManager().fetchEdgeEncoders().get(0);
+@@ -437,7 +439,7 @@ public void avoidsLoopEdges_1525() {
+     }
+ 
+     void checkLoop(GraphHopper hopper) {
+-        GraphHopperStorage graph = hopper.getGraphHopperStorage();
++        BaseGraph graph = hopper.getBaseGraph();
+ 
+         // A, B, E and one of C or D should be tower nodes, in any case C and D should not be collapsed entirely
+         // into a loop edge from B to B.
+@@ -471,7 +473,7 @@ public void testBarriersOnTowerNodes() {
+         GraphHopper hopper = new GraphHopperFacade(fileBarriers).
+                 setMinNetworkSize(0).
+                 importOrLoad();
+-        Graph graph = hopper.getGraphHopperStorage();
++        Graph graph = hopper.getBaseGraph();
+         // we ignore the barrier at node 50
+         // 10-20-30 produces three edges: 10-20, 20-2x, 2x-30, the second one is a barrier edge
+         assertEquals(7, graph.getNodes());
+@@ -526,7 +528,7 @@ public void testTurnRestrictions() {
+         GraphHopper hopper = new GraphHopperFacade(fileTurnRestrictions, true, "").
+                 importOrLoad();
+ 
+-        Graph graph = hopper.getGraphHopperStorage();
++        Graph graph = hopper.getBaseGraph();
+         assertEquals(15, graph.getNodes());
+         TurnCostStorage tcStorage = graph.getTurnCostStorage();
+         assertNotNull(tcStorage);
+@@ -601,7 +603,7 @@ public void testRoadAttributes() {
+         DecimalEncodedValue heightEnc = hopper.getEncodingManager().getDecimalEncodedValue(MaxHeight.KEY);
+         DecimalEncodedValue weightEnc = hopper.getEncodingManager().getDecimalEncodedValue(MaxWeight.KEY);
+ 
+-        Graph graph = hopper.getGraphHopperStorage();
++        Graph graph = hopper.getBaseGraph();
+         assertEquals(5, graph.getNodes());
+ 
+         int na = AbstractGraphStorageTester.getIdOf(graph, 11.1, 50);
+@@ -644,7 +646,7 @@ public void testReadEleFromDataProvider() {
+         hopper.setElevationProvider(provider);
+         hopper.importOrLoad();
+ 
+-        Graph graph = hopper.getGraphHopperStorage();
++        Graph graph = hopper.getBaseGraph();
+         int n10 = AbstractGraphStorageTester.getIdOf(graph, 49.501);
+         int n30 = AbstractGraphStorageTester.getIdOf(graph, 49.5011);
+         int n50 = AbstractGraphStorageTester.getIdOf(graph, 49.5001);
+@@ -698,7 +700,7 @@ public void testTurnFlagCombination() {
+         DecimalEncodedValue truckTCEnc = manager.getDecimalEncodedValue(TurnCost.key("truck"));
+         DecimalEncodedValue bikeTCEnc = manager.getDecimalEncodedValue(TurnCost.key("bike"));
+ 
+-        Graph graph = hopper.getGraphHopperStorage();
++        Graph graph = hopper.getBaseGraph();
+         TurnCostStorage tcStorage = graph.getTurnCostStorage();
+ 
+         int edge1 = GHUtility.getEdge(graph, 1, 0).getEdge();
+@@ -729,7 +731,7 @@ public void testConditionalTurnRestriction() {
+                 setMinNetworkSize(0).
+                 importOrLoad();
+ 
+-        Graph graph = hopper.getGraphHopperStorage();
++        Graph graph = hopper.getBaseGraph();
+         assertEquals(8, graph.getNodes());
+         TurnCostStorage tcStorage = graph.getTurnCostStorage();
+         assertNotNull(tcStorage);
+@@ -797,7 +799,7 @@ public void testMultipleTurnRestrictions() {
+         GraphHopper hopper = new GraphHopperFacade(fileMultipleConditionalTurnRestrictions, true, "").
+                 importOrLoad();
+ 
+-        Graph graph = hopper.getGraphHopperStorage();
++        Graph graph = hopper.getBaseGraph();
+         assertEquals(5, graph.getNodes());
+         TurnCostStorage tcStorage = graph.getTurnCostStorage();
+         assertNotNull(tcStorage);
+@@ -838,7 +840,7 @@ public void testMultipleTurnRestrictions() {
+     public void testPreferredLanguage() {
+         GraphHopper hopper = new GraphHopperFacade(file1, false, "de").
+                 importOrLoad();
+-        GraphHopperStorage graph = hopper.getGraphHopperStorage();
++        BaseGraph graph = hopper.getBaseGraph();
+         int n20 = AbstractGraphStorageTester.getIdOf(graph, 52);
+         EdgeIterator iter = carOutExplorer.setBaseNode(n20);
+         assertTrue(iter.next());
+@@ -846,7 +848,7 @@ public void testPreferredLanguage() {
+ 
+         hopper = new GraphHopperFacade(file1, false, "el").
+                 importOrLoad();
+-        graph = hopper.getGraphHopperStorage();
++        graph = hopper.getBaseGraph();
+         n20 = AbstractGraphStorageTester.getIdOf(graph, 52);
+         iter = carOutExplorer.setBaseNode(n20);
+         assertTrue(iter.next());
+@@ -859,9 +861,8 @@ public void testDataDateWithinPBF() {
+         GraphHopper hopper = new GraphHopperFacade("test-osm6.pbf")
+                 .setMinNetworkSize(0)
+                 .importOrLoad();
+-        GraphHopperStorage graph = hopper.getGraphHopperStorage();
+-
+-        assertEquals("2014-01-02T00:10:14Z", graph.getProperties().get("datareader.data.date"));
++        StorableProperties properties = hopper.getProperties();
++        assertEquals("2014-01-02T00:10:14Z", properties.get("datareader.data.date"));
+     }
+ 
+     @Test
+@@ -1004,14 +1005,14 @@ public GraphHopperFacade(String osmFile, boolean turnCosts, String prefLang) {
+ 
+         @Override
+         protected void importOSM() {
+-            GraphHopperStorage tmpGraph = new GraphBuilder(getEncodingManager()).set3D(hasElevation()).withTurnCosts(getEncodingManager().needsTurnCostsSupport()).build();
+-            setGraphHopperStorage(tmpGraph);
++            BaseGraph baseGraph = new BaseGraph.Builder(getEncodingManager()).set3D(hasElevation()).withTurnCosts(getEncodingManager().needsTurnCostsSupport()).build();
++            setBaseGraph(baseGraph);
+             super.importOSM();
+             carEncoder = getEncodingManager().getEncoder("car");
+             footEncoder = getEncodingManager().getEncoder("foot");
+             carAccessEnc = carEncoder.getAccessEnc();
+-            carOutExplorer = getGraphHopperStorage().createEdgeExplorer(AccessFilter.outEdges(carAccessEnc));
+-            carAllExplorer = getGraphHopperStorage().createEdgeExplorer(AccessFilter.allEdges(carAccessEnc));
++            carOutExplorer = getBaseGraph().createEdgeExplorer(AccessFilter.outEdges(carAccessEnc));
++            carAllExplorer = getBaseGraph().createEdgeExplorer(AccessFilter.allEdges(carAccessEnc));
+         }
+ 
+         @Override
+diff --git a/core/src/test/java/com/graphhopper/routing/RoutingAlgorithmWithOSMTest.java b/core/src/test/java/com/graphhopper/routing/RoutingAlgorithmWithOSMTest.java
+index ee6452af162..8dce1d5b190 100644
+--- a/core/src/test/java/com/graphhopper/routing/RoutingAlgorithmWithOSMTest.java
++++ b/core/src/test/java/com/graphhopper/routing/RoutingAlgorithmWithOSMTest.java
+@@ -74,7 +74,7 @@ public void testMonaco() {
+         GraphHopper hopper = createHopper(MONACO, new Profile("car").setVehicle("car").setWeighting("shortest"));
+         hopper.importOrLoad();
+         checkQueries(hopper, createMonacoCarQueries());
+-        Graph g = hopper.getGraphHopperStorage();
++        Graph g = hopper.getBaseGraph();
+ 
+         // When OSM file stays unchanged make static edge and node IDs a requirement
+         assertEquals(GHUtility.asSet(9, 111, 182), GHUtility.getNeighbors(g.createEdgeExplorer().setBaseNode(10)));
+@@ -268,7 +268,7 @@ public void testMonacoFoot() {
+                 new Profile("foot").setVehicle("foot").setWeighting("shortest"));
+         hopper.importOrLoad();
+         checkQueries(hopper, createMonacoFoot());
+-        Graph g = hopper.getGraphHopperStorage();
++        Graph g = hopper.getBaseGraph();
+ 
+         // see testMonaco for a similar ID test
+         assertEquals(GHUtility.asSet(2, 909, 571), GHUtility.getNeighbors(g.createEdgeExplorer().setBaseNode(10)));
+@@ -440,7 +440,7 @@ public void testKremsBikeRelation() {
+                 new Profile("bike").setVehicle("bike").setWeighting("fastest"));
+         hopper.importOrLoad();
+         checkQueries(hopper, queries);
+-        hopper.getGraphHopperStorage();
++        hopper.getBaseGraph();
+ 
+         Helper.removeDir(new File(GH_LOCATION));
+ 
+diff --git a/core/src/test/java/com/graphhopper/storage/AbstractGraphStorageTester.java b/core/src/test/java/com/graphhopper/storage/AbstractGraphStorageTester.java
+index ed1b698a3f0..924c8ca4b9c 100644
+--- a/core/src/test/java/com/graphhopper/storage/AbstractGraphStorageTester.java
++++ b/core/src/test/java/com/graphhopper/storage/AbstractGraphStorageTester.java
+@@ -35,7 +35,7 @@
+ 
+ /**
+  * Abstract test class to be extended for implementations of the Graph interface. Graphs
+- * implementing GraphStorage should extend {@link GraphHopperStorageTest} instead.
++ * implementing GraphStorage should extend {@link BaseGraphTest} instead.
+  * <p>
+  *
+  * @author Peter Karich
+diff --git a/core/src/test/java/com/graphhopper/storage/GraphHopperStorageTest.java b/core/src/test/java/com/graphhopper/storage/BaseGraphTest.java
+similarity index 99%
+rename from core/src/test/java/com/graphhopper/storage/GraphHopperStorageTest.java
+rename to core/src/test/java/com/graphhopper/storage/BaseGraphTest.java
+index cdf3ad8a277..8cf003735eb 100644
+--- a/core/src/test/java/com/graphhopper/storage/GraphHopperStorageTest.java
++++ b/core/src/test/java/com/graphhopper/storage/BaseGraphTest.java
+@@ -28,7 +28,7 @@
+ /**
+  * @author Peter Karich
+  */
+-public class GraphHopperStorageTest extends AbstractGraphStorageTester {
++public class BaseGraphTest extends AbstractGraphStorageTester {
+     @Override
+     public BaseGraph createGHStorage(String location, boolean enabled3D) {
+         // reduce segment size in order to test the case where multiple segments come into the game
+diff --git a/core/src/test/java/com/graphhopper/storage/GraphHopperStorageWithTurnCostsTest.java b/core/src/test/java/com/graphhopper/storage/BaseGraphWithTurnCostsTest.java
+similarity index 98%
+rename from core/src/test/java/com/graphhopper/storage/GraphHopperStorageWithTurnCostsTest.java
+rename to core/src/test/java/com/graphhopper/storage/BaseGraphWithTurnCostsTest.java
+index 2f632b68bd0..e73beea37bd 100644
+--- a/core/src/test/java/com/graphhopper/storage/GraphHopperStorageWithTurnCostsTest.java
++++ b/core/src/test/java/com/graphhopper/storage/BaseGraphWithTurnCostsTest.java
+@@ -34,7 +34,7 @@
+ /**
+  * @author Karl Hübner
+  */
+-public class GraphHopperStorageWithTurnCostsTest extends GraphHopperStorageTest {
++public class BaseGraphWithTurnCostsTest extends BaseGraphTest {
+     @Override
+     FlagEncoder createCarFlagEncoder() {
+         return FlagEncoders.createCar(new PMap().putObject("max_turn_costs", 1400));
+diff --git a/core/src/test/java/com/graphhopper/storage/CHStorageTest.java b/core/src/test/java/com/graphhopper/storage/CHStorageTest.java
+index bbea4ebde17..4524f8b7f3c 100644
+--- a/core/src/test/java/com/graphhopper/storage/CHStorageTest.java
++++ b/core/src/test/java/com/graphhopper/storage/CHStorageTest.java
+@@ -15,8 +15,7 @@ class CHStorageTest {
+     void setAndGetLevels() {
+         RAMDirectory dir = new RAMDirectory();
+         CHStorage store = new CHStorage(dir, "ch1", -1, false);
+-        store.create();
+-        store.init(30, 5);
++        store.create(30, 5);
+         assertEquals(0, store.getLevel(store.toNodePointer(10)));
+         store.setLevel(store.toNodePointer(10), 100);
+         assertEquals(100, store.getLevel(store.toNodePointer(10)));
+@@ -30,11 +29,7 @@ void createAndLoad(@TempDir Path path) {
+             GHDirectory dir = new GHDirectory(path.toAbsolutePath().toString(), DAType.RAM_INT_STORE);
+             CHStorage chStorage = new CHStorage(dir, "car", -1, false);
+             // we have to call create, because we want to create a new storage not load an existing one
+-            chStorage.create();
+-            // init is needed as well, because we have to set the nodes capacity and we cannot do this in create() yet.
+-            // we can also not use init instead of create, because currently GraphHopperStorage needs to 'create' all
+-            // its data objects. if we want to change this lifecycle we need to change this in GraphHopperStorage first
+-            chStorage.init(5, 3);
++            chStorage.create(5, 3);
+             assertEquals(0, chStorage.shortcutNodeBased(0, 1, PrepareEncoder.getScFwdDir(), 10, 3, 5));
+             assertEquals(1, chStorage.shortcutNodeBased(1, 2, PrepareEncoder.getScFwdDir(), 11, 4, 6));
+             assertEquals(2, chStorage.shortcutNodeBased(2, 3, PrepareEncoder.getScFwdDir(), 12, 5, 7));
+diff --git a/example/src/main/java/com/graphhopper/example/IsochroneExample.java b/example/src/main/java/com/graphhopper/example/IsochroneExample.java
+index 1e20817c731..ff80ed904bd 100644
+--- a/example/src/main/java/com/graphhopper/example/IsochroneExample.java
++++ b/example/src/main/java/com/graphhopper/example/IsochroneExample.java
+@@ -25,7 +25,7 @@ public static void main(String[] args) {
+         // snap some GPS coordinates to the routing graph and build a query graph
+         FastestWeighting weighting = new FastestWeighting(encoder);
+         Snap snap = hopper.getLocationIndex().findClosest(42.508679, 1.532078, new DefaultSnapFilter(weighting, encodingManager.getBooleanEncodedValue(Subnetwork.key("car"))));
+-        QueryGraph queryGraph = QueryGraph.create(hopper.getGraphHopperStorage(), snap);
++        QueryGraph queryGraph = QueryGraph.create(hopper.getBaseGraph(), snap);
+ 
+         // run the isochrone calculation
+         ShortestPathTree tree = new ShortestPathTree(queryGraph, weighting, false, TraversalMode.NODE_BASED);
+diff --git a/example/src/main/java/com/graphhopper/example/LowLevelAPIExample.java b/example/src/main/java/com/graphhopper/example/LowLevelAPIExample.java
+index 435d76f923c..4761cb58979 100644
+--- a/example/src/main/java/com/graphhopper/example/LowLevelAPIExample.java
++++ b/example/src/main/java/com/graphhopper/example/LowLevelAPIExample.java
+@@ -33,7 +33,7 @@ public static void createAndSaveGraph() {
+         {
+             FlagEncoder encoder = FlagEncoders.createCar();
+             EncodingManager em = EncodingManager.create(encoder);
+-            GraphHopperStorage graph = new GraphBuilder(em).setRAM(graphLocation, true).create();
++            BaseGraph graph = new BaseGraph.Builder(em).setDir(new RAMDirectory(graphLocation, true)).create();
+             // Make a weighted edge between two nodes and set average speed to 50km/h
+             EdgeIteratorState edge = graph.edge(0, 1).setDistance(1234).set(encoder.getAverageSpeedEnc(), 50);
+ 
+@@ -57,7 +57,7 @@ public static void createAndSaveGraph() {
+             // note that the EncodingManager must be the same
+             FlagEncoder encoder = FlagEncoders.createCar();
+             EncodingManager em = EncodingManager.create(encoder);
+-            GraphHopperStorage graph = new GraphBuilder(em).setRAM(graphLocation, true).build();
++            BaseGraph graph = new BaseGraph.Builder(em).setDir(new RAMDirectory(graphLocation, true)).build();
+             graph.loadExisting();
+ 
+             // Load the location index
+diff --git a/map-matching/src/main/java/com/graphhopper/matching/MapMatching.java b/map-matching/src/main/java/com/graphhopper/matching/MapMatching.java
+index 44d784ddd34..aba6870c005 100644
+--- a/map-matching/src/main/java/com/graphhopper/matching/MapMatching.java
++++ b/map-matching/src/main/java/com/graphhopper/matching/MapMatching.java
+@@ -129,7 +129,7 @@ public MapMatching(GraphHopper graphHopper, PMap hints) {
+         } else {
+             landmarks = null;
+         }
+-        graph = graphHopper.getGraphHopperStorage().getBaseGraph();
++        graph = graphHopper.getBaseGraph();
+         unwrappedWeighting = graphHopper.createWeighting(profile, hints);
+         inSubnetworkEnc = graphHopper.getEncodingManager().getBooleanEncodedValue(Subnetwork.key(profileStr));
+         this.maxVisitedNodes = hints.getInt(Parameters.Routing.MAX_VISITED_NODES, Integer.MAX_VALUE);
+diff --git a/reader-gtfs/src/main/java/com/graphhopper/gtfs/GraphHopperGtfs.java b/reader-gtfs/src/main/java/com/graphhopper/gtfs/GraphHopperGtfs.java
+index 23f08c1a11e..1fb4b40283b 100644
+--- a/reader-gtfs/src/main/java/com/graphhopper/gtfs/GraphHopperGtfs.java
++++ b/reader-gtfs/src/main/java/com/graphhopper/gtfs/GraphHopperGtfs.java
+@@ -23,7 +23,6 @@
+ import com.graphhopper.GraphHopperConfig;
+ import com.graphhopper.routing.querygraph.QueryGraph;
+ import com.graphhopper.routing.weighting.Weighting;
+-import com.graphhopper.storage.GraphHopperStorage;
+ import com.graphhopper.storage.index.InMemConstructionIndex;
+ import com.graphhopper.storage.index.IndexStructureInfo;
+ import com.graphhopper.storage.index.LineIntIndex;
+@@ -56,15 +55,15 @@ protected void importOSM() {
+         if (ghConfig.has("datareader.file")) {
+             super.importOSM();
+         } else {
+-            getGraphHopperStorage().create(1000);
++            createBaseGraphAndProperties();
+         }
+     }
+ 
+     @Override
+     protected void importPublicTransit() {
+-        ptGraph = new PtGraph(getGraphHopperStorage().getDirectory(), 100);
+-        gtfsStorage = new GtfsStorage(getGraphHopperStorage().getDirectory());
+-        LineIntIndex stopIndex = new LineIntIndex(new BBox(-180.0, 180.0, -90.0, 90.0), getGraphHopperStorage().getDirectory(), "stop_index");
++        ptGraph = new PtGraph(getBaseGraph().getDirectory(), 100);
++        gtfsStorage = new GtfsStorage(getBaseGraph().getDirectory());
++        LineIntIndex stopIndex = new LineIntIndex(new BBox(-180.0, 180.0, -90.0, 90.0), getBaseGraph().getDirectory(), "stop_index");
+         if (getGtfsStorage().loadExisting()) {
+             ptGraph.loadExisting();
+             stopIndex.loadExisting();
+@@ -86,7 +85,7 @@ protected void importPublicTransit() {
+                 getGtfsStorage().getGtfsFeeds().forEach((id, gtfsFeed) -> {
+                     Transfers transfers = new Transfers(gtfsFeed);
+                     allTransfers.put(id, transfers);
+-                    GtfsReader gtfsReader = new GtfsReader(id, getGraphHopperStorage(), ptGraph, ptGraph, getGtfsStorage(), getLocationIndex(), transfers, indexBuilder);
++                    GtfsReader gtfsReader = new GtfsReader(id, getBaseGraph(), getEncodingManager(), ptGraph, ptGraph, getGtfsStorage(), getLocationIndex(), transfers, indexBuilder);
+                     gtfsReader.connectStopsToStreetNetwork();
+                     LOGGER.info("Building transit graph for feed {}", gtfsFeed.feedId);
+                     gtfsReader.buildPtNetwork();
+@@ -107,8 +106,7 @@ protected void importPublicTransit() {
+     private void interpolateTransfers(HashMap<String, GtfsReader> readers, Map<String, Transfers> allTransfers) {
+         LOGGER.info("Looking for transfers");
+         final int maxTransferWalkTimeSeconds = ghConfig.getInt("gtfs.max_transfer_interpolation_walk_time_seconds", 120);
+-        GraphHopperStorage graphHopperStorage = getGraphHopperStorage();
+-        QueryGraph queryGraph = QueryGraph.create(graphHopperStorage.getBaseGraph(), Collections.emptyList());
++        QueryGraph queryGraph = QueryGraph.create(getBaseGraph(), Collections.emptyList());
+         Weighting transferWeighting = createWeighting(getProfile("foot"), new PMap());
+         final GraphExplorer graphExplorer = new GraphExplorer(queryGraph, ptGraph, transferWeighting, getGtfsStorage(), RealtimeFeed.empty(), true, true, false, 5.0, false, 0);
+         getGtfsStorage().getStationNodes().values().stream().distinct().map(n -> {
+@@ -150,7 +148,7 @@ private void insertInterpolatedTransfer(Label label, GtfsStorage.PlatformDescrip
+         List<Label.Transition> transitions = Label.getTransitions(label.parent, true);
+         int[] skippedEdgesForTransfer = transitions.stream().filter(t -> t.edge != null).mapToInt(t -> {
+             Label.NodeId adjNode = t.label.node;
+-            EdgeIteratorState edgeIteratorState = getGraphHopperStorage().getEdgeIteratorState(t.edge.getId(), adjNode.streetNode);
++            EdgeIteratorState edgeIteratorState = getBaseGraph().getEdgeIteratorState(t.edge.getId(), adjNode.streetNode);
+             return edgeIteratorState.getEdgeKey();
+         }).toArray();
+         if (skippedEdgesForTransfer.length > 0) { // TODO: Elsewhere, we distinguish empty path ("at" a node) from no path
+@@ -162,7 +160,7 @@ private void insertInterpolatedTransfer(Label label, GtfsStorage.PlatformDescrip
+     }
+ 
+     private boolean isValidPath(int[] edgeKeys) {
+-        List<EdgeIteratorState> edges = Arrays.stream(edgeKeys).mapToObj(i -> getGraphHopperStorage().getEdgeIteratorStateForKey(i)).collect(Collectors.toList());
++        List<EdgeIteratorState> edges = Arrays.stream(edgeKeys).mapToObj(i -> getBaseGraph().getEdgeIteratorStateForKey(i)).collect(Collectors.toList());
+         for (int i = 1; i < edges.size(); i++) {
+             if (edges.get(i).getBaseNode() != edges.get(i-1).getAdjNode())
+                 return false;
+diff --git a/reader-gtfs/src/main/java/com/graphhopper/gtfs/GtfsReader.java b/reader-gtfs/src/main/java/com/graphhopper/gtfs/GtfsReader.java
+index caf38ef7150..8847de0a08a 100644
+--- a/reader-gtfs/src/main/java/com/graphhopper/gtfs/GtfsReader.java
++++ b/reader-gtfs/src/main/java/com/graphhopper/gtfs/GtfsReader.java
+@@ -28,7 +28,7 @@
+ import com.graphhopper.routing.util.EncodingManager;
+ import com.graphhopper.routing.util.FlagEncoder;
+ import com.graphhopper.routing.weighting.FastestWeighting;
+-import com.graphhopper.storage.GraphHopperStorage;
++import com.graphhopper.storage.BaseGraph;
+ import com.graphhopper.storage.index.InMemConstructionIndex;
+ import com.graphhopper.storage.index.LocationIndex;
+ import com.graphhopper.storage.index.Snap;
+@@ -77,7 +77,8 @@ static class TripWithStopTimes {
+ 
+     private static final Logger LOGGER = LoggerFactory.getLogger(GtfsReader.class);
+ 
+-    private final GraphHopperStorage graph;
++    private final BaseGraph baseGraph;
++    private final EncodingManager encodingManager;
+     private final LocationIndex walkNetworkIndex;
+     private final GtfsStorage gtfsStorage;
+ 
+@@ -87,9 +88,10 @@ static class TripWithStopTimes {
+     private final Map<String, Map<GtfsStorage.PlatformDescriptor, NavigableMap<Integer, Integer>>> departureTimelinesByStop = new HashMap<>();
+     private final Map<String, Map<GtfsStorage.PlatformDescriptor, NavigableMap<Integer, Integer>>> arrivalTimelinesByStop = new HashMap<>();
+ 
+-    GtfsReader(String id, GraphHopperStorage graph, PtGraph ptGraph, PtGraphOut out, GtfsStorage gtfsStorage, LocationIndex walkNetworkIndex, Transfers transfers, InMemConstructionIndex indexBuilder) {
++    GtfsReader(String id, BaseGraph baseGraph, EncodingManager encodingManager, PtGraph ptGraph, PtGraphOut out, GtfsStorage gtfsStorage, LocationIndex walkNetworkIndex, Transfers transfers, InMemConstructionIndex indexBuilder) {
+         this.id = id;
+-        this.graph = graph;
++        this.baseGraph = baseGraph;
++        this.encodingManager = encodingManager;
+         this.gtfsStorage = gtfsStorage;
+         this.walkNetworkIndex = walkNetworkIndex;
+         this.feed = this.gtfsStorage.getGtfsFeeds().get(id);
+@@ -102,9 +104,8 @@ static class TripWithStopTimes {
+     }
+ 
+     void connectStopsToStreetNetwork() {
+-        EncodingManager em = graph.getEncodingManager();
+-        FlagEncoder footEncoder = em.getEncoder("foot");
+-        final EdgeFilter filter = new DefaultSnapFilter(new FastestWeighting(footEncoder), em.getBooleanEncodedValue(Subnetwork.key("foot")));
++        FlagEncoder footEncoder = encodingManager.getEncoder("foot");
++        final EdgeFilter filter = new DefaultSnapFilter(new FastestWeighting(footEncoder), encodingManager.getBooleanEncodedValue(Subnetwork.key("foot")));
+         for (Stop stop : feed.stops.values()) {
+             if (stop.location_type == 0) { // Only stops. Not interested in parent stations for now.
+                 Snap locationSnap = walkNetworkIndex.findClosest(stop.stop_lat, stop.stop_lon, filter);
+diff --git a/reader-gtfs/src/main/java/com/graphhopper/gtfs/PtLocationSnapper.java b/reader-gtfs/src/main/java/com/graphhopper/gtfs/PtLocationSnapper.java
+index da45de5b754..c5eaa3d184d 100644
+--- a/reader-gtfs/src/main/java/com/graphhopper/gtfs/PtLocationSnapper.java
++++ b/reader-gtfs/src/main/java/com/graphhopper/gtfs/PtLocationSnapper.java
+@@ -6,7 +6,7 @@
+ import com.conveyal.gtfs.model.Stop;
+ import com.graphhopper.routing.querygraph.QueryGraph;
+ import com.graphhopper.routing.util.EdgeFilter;
+-import com.graphhopper.storage.GraphHopperStorage;
++import com.graphhopper.storage.BaseGraph;
+ import com.graphhopper.storage.index.LocationIndex;
+ import com.graphhopper.storage.index.Snap;
+ import com.graphhopper.util.PointList;
+@@ -33,12 +33,12 @@ public Result(QueryGraph queryGraph, List<Label.NodeId> nodes, PointList points)
+         }
+     }
+ 
+-    GraphHopperStorage graphHopperStorage;
++    BaseGraph baseGraph;
+     LocationIndex locationIndex;
+     GtfsStorage gtfsStorage;
+ 
+-    public PtLocationSnapper(GraphHopperStorage graphHopperStorage, LocationIndex locationIndex, GtfsStorage gtfsStorage) {
+-        this.graphHopperStorage = graphHopperStorage;
++    public PtLocationSnapper(BaseGraph baseGraph, LocationIndex locationIndex, GtfsStorage gtfsStorage) {
++        this.baseGraph = baseGraph;
+         this.locationIndex = locationIndex;
+         this.gtfsStorage = gtfsStorage;
+     }
+@@ -80,7 +80,7 @@ public Result snapAll(List<GHLocation> locations, List<EdgeFilter> snapFilters)
+                 points.add(stopSnap.getQueryPoint().lat, stopSnap.getQueryPoint().lon);
+             }
+         }
+-        QueryGraph queryGraph = QueryGraph.create(graphHopperStorage.getBaseGraph(), pointSnaps); // modifies pointSnaps!
++        QueryGraph queryGraph = QueryGraph.create(baseGraph.getBaseGraph(), pointSnaps); // modifies pointSnaps!
+ 
+         List<Label.NodeId> nodes = new ArrayList<>();
+         for (Supplier<Label.NodeId> supplier : allSnaps) {
+diff --git a/reader-gtfs/src/main/java/com/graphhopper/gtfs/PtRouterFreeWalkImpl.java b/reader-gtfs/src/main/java/com/graphhopper/gtfs/PtRouterFreeWalkImpl.java
+index c94dfaf8449..7cd6e9f414c 100644
+--- a/reader-gtfs/src/main/java/com/graphhopper/gtfs/PtRouterFreeWalkImpl.java
++++ b/reader-gtfs/src/main/java/com/graphhopper/gtfs/PtRouterFreeWalkImpl.java
+@@ -30,9 +30,10 @@
+ import com.graphhopper.routing.querygraph.QueryGraph;
+ import com.graphhopper.routing.util.DefaultSnapFilter;
+ import com.graphhopper.routing.util.EdgeFilter;
++import com.graphhopper.routing.util.EncodingManager;
+ import com.graphhopper.routing.weighting.FastestWeighting;
+ import com.graphhopper.routing.weighting.Weighting;
+-import com.graphhopper.storage.GraphHopperStorage;
++import com.graphhopper.storage.BaseGraph;
+ import com.graphhopper.storage.index.LocationIndex;
+ import com.graphhopper.util.*;
+ import com.graphhopper.util.details.PathDetailsBuilderFactory;
+@@ -50,7 +51,8 @@ public final class PtRouterFreeWalkImpl implements PtRouter {
+     private final GraphHopperConfig config;
+     private final TranslationMap translationMap;
+     private final Weighting accessEgressWeighting;
+-    private final GraphHopperStorage graphHopperStorage;
++    private final BaseGraph baseGraph;
++    private final EncodingManager encodingManager;
+     private final LocationIndex locationIndex;
+     private final GtfsStorage gtfsStorage;
+     private final RealtimeFeed realtimeFeed;
+@@ -59,12 +61,13 @@ public final class PtRouterFreeWalkImpl implements PtRouter {
+     private final PtGraph ptGraph;
+ 
+     @Inject
+-    public PtRouterFreeWalkImpl(GraphHopperConfig config, TranslationMap translationMap, GraphHopperStorage graphHopperStorage, LocationIndex locationIndex, GtfsStorage gtfsStorage, RealtimeFeed realtimeFeed, PathDetailsBuilderFactory pathDetailsBuilderFactory) {
++    public PtRouterFreeWalkImpl(GraphHopperConfig config, TranslationMap translationMap, BaseGraph baseGraph, EncodingManager encodingManager, LocationIndex locationIndex, GtfsStorage gtfsStorage, RealtimeFeed realtimeFeed, PathDetailsBuilderFactory pathDetailsBuilderFactory) {
+         this.config = config;
+-        this.weightingFactory = new DefaultWeightingFactory(graphHopperStorage.getBaseGraph(), graphHopperStorage.getEncodingManager());
+-        this.accessEgressWeighting = new FastestWeighting(graphHopperStorage.getEncodingManager().getEncoder("foot"));
++        this.weightingFactory = new DefaultWeightingFactory(baseGraph.getBaseGraph(), encodingManager);
++        this.accessEgressWeighting = new FastestWeighting(encodingManager.getEncoder("foot"));
+         this.translationMap = translationMap;
+-        this.graphHopperStorage = graphHopperStorage;
++        this.baseGraph = baseGraph;
++        this.encodingManager = encodingManager;
+         this.locationIndex = locationIndex;
+         this.gtfsStorage = gtfsStorage;
+         this.realtimeFeed = realtimeFeed;
+@@ -80,15 +83,17 @@ public GHResponse route(Request request) {
+     public static class Factory {
+         private final GraphHopperConfig config;
+         private final TranslationMap translationMap;
+-        private final GraphHopperStorage graphHopperStorage;
++        private final BaseGraph baseGraph;
++        private final EncodingManager encodingManager;
+         private final LocationIndex locationIndex;
+         private final GtfsStorage gtfsStorage;
+         private final Map<String, Transfers> transfers;
+ 
+-        public Factory(GraphHopperConfig config, TranslationMap translationMap, GraphHopperStorage graphHopperStorage, LocationIndex locationIndex, GtfsStorage gtfsStorage) {
++        public Factory(GraphHopperConfig config, TranslationMap translationMap, BaseGraph baseGraph, EncodingManager encodingManager, LocationIndex locationIndex, GtfsStorage gtfsStorage) {
+             this.config = config;
+             this.translationMap = translationMap;
+-            this.graphHopperStorage = graphHopperStorage;
++            this.baseGraph = baseGraph;
++            this.encodingManager = encodingManager;
+             this.locationIndex = locationIndex;
+             this.gtfsStorage = gtfsStorage;
+             this.transfers = new HashMap<>();
+@@ -100,11 +105,11 @@ public Factory(GraphHopperConfig config, TranslationMap translationMap, GraphHop
+         public PtRouter createWith(GtfsRealtime.FeedMessage realtimeFeed) {
+             Map<String, GtfsRealtime.FeedMessage> realtimeFeeds = new HashMap<>();
+             realtimeFeeds.put("gtfs_0", realtimeFeed);
+-            return new PtRouterFreeWalkImpl(config, translationMap, graphHopperStorage, locationIndex, gtfsStorage, RealtimeFeed.fromProtobuf(graphHopperStorage, gtfsStorage, this.transfers, realtimeFeeds), new PathDetailsBuilderFactory());
++            return new PtRouterFreeWalkImpl(config, translationMap, baseGraph, encodingManager, locationIndex, gtfsStorage, RealtimeFeed.fromProtobuf(baseGraph, encodingManager, gtfsStorage, this.transfers, realtimeFeeds), new PathDetailsBuilderFactory());
+         }
+ 
+         public PtRouter createWithoutRealtimeFeed() {
+-            return new PtRouterFreeWalkImpl(config, translationMap, graphHopperStorage, locationIndex, gtfsStorage, RealtimeFeed.empty(), new PathDetailsBuilderFactory());
++            return new PtRouterFreeWalkImpl(config, translationMap, baseGraph, encodingManager, locationIndex, gtfsStorage, RealtimeFeed.empty(), new PathDetailsBuilderFactory());
+         }
+     }
+ 
+@@ -161,15 +166,15 @@ private class RequestHandler {
+             requestedPathDetails = request.getPathDetails();
+             accessProfile = config.getProfiles().stream().filter(p -> p.getName().equals(request.getAccessProfile())).findFirst().get();
+             accessWeighting = weightingFactory.createWeighting(accessProfile, new PMap(), false);
+-            accessSnapFilter = new DefaultSnapFilter(new FastestWeighting(graphHopperStorage.getEncodingManager().getEncoder(accessProfile.getVehicle())), graphHopperStorage.getEncodingManager().getBooleanEncodedValue(Subnetwork.key(accessProfile.getVehicle())));
++            accessSnapFilter = new DefaultSnapFilter(new FastestWeighting(encodingManager.getEncoder(accessProfile.getVehicle())), encodingManager.getBooleanEncodedValue(Subnetwork.key(accessProfile.getVehicle())));
+             egressProfile = config.getProfiles().stream().filter(p -> p.getName().equals(request.getEgressProfile())).findFirst().get();
+             egressWeighting = weightingFactory.createWeighting(egressProfile, new PMap(), false);
+-            egressSnapFilter = new DefaultSnapFilter(new FastestWeighting(graphHopperStorage.getEncodingManager().getEncoder(egressProfile.getVehicle())), graphHopperStorage.getEncodingManager().getBooleanEncodedValue(Subnetwork.key(egressProfile.getVehicle())));
++            egressSnapFilter = new DefaultSnapFilter(new FastestWeighting(encodingManager.getEncoder(egressProfile.getVehicle())), encodingManager.getBooleanEncodedValue(Subnetwork.key(egressProfile.getVehicle())));
+         }
+ 
+         GHResponse route() {
+             StopWatch stopWatch = new StopWatch().start();
+-            PtLocationSnapper.Result result = new PtLocationSnapper(graphHopperStorage, locationIndex, gtfsStorage).snapAll(Arrays.asList(enter, exit), Arrays.asList(accessSnapFilter, egressSnapFilter));
++            PtLocationSnapper.Result result = new PtLocationSnapper(baseGraph, locationIndex, gtfsStorage).snapAll(Arrays.asList(enter, exit), Arrays.asList(accessSnapFilter, egressSnapFilter));
+             queryGraph = result.queryGraph;
+             response.addDebugInfo("idLookup:" + stopWatch.stop().getSeconds() + "s");
+ 
+@@ -188,7 +193,7 @@ GHResponse route() {
+         }
+ 
+         private void parseSolutionsAndAddToResponse(List<List<Label.Transition>> solutions, PointList waypoints) {
+-            TripFromLabel tripFromLabel = new TripFromLabel(queryGraph, graphHopperStorage.getEncodingManager(), gtfsStorage, realtimeFeed, pathDetailsBuilderFactory, walkSpeedKmH);
++            TripFromLabel tripFromLabel = new TripFromLabel(queryGraph, encodingManager, gtfsStorage, realtimeFeed, pathDetailsBuilderFactory, walkSpeedKmH);
+             for (List<Label.Transition> solution : solutions) {
+                 final ResponsePath responsePath = tripFromLabel.createResponsePath(translation, waypoints, queryGraph, accessWeighting, egressWeighting, solution, requestedPathDetails);
+                 responsePath.setImpossible(solution.stream().anyMatch(t -> t.label.impossible));
+diff --git a/reader-gtfs/src/main/java/com/graphhopper/gtfs/PtRouterImpl.java b/reader-gtfs/src/main/java/com/graphhopper/gtfs/PtRouterImpl.java
+index 99e78e73d65..573679469d5 100644
+--- a/reader-gtfs/src/main/java/com/graphhopper/gtfs/PtRouterImpl.java
++++ b/reader-gtfs/src/main/java/com/graphhopper/gtfs/PtRouterImpl.java
+@@ -30,9 +30,10 @@
+ import com.graphhopper.routing.querygraph.QueryGraph;
+ import com.graphhopper.routing.util.DefaultSnapFilter;
+ import com.graphhopper.routing.util.EdgeFilter;
++import com.graphhopper.routing.util.EncodingManager;
+ import com.graphhopper.routing.weighting.FastestWeighting;
+ import com.graphhopper.routing.weighting.Weighting;
+-import com.graphhopper.storage.GraphHopperStorage;
++import com.graphhopper.storage.BaseGraph;
+ import com.graphhopper.storage.index.LocationIndex;
+ import com.graphhopper.util.*;
+ import com.graphhopper.util.details.PathDetailsBuilderFactory;
+@@ -51,7 +52,8 @@ public final class PtRouterImpl implements PtRouter {
+ 
+     private final GraphHopperConfig config;
+     private final TranslationMap translationMap;
+-    private final GraphHopperStorage graphHopperStorage;
++    private final BaseGraph baseGraph;
++    private final EncodingManager encodingManager;
+     private final LocationIndex locationIndex;
+     private final GtfsStorage gtfsStorage;
+     private final PtGraph ptGraph;
+@@ -60,11 +62,12 @@ public final class PtRouterImpl implements PtRouter {
+     private final WeightingFactory weightingFactory;
+ 
+     @Inject
+-    public PtRouterImpl(GraphHopperConfig config, TranslationMap translationMap, GraphHopperStorage graphHopperStorage, LocationIndex locationIndex, GtfsStorage gtfsStorage, RealtimeFeed realtimeFeed, PathDetailsBuilderFactory pathDetailsBuilderFactory) {
++    public PtRouterImpl(GraphHopperConfig config, TranslationMap translationMap, BaseGraph baseGraph, EncodingManager encodingManager, LocationIndex locationIndex, GtfsStorage gtfsStorage, RealtimeFeed realtimeFeed, PathDetailsBuilderFactory pathDetailsBuilderFactory) {
+         this.config = config;
+-        this.weightingFactory = new DefaultWeightingFactory(graphHopperStorage.getBaseGraph(), graphHopperStorage.getEncodingManager());
++        this.weightingFactory = new DefaultWeightingFactory(baseGraph, encodingManager);
+         this.translationMap = translationMap;
+-        this.graphHopperStorage = graphHopperStorage;
++        this.baseGraph = baseGraph;
++        this.encodingManager = encodingManager;
+         this.locationIndex = locationIndex;
+         this.gtfsStorage = gtfsStorage;
+         this.ptGraph = gtfsStorage.getPtGraph();
+@@ -80,15 +83,17 @@ public GHResponse route(Request request) {
+     public static class Factory {
+         private final GraphHopperConfig config;
+         private final TranslationMap translationMap;
+-        private final GraphHopperStorage graphHopperStorage;
++        private final BaseGraph baseGraph;
++        private final EncodingManager encodingManager;
+         private final LocationIndex locationIndex;
+         private final GtfsStorage gtfsStorage;
+         private final Map<String, Transfers> transfers;
+ 
+-        public Factory(GraphHopperConfig config, TranslationMap translationMap, GraphHopperStorage graphHopperStorage, LocationIndex locationIndex, GtfsStorage gtfsStorage) {
++        public Factory(GraphHopperConfig config, TranslationMap translationMap, BaseGraph baseGraph, EncodingManager encodingManager, LocationIndex locationIndex, GtfsStorage gtfsStorage) {
+             this.config = config;
+             this.translationMap = translationMap;
+-            this.graphHopperStorage = graphHopperStorage;
++            this.baseGraph = baseGraph;
++            this.encodingManager = encodingManager;
+             this.locationIndex = locationIndex;
+             this.gtfsStorage = gtfsStorage;
+             this.transfers = new HashMap<>();
+@@ -100,11 +105,11 @@ public Factory(GraphHopperConfig config, TranslationMap translationMap, GraphHop
+         public PtRouter createWith(GtfsRealtime.FeedMessage realtimeFeed) {
+             Map<String, GtfsRealtime.FeedMessage> realtimeFeeds = new HashMap<>();
+             realtimeFeeds.put("gtfs_0", realtimeFeed);
+-            return new PtRouterImpl(config, translationMap, graphHopperStorage, locationIndex, gtfsStorage, RealtimeFeed.fromProtobuf(graphHopperStorage, gtfsStorage, this.transfers, realtimeFeeds), new PathDetailsBuilderFactory());
++            return new PtRouterImpl(config, translationMap, baseGraph, encodingManager, locationIndex, gtfsStorage, RealtimeFeed.fromProtobuf(baseGraph, encodingManager, gtfsStorage, this.transfers, realtimeFeeds), new PathDetailsBuilderFactory());
+         }
+ 
+         public PtRouter createWithoutRealtimeFeed() {
+-            return new PtRouterImpl(config, translationMap, graphHopperStorage, locationIndex, gtfsStorage, RealtimeFeed.empty(), new PathDetailsBuilderFactory());
++            return new PtRouterImpl(config, translationMap, baseGraph, encodingManager, locationIndex, gtfsStorage, RealtimeFeed.empty(), new PathDetailsBuilderFactory());
+         }
+     }
+ 
+@@ -161,15 +166,15 @@ private class RequestHandler {
+             requestedPathDetails = request.getPathDetails();
+             accessProfile = config.getProfiles().stream().filter(p -> p.getName().equals(request.getAccessProfile())).findFirst().get();
+             accessWeighting = weightingFactory.createWeighting(accessProfile, new PMap(), false);
+-            accessSnapFilter = new DefaultSnapFilter(new FastestWeighting(graphHopperStorage.getEncodingManager().getEncoder(accessProfile.getVehicle())), graphHopperStorage.getEncodingManager().getBooleanEncodedValue(Subnetwork.key(accessProfile.getVehicle())));
++            accessSnapFilter = new DefaultSnapFilter(new FastestWeighting(encodingManager.getEncoder(accessProfile.getVehicle())), encodingManager.getBooleanEncodedValue(Subnetwork.key(accessProfile.getVehicle())));
+             egressProfile = config.getProfiles().stream().filter(p -> p.getName().equals(request.getEgressProfile())).findFirst().get();
+             egressWeighting = weightingFactory.createWeighting(egressProfile, new PMap(), false);
+-            egressSnapFilter = new DefaultSnapFilter(new FastestWeighting(graphHopperStorage.getEncodingManager().getEncoder(egressProfile.getVehicle())), graphHopperStorage.getEncodingManager().getBooleanEncodedValue(Subnetwork.key(egressProfile.getVehicle())));
++            egressSnapFilter = new DefaultSnapFilter(new FastestWeighting(encodingManager.getEncoder(egressProfile.getVehicle())), encodingManager.getBooleanEncodedValue(Subnetwork.key(egressProfile.getVehicle())));
+         }
+ 
+         GHResponse route() {
+             StopWatch stopWatch = new StopWatch().start();
+-            PtLocationSnapper.Result result = new PtLocationSnapper(graphHopperStorage, locationIndex, gtfsStorage).snapAll(Arrays.asList(enter, exit), Arrays.asList(accessSnapFilter, egressSnapFilter));
++            PtLocationSnapper.Result result = new PtLocationSnapper(baseGraph, locationIndex, gtfsStorage).snapAll(Arrays.asList(enter, exit), Arrays.asList(accessSnapFilter, egressSnapFilter));
+             queryGraph = result.queryGraph;
+             response.addDebugInfo("idLookup:" + stopWatch.stop().getSeconds() + "s");
+ 
+@@ -188,7 +193,7 @@ GHResponse route() {
+         }
+ 
+         private void parseSolutionsAndAddToResponse(List<List<Label.Transition>> solutions, PointList waypoints) {
+-            TripFromLabel tripFromLabel = new TripFromLabel(queryGraph, graphHopperStorage.getEncodingManager(), gtfsStorage, realtimeFeed, pathDetailsBuilderFactory, walkSpeedKmH);
++            TripFromLabel tripFromLabel = new TripFromLabel(queryGraph, encodingManager, gtfsStorage, realtimeFeed, pathDetailsBuilderFactory, walkSpeedKmH);
+             for (List<Label.Transition> solution : solutions) {
+                 final ResponsePath responsePath = tripFromLabel.createResponsePath(translation, waypoints, queryGraph, accessWeighting, egressWeighting, solution, requestedPathDetails);
+                 responsePath.setImpossible(solution.stream().anyMatch(t -> t.label.impossible));
+diff --git a/reader-gtfs/src/main/java/com/graphhopper/gtfs/RealtimeFeed.java b/reader-gtfs/src/main/java/com/graphhopper/gtfs/RealtimeFeed.java
+index ba5ff98c3b7..1a19c12a541 100644
+--- a/reader-gtfs/src/main/java/com/graphhopper/gtfs/RealtimeFeed.java
++++ b/reader-gtfs/src/main/java/com/graphhopper/gtfs/RealtimeFeed.java
+@@ -26,7 +26,8 @@
+ import com.conveyal.gtfs.model.StopTime;
+ import com.conveyal.gtfs.model.Trip;
+ import com.google.transit.realtime.GtfsRealtime;
+-import com.graphhopper.storage.GraphHopperStorage;
++import com.graphhopper.routing.util.EncodingManager;
++import com.graphhopper.storage.BaseGraph;
+ import org.mapdb.Fun;
+ import org.slf4j.Logger;
+ import org.slf4j.LoggerFactory;
+@@ -67,7 +68,7 @@ public static RealtimeFeed empty() {
+         return new RealtimeFeed(Collections.emptyMap(), new IntHashSet(), new IntLongHashMap(), new IntLongHashMap(), Collections.emptyList());
+     }
+ 
+-    public static RealtimeFeed fromProtobuf(GraphHopperStorage graphHopperStorage, GtfsStorage staticGtfs, Map<String, Transfers> transfers, Map<String, GtfsRealtime.FeedMessage> feedMessages) {
++    public static RealtimeFeed fromProtobuf(BaseGraph baseGraph, EncodingManager encodingManager, GtfsStorage staticGtfs, Map<String, Transfers> transfers, Map<String, GtfsRealtime.FeedMessage> feedMessages) {
+         final IntHashSet blockedEdges = new IntHashSet();
+         final IntLongHashMap delaysForBoardEdges = new IntLongHashMap();
+         final IntLongHashMap delaysForAlightEdges = new IntLongHashMap();
+@@ -94,7 +95,7 @@ public int createNode() {
+             GTFSFeed feed = staticGtfs.getGtfsFeeds().get(feedKey);
+             ZoneId timezone = ZoneId.of(feed.agency.values().stream().findFirst().get().agency_timezone);
+             PtGraph ptGraphNodesAndEdges = staticGtfs.getPtGraph();
+-            final GtfsReader gtfsReader = new GtfsReader(feedKey, graphHopperStorage, ptGraphNodesAndEdges, overlayGraph, staticGtfs, null, transfers.get(feedKey), null);
++            final GtfsReader gtfsReader = new GtfsReader(feedKey, baseGraph, encodingManager, ptGraphNodesAndEdges, overlayGraph, staticGtfs, null, transfers.get(feedKey), null);
+             Instant timestamp = Instant.ofEpochSecond(feedMessage.getHeader().getTimestamp());
+             LocalDate dateToChange = timestamp.atZone(timezone).toLocalDate(); //FIXME
+             BitSet validOnDay = new BitSet();
+diff --git a/reader-gtfs/src/test/java/com/graphhopper/AnotherAgencyIT.java b/reader-gtfs/src/test/java/com/graphhopper/AnotherAgencyIT.java
+index 4dce057aef0..13b3ac4f19d 100644
+--- a/reader-gtfs/src/test/java/com/graphhopper/AnotherAgencyIT.java
++++ b/reader-gtfs/src/test/java/com/graphhopper/AnotherAgencyIT.java
+@@ -40,7 +40,8 @@
+ 
+ import static com.graphhopper.gtfs.GtfsHelper.time;
+ import static com.graphhopper.util.Parameters.Details.EDGE_KEY;
+-import static org.junit.jupiter.api.Assertions.*;
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertFalse;
+ 
+ public class AnotherAgencyIT {
+ 
+@@ -62,7 +63,7 @@ public static void init() {
+         graphHopperGtfs = new GraphHopperGtfs(ghConfig);
+         graphHopperGtfs.init(ghConfig);
+         graphHopperGtfs.importOrLoad();
+-        ptRouter = new PtRouterImpl.Factory(ghConfig, new TranslationMap().doImport(), graphHopperGtfs.getGraphHopperStorage(), graphHopperGtfs.getLocationIndex(), graphHopperGtfs.getGtfsStorage())
++        ptRouter = new PtRouterImpl.Factory(ghConfig, new TranslationMap().doImport(), graphHopperGtfs.getBaseGraph(), graphHopperGtfs.getEncodingManager(), graphHopperGtfs.getLocationIndex(), graphHopperGtfs.getGtfsStorage())
+                 .createWithoutRealtimeFeed();
+     }
+ 
+diff --git a/reader-gtfs/src/test/java/com/graphhopper/ExtendedRouteTypeIT.java b/reader-gtfs/src/test/java/com/graphhopper/ExtendedRouteTypeIT.java
+index e660fb00dac..8b0a3386729 100644
+--- a/reader-gtfs/src/test/java/com/graphhopper/ExtendedRouteTypeIT.java
++++ b/reader-gtfs/src/test/java/com/graphhopper/ExtendedRouteTypeIT.java
+@@ -57,7 +57,7 @@ public static void init() {
+         graphHopperGtfs = new GraphHopperGtfs(ghConfig);
+         graphHopperGtfs.init(ghConfig);
+         graphHopperGtfs.importOrLoad();
+-        ptRouter = new PtRouterImpl.Factory(ghConfig, new TranslationMap().doImport(), graphHopperGtfs.getGraphHopperStorage(), graphHopperGtfs.getLocationIndex(), graphHopperGtfs.getGtfsStorage()).createWithoutRealtimeFeed();
++        ptRouter = new PtRouterImpl.Factory(ghConfig, new TranslationMap().doImport(), graphHopperGtfs.getBaseGraph(), graphHopperGtfs.getEncodingManager(), graphHopperGtfs.getLocationIndex(), graphHopperGtfs.getGtfsStorage()).createWithoutRealtimeFeed();
+     }
+ 
+     @AfterAll
+diff --git a/reader-gtfs/src/test/java/com/graphhopper/FreeWalkIT.java b/reader-gtfs/src/test/java/com/graphhopper/FreeWalkIT.java
+index 9cfbcdb7207..b1f2f03ffcf 100644
+--- a/reader-gtfs/src/test/java/com/graphhopper/FreeWalkIT.java
++++ b/reader-gtfs/src/test/java/com/graphhopper/FreeWalkIT.java
+@@ -30,7 +30,9 @@
+ import org.locationtech.jts.io.WKTReader;
+ 
+ import java.io.File;
+-import java.time.*;
++import java.time.LocalDateTime;
++import java.time.LocalTime;
++import java.time.ZoneId;
+ import java.util.Arrays;
+ import java.util.stream.Collectors;
+ 
+@@ -64,7 +66,7 @@ public static void init() {
+         graphHopperGtfs = new GraphHopperGtfs(ghConfig);
+         graphHopperGtfs.init(ghConfig);
+         graphHopperGtfs.importOrLoad();
+-        ptRouter = new PtRouterFreeWalkImpl.Factory(ghConfig, new TranslationMap().doImport(), graphHopperGtfs.getGraphHopperStorage(), graphHopperGtfs.getLocationIndex(), graphHopperGtfs.getGtfsStorage())
++        ptRouter = new PtRouterFreeWalkImpl.Factory(ghConfig, new TranslationMap().doImport(), graphHopperGtfs.getBaseGraph(), graphHopperGtfs.getEncodingManager(), graphHopperGtfs.getLocationIndex(), graphHopperGtfs.getGtfsStorage())
+                 .createWithoutRealtimeFeed();
+     }
+ 
+diff --git a/reader-gtfs/src/test/java/com/graphhopper/GraphHopperGtfsIT.java b/reader-gtfs/src/test/java/com/graphhopper/GraphHopperGtfsIT.java
+index 5b224f006c2..1a875f113d7 100644
+--- a/reader-gtfs/src/test/java/com/graphhopper/GraphHopperGtfsIT.java
++++ b/reader-gtfs/src/test/java/com/graphhopper/GraphHopperGtfsIT.java
+@@ -64,7 +64,7 @@ public static void init() {
+         graphHopperGtfs = new GraphHopperGtfs(ghConfig);
+         graphHopperGtfs.init(ghConfig);
+         graphHopperGtfs.importOrLoad();
+-        ptRouter = new PtRouterImpl.Factory(ghConfig, new TranslationMap().doImport(), graphHopperGtfs.getGraphHopperStorage(), graphHopperGtfs.getLocationIndex(), graphHopperGtfs.getGtfsStorage())
++        ptRouter = new PtRouterImpl.Factory(ghConfig, new TranslationMap().doImport(), graphHopperGtfs.getBaseGraph(), graphHopperGtfs.getEncodingManager(), graphHopperGtfs.getLocationIndex(), graphHopperGtfs.getGtfsStorage())
+                 .createWithoutRealtimeFeed();
+     }
+ 
+diff --git a/reader-gtfs/src/test/java/com/graphhopper/GraphHopperMultimodalIT.java b/reader-gtfs/src/test/java/com/graphhopper/GraphHopperMultimodalIT.java
+index 7ed35fa89ad..f4b4c2a4d80 100644
+--- a/reader-gtfs/src/test/java/com/graphhopper/GraphHopperMultimodalIT.java
++++ b/reader-gtfs/src/test/java/com/graphhopper/GraphHopperMultimodalIT.java
+@@ -67,7 +67,7 @@ public static void init() {
+         graphHopperGtfs.init(ghConfig);
+         graphHopperGtfs.importOrLoad();
+         locationIndex = graphHopperGtfs.getLocationIndex();
+-        graphHopper = new PtRouterImpl.Factory(ghConfig, new TranslationMap().doImport(), graphHopperGtfs.getGraphHopperStorage(), locationIndex, graphHopperGtfs.getGtfsStorage())
++        graphHopper = new PtRouterImpl.Factory(ghConfig, new TranslationMap().doImport(), graphHopperGtfs.getBaseGraph(), graphHopperGtfs.getEncodingManager(), locationIndex, graphHopperGtfs.getGtfsStorage())
+                 .createWithoutRealtimeFeed();
+     }
+ 
+@@ -281,11 +281,11 @@ public void testSubnetworkRemoval() {
+ 
+         // Go through all edges on removed foot subnetworks, and check that we can get to our destination station from there
+         List<GHResponse> responses = new ArrayList<>();
+-        AllEdgesIterator edges = graphHopperGtfs.getGraphHopperStorage().getAllEdges();
++        AllEdgesIterator edges = graphHopperGtfs.getBaseGraph().getAllEdges();
+         while (edges.next()) {
+             if (edges.get(footSub)) {
+                 Request ghRequest = new Request(Arrays.asList(
+-                        new GHPointLocation(new GHPoint(graphHopperGtfs.getGraphHopperStorage().getNodeAccess().getLat(edges.getBaseNode()), graphHopperGtfs.getGraphHopperStorage().getNodeAccess().getLon(edges.getBaseNode()))),
++                        new GHPointLocation(new GHPoint(graphHopperGtfs.getBaseGraph().getNodeAccess().getLat(edges.getBaseNode()), graphHopperGtfs.getBaseGraph().getNodeAccess().getLon(edges.getBaseNode()))),
+                         new GHStationLocation("EMSI")),
+                         LocalDateTime.of(2007, 1, 1, 6, 40, 0).atZone(zoneId).toInstant());
+                 ghRequest.setWalkSpeedKmH(50); // Yes, I can walk very fast, 50 km/h. Problem?
+diff --git a/reader-gtfs/src/test/java/com/graphhopper/RealtimeIT.java b/reader-gtfs/src/test/java/com/graphhopper/RealtimeIT.java
+index 72a67280f4f..2ac7c4aa179 100644
+--- a/reader-gtfs/src/test/java/com/graphhopper/RealtimeIT.java
++++ b/reader-gtfs/src/test/java/com/graphhopper/RealtimeIT.java
+@@ -67,7 +67,7 @@ public static void init() {
+         graphHopperGtfs.init(ghConfig);
+         graphHopperGtfs.importOrLoad();
+ 
+-        graphHopperFactory = new PtRouterImpl.Factory(ghConfig, new TranslationMap().doImport(), graphHopperGtfs.getGraphHopperStorage(), graphHopperGtfs.getLocationIndex(), graphHopperGtfs.getGtfsStorage());
++        graphHopperFactory = new PtRouterImpl.Factory(ghConfig, new TranslationMap().doImport(), graphHopperGtfs.getBaseGraph(), graphHopperGtfs.getEncodingManager(), graphHopperGtfs.getLocationIndex(), graphHopperGtfs.getGtfsStorage());
+     }
+ 
+     @AfterAll
+diff --git a/tools/src/main/java/com/graphhopper/tools/CHMeasurement.java b/tools/src/main/java/com/graphhopper/tools/CHMeasurement.java
+index 2eaeecfd561..96afb6b963e 100644
+--- a/tools/src/main/java/com/graphhopper/tools/CHMeasurement.java
++++ b/tools/src/main/java/com/graphhopper/tools/CHMeasurement.java
+@@ -208,7 +208,7 @@ private static String getStatLine(TreeSet<String> keys, Map<String, Object> resu
+     private static void runCompareTest(final String algo, final GraphHopper graphHopper, final boolean withTurnCosts, final int uTurnCosts,
+                                        long seed, final int iterations, final double threshold, final PMap results) {
+         LOGGER.info("Running compare test for {}, using seed {}", algo, seed);
+-        Graph g = graphHopper.getGraphHopperStorage();
++        Graph g = graphHopper.getBaseGraph();
+         final int numNodes = g.getNodes();
+         final NodeAccess nodeAccess = g.getNodeAccess();
+         final Random random = new Random(seed);
+@@ -291,7 +291,7 @@ public int doCalc(boolean warmup, int run) {
+ 
+     private static void runPerformanceTest(final String algo, final GraphHopper graphHopper, final boolean withTurnCosts,
+                                            long seed, final int iterations, final PMap results) {
+-        Graph g = graphHopper.getGraphHopperStorage();
++        Graph g = graphHopper.getBaseGraph();
+         final int numNodes = g.getNodes();
+         final NodeAccess nodeAccess = g.getNodeAccess();
+         final Random random = new Random(seed);
+diff --git a/tools/src/main/java/com/graphhopper/tools/Measurement.java b/tools/src/main/java/com/graphhopper/tools/Measurement.java
+index ab9d8143bb5..ada120fc1eb 100644
+--- a/tools/src/main/java/com/graphhopper/tools/Measurement.java
++++ b/tools/src/main/java/com/graphhopper/tools/Measurement.java
+@@ -175,7 +175,7 @@ protected void importOSM() {
+ 
+         hopper.importOrLoad();
+ 
+-        BaseGraph g = hopper.getGraphHopperStorage().getBaseGraph();
++        BaseGraph g = hopper.getBaseGraph();
+         EncodingManager encodingManager = hopper.getEncodingManager();
+         if (encodingManager.fetchEdgeEncoders().size() != 1) {
+             throw new IllegalArgumentException("There has to be exactly one encoder for each measurement");
+@@ -538,7 +538,7 @@ private void measureCountryAreaIndex(int count) {
+     }
+ 
+     private void measureRouting(final GraphHopper hopper, final QuerySettings querySettings) {
+-        final Graph g = hopper.getGraphHopperStorage();
++        final Graph g = hopper.getBaseGraph();
+         final AtomicLong maxDistance = new AtomicLong(0);
+         final AtomicLong minDistance = new AtomicLong(Long.MAX_VALUE);
+         final AtomicLong distSum = new AtomicLong(0);
+@@ -586,7 +586,7 @@ private void measureRouting(final GraphHopper hopper, final QuerySettings queryS
+                 try {
+                     req.getHints().putObject(BLOCK_AREA, querySettings.blockArea);
+                     // run this method to check if creating the blocked area is possible
+-                    GraphEdgeIdFinder.createBlockArea(hopper.getGraphHopperStorage(), hopper.getLocationIndex(), req.getPoints(), req.getHints(), edgeFilter);
++                    GraphEdgeIdFinder.createBlockArea(hopper.getBaseGraph(), hopper.getLocationIndex(), req.getPoints(), req.getHints(), edgeFilter);
+                     break;
+                 } catch (IllegalArgumentException ex) {
+                     if (i >= 4)
+diff --git a/tools/src/main/java/com/graphhopper/ui/MiniGraphUI.java b/tools/src/main/java/com/graphhopper/ui/MiniGraphUI.java
+index 8389de69753..2decd67a603 100644
+--- a/tools/src/main/java/com/graphhopper/ui/MiniGraphUI.java
++++ b/tools/src/main/java/com/graphhopper/ui/MiniGraphUI.java
+@@ -118,7 +118,7 @@ public static void main(String[] strs) {
+     }
+ 
+     public MiniGraphUI(GraphHopper hopper, boolean debug, boolean useCH) {
+-        this.graph = hopper.getGraphHopperStorage().getBaseGraph();
++        this.graph = hopper.getBaseGraph();
+         this.na = graph.getNodeAccess();
+         encoder = hopper.getEncodingManager().fetchEdgeEncoders().get(0);
+         avSpeedEnc = encoder.getAverageSpeedEnc();
+diff --git a/web-bundle/src/main/java/com/graphhopper/http/GraphHopperBundle.java b/web-bundle/src/main/java/com/graphhopper/http/GraphHopperBundle.java
+index 764da6de617..f1821b35b93 100644
+--- a/web-bundle/src/main/java/com/graphhopper/http/GraphHopperBundle.java
++++ b/web-bundle/src/main/java/com/graphhopper/http/GraphHopperBundle.java
+@@ -31,7 +31,7 @@
+ import com.graphhopper.resources.*;
+ import com.graphhopper.routing.ProfileResolver;
+ import com.graphhopper.routing.util.EncodingManager;
+-import com.graphhopper.storage.GraphHopperStorage;
++import com.graphhopper.storage.BaseGraph;
+ import com.graphhopper.storage.index.LocationIndex;
+ import com.graphhopper.util.TranslationMap;
+ import com.graphhopper.util.details.PathDetailsBuilderFactory;
+@@ -61,18 +61,18 @@ public void dispose(TranslationMap instance) {
+         }
+     }
+ 
+-    static class GraphHopperStorageFactory implements Factory<GraphHopperStorage> {
++    static class BaseGraphFactory implements Factory<BaseGraph> {
+ 
+         @Inject
+         GraphHopper graphHopper;
+ 
+         @Override
+-        public GraphHopperStorage provide() {
+-            return graphHopper.getGraphHopperStorage();
++        public BaseGraph provide() {
++            return graphHopper.getBaseGraph();
+         }
+ 
+         @Override
+-        public void dispose(GraphHopperStorage instance) {
++        public void dispose(BaseGraph instance) {
+ 
+         }
+     }
+@@ -242,7 +242,7 @@ protected void configure() {
+                 bindFactory(LocationIndexFactory.class).to(LocationIndex.class);
+                 bindFactory(TranslationMapFactory.class).to(TranslationMap.class);
+                 bindFactory(EncodingManagerFactory.class).to(EncodingManager.class);
+-                bindFactory(GraphHopperStorageFactory.class).to(GraphHopperStorage.class);
++                bindFactory(BaseGraphFactory.class).to(BaseGraph.class);
+                 bindFactory(GtfsStorageFactory.class).to(GtfsStorage.class);
+             }
+         });
+diff --git a/web-bundle/src/main/java/com/graphhopper/http/GraphHopperManaged.java b/web-bundle/src/main/java/com/graphhopper/http/GraphHopperManaged.java
+index acb7fa806b8..7a84312f877 100644
+--- a/web-bundle/src/main/java/com/graphhopper/http/GraphHopperManaged.java
++++ b/web-bundle/src/main/java/com/graphhopper/http/GraphHopperManaged.java
+@@ -105,7 +105,7 @@ public void start() {
+                 graphHopper.getGraphHopperLocation(), graphHopper.getOSMFile(),
+                 graphHopper.getEncodingManager().toEncodedValuesAsString(),
+                 graphHopper.getEncodingManager().getIntsForFlags(),
+-                graphHopper.getGraphHopperStorage().toDetailsString());
++                graphHopper.getBaseGraph().toDetailsString());
+     }
+ 
+     public GraphHopper getGraphHopper() {
+diff --git a/web-bundle/src/main/java/com/graphhopper/http/RealtimeFeedLoadingCache.java b/web-bundle/src/main/java/com/graphhopper/http/RealtimeFeedLoadingCache.java
+index b555192b2b6..d6f2f3e3620 100644
+--- a/web-bundle/src/main/java/com/graphhopper/http/RealtimeFeedLoadingCache.java
++++ b/web-bundle/src/main/java/com/graphhopper/http/RealtimeFeedLoadingCache.java
+@@ -28,7 +28,8 @@
+ import com.graphhopper.gtfs.GtfsStorage;
+ import com.graphhopper.gtfs.RealtimeFeed;
+ import com.graphhopper.gtfs.Transfers;
+-import com.graphhopper.storage.GraphHopperStorage;
++import com.graphhopper.routing.util.EncodingManager;
++import com.graphhopper.storage.BaseGraph;
+ import io.dropwizard.lifecycle.Managed;
+ import org.apache.http.client.HttpClient;
+ import org.apache.http.client.methods.HttpGet;
+@@ -47,7 +48,8 @@
+ public class RealtimeFeedLoadingCache implements Factory<RealtimeFeed>, Managed {
+ 
+     private final HttpClient httpClient;
+-    private final GraphHopperStorage graphHopperStorage;
++    private final BaseGraph baseGraph;
++    private final EncodingManager encodingManager;
+     private final GtfsStorage gtfsStorage;
+     private final RealtimeBundleConfiguration bundleConfiguration;
+     private ExecutorService executor;
+@@ -55,8 +57,9 @@ public class RealtimeFeedLoadingCache implements Factory<RealtimeFeed>, Managed
+     private Map<String, Transfers> transfers;
+ 
+     @Inject
+-    RealtimeFeedLoadingCache(GraphHopperStorage graphHopperStorage, GtfsStorage gtfsStorage, HttpClient httpClient, RealtimeBundleConfiguration bundleConfiguration) {
+-        this.graphHopperStorage = graphHopperStorage;
++    RealtimeFeedLoadingCache(BaseGraph baseGraph, EncodingManager encodingManager, GtfsStorage gtfsStorage, HttpClient httpClient, RealtimeBundleConfiguration bundleConfiguration) {
++        this.baseGraph = baseGraph;
++        this.encodingManager = encodingManager;
+         this.gtfsStorage = gtfsStorage;
+         this.bundleConfiguration = bundleConfiguration;
+         this.httpClient = httpClient;
+@@ -115,7 +118,7 @@ private RealtimeFeed fetchFeedsAndCreateGraph() {
+                 throw new RuntimeException(e);
+             }
+         }
+-        return RealtimeFeed.fromProtobuf(graphHopperStorage, gtfsStorage, this.transfers, feedMessageMap);
++        return RealtimeFeed.fromProtobuf(baseGraph, encodingManager, gtfsStorage, this.transfers, feedMessageMap);
+     }
+ 
+ }
+diff --git a/web-bundle/src/main/java/com/graphhopper/http/health/GraphHopperHealthCheck.java b/web-bundle/src/main/java/com/graphhopper/http/health/GraphHopperHealthCheck.java
+index 63c3db0bda7..5abfa8a07d1 100644
+--- a/web-bundle/src/main/java/com/graphhopper/http/health/GraphHopperHealthCheck.java
++++ b/web-bundle/src/main/java/com/graphhopper/http/health/GraphHopperHealthCheck.java
+@@ -31,8 +31,8 @@ public GraphHopperHealthCheck(GraphHopper graphHopper) {
+ 
+     @Override
+     protected Result check() {
+-        if (!graphHopper.getGraphHopperStorage().getBounds().isValid()) {
+-            return Result.unhealthy("GraphHopperStorage has invalid bounds.");
++        if (!graphHopper.getBaseGraph().getBounds().isValid()) {
++            return Result.unhealthy("BaseGraph has invalid bounds.");
+         }
+         if (!graphHopper.getFullyLoaded()) {
+             return Result.unhealthy("GraphHopper is not fully loaded.");
+diff --git a/web-bundle/src/main/java/com/graphhopper/resources/InfoResource.java b/web-bundle/src/main/java/com/graphhopper/resources/InfoResource.java
+index 053b6809b32..58564c0151a 100644
+--- a/web-bundle/src/main/java/com/graphhopper/resources/InfoResource.java
++++ b/web-bundle/src/main/java/com/graphhopper/resources/InfoResource.java
+@@ -21,7 +21,9 @@
+ import com.graphhopper.GraphHopperConfig;
+ import com.graphhopper.config.Profile;
+ import com.graphhopper.routing.ev.*;
+-import com.graphhopper.storage.GraphHopperStorage;
++import com.graphhopper.routing.util.EncodingManager;
++import com.graphhopper.storage.BaseGraph;
++import com.graphhopper.storage.StorableProperties;
+ import com.graphhopper.util.Constants;
+ import org.locationtech.jts.geom.Envelope;
+ 
+@@ -41,13 +43,17 @@
+ public class InfoResource {
+ 
+     private final GraphHopperConfig config;
+-    private final GraphHopperStorage storage;
++    private final BaseGraph baseGraph;
++    private final EncodingManager encodingManager;
++    private final StorableProperties properties;
+     private final boolean hasElevation;
+ 
+     @Inject
+     public InfoResource(GraphHopperConfig config, GraphHopper graphHopper, @Named("hasElevation") Boolean hasElevation) {
+         this.config = config;
+-        this.storage = graphHopper.getGraphHopperStorage();
++        this.baseGraph = graphHopper.getBaseGraph();
++        this.encodingManager = graphHopper.getEncodingManager();
++        this.properties = graphHopper.getProperties();
+         this.hasElevation = hasElevation;
+     }
+ 
+@@ -78,7 +84,7 @@ public ProfileData(String name, String vehicle) {
+     @GET
+     public Info getInfo() {
+         final Info info = new Info();
+-        info.bbox = new Envelope(storage.getBounds().minLon, storage.getBounds().maxLon, storage.getBounds().minLat, storage.getBounds().maxLat);
++        info.bbox = new Envelope(baseGraph.getBounds().minLon, baseGraph.getBounds().maxLon, baseGraph.getBounds().minLat, baseGraph.getBounds().maxLat);
+         for (Profile p : config.getProfiles()) {
+             Info.ProfileData profileData = new Info.ProfileData(p.getName(), p.getVehicle());
+             info.profiles.add(profileData);
+@@ -87,15 +93,15 @@ public Info getInfo() {
+             info.profiles.add(new Info.ProfileData("pt", "pt"));
+ 
+         info.elevation = hasElevation;
+-        List<String> encoderNames = Arrays.asList(storage.getEncodingManager().toString().split(","));
++        List<String> encoderNames = Arrays.asList(encodingManager.toString().split(","));
+         info.supported_vehicles = new ArrayList<>(encoderNames);
+         if (config.has("gtfs.file")) {
+             info.supported_vehicles.add("pt");
+         }
+-        info.import_date = storage.getProperties().get("datareader.import.date");
+-        info.data_date = storage.getProperties().get("datareader.data.date");
++        info.import_date = properties.get("datareader.import.date");
++        info.data_date = properties.get("datareader.data.date");
+ 
+-        List<EncodedValue> evList = storage.getEncodingManager().getEncodedValues();
++        List<EncodedValue> evList = encodingManager.getEncodedValues();
+         info.encoded_values = new LinkedHashMap<>();
+         for (EncodedValue encodedValue : evList) {
+             List<Object> possibleValueList = new ArrayList<>();
+diff --git a/web-bundle/src/main/java/com/graphhopper/resources/IsochroneResource.java b/web-bundle/src/main/java/com/graphhopper/resources/IsochroneResource.java
+index fa6bf52f0b7..0ec76366081 100644
+--- a/web-bundle/src/main/java/com/graphhopper/resources/IsochroneResource.java
++++ b/web-bundle/src/main/java/com/graphhopper/resources/IsochroneResource.java
+@@ -18,7 +18,7 @@
+ import com.graphhopper.routing.util.TraversalMode;
+ import com.graphhopper.routing.weighting.BlockAreaWeighting;
+ import com.graphhopper.routing.weighting.Weighting;
+-import com.graphhopper.storage.Graph;
++import com.graphhopper.storage.BaseGraph;
+ import com.graphhopper.storage.GraphEdgeIdFinder;
+ import com.graphhopper.storage.index.LocationIndex;
+ import com.graphhopper.storage.index.Snap;
+@@ -35,11 +35,7 @@
+ import javax.ws.rs.core.MediaType;
+ import javax.ws.rs.core.Response;
+ import javax.ws.rs.core.UriInfo;
+-import java.util.ArrayList;
+-import java.util.Collections;
+-import java.util.HashMap;
+-import java.util.OptionalInt;
+-import java.util.OptionalLong;
++import java.util.*;
+ import java.util.function.ToDoubleFunction;
+ 
+ import static com.graphhopper.resources.IsochroneResource.ResponseType.geojson;
+@@ -95,7 +91,7 @@ public Response doGet(
+         if (profile == null)
+             throw new IllegalArgumentException("The requested profile '" + profileName + "' does not exist");
+         LocationIndex locationIndex = graphHopper.getLocationIndex();
+-        Graph graph = graphHopper.getGraphHopperStorage();
++        BaseGraph graph = graphHopper.getBaseGraph();
+         Weighting weighting = graphHopper.createWeighting(profile, hintsMap);
+         BooleanEncodedValue inSubnetworkEnc = graphHopper.getEncodingManager().getBooleanEncodedValue(Subnetwork.key(profileName));
+         if (hintsMap.has(Parameters.Routing.BLOCK_AREA)) {
+diff --git a/web-bundle/src/main/java/com/graphhopper/resources/MVTResource.java b/web-bundle/src/main/java/com/graphhopper/resources/MVTResource.java
+index d74d2a3e9bb..98f330b6deb 100644
+--- a/web-bundle/src/main/java/com/graphhopper/resources/MVTResource.java
++++ b/web-bundle/src/main/java/com/graphhopper/resources/MVTResource.java
+@@ -70,7 +70,7 @@ public Response doGetXyz(
+         Coordinate nw = num2deg(xInfo, yInfo, zInfo);
+         Coordinate se = num2deg(xInfo + 1, yInfo + 1, zInfo);
+         LocationIndexTree locationIndex = (LocationIndexTree) graphHopper.getLocationIndex();
+-        final NodeAccess na = graphHopper.getGraphHopperStorage().getNodeAccess();
++        final NodeAccess na = graphHopper.getBaseGraph().getNodeAccess();
+         BBox bbox = new BBox(nw.x, se.x, se.y, nw.y);
+         if (!bbox.isValid())
+             throw new IllegalStateException("Invalid bbox " + bbox);
+@@ -92,7 +92,7 @@ public Response doGetXyz(
+         final VectorTile.Tile.Layer.Builder layerBuilder = MvtLayerBuild.newLayerBuilder("roads", layerParams);
+ 
+         locationIndex.query(bbox, edgeId -> {
+-            EdgeIteratorState edge = graphHopper.getGraphHopperStorage().getEdgeIteratorStateForKey(edgeId * 2);
++            EdgeIteratorState edge = graphHopper.getBaseGraph().getEdgeIteratorStateForKey(edgeId * 2);
+             LineString lineString;
+             RoadClass rc = edge.get(roadClassEnc);
+             if (zInfo >= 14) {
+diff --git a/web-bundle/src/main/java/com/graphhopper/resources/PtIsochroneResource.java b/web-bundle/src/main/java/com/graphhopper/resources/PtIsochroneResource.java
+index bab5927f0ca..f364f1dff41 100644
+--- a/web-bundle/src/main/java/com/graphhopper/resources/PtIsochroneResource.java
++++ b/web-bundle/src/main/java/com/graphhopper/resources/PtIsochroneResource.java
+@@ -31,7 +31,7 @@
+ import com.graphhopper.routing.util.FlagEncoder;
+ import com.graphhopper.routing.weighting.FastestWeighting;
+ import com.graphhopper.routing.weighting.Weighting;
+-import com.graphhopper.storage.GraphHopperStorage;
++import com.graphhopper.storage.BaseGraph;
+ import com.graphhopper.storage.NodeAccess;
+ import com.graphhopper.storage.index.LocationIndex;
+ import com.graphhopper.util.EdgeIteratorState;
+@@ -59,14 +59,14 @@ public class PtIsochroneResource {
+ 
+     private final GtfsStorage gtfsStorage;
+     private final EncodingManager encodingManager;
+-    private final GraphHopperStorage graphHopperStorage;
++    private final BaseGraph baseGraph;
+     private final LocationIndex locationIndex;
+ 
+     @Inject
+-    public PtIsochroneResource(GtfsStorage gtfsStorage, EncodingManager encodingManager, GraphHopperStorage graphHopperStorage, LocationIndex locationIndex) {
++    public PtIsochroneResource(GtfsStorage gtfsStorage, EncodingManager encodingManager, BaseGraph baseGraph, LocationIndex locationIndex) {
+         this.gtfsStorage = gtfsStorage;
+         this.encodingManager = encodingManager;
+-        this.graphHopperStorage = graphHopperStorage;
++        this.baseGraph = baseGraph;
+         this.locationIndex = locationIndex;
+     }
+ 
+@@ -96,9 +96,9 @@ public Response doGet(
+         GeometryFactory geometryFactory = new GeometryFactory();
+         final FlagEncoder footEncoder = encodingManager.getEncoder("foot");
+         final Weighting weighting = new FastestWeighting(footEncoder);
+-        DefaultSnapFilter snapFilter = new DefaultSnapFilter(weighting, graphHopperStorage.getEncodingManager().getBooleanEncodedValue(Subnetwork.key("foot")));
++        DefaultSnapFilter snapFilter = new DefaultSnapFilter(weighting, encodingManager.getBooleanEncodedValue(Subnetwork.key("foot")));
+ 
+-        PtLocationSnapper.Result snapResult = new PtLocationSnapper(graphHopperStorage, locationIndex, gtfsStorage).snapAll(Arrays.asList(location), Arrays.asList(snapFilter));
++        PtLocationSnapper.Result snapResult = new PtLocationSnapper(baseGraph, locationIndex, gtfsStorage).snapAll(Arrays.asList(location), Arrays.asList(snapFilter));
+         GraphExplorer graphExplorer = new GraphExplorer(snapResult.queryGraph, gtfsStorage.getPtGraph(), weighting, gtfsStorage, RealtimeFeed.empty(), reverseFlow, false, false, 5.0, reverseFlow, blockedRouteTypes);
+         MultiCriteriaLabelSetting router = new MultiCriteriaLabelSetting(graphExplorer, reverseFlow, false, false, 0, Collections.emptyList());
+ 
+diff --git a/web-bundle/src/main/java/com/graphhopper/resources/SPTResource.java b/web-bundle/src/main/java/com/graphhopper/resources/SPTResource.java
+index b2916fc81cf..b4914b0155b 100644
+--- a/web-bundle/src/main/java/com/graphhopper/resources/SPTResource.java
++++ b/web-bundle/src/main/java/com/graphhopper/resources/SPTResource.java
+@@ -13,7 +13,7 @@
+ import com.graphhopper.routing.util.TraversalMode;
+ import com.graphhopper.routing.weighting.BlockAreaWeighting;
+ import com.graphhopper.routing.weighting.Weighting;
+-import com.graphhopper.storage.Graph;
++import com.graphhopper.storage.BaseGraph;
+ import com.graphhopper.storage.GraphEdgeIdFinder;
+ import com.graphhopper.storage.NodeAccess;
+ import com.graphhopper.storage.index.LocationIndex;
+@@ -95,7 +95,7 @@ public Response doGet(
+         if (profile == null)
+             throw new IllegalArgumentException("The requested profile '" + profileName + "' does not exist");
+         LocationIndex locationIndex = graphHopper.getLocationIndex();
+-        Graph graph = graphHopper.getGraphHopperStorage();
++        BaseGraph graph = graphHopper.getBaseGraph();
+         Weighting weighting = graphHopper.createWeighting(profile, hintsMap);
+         BooleanEncodedValue inSubnetworkEnc = graphHopper.getEncodingManager().getBooleanEncodedValue(Subnetwork.key(profileName));
+         if (hintsMap.has(Parameters.Routing.BLOCK_AREA)) {
+diff --git a/web/src/test/java/com/graphhopper/application/MapMatching2Test.java b/web/src/test/java/com/graphhopper/application/MapMatching2Test.java
+index 7fee9845b74..f2c30de04b3 100644
+--- a/web/src/test/java/com/graphhopper/application/MapMatching2Test.java
++++ b/web/src/test/java/com/graphhopper/application/MapMatching2Test.java
+@@ -69,7 +69,7 @@ public void testIssue13() throws IOException {
+         MatchResult mr = mapMatching.match(GpxConversions.getEntries(gpx.trk.get(0)));
+ 
+         // make sure no virtual edges are returned
+-        int edgeCount = hopper.getGraphHopperStorage().getAllEdges().length();
++        int edgeCount = hopper.getBaseGraph().getAllEdges().length();
+         for (EdgeMatch em : mr.getEdgeMatches()) {
+             assertTrue(em.getEdgeState().getEdge() < edgeCount, "result contains virtual edges:" + em.getEdgeState().toString());
+             validateEdgeMatch(em);
+@@ -115,7 +115,7 @@ public void testIssue127() throws IOException {
+         MatchResult mr = mapMatching.match(GpxConversions.getEntries(gpx.trk.get(0)));
+ 
+         // make sure no virtual edges are returned
+-        int edgeCount = hopper.getGraphHopperStorage().getAllEdges().length();
++        int edgeCount = hopper.getBaseGraph().getAllEdges().length();
+         for (EdgeMatch em : mr.getEdgeMatches()) {
+             assertTrue(em.getEdgeState().getEdge() < edgeCount, "result contains virtual edges:" + em.getEdgeState().toString());
+             validateEdgeMatch(em);
+diff --git a/web/src/test/java/com/graphhopper/application/MapMatchingTest.java b/web/src/test/java/com/graphhopper/application/MapMatchingTest.java
+index 4bd10de14cb..2733bbfcbeb 100644
+--- a/web/src/test/java/com/graphhopper/application/MapMatchingTest.java
++++ b/web/src/test/java/com/graphhopper/application/MapMatchingTest.java
+@@ -108,7 +108,7 @@ public void testDoWork(PMap hints) {
+         MatchResult mr = mapMatching.match(inputGPXEntries);
+ 
+         // make sure no virtual edges are returned
+-        int edgeCount = graphHopper.getGraphHopperStorage().getAllEdges().length();
++        int edgeCount = graphHopper.getBaseGraph().getAllEdges().length();
+         for (EdgeMatch em : mr.getEdgeMatches()) {
+             assertTrue(em.getEdgeState().getEdge() < edgeCount, "result contains virtual edges:" + em.getEdgeState().toString());
+         }

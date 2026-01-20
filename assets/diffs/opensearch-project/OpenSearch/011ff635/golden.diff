@@ -1,0 +1,1502 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index af34a840c837b..fc1ee7433274c 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -50,6 +50,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+ - Migrate client transports to Apache HttpClient / Core 5.x ([#4459](https://github.com/opensearch-project/OpenSearch/pull/4459))
+ - Changed http code on create index API with bad input raising NotXContentException from 500 to 400 ([#4773](https://github.com/opensearch-project/OpenSearch/pull/4773))
+ - Change http code for DecommissioningFailedException from 500 to 400 ([#5283](https://github.com/opensearch-project/OpenSearch/pull/5283))
++- [Refactor] Use local opensearch.common.SetOnce instead of lucene's utility class ([#5947](https://github.com/opensearch-project/OpenSearch/pull/5947))
+ 
+ ### Deprecated
+ 
+diff --git a/buildSrc/src/main/resources/forbidden/opensearch-all-signatures.txt b/buildSrc/src/main/resources/forbidden/opensearch-all-signatures.txt
+index 1e4e669e4722f..f9f24fd1e2367 100644
+--- a/buildSrc/src/main/resources/forbidden/opensearch-all-signatures.txt
++++ b/buildSrc/src/main/resources/forbidden/opensearch-all-signatures.txt
+@@ -50,6 +50,7 @@ java.nio.channels.SocketChannel#connect(java.net.SocketAddress)
+ java.lang.Boolean#getBoolean(java.lang.String)
+ 
+ org.apache.lucene.util.IOUtils @ use @org.opensearch.core.internal.io instead
++org.apache.lucene.util.SetOnce @ use @org.opensearch.common.SetOnce instead
+ 
+ @defaultMessage use executors from org.opensearch.common.util.concurrent.OpenSearchExecutors instead which will properly bubble up Errors
+ java.util.concurrent.AbstractExecutorService#<init>()
+diff --git a/libs/core/src/main/java/org/opensearch/common/SetOnce.java b/libs/core/src/main/java/org/opensearch/common/SetOnce.java
+new file mode 100644
+index 0000000000000..a596b5fcdb61d
+--- /dev/null
++++ b/libs/core/src/main/java/org/opensearch/common/SetOnce.java
+@@ -0,0 +1,104 @@
++/*
++ * SPDX-License-Identifier: Apache-2.0
++ *
++ * The OpenSearch Contributors require contributions made to
++ * this file be licensed under the Apache-2.0 license or a
++ * compatible open source license.
++ */
++
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with
++ * the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++/*
++ * Modifications Copyright OpenSearch Contributors. See
++ * GitHub history for details.
++ */
++package org.opensearch.common;
++
++import java.util.concurrent.atomic.AtomicReference;
++
++/**
++ * A convenient class which offers a semi-immutable object wrapper implementation which allows one
++ * to set the value of an object exactly once, and retrieve it many times. If {@link #set(Object)}
++ * is called more than once, {@link AlreadySetException} is thrown and the operation will fail.
++ *
++ * This is borrowed from lucene's experimental API. It is not reused to eliminate the dependency
++ * on lucene core for such a simple (standalone) utility class that may change beyond OpenSearch needs.
++ *
++ * @opensearch.api
++ */
++public final class SetOnce<T> implements Cloneable {
++
++    /** Thrown when {@link SetOnce#set(Object)} is called more than once. */
++    public static final class AlreadySetException extends IllegalStateException {
++        public AlreadySetException() {
++            super("The object cannot be set twice!");
++        }
++    }
++
++    /** Holding object and marking that it was already set */
++    private static final class Wrapper<T> {
++        private T object;
++
++        private Wrapper(T object) {
++            this.object = object;
++        }
++    }
++
++    private final AtomicReference<Wrapper<T>> set;
++
++    /**
++     * A default constructor which does not set the internal object, and allows setting it by calling
++     * {@link #set(Object)}.
++     */
++    public SetOnce() {
++        set = new AtomicReference<>();
++    }
++
++    /**
++     * Creates a new instance with the internal object set to the given object. Note that any calls to
++     * {@link #set(Object)} afterwards will result in {@link AlreadySetException}
++     *
++     * @throws AlreadySetException if called more than once
++     * @see #set(Object)
++     */
++    public SetOnce(T obj) {
++        set = new AtomicReference<>(new Wrapper<>(obj));
++    }
++
++    /** Sets the given object. If the object has already been set, an exception is thrown. */
++    public final void set(T obj) {
++        if (!trySet(obj)) {
++            throw new AlreadySetException();
++        }
++    }
++
++    /**
++     * Sets the given object if none was set before.
++     *
++     * @return true if object was set successfully, false otherwise
++     */
++    public final boolean trySet(T obj) {
++        return set.compareAndSet(null, new Wrapper<>(obj));
++    }
++
++    /** Returns the object set by {@link #set(Object)}. */
++    public final T get() {
++        Wrapper<T> wrapper = set.get();
++        return wrapper == null ? null : wrapper.object;
++    }
++}
+diff --git a/libs/core/src/test/java/org/opensearch/common/SetOnceTests.java b/libs/core/src/test/java/org/opensearch/common/SetOnceTests.java
+new file mode 100644
+index 0000000000000..0392ff62dd115
+--- /dev/null
++++ b/libs/core/src/test/java/org/opensearch/common/SetOnceTests.java
+@@ -0,0 +1,120 @@
++/*
++ * SPDX-License-Identifier: Apache-2.0
++ *
++ * The OpenSearch Contributors require contributions made to
++ * this file be licensed under the Apache-2.0 license or a
++ * compatible open source license.
++ */
++
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with
++ * the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++/*
++ * Modifications Copyright OpenSearch Contributors. See
++ * GitHub history for details.
++ */
++
++package org.opensearch.common;
++
++import org.opensearch.common.SetOnce.AlreadySetException;
++import org.opensearch.test.OpenSearchTestCase;
++
++import java.util.Random;
++
++import static org.hamcrest.CoreMatchers.containsString;
++
++public class SetOnceTests extends OpenSearchTestCase {
++    private static final class SetOnceThread extends Thread {
++        SetOnce<Integer> set;
++        boolean success = false;
++        final Random RAND;
++
++        public SetOnceThread(Random random) {
++            RAND = new Random(random.nextLong());
++        }
++
++        @Override
++        public void run() {
++            try {
++                sleep(RAND.nextInt(10)); // sleep for a short time
++                set.set(Integer.valueOf(getName().substring(2)));
++                success = true;
++            } catch (@SuppressWarnings("unused") InterruptedException e) {
++                // ignore
++            } catch (@SuppressWarnings("unused") RuntimeException e) {
++                // TODO: change exception type
++                // expected.
++                success = false;
++            }
++        }
++    }
++
++    public void testEmptyCtor() {
++        SetOnce<Integer> set = new SetOnce<>();
++        assertNull(set.get());
++    }
++
++    public void testSettingCtor() {
++        SetOnce<Integer> set = new SetOnce<>(5);
++        assertEquals(5, set.get().intValue());
++
++        AlreadySetException alreadySetException = expectThrows(AlreadySetException.class, () -> set.set(7));
++        assertThat(alreadySetException.getMessage(), containsString("The object cannot be set twice!"));
++    }
++
++    public void testSetOnce() {
++        SetOnce<Integer> set = new SetOnce<>();
++        set.set(5);
++        assertEquals(5, set.get().intValue());
++
++        AlreadySetException alreadySetException = expectThrows(AlreadySetException.class, () -> set.set(7));
++        assertThat(alreadySetException.getMessage(), containsString("The object cannot be set twice!"));
++    }
++
++    public void testTrySet() {
++        SetOnce<Integer> set = new SetOnce<>();
++        assertTrue(set.trySet(5));
++        assertEquals(5, set.get().intValue());
++        assertFalse(set.trySet(7));
++        assertEquals(5, set.get().intValue());
++    }
++
++    public void testSetMultiThreaded() throws Exception {
++        final SetOnce<Integer> set = new SetOnce<>();
++        SetOnceThread[] threads = new SetOnceThread[10];
++        for (int i = 0; i < threads.length; i++) {
++            threads[i] = new SetOnceThread(random());
++            threads[i].setName("t-" + (i + 1));
++            threads[i].set = set;
++        }
++
++        for (Thread t : threads) {
++            t.start();
++        }
++
++        for (Thread t : threads) {
++            t.join();
++        }
++
++        for (SetOnceThread t : threads) {
++            if (t.success) {
++                int expectedVal = Integer.parseInt(t.getName().substring(2));
++                assertEquals("thread " + t.getName(), expectedVal, t.set.get().intValue());
++            }
++        }
++    }
++}
+diff --git a/modules/analysis-common/src/main/java/org/opensearch/analysis/common/CommonAnalysisModulePlugin.java b/modules/analysis-common/src/main/java/org/opensearch/analysis/common/CommonAnalysisModulePlugin.java
+index a26912733a9c6..67a0c3b13f8fb 100644
+--- a/modules/analysis-common/src/main/java/org/opensearch/analysis/common/CommonAnalysisModulePlugin.java
++++ b/modules/analysis-common/src/main/java/org/opensearch/analysis/common/CommonAnalysisModulePlugin.java
+@@ -123,11 +123,11 @@
+ import org.apache.lucene.analysis.tr.ApostropheFilter;
+ import org.apache.lucene.analysis.tr.TurkishAnalyzer;
+ import org.apache.lucene.analysis.util.ElisionFilter;
+-import org.apache.lucene.util.SetOnce;
+ import org.opensearch.Version;
+ import org.opensearch.client.Client;
+ import org.opensearch.cluster.metadata.IndexNameExpressionResolver;
+ import org.opensearch.cluster.service.ClusterService;
++import org.opensearch.common.SetOnce;
+ import org.opensearch.common.io.stream.NamedWriteableRegistry;
+ import org.opensearch.common.logging.DeprecationLogger;
+ import org.opensearch.common.regex.Regex;
+diff --git a/modules/ingest-geoip/src/main/java/org/opensearch/ingest/geoip/DatabaseReaderLazyLoader.java b/modules/ingest-geoip/src/main/java/org/opensearch/ingest/geoip/DatabaseReaderLazyLoader.java
+index 70feb44f0f385..44b03744b6685 100644
+--- a/modules/ingest-geoip/src/main/java/org/opensearch/ingest/geoip/DatabaseReaderLazyLoader.java
++++ b/modules/ingest-geoip/src/main/java/org/opensearch/ingest/geoip/DatabaseReaderLazyLoader.java
+@@ -35,8 +35,8 @@
+ import com.maxmind.geoip2.DatabaseReader;
+ import org.apache.logging.log4j.LogManager;
+ import org.apache.logging.log4j.Logger;
+-import org.apache.lucene.util.SetOnce;
+ import org.opensearch.common.CheckedSupplier;
++import org.opensearch.common.SetOnce;
+ import org.opensearch.core.internal.io.IOUtils;
+ 
+ import java.io.Closeable;
+diff --git a/modules/lang-painless/src/main/java/org/opensearch/painless/PainlessModulePlugin.java b/modules/lang-painless/src/main/java/org/opensearch/painless/PainlessModulePlugin.java
+index 4a432b8f17b25..144f02ee7d74e 100644
+--- a/modules/lang-painless/src/main/java/org/opensearch/painless/PainlessModulePlugin.java
++++ b/modules/lang-painless/src/main/java/org/opensearch/painless/PainlessModulePlugin.java
+@@ -32,13 +32,13 @@
+ 
+ package org.opensearch.painless;
+ 
+-import org.apache.lucene.util.SetOnce;
+ import org.opensearch.action.ActionRequest;
+ import org.opensearch.action.ActionResponse;
+ import org.opensearch.client.Client;
+ import org.opensearch.cluster.metadata.IndexNameExpressionResolver;
+ import org.opensearch.cluster.node.DiscoveryNodes;
+ import org.opensearch.cluster.service.ClusterService;
++import org.opensearch.common.SetOnce;
+ import org.opensearch.common.io.stream.NamedWriteableRegistry;
+ import org.opensearch.common.settings.ClusterSettings;
+ import org.opensearch.common.settings.IndexScopedSettings;
+diff --git a/modules/percolator/src/main/java/org/opensearch/percolator/PercolateQueryBuilder.java b/modules/percolator/src/main/java/org/opensearch/percolator/PercolateQueryBuilder.java
+index 4f4665c434c67..11d9d274e1e9b 100644
+--- a/modules/percolator/src/main/java/org/opensearch/percolator/PercolateQueryBuilder.java
++++ b/modules/percolator/src/main/java/org/opensearch/percolator/PercolateQueryBuilder.java
+@@ -54,13 +54,13 @@
+ import org.apache.lucene.util.BitDocIdSet;
+ import org.apache.lucene.util.BitSet;
+ import org.apache.lucene.util.BytesRef;
+-import org.apache.lucene.util.SetOnce;
+ import org.opensearch.OpenSearchException;
+ import org.opensearch.ResourceNotFoundException;
+ import org.opensearch.Version;
+ import org.opensearch.action.ActionListener;
+ import org.opensearch.action.get.GetRequest;
+ import org.opensearch.common.ParseField;
++import org.opensearch.common.SetOnce;
+ import org.opensearch.common.bytes.BytesReference;
+ import org.opensearch.common.io.stream.InputStreamStreamInput;
+ import org.opensearch.common.io.stream.NamedWriteableAwareStreamInput;
+diff --git a/modules/reindex/src/test/java/org/opensearch/index/reindex/ReindexFromRemoteWithAuthTests.java b/modules/reindex/src/test/java/org/opensearch/index/reindex/ReindexFromRemoteWithAuthTests.java
+index dd7eb977bbe48..a5de8e56c8d6f 100644
+--- a/modules/reindex/src/test/java/org/opensearch/index/reindex/ReindexFromRemoteWithAuthTests.java
++++ b/modules/reindex/src/test/java/org/opensearch/index/reindex/ReindexFromRemoteWithAuthTests.java
+@@ -32,7 +32,6 @@
+ 
+ package org.opensearch.index.reindex;
+ 
+-import org.apache.lucene.util.SetOnce;
+ import org.opensearch.OpenSearchSecurityException;
+ import org.opensearch.OpenSearchStatusException;
+ import org.opensearch.action.ActionListener;
+@@ -46,6 +45,7 @@
+ import org.opensearch.client.Client;
+ import org.opensearch.cluster.metadata.IndexNameExpressionResolver;
+ import org.opensearch.cluster.service.ClusterService;
++import org.opensearch.common.SetOnce;
+ import org.opensearch.common.bytes.BytesArray;
+ import org.opensearch.common.io.stream.NamedWriteableRegistry;
+ import org.opensearch.common.network.NetworkModule;
+diff --git a/modules/systemd/src/main/java/org/opensearch/systemd/SystemdModulePlugin.java b/modules/systemd/src/main/java/org/opensearch/systemd/SystemdModulePlugin.java
+index a22b3f862e017..a2966c059d4d2 100644
+--- a/modules/systemd/src/main/java/org/opensearch/systemd/SystemdModulePlugin.java
++++ b/modules/systemd/src/main/java/org/opensearch/systemd/SystemdModulePlugin.java
+@@ -34,10 +34,10 @@
+ 
+ import org.apache.logging.log4j.LogManager;
+ import org.apache.logging.log4j.Logger;
+-import org.apache.lucene.util.SetOnce;
+ import org.opensearch.client.Client;
+ import org.opensearch.cluster.metadata.IndexNameExpressionResolver;
+ import org.opensearch.cluster.service.ClusterService;
++import org.opensearch.common.SetOnce;
+ import org.opensearch.common.io.stream.NamedWriteableRegistry;
+ import org.opensearch.common.unit.TimeValue;
+ import org.opensearch.common.xcontent.NamedXContentRegistry;
+diff --git a/modules/transport-netty4/src/main/java/org/opensearch/transport/Netty4ModulePlugin.java b/modules/transport-netty4/src/main/java/org/opensearch/transport/Netty4ModulePlugin.java
+index 8a18210fd963e..5ad8b11f9fe6e 100644
+--- a/modules/transport-netty4/src/main/java/org/opensearch/transport/Netty4ModulePlugin.java
++++ b/modules/transport-netty4/src/main/java/org/opensearch/transport/Netty4ModulePlugin.java
+@@ -32,8 +32,8 @@
+ 
+ package org.opensearch.transport;
+ 
+-import org.apache.lucene.util.SetOnce;
+ import org.opensearch.Version;
++import org.opensearch.common.SetOnce;
+ import org.opensearch.common.io.stream.NamedWriteableRegistry;
+ import org.opensearch.common.network.NetworkModule;
+ import org.opensearch.common.network.NetworkService;
+diff --git a/plugins/discovery-gce/src/main/java/org/opensearch/plugin/discovery/gce/GceDiscoveryPlugin.java b/plugins/discovery-gce/src/main/java/org/opensearch/plugin/discovery/gce/GceDiscoveryPlugin.java
+index 6d015f54ffb29..282361c893689 100644
+--- a/plugins/discovery-gce/src/main/java/org/opensearch/plugin/discovery/gce/GceDiscoveryPlugin.java
++++ b/plugins/discovery-gce/src/main/java/org/opensearch/plugin/discovery/gce/GceDiscoveryPlugin.java
+@@ -36,13 +36,13 @@
+ import com.google.api.client.util.ClassInfo;
+ import org.apache.logging.log4j.LogManager;
+ import org.apache.logging.log4j.Logger;
+-import org.apache.lucene.util.SetOnce;
+ import org.opensearch.cloud.gce.GceInstancesService;
+ import org.opensearch.cloud.gce.GceInstancesServiceImpl;
+ import org.opensearch.cloud.gce.GceMetadataService;
+ import org.opensearch.cloud.gce.network.GceNameResolver;
+ import org.opensearch.cloud.gce.util.Access;
+ import org.opensearch.common.Booleans;
++import org.opensearch.common.SetOnce;
+ import org.opensearch.common.network.NetworkService;
+ import org.opensearch.common.settings.Setting;
+ import org.opensearch.common.settings.Settings;
+diff --git a/plugins/repository-s3/src/main/java/org/opensearch/repositories/s3/S3BlobContainer.java b/plugins/repository-s3/src/main/java/org/opensearch/repositories/s3/S3BlobContainer.java
+index 678be7c6f13f2..c2c272b2527a2 100644
+--- a/plugins/repository-s3/src/main/java/org/opensearch/repositories/s3/S3BlobContainer.java
++++ b/plugins/repository-s3/src/main/java/org/opensearch/repositories/s3/S3BlobContainer.java
+@@ -48,9 +48,9 @@
+ import org.apache.logging.log4j.LogManager;
+ import org.apache.logging.log4j.Logger;
+ import org.apache.logging.log4j.message.ParameterizedMessage;
+-import org.apache.lucene.util.SetOnce;
+ import org.opensearch.ExceptionsHelper;
+ import org.opensearch.common.Nullable;
++import org.opensearch.common.SetOnce;
+ import org.opensearch.common.Strings;
+ import org.opensearch.common.blobstore.BlobContainer;
+ import org.opensearch.common.blobstore.BlobMetadata;
+diff --git a/plugins/transport-nio/src/main/java/org/opensearch/transport/nio/NioTransportPlugin.java b/plugins/transport-nio/src/main/java/org/opensearch/transport/nio/NioTransportPlugin.java
+index f8816e0686e9d..88e99b232d2da 100644
+--- a/plugins/transport-nio/src/main/java/org/opensearch/transport/nio/NioTransportPlugin.java
++++ b/plugins/transport-nio/src/main/java/org/opensearch/transport/nio/NioTransportPlugin.java
+@@ -34,8 +34,8 @@
+ 
+ import org.apache.logging.log4j.LogManager;
+ import org.apache.logging.log4j.Logger;
+-import org.apache.lucene.util.SetOnce;
+ import org.opensearch.Version;
++import org.opensearch.common.SetOnce;
+ import org.opensearch.common.io.stream.NamedWriteableRegistry;
+ import org.opensearch.common.network.NetworkService;
+ import org.opensearch.common.settings.ClusterSettings;
+diff --git a/qa/smoke-test-http/src/test/java/org/opensearch/http/SearchRestCancellationIT.java b/qa/smoke-test-http/src/test/java/org/opensearch/http/SearchRestCancellationIT.java
+index 42c7357de3f07..c15678a3f2f38 100644
+--- a/qa/smoke-test-http/src/test/java/org/opensearch/http/SearchRestCancellationIT.java
++++ b/qa/smoke-test-http/src/test/java/org/opensearch/http/SearchRestCancellationIT.java
+@@ -34,7 +34,6 @@
+ import org.apache.hc.core5.http.ContentType;
+ import org.apache.hc.core5.http.io.entity.ByteArrayEntity;
+ import org.apache.logging.log4j.LogManager;
+-import org.apache.lucene.util.SetOnce;
+ import org.opensearch.action.admin.cluster.node.info.NodeInfo;
+ import org.opensearch.action.admin.cluster.node.info.NodesInfoResponse;
+ import org.opensearch.action.admin.cluster.node.tasks.list.ListTasksResponse;
+@@ -48,6 +47,7 @@
+ import org.opensearch.client.Request;
+ import org.opensearch.client.Response;
+ import org.opensearch.client.ResponseListener;
++import org.opensearch.common.SetOnce;
+ import org.opensearch.common.Strings;
+ import org.opensearch.common.xcontent.XContentType;
+ import org.opensearch.plugins.Plugin;
+diff --git a/server/src/internalClusterTest/java/org/opensearch/action/admin/cluster/node/tasks/CancellableTasksIT.java b/server/src/internalClusterTest/java/org/opensearch/action/admin/cluster/node/tasks/CancellableTasksIT.java
+index 6c507171091e7..6743efda8e5e3 100644
+--- a/server/src/internalClusterTest/java/org/opensearch/action/admin/cluster/node/tasks/CancellableTasksIT.java
++++ b/server/src/internalClusterTest/java/org/opensearch/action/admin/cluster/node/tasks/CancellableTasksIT.java
+@@ -31,7 +31,6 @@
+ 
+ package org.opensearch.action.admin.cluster.node.tasks;
+ 
+-import org.apache.lucene.util.SetOnce;
+ import org.opensearch.ExceptionsHelper;
+ import org.opensearch.ResourceNotFoundException;
+ import org.opensearch.action.ActionFuture;
+@@ -50,6 +49,7 @@
+ import org.opensearch.action.support.PlainActionFuture;
+ import org.opensearch.client.node.NodeClient;
+ import org.opensearch.cluster.node.DiscoveryNode;
++import org.opensearch.common.SetOnce;
+ import org.opensearch.common.inject.Inject;
+ import org.opensearch.common.io.stream.StreamInput;
+ import org.opensearch.common.io.stream.StreamOutput;
+diff --git a/server/src/internalClusterTest/java/org/opensearch/indices/recovery/IndexRecoveryIT.java b/server/src/internalClusterTest/java/org/opensearch/indices/recovery/IndexRecoveryIT.java
+index bb1456c8b5d4f..a7ab1dc7c7d39 100644
+--- a/server/src/internalClusterTest/java/org/opensearch/indices/recovery/IndexRecoveryIT.java
++++ b/server/src/internalClusterTest/java/org/opensearch/indices/recovery/IndexRecoveryIT.java
+@@ -34,7 +34,6 @@
+ 
+ import org.apache.lucene.analysis.TokenStream;
+ import org.apache.lucene.index.IndexCommit;
+-import org.apache.lucene.util.SetOnce;
+ import org.opensearch.OpenSearchException;
+ import org.opensearch.Version;
+ import org.opensearch.action.admin.cluster.health.ClusterHealthResponse;
+@@ -72,6 +71,7 @@
+ import org.opensearch.cluster.routing.allocation.command.MoveAllocationCommand;
+ import org.opensearch.cluster.service.ClusterService;
+ import org.opensearch.common.Priority;
++import org.opensearch.common.SetOnce;
+ import org.opensearch.common.Strings;
+ import org.opensearch.common.breaker.CircuitBreaker;
+ import org.opensearch.common.breaker.CircuitBreakingException;
+diff --git a/server/src/main/java/org/opensearch/action/search/AbstractSearchAsyncAction.java b/server/src/main/java/org/opensearch/action/search/AbstractSearchAsyncAction.java
+index 1a37406e19f14..6b6678361b2b5 100644
+--- a/server/src/main/java/org/opensearch/action/search/AbstractSearchAsyncAction.java
++++ b/server/src/main/java/org/opensearch/action/search/AbstractSearchAsyncAction.java
+@@ -34,7 +34,6 @@
+ 
+ import org.apache.logging.log4j.Logger;
+ import org.apache.logging.log4j.message.ParameterizedMessage;
+-import org.apache.lucene.util.SetOnce;
+ import org.opensearch.ExceptionsHelper;
+ import org.opensearch.OpenSearchException;
+ import org.opensearch.Version;
+@@ -46,6 +45,7 @@
+ import org.opensearch.cluster.routing.FailAwareWeightedRouting;
+ import org.opensearch.cluster.routing.GroupShardsIterator;
+ import org.opensearch.common.Nullable;
++import org.opensearch.common.SetOnce;
+ import org.opensearch.common.lease.Releasable;
+ import org.opensearch.common.lease.Releasables;
+ import org.opensearch.common.util.concurrent.AbstractRunnable;
+diff --git a/server/src/main/java/org/opensearch/cluster/coordination/Coordinator.java b/server/src/main/java/org/opensearch/cluster/coordination/Coordinator.java
+index fd52f48c7b5f8..eb069dc1f7698 100644
+--- a/server/src/main/java/org/opensearch/cluster/coordination/Coordinator.java
++++ b/server/src/main/java/org/opensearch/cluster/coordination/Coordinator.java
+@@ -35,7 +35,6 @@
+ import org.apache.logging.log4j.LogManager;
+ import org.apache.logging.log4j.Logger;
+ import org.apache.logging.log4j.message.ParameterizedMessage;
+-import org.apache.lucene.util.SetOnce;
+ import org.opensearch.action.ActionListener;
+ import org.opensearch.cluster.ClusterChangedEvent;
+ import org.opensearch.cluster.ClusterName;
+@@ -61,6 +60,7 @@
+ import org.opensearch.common.Booleans;
+ import org.opensearch.common.Nullable;
+ import org.opensearch.common.Priority;
++import org.opensearch.common.SetOnce;
+ import org.opensearch.common.Strings;
+ import org.opensearch.common.component.AbstractLifecycleComponent;
+ import org.opensearch.common.io.stream.NamedWriteableRegistry;
+diff --git a/server/src/main/java/org/opensearch/cluster/metadata/IndexAbstraction.java b/server/src/main/java/org/opensearch/cluster/metadata/IndexAbstraction.java
+index 975c71ab75110..f9328d5b61183 100644
+--- a/server/src/main/java/org/opensearch/cluster/metadata/IndexAbstraction.java
++++ b/server/src/main/java/org/opensearch/cluster/metadata/IndexAbstraction.java
+@@ -31,8 +31,8 @@
+ 
+ package org.opensearch.cluster.metadata;
+ 
+-import org.apache.lucene.util.SetOnce;
+ import org.opensearch.common.Nullable;
++import org.opensearch.common.SetOnce;
+ import org.opensearch.common.Strings;
+ import org.opensearch.common.collect.Tuple;
+ 
+diff --git a/server/src/main/java/org/opensearch/common/logging/NodeAndClusterIdConverter.java b/server/src/main/java/org/opensearch/common/logging/NodeAndClusterIdConverter.java
+index a3062bca90158..7bbb83e311adc 100644
+--- a/server/src/main/java/org/opensearch/common/logging/NodeAndClusterIdConverter.java
++++ b/server/src/main/java/org/opensearch/common/logging/NodeAndClusterIdConverter.java
+@@ -37,7 +37,7 @@
+ import org.apache.logging.log4j.core.pattern.ConverterKeys;
+ import org.apache.logging.log4j.core.pattern.LogEventPatternConverter;
+ import org.apache.logging.log4j.core.pattern.PatternConverter;
+-import org.apache.lucene.util.SetOnce;
++import org.opensearch.common.SetOnce;
+ 
+ import java.util.Locale;
+ 
+diff --git a/server/src/main/java/org/opensearch/common/logging/NodeNamePatternConverter.java b/server/src/main/java/org/opensearch/common/logging/NodeNamePatternConverter.java
+index bc25f690d4a64..b0ecbb6f9407f 100644
+--- a/server/src/main/java/org/opensearch/common/logging/NodeNamePatternConverter.java
++++ b/server/src/main/java/org/opensearch/common/logging/NodeNamePatternConverter.java
+@@ -39,7 +39,7 @@
+ import org.apache.logging.log4j.core.pattern.ConverterKeys;
+ import org.apache.logging.log4j.core.pattern.LogEventPatternConverter;
+ import org.apache.logging.log4j.core.pattern.PatternConverter;
+-import org.apache.lucene.util.SetOnce;
++import org.opensearch.common.SetOnce;
+ 
+ /**
+  * Converts {@code %node_name} in log4j patterns into the current node name.
+diff --git a/server/src/main/java/org/opensearch/common/settings/KeyStoreWrapper.java b/server/src/main/java/org/opensearch/common/settings/KeyStoreWrapper.java
+index 508e1bc38ea8a..ffd980f8f0da6 100644
+--- a/server/src/main/java/org/opensearch/common/settings/KeyStoreWrapper.java
++++ b/server/src/main/java/org/opensearch/common/settings/KeyStoreWrapper.java
+@@ -40,10 +40,10 @@
+ import org.apache.lucene.store.IOContext;
+ import org.apache.lucene.store.IndexOutput;
+ import org.apache.lucene.store.NIOFSDirectory;
+-import org.apache.lucene.util.SetOnce;
+ import org.opensearch.cli.ExitCodes;
+ import org.opensearch.cli.UserException;
+ import org.opensearch.common.Randomness;
++import org.opensearch.common.SetOnce;
+ import org.opensearch.common.hash.MessageDigests;
+ 
+ import javax.crypto.AEADBadTagException;
+diff --git a/server/src/main/java/org/opensearch/common/settings/Settings.java b/server/src/main/java/org/opensearch/common/settings/Settings.java
+index 5e15e1693c017..d5ec0e514ac67 100644
+--- a/server/src/main/java/org/opensearch/common/settings/Settings.java
++++ b/server/src/main/java/org/opensearch/common/settings/Settings.java
+@@ -33,11 +33,11 @@
+ package org.opensearch.common.settings;
+ 
+ import org.apache.logging.log4j.Level;
+-import org.apache.lucene.util.SetOnce;
+ import org.opensearch.OpenSearchGenerationException;
+ import org.opensearch.OpenSearchParseException;
+ import org.opensearch.Version;
+ import org.opensearch.common.Booleans;
++import org.opensearch.common.SetOnce;
+ import org.opensearch.common.Strings;
+ import org.opensearch.common.io.stream.StreamInput;
+ import org.opensearch.common.io.stream.StreamOutput;
+diff --git a/server/src/main/java/org/opensearch/common/util/CancellableThreads.java b/server/src/main/java/org/opensearch/common/util/CancellableThreads.java
+index bb9ae9502f746..ad7ceff90c55d 100644
+--- a/server/src/main/java/org/opensearch/common/util/CancellableThreads.java
++++ b/server/src/main/java/org/opensearch/common/util/CancellableThreads.java
+@@ -31,10 +31,10 @@
+ 
+ package org.opensearch.common.util;
+ 
+-import org.apache.lucene.util.SetOnce;
+ import org.apache.lucene.util.ThreadInterruptedException;
+ import org.opensearch.OpenSearchException;
+ import org.opensearch.common.Nullable;
++import org.opensearch.common.SetOnce;
+ import org.opensearch.common.io.stream.StreamInput;
+ 
+ import java.io.IOException;
+diff --git a/server/src/main/java/org/opensearch/discovery/PeerFinder.java b/server/src/main/java/org/opensearch/discovery/PeerFinder.java
+index e8b6c72c512a2..467ed7ed80ea7 100644
+--- a/server/src/main/java/org/opensearch/discovery/PeerFinder.java
++++ b/server/src/main/java/org/opensearch/discovery/PeerFinder.java
+@@ -36,12 +36,12 @@
+ import org.apache.logging.log4j.LogManager;
+ import org.apache.logging.log4j.Logger;
+ import org.apache.logging.log4j.message.ParameterizedMessage;
+-import org.apache.lucene.util.SetOnce;
+ import org.opensearch.action.ActionListener;
+ import org.opensearch.cluster.coordination.PeersResponse;
+ import org.opensearch.cluster.node.DiscoveryNode;
+ import org.opensearch.cluster.node.DiscoveryNodes;
+ import org.opensearch.common.Nullable;
++import org.opensearch.common.SetOnce;
+ import org.opensearch.common.io.stream.StreamInput;
+ import org.opensearch.common.settings.Setting;
+ import org.opensearch.common.settings.Settings;
+diff --git a/server/src/main/java/org/opensearch/discovery/SeedHostsResolver.java b/server/src/main/java/org/opensearch/discovery/SeedHostsResolver.java
+index 94e51fe5804ca..14805648c6771 100644
+--- a/server/src/main/java/org/opensearch/discovery/SeedHostsResolver.java
++++ b/server/src/main/java/org/opensearch/discovery/SeedHostsResolver.java
+@@ -34,7 +34,7 @@
+ 
+ import org.apache.logging.log4j.LogManager;
+ import org.apache.logging.log4j.Logger;
+-import org.apache.lucene.util.SetOnce;
++import org.opensearch.common.SetOnce;
+ import org.opensearch.common.component.AbstractLifecycleComponent;
+ import org.opensearch.common.settings.Setting;
+ import org.opensearch.common.settings.Settings;
+diff --git a/server/src/main/java/org/opensearch/gateway/GatewayMetaState.java b/server/src/main/java/org/opensearch/gateway/GatewayMetaState.java
+index 48dd0ddf90413..ea550fc6ac3e8 100644
+--- a/server/src/main/java/org/opensearch/gateway/GatewayMetaState.java
++++ b/server/src/main/java/org/opensearch/gateway/GatewayMetaState.java
+@@ -36,7 +36,6 @@
+ import org.apache.logging.log4j.LogManager;
+ import org.apache.logging.log4j.Logger;
+ import org.apache.lucene.store.AlreadyClosedException;
+-import org.apache.lucene.util.SetOnce;
+ import org.opensearch.OpenSearchException;
+ import org.opensearch.ExceptionsHelper;
+ import org.opensearch.Version;
+@@ -54,6 +53,7 @@
+ import org.opensearch.cluster.metadata.MetadataIndexUpgradeService;
+ import org.opensearch.cluster.node.DiscoveryNode;
+ import org.opensearch.cluster.service.ClusterService;
++import org.opensearch.common.SetOnce;
+ import org.opensearch.common.collect.ImmutableOpenMap;
+ import org.opensearch.common.collect.Tuple;
+ import org.opensearch.common.settings.Settings;
+diff --git a/server/src/main/java/org/opensearch/gateway/PersistedClusterStateService.java b/server/src/main/java/org/opensearch/gateway/PersistedClusterStateService.java
+index ea77e4ae5f13b..30af9aaa91765 100644
+--- a/server/src/main/java/org/opensearch/gateway/PersistedClusterStateService.java
++++ b/server/src/main/java/org/opensearch/gateway/PersistedClusterStateService.java
+@@ -60,13 +60,13 @@
+ import org.apache.lucene.util.Bits;
+ import org.apache.lucene.util.BytesRef;
+ import org.apache.lucene.util.BytesRefIterator;
+-import org.apache.lucene.util.SetOnce;
+ import org.opensearch.Version;
+ import org.opensearch.cluster.ClusterState;
+ import org.opensearch.cluster.metadata.IndexMetadata;
+ import org.opensearch.cluster.metadata.Metadata;
+ import org.opensearch.common.CheckedConsumer;
+ import org.opensearch.common.Nullable;
++import org.opensearch.common.SetOnce;
+ import org.opensearch.common.bytes.BytesReference;
+ import org.opensearch.common.bytes.RecyclingBytesStreamOutput;
+ import org.opensearch.common.io.Streams;
+diff --git a/server/src/main/java/org/opensearch/index/IndexModule.java b/server/src/main/java/org/opensearch/index/IndexModule.java
+index 5b9b051af8e8b..f2675f018d0e6 100644
+--- a/server/src/main/java/org/opensearch/index/IndexModule.java
++++ b/server/src/main/java/org/opensearch/index/IndexModule.java
+@@ -40,13 +40,13 @@
+ import org.apache.lucene.search.similarities.Similarity;
+ import org.apache.lucene.store.MMapDirectory;
+ import org.apache.lucene.util.Constants;
+-import org.apache.lucene.util.SetOnce;
+ import org.opensearch.Version;
+ import org.opensearch.client.Client;
+ import org.opensearch.cluster.metadata.IndexNameExpressionResolver;
+ import org.opensearch.cluster.routing.ShardRouting;
+ import org.opensearch.cluster.service.ClusterService;
+ import org.opensearch.common.CheckedFunction;
++import org.opensearch.common.SetOnce;
+ import org.opensearch.common.TriFunction;
+ import org.opensearch.common.io.stream.NamedWriteableRegistry;
+ import org.opensearch.common.logging.DeprecationLogger;
+diff --git a/server/src/main/java/org/opensearch/index/engine/Engine.java b/server/src/main/java/org/opensearch/index/engine/Engine.java
+index 95d671ee7adc2..604fa7a53e65c 100644
+--- a/server/src/main/java/org/opensearch/index/engine/Engine.java
++++ b/server/src/main/java/org/opensearch/index/engine/Engine.java
+@@ -51,10 +51,10 @@
+ import org.apache.lucene.store.AlreadyClosedException;
+ import org.apache.lucene.store.Directory;
+ import org.apache.lucene.store.IOContext;
+-import org.apache.lucene.util.SetOnce;
+ import org.opensearch.ExceptionsHelper;
+ import org.opensearch.action.index.IndexRequest;
+ import org.opensearch.common.Nullable;
++import org.opensearch.common.SetOnce;
+ import org.opensearch.common.bytes.BytesReference;
+ import org.opensearch.common.collect.ImmutableOpenMap;
+ import org.opensearch.common.concurrent.GatedCloseable;
+diff --git a/server/src/main/java/org/opensearch/index/query/AbstractGeometryQueryBuilder.java b/server/src/main/java/org/opensearch/index/query/AbstractGeometryQueryBuilder.java
+index 4f0a873ac7bdb..dfffafa7cf114 100644
+--- a/server/src/main/java/org/opensearch/index/query/AbstractGeometryQueryBuilder.java
++++ b/server/src/main/java/org/opensearch/index/query/AbstractGeometryQueryBuilder.java
+@@ -34,7 +34,6 @@
+ 
+ import org.apache.lucene.search.MatchNoDocsQuery;
+ import org.apache.lucene.search.Query;
+-import org.apache.lucene.util.SetOnce;
+ import org.opensearch.Version;
+ import org.opensearch.action.ActionListener;
+ import org.opensearch.action.get.GetRequest;
+@@ -42,6 +41,7 @@
+ import org.opensearch.client.Client;
+ import org.opensearch.common.ParseField;
+ import org.opensearch.common.ParsingException;
++import org.opensearch.common.SetOnce;
+ import org.opensearch.common.geo.GeoJson;
+ import org.opensearch.common.geo.GeometryIO;
+ import org.opensearch.common.geo.GeometryParser;
+diff --git a/server/src/main/java/org/opensearch/index/query/QueryShardContext.java b/server/src/main/java/org/opensearch/index/query/QueryShardContext.java
+index fe2ed23b2b279..9338b28e5f68d 100644
+--- a/server/src/main/java/org/opensearch/index/query/QueryShardContext.java
++++ b/server/src/main/java/org/opensearch/index/query/QueryShardContext.java
+@@ -38,12 +38,12 @@
+ import org.apache.lucene.search.Query;
+ import org.apache.lucene.search.join.BitSetProducer;
+ import org.apache.lucene.search.similarities.Similarity;
+-import org.apache.lucene.util.SetOnce;
+ import org.opensearch.Version;
+ import org.opensearch.action.ActionListener;
+ import org.opensearch.client.Client;
+ import org.opensearch.common.CheckedFunction;
+ import org.opensearch.common.ParsingException;
++import org.opensearch.common.SetOnce;
+ import org.opensearch.common.TriFunction;
+ import org.opensearch.common.io.stream.NamedWriteableRegistry;
+ import org.opensearch.common.lucene.search.Queries;
+diff --git a/server/src/main/java/org/opensearch/index/query/TermsQueryBuilder.java b/server/src/main/java/org/opensearch/index/query/TermsQueryBuilder.java
+index 28f98f7060395..a1529889e0d05 100644
+--- a/server/src/main/java/org/opensearch/index/query/TermsQueryBuilder.java
++++ b/server/src/main/java/org/opensearch/index/query/TermsQueryBuilder.java
+@@ -37,11 +37,11 @@
+ import org.apache.lucene.search.Query;
+ import org.apache.lucene.util.BytesRef;
+ import org.apache.lucene.util.BytesRefBuilder;
+-import org.apache.lucene.util.SetOnce;
+ import org.opensearch.action.ActionListener;
+ import org.opensearch.action.get.GetRequest;
+ import org.opensearch.client.Client;
+ import org.opensearch.common.ParsingException;
++import org.opensearch.common.SetOnce;
+ import org.opensearch.common.Strings;
+ import org.opensearch.common.bytes.BytesReference;
+ import org.opensearch.common.io.stream.BytesStreamOutput;
+diff --git a/server/src/main/java/org/opensearch/index/shard/IndexShard.java b/server/src/main/java/org/opensearch/index/shard/IndexShard.java
+index 26abe80d2bff2..96a54ab65d268 100644
+--- a/server/src/main/java/org/opensearch/index/shard/IndexShard.java
++++ b/server/src/main/java/org/opensearch/index/shard/IndexShard.java
+@@ -55,7 +55,6 @@
+ import org.apache.lucene.store.FilterDirectory;
+ import org.apache.lucene.store.IOContext;
+ import org.apache.lucene.store.IndexInput;
+-import org.apache.lucene.util.SetOnce;
+ import org.apache.lucene.util.ThreadInterruptedException;
+ import org.opensearch.Assertions;
+ import org.opensearch.ExceptionsHelper;
+@@ -80,6 +79,7 @@
+ import org.opensearch.common.CheckedFunction;
+ import org.opensearch.common.CheckedRunnable;
+ import org.opensearch.common.Nullable;
++import org.opensearch.common.SetOnce;
+ import org.opensearch.common.collect.Tuple;
+ import org.opensearch.common.concurrent.GatedCloseable;
+ import org.opensearch.common.io.stream.BytesStreamOutput;
+diff --git a/server/src/main/java/org/opensearch/index/translog/transfer/TranslogTransferMetadata.java b/server/src/main/java/org/opensearch/index/translog/transfer/TranslogTransferMetadata.java
+index 243294d85c97d..3b2884dca9a3f 100644
+--- a/server/src/main/java/org/opensearch/index/translog/transfer/TranslogTransferMetadata.java
++++ b/server/src/main/java/org/opensearch/index/translog/transfer/TranslogTransferMetadata.java
+@@ -12,7 +12,7 @@
+ import org.apache.lucene.store.DataOutput;
+ import org.apache.lucene.store.IndexInput;
+ import org.apache.lucene.store.OutputStreamIndexOutput;
+-import org.apache.lucene.util.SetOnce;
++import org.opensearch.common.SetOnce;
+ import org.opensearch.common.bytes.BytesReference;
+ import org.opensearch.common.io.stream.BytesStreamOutput;
+ 
+diff --git a/server/src/main/java/org/opensearch/indices/recovery/LocalStorePeerRecoverySourceHandler.java b/server/src/main/java/org/opensearch/indices/recovery/LocalStorePeerRecoverySourceHandler.java
+index 4bb6fc1d23b9f..c8d3b2d09ad28 100644
+--- a/server/src/main/java/org/opensearch/indices/recovery/LocalStorePeerRecoverySourceHandler.java
++++ b/server/src/main/java/org/opensearch/indices/recovery/LocalStorePeerRecoverySourceHandler.java
+@@ -9,13 +9,13 @@
+ package org.opensearch.indices.recovery;
+ 
+ import org.apache.lucene.index.IndexCommit;
+-import org.apache.lucene.util.SetOnce;
+ import org.opensearch.action.ActionListener;
+ import org.opensearch.action.StepListener;
+ import org.opensearch.action.support.ThreadedActionListener;
+ import org.opensearch.action.support.replication.ReplicationResponse;
+ import org.opensearch.cluster.routing.IndexShardRoutingTable;
+ import org.opensearch.cluster.routing.ShardRouting;
++import org.opensearch.common.SetOnce;
+ import org.opensearch.common.concurrent.GatedCloseable;
+ import org.opensearch.common.lease.Releasable;
+ import org.opensearch.common.unit.TimeValue;
+diff --git a/server/src/main/java/org/opensearch/node/Node.java b/server/src/main/java/org/opensearch/node/Node.java
+index ab39a7bf71ff6..662a44a81ef85 100644
+--- a/server/src/main/java/org/opensearch/node/Node.java
++++ b/server/src/main/java/org/opensearch/node/Node.java
+@@ -35,7 +35,7 @@
+ import org.apache.logging.log4j.LogManager;
+ import org.apache.logging.log4j.Logger;
+ import org.apache.lucene.util.Constants;
+-import org.apache.lucene.util.SetOnce;
++import org.opensearch.common.SetOnce;
+ import org.opensearch.common.util.FeatureFlags;
+ import org.opensearch.cluster.routing.allocation.AwarenessReplicaBalance;
+ import org.opensearch.index.IndexModule;
+diff --git a/server/src/main/java/org/opensearch/repositories/blobstore/BlobStoreRepository.java b/server/src/main/java/org/opensearch/repositories/blobstore/BlobStoreRepository.java
+index d2a70e88d6eee..9113c5531b1e3 100644
+--- a/server/src/main/java/org/opensearch/repositories/blobstore/BlobStoreRepository.java
++++ b/server/src/main/java/org/opensearch/repositories/blobstore/BlobStoreRepository.java
+@@ -45,7 +45,6 @@
+ import org.apache.lucene.store.IndexOutput;
+ import org.apache.lucene.store.RateLimiter;
+ import org.apache.lucene.util.BytesRef;
+-import org.apache.lucene.util.SetOnce;
+ import org.opensearch.ExceptionsHelper;
+ import org.opensearch.Version;
+ import org.opensearch.action.ActionListener;
+@@ -67,6 +66,7 @@
+ import org.opensearch.cluster.service.ClusterService;
+ import org.opensearch.common.Nullable;
+ import org.opensearch.common.Numbers;
++import org.opensearch.common.SetOnce;
+ import org.opensearch.common.Strings;
+ import org.opensearch.common.UUIDs;
+ import org.opensearch.common.blobstore.BlobContainer;
+diff --git a/server/src/main/java/org/opensearch/rest/RestRequest.java b/server/src/main/java/org/opensearch/rest/RestRequest.java
+index d44a4e3039543..1e0a2b1827e10 100644
+--- a/server/src/main/java/org/opensearch/rest/RestRequest.java
++++ b/server/src/main/java/org/opensearch/rest/RestRequest.java
+@@ -32,11 +32,11 @@
+ 
+ package org.opensearch.rest;
+ 
+-import org.apache.lucene.util.SetOnce;
+ import org.opensearch.OpenSearchParseException;
+ import org.opensearch.common.Booleans;
+ import org.opensearch.common.CheckedConsumer;
+ import org.opensearch.common.Nullable;
++import org.opensearch.common.SetOnce;
+ import org.opensearch.common.Strings;
+ import org.opensearch.common.bytes.BytesArray;
+ import org.opensearch.common.bytes.BytesReference;
+diff --git a/server/src/main/java/org/opensearch/search/aggregations/Aggregations.java b/server/src/main/java/org/opensearch/search/aggregations/Aggregations.java
+index 4049d96d68817..b59eaa46f0bd1 100644
+--- a/server/src/main/java/org/opensearch/search/aggregations/Aggregations.java
++++ b/server/src/main/java/org/opensearch/search/aggregations/Aggregations.java
+@@ -31,8 +31,8 @@
+ 
+ package org.opensearch.search.aggregations;
+ 
+-import org.apache.lucene.util.SetOnce;
+ import org.opensearch.common.ParsingException;
++import org.opensearch.common.SetOnce;
+ import org.opensearch.common.xcontent.ToXContentFragment;
+ import org.opensearch.common.xcontent.XContentBuilder;
+ import org.opensearch.common.xcontent.XContentParser;
+diff --git a/server/src/main/java/org/opensearch/search/internal/PitReaderContext.java b/server/src/main/java/org/opensearch/search/internal/PitReaderContext.java
+index b24a8a4172e29..5c2a9f82f98e4 100644
+--- a/server/src/main/java/org/opensearch/search/internal/PitReaderContext.java
++++ b/server/src/main/java/org/opensearch/search/internal/PitReaderContext.java
+@@ -8,8 +8,8 @@
+ 
+ package org.opensearch.search.internal;
+ 
+-import org.apache.lucene.util.SetOnce;
+ import org.opensearch.cluster.routing.ShardRouting;
++import org.opensearch.common.SetOnce;
+ import org.opensearch.common.lease.Releasable;
+ import org.opensearch.common.lease.Releasables;
+ import org.opensearch.index.IndexService;
+diff --git a/server/src/main/java/org/opensearch/search/suggest/Suggest.java b/server/src/main/java/org/opensearch/search/suggest/Suggest.java
+index 0aa881e2a3c9e..7943892b2af89 100644
+--- a/server/src/main/java/org/opensearch/search/suggest/Suggest.java
++++ b/server/src/main/java/org/opensearch/search/suggest/Suggest.java
+@@ -32,10 +32,10 @@
+ package org.opensearch.search.suggest;
+ 
+ import org.apache.lucene.util.CollectionUtil;
+-import org.apache.lucene.util.SetOnce;
+ import org.opensearch.common.CheckedFunction;
+ import org.opensearch.common.ParseField;
+ import org.opensearch.common.ParsingException;
++import org.opensearch.common.SetOnce;
+ import org.opensearch.common.Strings;
+ import org.opensearch.common.io.stream.NamedWriteable;
+ import org.opensearch.common.io.stream.StreamInput;
+diff --git a/server/src/main/java/org/opensearch/tasks/TaskManager.java b/server/src/main/java/org/opensearch/tasks/TaskManager.java
+index 334cde81dfb6a..ff760219716e6 100644
+--- a/server/src/main/java/org/opensearch/tasks/TaskManager.java
++++ b/server/src/main/java/org/opensearch/tasks/TaskManager.java
+@@ -37,7 +37,6 @@
+ import org.apache.logging.log4j.LogManager;
+ import org.apache.logging.log4j.Logger;
+ import org.apache.logging.log4j.message.ParameterizedMessage;
+-import org.apache.lucene.util.SetOnce;
+ import org.opensearch.Assertions;
+ import org.opensearch.ExceptionsHelper;
+ import org.opensearch.OpenSearchException;
+@@ -49,6 +48,7 @@
+ import org.opensearch.cluster.ClusterStateApplier;
+ import org.opensearch.cluster.node.DiscoveryNode;
+ import org.opensearch.cluster.node.DiscoveryNodes;
++import org.opensearch.common.SetOnce;
+ import org.opensearch.common.lease.Releasable;
+ import org.opensearch.common.lease.Releasables;
+ import org.opensearch.common.settings.ClusterSettings;
+diff --git a/server/src/main/java/org/opensearch/transport/SniffConnectionStrategy.java b/server/src/main/java/org/opensearch/transport/SniffConnectionStrategy.java
+index 47fd5fc2c9489..d465f05cd6a6f 100644
+--- a/server/src/main/java/org/opensearch/transport/SniffConnectionStrategy.java
++++ b/server/src/main/java/org/opensearch/transport/SniffConnectionStrategy.java
+@@ -33,7 +33,6 @@
+ package org.opensearch.transport;
+ 
+ import org.apache.logging.log4j.message.ParameterizedMessage;
+-import org.apache.lucene.util.SetOnce;
+ import org.opensearch.Version;
+ import org.opensearch.action.ActionListener;
+ import org.opensearch.action.StepListener;
+@@ -44,6 +43,7 @@
+ import org.opensearch.cluster.node.DiscoveryNode;
+ import org.opensearch.cluster.node.DiscoveryNodeRole;
+ import org.opensearch.common.Booleans;
++import org.opensearch.common.SetOnce;
+ import org.opensearch.common.Strings;
+ import org.opensearch.common.UUIDs;
+ import org.opensearch.common.io.stream.StreamInput;
+diff --git a/server/src/test/java/org/opensearch/action/admin/cluster/configuration/TransportAddVotingConfigExclusionsActionTests.java b/server/src/test/java/org/opensearch/action/admin/cluster/configuration/TransportAddVotingConfigExclusionsActionTests.java
+index 69570fa7b4640..03c6b5ab822c1 100644
+--- a/server/src/test/java/org/opensearch/action/admin/cluster/configuration/TransportAddVotingConfigExclusionsActionTests.java
++++ b/server/src/test/java/org/opensearch/action/admin/cluster/configuration/TransportAddVotingConfigExclusionsActionTests.java
+@@ -31,7 +31,6 @@
+ 
+ package org.opensearch.action.admin.cluster.configuration;
+ 
+-import org.apache.lucene.util.SetOnce;
+ import org.opensearch.OpenSearchTimeoutException;
+ import org.opensearch.Version;
+ import org.opensearch.action.support.ActionFilters;
+@@ -49,6 +48,7 @@
+ import org.opensearch.cluster.node.DiscoveryNodeRole;
+ import org.opensearch.cluster.node.DiscoveryNodes.Builder;
+ import org.opensearch.cluster.service.ClusterService;
++import org.opensearch.common.SetOnce;
+ import org.opensearch.common.Strings;
+ import org.opensearch.common.io.stream.StreamInput;
+ import org.opensearch.common.settings.ClusterSettings;
+diff --git a/server/src/test/java/org/opensearch/action/admin/cluster/configuration/TransportClearVotingConfigExclusionsActionTests.java b/server/src/test/java/org/opensearch/action/admin/cluster/configuration/TransportClearVotingConfigExclusionsActionTests.java
+index b3620bf757256..37ead5d588f84 100644
+--- a/server/src/test/java/org/opensearch/action/admin/cluster/configuration/TransportClearVotingConfigExclusionsActionTests.java
++++ b/server/src/test/java/org/opensearch/action/admin/cluster/configuration/TransportClearVotingConfigExclusionsActionTests.java
+@@ -31,7 +31,6 @@
+ 
+ package org.opensearch.action.admin.cluster.configuration;
+ 
+-import org.apache.lucene.util.SetOnce;
+ import org.opensearch.OpenSearchTimeoutException;
+ import org.opensearch.Version;
+ import org.opensearch.action.support.ActionFilters;
+@@ -45,6 +44,7 @@
+ import org.opensearch.cluster.node.DiscoveryNodes;
+ import org.opensearch.cluster.node.DiscoveryNodes.Builder;
+ import org.opensearch.cluster.service.ClusterService;
++import org.opensearch.common.SetOnce;
+ import org.opensearch.common.io.stream.StreamInput;
+ import org.opensearch.common.settings.Settings;
+ import org.opensearch.common.unit.TimeValue;
+diff --git a/server/src/test/java/org/opensearch/action/admin/cluster/node/tasks/TaskManagerTestCase.java b/server/src/test/java/org/opensearch/action/admin/cluster/node/tasks/TaskManagerTestCase.java
+index 8b0c2187d05af..4eba00e95b77c 100644
+--- a/server/src/test/java/org/opensearch/action/admin/cluster/node/tasks/TaskManagerTestCase.java
++++ b/server/src/test/java/org/opensearch/action/admin/cluster/node/tasks/TaskManagerTestCase.java
+@@ -31,7 +31,6 @@
+ 
+ package org.opensearch.action.admin.cluster.node.tasks;
+ 
+-import org.apache.lucene.util.SetOnce;
+ import org.opensearch.Version;
+ import org.opensearch.action.FailedNodeException;
+ import org.opensearch.action.admin.cluster.node.tasks.cancel.TransportCancelTasksAction;
+@@ -46,6 +45,7 @@
+ import org.opensearch.cluster.ClusterName;
+ import org.opensearch.cluster.node.DiscoveryNode;
+ import org.opensearch.cluster.service.ClusterService;
++import org.opensearch.common.SetOnce;
+ import org.opensearch.common.io.stream.NamedWriteableRegistry;
+ import org.opensearch.common.io.stream.StreamInput;
+ import org.opensearch.common.io.stream.StreamOutput;
+diff --git a/server/src/test/java/org/opensearch/action/admin/indices/close/TransportVerifyShardBeforeCloseActionTests.java b/server/src/test/java/org/opensearch/action/admin/indices/close/TransportVerifyShardBeforeCloseActionTests.java
+index 000dac92506f6..f617585894766 100644
+--- a/server/src/test/java/org/opensearch/action/admin/indices/close/TransportVerifyShardBeforeCloseActionTests.java
++++ b/server/src/test/java/org/opensearch/action/admin/indices/close/TransportVerifyShardBeforeCloseActionTests.java
+@@ -31,7 +31,6 @@
+ 
+ package org.opensearch.action.admin.indices.close;
+ 
+-import org.apache.lucene.util.SetOnce;
+ import org.junit.After;
+ import org.junit.AfterClass;
+ import org.junit.Before;
+@@ -59,6 +58,7 @@
+ import org.opensearch.cluster.routing.ShardRouting;
+ import org.opensearch.cluster.routing.ShardRoutingState;
+ import org.opensearch.cluster.service.ClusterService;
++import org.opensearch.common.SetOnce;
+ import org.opensearch.common.settings.Settings;
+ import org.opensearch.common.unit.TimeValue;
+ import org.opensearch.index.shard.IndexShard;
+diff --git a/server/src/test/java/org/opensearch/action/search/TransportSearchActionTests.java b/server/src/test/java/org/opensearch/action/search/TransportSearchActionTests.java
+index d1f2304365d59..136e1879881f8 100644
+--- a/server/src/test/java/org/opensearch/action/search/TransportSearchActionTests.java
++++ b/server/src/test/java/org/opensearch/action/search/TransportSearchActionTests.java
+@@ -33,7 +33,6 @@
+ package org.opensearch.action.search;
+ 
+ import org.apache.lucene.search.TotalHits;
+-import org.apache.lucene.util.SetOnce;
+ import org.opensearch.Version;
+ import org.opensearch.action.ActionListener;
+ import org.opensearch.action.LatchedActionListener;
+@@ -52,6 +51,7 @@
+ import org.opensearch.cluster.routing.ShardRouting;
+ import org.opensearch.cluster.routing.ShardRoutingState;
+ import org.opensearch.cluster.routing.TestShardRouting;
++import org.opensearch.common.SetOnce;
+ import org.opensearch.common.Strings;
+ import org.opensearch.common.collect.Tuple;
+ import org.opensearch.common.settings.Settings;
+diff --git a/server/src/test/java/org/opensearch/action/support/replication/TransportReplicationAllPermitsAcquisitionTests.java b/server/src/test/java/org/opensearch/action/support/replication/TransportReplicationAllPermitsAcquisitionTests.java
+index 98972d4063a97..013be1f2ebd42 100644
+--- a/server/src/test/java/org/opensearch/action/support/replication/TransportReplicationAllPermitsAcquisitionTests.java
++++ b/server/src/test/java/org/opensearch/action/support/replication/TransportReplicationAllPermitsAcquisitionTests.java
+@@ -31,7 +31,6 @@
+ 
+ package org.opensearch.action.support.replication;
+ 
+-import org.apache.lucene.util.SetOnce;
+ import org.opensearch.Version;
+ import org.opensearch.action.ActionListener;
+ import org.opensearch.action.support.ActionFilters;
+@@ -54,6 +53,7 @@
+ import org.opensearch.cluster.routing.ShardRouting;
+ import org.opensearch.cluster.routing.ShardRoutingState;
+ import org.opensearch.cluster.service.ClusterService;
++import org.opensearch.common.SetOnce;
+ import org.opensearch.common.io.stream.StreamInput;
+ import org.opensearch.common.lease.Releasable;
+ import org.opensearch.common.settings.Settings;
+diff --git a/server/src/test/java/org/opensearch/cluster/action/shard/ShardStateActionTests.java b/server/src/test/java/org/opensearch/cluster/action/shard/ShardStateActionTests.java
+index 2138f28f7b8c2..95ef12f0224fd 100644
+--- a/server/src/test/java/org/opensearch/cluster/action/shard/ShardStateActionTests.java
++++ b/server/src/test/java/org/opensearch/cluster/action/shard/ShardStateActionTests.java
+@@ -33,7 +33,6 @@
+ package org.opensearch.cluster.action.shard;
+ 
+ import org.apache.lucene.index.CorruptIndexException;
+-import org.apache.lucene.util.SetOnce;
+ import org.opensearch.Version;
+ import org.opensearch.action.ActionListener;
+ import org.opensearch.action.support.replication.ClusterStateCreationUtils;
+@@ -51,6 +50,7 @@
+ import org.opensearch.cluster.routing.ShardsIterator;
+ import org.opensearch.cluster.routing.allocation.AllocationService;
+ import org.opensearch.cluster.service.ClusterService;
++import org.opensearch.common.SetOnce;
+ import org.opensearch.common.bytes.BytesReference;
+ import org.opensearch.common.io.stream.BytesStreamOutput;
+ import org.opensearch.common.io.stream.StreamInput;
+diff --git a/server/src/test/java/org/opensearch/common/xcontent/XContentParserUtilsTests.java b/server/src/test/java/org/opensearch/common/xcontent/XContentParserUtilsTests.java
+index aafe77a895dbc..36c08d11d424f 100644
+--- a/server/src/test/java/org/opensearch/common/xcontent/XContentParserUtilsTests.java
++++ b/server/src/test/java/org/opensearch/common/xcontent/XContentParserUtilsTests.java
+@@ -32,11 +32,11 @@
+ 
+ package org.opensearch.common.xcontent;
+ 
+-import org.apache.lucene.util.SetOnce;
+ import org.opensearch.common.CheckedBiConsumer;
+ import org.opensearch.common.CheckedConsumer;
+ import org.opensearch.common.ParseField;
+ import org.opensearch.common.ParsingException;
++import org.opensearch.common.SetOnce;
+ import org.opensearch.common.bytes.BytesArray;
+ import org.opensearch.common.bytes.BytesReference;
+ import org.opensearch.common.xcontent.json.JsonXContent;
+diff --git a/server/src/test/java/org/opensearch/discovery/HandshakingTransportAddressConnectorTests.java b/server/src/test/java/org/opensearch/discovery/HandshakingTransportAddressConnectorTests.java
+index 3a1c24806e266..5d252168c7b28 100644
+--- a/server/src/test/java/org/opensearch/discovery/HandshakingTransportAddressConnectorTests.java
++++ b/server/src/test/java/org/opensearch/discovery/HandshakingTransportAddressConnectorTests.java
+@@ -35,13 +35,13 @@
+ import org.apache.logging.log4j.Level;
+ import org.apache.logging.log4j.LogManager;
+ import org.apache.logging.log4j.Logger;
+-import org.apache.lucene.util.SetOnce;
+ import org.opensearch.OpenSearchException;
+ import org.opensearch.Version;
+ import org.opensearch.action.ActionListener;
+ import org.opensearch.cluster.ClusterName;
+ import org.opensearch.cluster.node.DiscoveryNode;
+ import org.opensearch.common.Nullable;
++import org.opensearch.common.SetOnce;
+ import org.opensearch.common.settings.Settings;
+ import org.opensearch.common.transport.TransportAddress;
+ import org.opensearch.test.OpenSearchTestCase;
+diff --git a/server/src/test/java/org/opensearch/index/IndexModuleTests.java b/server/src/test/java/org/opensearch/index/IndexModuleTests.java
+index d2374e767639c..565ae5a16a384 100644
+--- a/server/src/test/java/org/opensearch/index/IndexModuleTests.java
++++ b/server/src/test/java/org/opensearch/index/IndexModuleTests.java
+@@ -44,8 +44,6 @@
+ import org.apache.lucene.search.similarities.BM25Similarity;
+ import org.apache.lucene.search.similarities.Similarity;
+ import org.apache.lucene.store.Directory;
+-import org.apache.lucene.util.SetOnce;
+-import org.apache.lucene.util.SetOnce.AlreadySetException;
+ import org.opensearch.Version;
+ import org.opensearch.cluster.metadata.IndexMetadata;
+ import org.opensearch.cluster.metadata.IndexNameExpressionResolver;
+@@ -55,6 +53,8 @@
+ import org.opensearch.cluster.routing.UnassignedInfo;
+ import org.opensearch.cluster.service.ClusterService;
+ import org.opensearch.common.CheckedFunction;
++import org.opensearch.common.SetOnce;
++import org.opensearch.common.SetOnce.AlreadySetException;
+ import org.opensearch.common.UUIDs;
+ import org.opensearch.common.breaker.CircuitBreaker;
+ import org.opensearch.common.settings.Setting;
+diff --git a/server/src/test/java/org/opensearch/index/engine/InternalEngineTests.java b/server/src/test/java/org/opensearch/index/engine/InternalEngineTests.java
+index 878e01c4130bf..c635c708e3b52 100644
+--- a/server/src/test/java/org/opensearch/index/engine/InternalEngineTests.java
++++ b/server/src/test/java/org/opensearch/index/engine/InternalEngineTests.java
+@@ -80,7 +80,6 @@
+ import org.apache.lucene.util.Bits;
+ import org.apache.lucene.util.BytesRef;
+ import org.apache.lucene.util.FixedBitSet;
+-import org.apache.lucene.util.SetOnce;
+ import org.hamcrest.MatcherAssert;
+ import org.hamcrest.Matchers;
+ import org.opensearch.OpenSearchException;
+@@ -96,6 +95,7 @@
+ import org.opensearch.common.CheckedBiConsumer;
+ import org.opensearch.common.CheckedRunnable;
+ import org.opensearch.common.Randomness;
++import org.opensearch.common.SetOnce;
+ import org.opensearch.common.Strings;
+ import org.opensearch.common.TriFunction;
+ import org.opensearch.common.UUIDs;
+diff --git a/server/src/test/java/org/opensearch/index/fielddata/IndexFieldDataServiceTests.java b/server/src/test/java/org/opensearch/index/fielddata/IndexFieldDataServiceTests.java
+index d2f9125be996a..d6fd079ac59e8 100644
+--- a/server/src/test/java/org/opensearch/index/fielddata/IndexFieldDataServiceTests.java
++++ b/server/src/test/java/org/opensearch/index/fielddata/IndexFieldDataServiceTests.java
+@@ -43,7 +43,7 @@
+ import org.apache.lucene.index.LeafReaderContext;
+ import org.apache.lucene.store.ByteBuffersDirectory;
+ import org.apache.lucene.util.Accountable;
+-import org.apache.lucene.util.SetOnce;
++import org.opensearch.common.SetOnce;
+ import org.opensearch.common.lucene.index.OpenSearchDirectoryReader;
+ import org.opensearch.common.settings.Settings;
+ import org.opensearch.index.IndexService;
+diff --git a/server/src/test/java/org/opensearch/index/query/RewriteableTests.java b/server/src/test/java/org/opensearch/index/query/RewriteableTests.java
+index eba4e11881aee..6385a57f9f370 100644
+--- a/server/src/test/java/org/opensearch/index/query/RewriteableTests.java
++++ b/server/src/test/java/org/opensearch/index/query/RewriteableTests.java
+@@ -31,8 +31,8 @@
+ 
+ package org.opensearch.index.query;
+ 
+-import org.apache.lucene.util.SetOnce;
+ import org.opensearch.action.support.PlainActionFuture;
++import org.opensearch.common.SetOnce;
+ import org.opensearch.test.OpenSearchTestCase;
+ 
+ import java.io.IOException;
+diff --git a/server/src/test/java/org/opensearch/indices/IndexingMemoryControllerTests.java b/server/src/test/java/org/opensearch/indices/IndexingMemoryControllerTests.java
+index be9a3b094ad7c..7a362ce8ded74 100644
+--- a/server/src/test/java/org/opensearch/indices/IndexingMemoryControllerTests.java
++++ b/server/src/test/java/org/opensearch/indices/IndexingMemoryControllerTests.java
+@@ -32,9 +32,9 @@
+ package org.opensearch.indices;
+ 
+ import org.apache.lucene.search.ReferenceManager;
+-import org.apache.lucene.util.SetOnce;
+ import org.opensearch.Version;
+ import org.opensearch.cluster.node.DiscoveryNode;
++import org.opensearch.common.SetOnce;
+ import org.opensearch.common.settings.Settings;
+ import org.opensearch.common.unit.ByteSizeUnit;
+ import org.opensearch.common.unit.ByteSizeValue;
+diff --git a/server/src/test/java/org/opensearch/indices/recovery/LocalStorePeerRecoverySourceHandlerTests.java b/server/src/test/java/org/opensearch/indices/recovery/LocalStorePeerRecoverySourceHandlerTests.java
+index 0f5bba4f0c332..ba54d3eb3dba8 100644
+--- a/server/src/test/java/org/opensearch/indices/recovery/LocalStorePeerRecoverySourceHandlerTests.java
++++ b/server/src/test/java/org/opensearch/indices/recovery/LocalStorePeerRecoverySourceHandlerTests.java
+@@ -45,7 +45,6 @@
+ import org.apache.lucene.tests.store.BaseDirectoryWrapper;
+ import org.apache.lucene.store.Directory;
+ import org.apache.lucene.store.IOContext;
+-import org.apache.lucene.util.SetOnce;
+ import org.junit.After;
+ import org.junit.Before;
+ import org.opensearch.ExceptionsHelper;
+@@ -58,6 +57,7 @@
+ import org.opensearch.cluster.node.DiscoveryNode;
+ import org.opensearch.common.Numbers;
+ import org.opensearch.common.Randomness;
++import org.opensearch.common.SetOnce;
+ import org.opensearch.common.UUIDs;
+ import org.opensearch.common.bytes.BytesArray;
+ import org.opensearch.common.bytes.BytesReference;
+diff --git a/server/src/test/java/org/opensearch/ingest/IngestServiceTests.java b/server/src/test/java/org/opensearch/ingest/IngestServiceTests.java
+index fcd15e85979f7..323f108d18a64 100644
+--- a/server/src/test/java/org/opensearch/ingest/IngestServiceTests.java
++++ b/server/src/test/java/org/opensearch/ingest/IngestServiceTests.java
+@@ -34,7 +34,6 @@
+ 
+ import org.apache.logging.log4j.Level;
+ import org.apache.logging.log4j.LogManager;
+-import org.apache.lucene.util.SetOnce;
+ import org.opensearch.OpenSearchParseException;
+ import org.opensearch.ResourceNotFoundException;
+ import org.opensearch.Version;
+@@ -57,6 +56,7 @@
+ import org.opensearch.cluster.metadata.Metadata;
+ import org.opensearch.cluster.node.DiscoveryNode;
+ import org.opensearch.cluster.service.ClusterService;
++import org.opensearch.common.SetOnce;
+ import org.opensearch.common.bytes.BytesArray;
+ import org.opensearch.common.settings.Settings;
+ import org.opensearch.common.util.concurrent.OpenSearchExecutors;
+diff --git a/server/src/test/java/org/opensearch/node/NodeTests.java b/server/src/test/java/org/opensearch/node/NodeTests.java
+index 783fe1abdca17..d775a6f645e61 100644
+--- a/server/src/test/java/org/opensearch/node/NodeTests.java
++++ b/server/src/test/java/org/opensearch/node/NodeTests.java
+@@ -32,10 +32,10 @@
+ package org.opensearch.node;
+ 
+ import org.apache.lucene.tests.util.LuceneTestCase;
+-import org.apache.lucene.util.SetOnce;
+ import org.opensearch.bootstrap.BootstrapCheck;
+ import org.opensearch.bootstrap.BootstrapContext;
+ import org.opensearch.cluster.ClusterName;
++import org.opensearch.common.SetOnce;
+ import org.opensearch.common.breaker.CircuitBreaker;
+ import org.opensearch.common.network.NetworkModule;
+ import org.opensearch.common.settings.Settings;
+diff --git a/server/src/test/java/org/opensearch/rest/action/document/RestBulkActionTests.java b/server/src/test/java/org/opensearch/rest/action/document/RestBulkActionTests.java
+index 19fd74aa30c07..1e13b365c82e3 100644
+--- a/server/src/test/java/org/opensearch/rest/action/document/RestBulkActionTests.java
++++ b/server/src/test/java/org/opensearch/rest/action/document/RestBulkActionTests.java
+@@ -32,13 +32,13 @@
+ 
+ package org.opensearch.rest.action.document;
+ 
+-import org.apache.lucene.util.SetOnce;
+ import org.opensearch.Version;
+ import org.opensearch.action.ActionListener;
+ import org.opensearch.action.bulk.BulkRequest;
+ import org.opensearch.action.bulk.BulkResponse;
+ import org.opensearch.action.update.UpdateRequest;
+ import org.opensearch.client.node.NodeClient;
++import org.opensearch.common.SetOnce;
+ import org.opensearch.common.bytes.BytesArray;
+ import org.opensearch.common.xcontent.XContentType;
+ import org.opensearch.rest.RestChannel;
+diff --git a/server/src/test/java/org/opensearch/rest/action/document/RestIndexActionTests.java b/server/src/test/java/org/opensearch/rest/action/document/RestIndexActionTests.java
+index 85e5497975888..fac1b2c75c9b7 100644
+--- a/server/src/test/java/org/opensearch/rest/action/document/RestIndexActionTests.java
++++ b/server/src/test/java/org/opensearch/rest/action/document/RestIndexActionTests.java
+@@ -32,7 +32,6 @@
+ 
+ package org.opensearch.rest.action.document;
+ 
+-import org.apache.lucene.util.SetOnce;
+ import org.opensearch.Version;
+ import org.opensearch.action.DocWriteRequest;
+ import org.opensearch.action.index.IndexRequest;
+@@ -40,6 +39,7 @@
+ import org.opensearch.cluster.ClusterState;
+ import org.opensearch.cluster.node.DiscoveryNode;
+ import org.opensearch.cluster.node.DiscoveryNodes;
++import org.opensearch.common.SetOnce;
+ import org.opensearch.common.bytes.BytesArray;
+ import org.opensearch.common.xcontent.XContentType;
+ import org.opensearch.rest.RestRequest;
+diff --git a/server/src/test/java/org/opensearch/search/aggregations/AggregatorFactoriesTests.java b/server/src/test/java/org/opensearch/search/aggregations/AggregatorFactoriesTests.java
+index 17abfbf489916..30db12f858c53 100644
+--- a/server/src/test/java/org/opensearch/search/aggregations/AggregatorFactoriesTests.java
++++ b/server/src/test/java/org/opensearch/search/aggregations/AggregatorFactoriesTests.java
+@@ -31,9 +31,9 @@
+ 
+ package org.opensearch.search.aggregations;
+ 
+-import org.apache.lucene.util.SetOnce;
+ import org.opensearch.action.ActionListener;
+ import org.opensearch.common.ParsingException;
++import org.opensearch.common.SetOnce;
+ import org.opensearch.common.Strings;
+ import org.opensearch.common.bytes.BytesReference;
+ import org.opensearch.common.io.stream.StreamOutput;
+diff --git a/server/src/test/java/org/opensearch/search/pit/RestCreatePitActionTests.java b/server/src/test/java/org/opensearch/search/pit/RestCreatePitActionTests.java
+index 5ca384daedbff..2ddd6eda122b4 100644
+--- a/server/src/test/java/org/opensearch/search/pit/RestCreatePitActionTests.java
++++ b/server/src/test/java/org/opensearch/search/pit/RestCreatePitActionTests.java
+@@ -8,11 +8,11 @@
+ 
+ package org.opensearch.search.pit;
+ 
+-import org.apache.lucene.util.SetOnce;
+ import org.opensearch.action.ActionListener;
+ import org.opensearch.action.search.CreatePitRequest;
+ import org.opensearch.action.search.CreatePitResponse;
+ import org.opensearch.client.node.NodeClient;
++import org.opensearch.common.SetOnce;
+ import org.opensearch.rest.RestRequest;
+ import org.opensearch.rest.action.search.RestCreatePitAction;
+ import org.opensearch.test.OpenSearchTestCase;
+diff --git a/server/src/test/java/org/opensearch/search/pit/RestDeletePitActionTests.java b/server/src/test/java/org/opensearch/search/pit/RestDeletePitActionTests.java
+index 0bfa16aafe1e3..c54cf5b5395ce 100644
+--- a/server/src/test/java/org/opensearch/search/pit/RestDeletePitActionTests.java
++++ b/server/src/test/java/org/opensearch/search/pit/RestDeletePitActionTests.java
+@@ -8,11 +8,11 @@
+ 
+ package org.opensearch.search.pit;
+ 
+-import org.apache.lucene.util.SetOnce;
+ import org.opensearch.action.ActionListener;
+ import org.opensearch.action.search.DeletePitRequest;
+ import org.opensearch.action.search.DeletePitResponse;
+ import org.opensearch.client.node.NodeClient;
++import org.opensearch.common.SetOnce;
+ import org.opensearch.common.bytes.BytesArray;
+ import org.opensearch.common.xcontent.XContentType;
+ import org.opensearch.rest.RestRequest;
+diff --git a/server/src/test/java/org/opensearch/search/scroll/RestClearScrollActionTests.java b/server/src/test/java/org/opensearch/search/scroll/RestClearScrollActionTests.java
+index 065635eff672d..a4605521634fc 100644
+--- a/server/src/test/java/org/opensearch/search/scroll/RestClearScrollActionTests.java
++++ b/server/src/test/java/org/opensearch/search/scroll/RestClearScrollActionTests.java
+@@ -32,11 +32,11 @@
+ 
+ package org.opensearch.search.scroll;
+ 
+-import org.apache.lucene.util.SetOnce;
+ import org.opensearch.action.ActionListener;
+ import org.opensearch.action.search.ClearScrollRequest;
+ import org.opensearch.action.search.ClearScrollResponse;
+ import org.opensearch.client.node.NodeClient;
++import org.opensearch.common.SetOnce;
+ import org.opensearch.common.bytes.BytesArray;
+ import org.opensearch.common.xcontent.XContentType;
+ import org.opensearch.rest.RestRequest;
+diff --git a/server/src/test/java/org/opensearch/search/scroll/RestSearchScrollActionTests.java b/server/src/test/java/org/opensearch/search/scroll/RestSearchScrollActionTests.java
+index 9e5c74be47525..7db3714769bcc 100644
+--- a/server/src/test/java/org/opensearch/search/scroll/RestSearchScrollActionTests.java
++++ b/server/src/test/java/org/opensearch/search/scroll/RestSearchScrollActionTests.java
+@@ -32,11 +32,11 @@
+ 
+ package org.opensearch.search.scroll;
+ 
+-import org.apache.lucene.util.SetOnce;
+ import org.opensearch.action.ActionListener;
+ import org.opensearch.action.search.SearchResponse;
+ import org.opensearch.action.search.SearchScrollRequest;
+ import org.opensearch.client.node.NodeClient;
++import org.opensearch.common.SetOnce;
+ import org.opensearch.common.bytes.BytesArray;
+ import org.opensearch.common.xcontent.XContentType;
+ import org.opensearch.rest.RestRequest;
+diff --git a/server/src/test/java/org/opensearch/snapshots/SnapshotResiliencyTests.java b/server/src/test/java/org/opensearch/snapshots/SnapshotResiliencyTests.java
+index 415a3d487b790..a6677fbc0c99b 100644
+--- a/server/src/test/java/org/opensearch/snapshots/SnapshotResiliencyTests.java
++++ b/server/src/test/java/org/opensearch/snapshots/SnapshotResiliencyTests.java
+@@ -34,7 +34,6 @@
+ 
+ import org.apache.logging.log4j.LogManager;
+ import org.apache.logging.log4j.Logger;
+-import org.apache.lucene.util.SetOnce;
+ import org.opensearch.ExceptionsHelper;
+ import org.opensearch.Version;
+ import org.opensearch.action.ActionListener;
+@@ -149,6 +148,7 @@
+ import org.opensearch.cluster.service.FakeThreadPoolClusterManagerService;
+ import org.opensearch.common.CheckedConsumer;
+ import org.opensearch.common.Nullable;
++import org.opensearch.common.SetOnce;
+ import org.opensearch.common.io.stream.NamedWriteableRegistry;
+ import org.opensearch.common.network.NetworkModule;
+ import org.opensearch.common.settings.ClusterSettings;
+diff --git a/server/src/test/java/org/opensearch/transport/TransportRequestDeduplicatorTests.java b/server/src/test/java/org/opensearch/transport/TransportRequestDeduplicatorTests.java
+index 755459ca96d90..8b4a75a37317b 100644
+--- a/server/src/test/java/org/opensearch/transport/TransportRequestDeduplicatorTests.java
++++ b/server/src/test/java/org/opensearch/transport/TransportRequestDeduplicatorTests.java
+@@ -31,8 +31,8 @@
+ 
+ package org.opensearch.transport;
+ 
+-import org.apache.lucene.util.SetOnce;
+ import org.opensearch.action.ActionListener;
++import org.opensearch.common.SetOnce;
+ import org.opensearch.tasks.TaskId;
+ import org.opensearch.test.OpenSearchTestCase;
+ 
+diff --git a/test/framework/src/main/java/org/opensearch/index/mapper/MapperTestCase.java b/test/framework/src/main/java/org/opensearch/index/mapper/MapperTestCase.java
+index a64193e55836d..c00a3831c0d8d 100644
+--- a/test/framework/src/main/java/org/opensearch/index/mapper/MapperTestCase.java
++++ b/test/framework/src/main/java/org/opensearch/index/mapper/MapperTestCase.java
+@@ -42,8 +42,8 @@
+ import org.apache.lucene.search.NormsFieldExistsQuery;
+ import org.apache.lucene.search.Query;
+ import org.apache.lucene.search.TermQuery;
+-import org.apache.lucene.util.SetOnce;
+ import org.opensearch.common.CheckedConsumer;
++import org.opensearch.common.SetOnce;
+ import org.opensearch.common.Strings;
+ import org.opensearch.common.bytes.BytesReference;
+ import org.opensearch.common.xcontent.ToXContent;
+diff --git a/test/framework/src/main/java/org/opensearch/repositories/blobstore/OpenSearchBlobStoreRepositoryIntegTestCase.java b/test/framework/src/main/java/org/opensearch/repositories/blobstore/OpenSearchBlobStoreRepositoryIntegTestCase.java
+index c5f4e171e0cf2..4fe9f354d8d10 100644
+--- a/test/framework/src/main/java/org/opensearch/repositories/blobstore/OpenSearchBlobStoreRepositoryIntegTestCase.java
++++ b/test/framework/src/main/java/org/opensearch/repositories/blobstore/OpenSearchBlobStoreRepositoryIntegTestCase.java
+@@ -33,7 +33,6 @@
+ 
+ import org.apache.lucene.util.BytesRef;
+ import org.apache.lucene.util.BytesRefBuilder;
+-import org.apache.lucene.util.SetOnce;
+ import org.opensearch.action.ActionRunnable;
+ import org.opensearch.action.admin.cluster.snapshots.create.CreateSnapshotRequestBuilder;
+ import org.opensearch.action.admin.cluster.snapshots.create.CreateSnapshotResponse;
+@@ -42,6 +41,7 @@
+ import org.opensearch.action.index.IndexRequestBuilder;
+ import org.opensearch.action.support.PlainActionFuture;
+ import org.opensearch.client.Client;
++import org.opensearch.common.SetOnce;
+ import org.opensearch.common.blobstore.BlobContainer;
+ import org.opensearch.common.blobstore.BlobMetadata;
+ import org.opensearch.common.blobstore.BlobPath;
+diff --git a/test/framework/src/main/java/org/opensearch/test/InternalAggregationTestCase.java b/test/framework/src/main/java/org/opensearch/test/InternalAggregationTestCase.java
+index 2cba15f2e2039..921fd64d3acb6 100644
+--- a/test/framework/src/main/java/org/opensearch/test/InternalAggregationTestCase.java
++++ b/test/framework/src/main/java/org/opensearch/test/InternalAggregationTestCase.java
+@@ -32,8 +32,8 @@
+ 
+ package org.opensearch.test;
+ 
+-import org.apache.lucene.util.SetOnce;
+ import org.opensearch.common.ParseField;
++import org.opensearch.common.SetOnce;
+ import org.opensearch.common.breaker.CircuitBreaker;
+ import org.opensearch.common.bytes.BytesReference;
+ import org.opensearch.common.io.stream.NamedWriteableRegistry;
+diff --git a/test/framework/src/main/java/org/opensearch/test/rest/OpenSearchRestTestCase.java b/test/framework/src/main/java/org/opensearch/test/rest/OpenSearchRestTestCase.java
+index a353f53ab1bb3..4fbf56babea29 100644
+--- a/test/framework/src/main/java/org/opensearch/test/rest/OpenSearchRestTestCase.java
++++ b/test/framework/src/main/java/org/opensearch/test/rest/OpenSearchRestTestCase.java
+@@ -47,7 +47,6 @@
+ import org.apache.hc.core5.reactor.ssl.TlsDetails;
+ import org.apache.hc.core5.ssl.SSLContexts;
+ import org.apache.hc.core5.util.Timeout;
+-import org.apache.lucene.util.SetOnce;
+ import org.opensearch.Version;
+ import org.opensearch.action.admin.cluster.node.tasks.list.ListTasksAction;
+ import org.opensearch.action.admin.cluster.repositories.put.PutRepositoryRequest;
+@@ -60,6 +59,7 @@
+ import org.opensearch.client.RestClientBuilder;
+ import org.opensearch.client.WarningsHandler;
+ import org.opensearch.common.CheckedRunnable;
++import org.opensearch.common.SetOnce;
+ import org.opensearch.common.Strings;
+ import org.opensearch.common.io.PathUtils;
+ import org.opensearch.common.settings.Settings;

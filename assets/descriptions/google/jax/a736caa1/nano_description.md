@@ -1,0 +1,1 @@
+Migrate internal/test modules to use typed config state objects

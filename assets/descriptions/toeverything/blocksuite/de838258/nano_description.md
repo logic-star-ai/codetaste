@@ -1,0 +1,1 @@
+Refactor: Add enums for Affine palette colors and styles

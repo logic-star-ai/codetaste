@@ -1,0 +1,1 @@
+Refactor `StageNode` → `PlanNode` and `stage` → `planFragment` terminology in query planner

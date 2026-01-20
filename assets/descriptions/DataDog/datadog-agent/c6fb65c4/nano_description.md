@@ -1,0 +1,1 @@
+Migrate components to new file hierarchy: `host`, `languagedetection/client`, and `process/forwarders`

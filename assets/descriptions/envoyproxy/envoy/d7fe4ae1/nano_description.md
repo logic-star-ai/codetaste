@@ -1,0 +1,1 @@
+Rename response flag types: `ResponseFlag` → `CoreResponseFlag`, `ExtendedResponseFlag` → `ResponseFlag`

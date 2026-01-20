@@ -1,0 +1,1 @@
+Remove `.Type()` and `.Route()` from all message types
