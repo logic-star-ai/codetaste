@@ -46,12 +46,14 @@ class InferenceConfig(BaseModel):
     sanitized_agent_id: str
     env_vars: Dict[str, str] = Field(default_factory=dict)
     description_type: str = "standard"
+    plan: bool = False
+    plan_timeout: int = Field(gt=0, default=1800)
 
     class Config:
         arbitrary_types_allowed = True
 
 
-FinishReason = Literal["success", "timeout", "execution_error", "error", "unknown", "budget_exceeded"]
+FinishReason = Literal["success", "timeout", "execution_error", "error", "unknown", "budget_exceeded", "error_planmode"]
 
 
 class InferenceMetadata(BaseModel):

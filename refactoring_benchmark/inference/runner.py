@@ -1,5 +1,6 @@
 import shutil
 from pathlib import Path
+import time
 from typing import Optional
 
 import podman
@@ -11,9 +12,10 @@ from refactoring_benchmark.inference.utils import (
     create_fallback_inference_metadata,
     get_instance_output_dir,
     output_exists,
-    prepare_temp_description,
     cleanup_temp_dir,
     output_container_logs,
+    prepare_temp_task_description,
+    prepare_temp_plan_description
 )
 from refactoring_benchmark.podman import utils as podman_utils
 from refactoring_benchmark.utils.logger import get_logger
@@ -40,6 +42,7 @@ class InstanceInferenceRunner:
         self.container: Optional[PodmanContainer] = None
         self.temp_description_dir: Optional[Path] = None
         self.client: Optional[podman.PodmanClient] = None
+        self.plan_path: Optional[Path] = None
 
     def should_skip(self) -> tuple[bool, bool]:
         """
@@ -63,7 +66,7 @@ class InstanceInferenceRunner:
 
     def prepare_environment(self) -> bool:
         """
-        Prepare output directory, agent config, and temp description directory.
+        Prepare output directory and Podman client.
 
         Returns:
             True if preparation successful, False otherwise
@@ -79,40 +82,81 @@ class InstanceInferenceRunner:
         if not self.client:
             self.logger.error("Failed to connect to Podman")
             return False
-
-        # Prepare temp description directory
-        try:
-            self.temp_description_dir = prepare_temp_description(
-                self.instance, self.config.description_type, self.logger
-            ).resolve()
-        except (ValueError, FileNotFoundError) as e:
-            self.logger.error(f"Failed to prepare description: {e}")
-            return False
-
         return True
 
-    def execute_container(self) -> bool:
+    def prepare_plan_environment(self) -> bool:
         """
-        Execute the inference container.
+        Prepare temp description directory for planning step.
+
+        Returns:
+            True if preparation successful, False otherwise
+        """
+        self.temp_description_dir = prepare_temp_plan_description(
+            self.instance,
+            logger=self.logger,
+            description_type=self.config.description_type,
+        )
+        if not self.temp_description_dir:
+            self.logger.error("Failed to prepare plan description")
+            return False
+        return True
+
+    def prepare_inference_environment(self) -> bool:
+        """
+        Prepare temp description directory for inference step.
+        Uses plan content if plan mode is active, otherwise uses standard description.
+
+        Returns:
+            True if preparation successful, False otherwise
+        """
+        # Clean up old temp directory if it exists
+        if self.temp_description_dir:
+            cleanup_temp_dir(self.temp_description_dir, self.logger)
+            self.temp_description_dir = None
+
+        if self.plan_path:
+            plan_content = self.plan_path.read_text(encoding="utf-8")
+            self.temp_description_dir = prepare_temp_task_description(
+                self.instance,
+                logger=self.logger,
+                description_type=None,
+                content=plan_content,
+            )
+        else:
+            # Use standard task description
+            self.temp_description_dir = prepare_temp_task_description(
+                self.instance,
+                logger=self.logger,
+                description_type=self.config.description_type,
+            )
+
+        if not self.temp_description_dir:
+            self.logger.error("Failed to prepare inference description")
+            return False
+        return True
+
+    def _execute_container_step(self, mode: str, timeout: int) -> bool:
+        """
+        Execute a container step (either "plan" or "inference").
+
+        Args:
+            mode: Container execution mode ("plan" or "inference")
+            timeout: Timeout in seconds for this step
 
         Returns:
             True if container executed without errors, False otherwise
         """
-        self.logger.info(f"Starting inference for {self.instance.display_path}")
+        self.logger.info(f"Starting {mode} step for {self.instance.display_path}")
         self.logger.info(f"  Image: {self.instance.runtime_image}")
-        self.logger.info(f"  Output: {self.output_dir}")
+        self.logger.info(f"  Timeout: {timeout}s")
 
         env = {**self.config.env_vars, "DESCRIPTION_TYPE": self.config.description_type}
-        self.logger.debug(
-            f"  Environment Variables: {[(k, v[:10] if isinstance(v, str) else v) for k, v in env.items()]}"
-        )
-
         try:
             # Run container
             self.container = podman_utils.safe_container_run(
                 self.client,
                 self.instance.runtime_image,
-                command=["inference"],
+                command=[mode],  # "plan" or "inference"
                 detach=True,
                 environment=env,
                 volumes={
@@ -132,23 +176,75 @@ class InstanceInferenceRunner:
 
             # Wait for completion
             try:
-                self.container.wait(timeout=self.config.timeout)
+                self.container.wait(timeout=timeout)
             except Exception as e:
-                self.logger.error(f"Execution timed out: {e}")
+                self.logger.error(f"{mode.capitalize()} step timed out: {e}")
+                finish_reason = "error_planmode" if mode == "plan" else "timeout"
                 create_fallback_inference_metadata(
                     self.output_dir,
-                    "timeout",
+                    finish_reason,
                     description_type=self.config.description_type,
-                    additional={"error": f"Container timed out: {str(e)}"},
+                    additional={"error": f"{mode.capitalize()} container timed out: {str(e)}"},
                 )
+                return False
 
             # Output logs
-            output_container_logs(self.container, self.output_dir / "inference.out", self.logger)
+            log_file = f"{mode}.out"
+            output_container_logs(self.container, self.output_dir / log_file, self.logger)
             return True
 
         except Exception as e:
-            self.logger.error(f"Container execution failed: {e}")
+            self.logger.error(f"{mode.capitalize()} step execution failed: {e}")
             return False
+        finally:
+            self.container_cleanup()
+
+    def _validate_plan_output(self) -> bool:
+        """Validate that plan step created a valid refactoring_plan.md."""
+        plan_path = self.output_dir / "refactoring_plan.md"
+        error = None
+        if not plan_path.exists():
+            error = "Agent did not produce refactoring_plan.md during plan step"
+        elif plan_path.stat().st_size < 10:
+            error = "refactoring_plan.md is empty or too small"
+
+        if error:
+            self.logger.error(f"Plan step failed: {error}")
+            create_fallback_inference_metadata(
+                self.output_dir, "error_planmode",
+                description_type=self.config.description_type,
+                additional={"error": error},
+            )
+            return False
+        self.logger.info(f"Plan validation successful: {plan_path.stat().st_size} bytes")
+        self.plan_path = plan_path
+        return True
+
+    def execute_plan(self) -> bool:
+        """
+        Execute the planning step (creates refactoring_plan.md from task description).
+
+        Returns:
+            True if planning step completed without errors, False otherwise
+        """
+        self.logger.info("=== PLAN STEP ===")
+        if not self._execute_container_step("plan", timeout=self.config.plan_timeout):
+            self.logger.error("Plan step failed - aborting")
+            return False
+        return True
+
+    def execute_inference(self) -> bool:
+        """
+        Execute the inference step (applies refactoring to codebase).
+
+        Returns:
+            True if execution completed without errors, False otherwise
+        """
+        self.logger.info("=== INFERENCE STEP ===")
+        if not self._execute_container_step("inference", timeout=self.config.timeout):
+            self.logger.error("Inference step failed")
+            return False
+        return True
 
     def validate_outputs(self) -> bool:
         """
@@ -171,7 +267,7 @@ class InstanceInferenceRunner:
             return False
 
         # Check C: Success reason
-        metadata = InferenceMetadata.load_from_json(metadata_path)
+        metadata: InferenceMetadata = InferenceMetadata.load_from_json(metadata_path)
         is_success = metadata.finish_reason.lower() == "success"
         metadata.description_type = self.config.description_type
         metadata.save_to_json(metadata_path)
@@ -183,8 +279,7 @@ class InstanceInferenceRunner:
 
         return is_success
 
-    def cleanup(self) -> None:
-        """Clean up container and temporary files."""
+    def container_cleanup(self) -> None:
         if self.container:
             podman_utils.stop_container(self.container)
             try:
@@ -193,7 +288,11 @@ class InstanceInferenceRunner:
                 self.logger.warning(
                     f"Failed to remove container [{self.instance.id}]. Probably already removed. Error: {e}"
                 )
+            self.container = None
 
+    def cleanup(self) -> None:
+        """Clean up container and temporary files."""
+        self.container_cleanup()
         if self.temp_description_dir:
             cleanup_temp_dir(self.temp_description_dir, self.logger)
 
@@ -213,20 +312,30 @@ class InstanceInferenceRunner:
             return is_success
 
         try:
-            # Phase 2: Prepare environment
+            # Phase 2: Prepare base environment (output dir, podman)
             if not self.prepare_environment():
                 return False
 
-            # Phase 3: Execute container
-            if not self.execute_container():
+            # Phase 3: Plan step (if enabled)
+            if self.config.plan:
+                if not self.prepare_plan_environment():
+                    return False
+                if not self.execute_plan():
+                    return False
+                if not self._validate_plan_output():
+                    return False
+
+            # Phase 4: Inference step (always executed, description depends on plan mode)
+            if not self.prepare_inference_environment():
+                return False
+            if not self.execute_inference():
                 return False
 
-            # Phase 4: Validate outputs
+            # Phase 5: Validate outputs
             return self.validate_outputs()
 
         except Exception as e:
             self.logger.error(f"Unexpected error: {e}")
             return False
         finally:
-            # Phase 5: Cleanup
             self.cleanup()

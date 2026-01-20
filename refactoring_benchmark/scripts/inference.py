@@ -49,6 +49,10 @@ def main():
         sys.exit(1)
 
     logger.info(f"Description Type: {args.description_type}")
+    if args.plan:
+        logger.info("Plan Mode: ENABLED (two-step inference)")
+        logger.info(f"  Step 1: Planning phase (timeout: {args.plan_timeout}s)")
+        logger.info(f"  Step 2: Execution phase (timeout: {args.timeout}s)")
     # Sanitize agent ID for filesystem use
     try:
         sanitized_agent_id = sanitize_agent_id(agent_config.id)
@@ -96,6 +100,8 @@ def main():
         env_vars=args.env_vars,
         description_type=args.description_type,
         force_unsuccessful=args.force_unsuccessful,
+        plan=args.plan,
+        plan_timeout=args.plan_timeout,
     )
 
     # Create and run orchestrator

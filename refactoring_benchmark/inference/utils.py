@@ -14,6 +14,20 @@ from refactoring_benchmark.inference.models import InferenceMetadata
 from refactoring_benchmark.utils.models import InstanceRow
 from podman.domain.containers import Container as PodmanContainer
 
+DEFAULT_PREFIX = """Perform the task described below in it's ENTIRETY. You operate completely AUTONOMOUSLY in a sandboxed environment. DO NOT ASK FOR CLARIFICATIONS. You must EDIT the codebase DIRECTLY to complete the task.\n"""
+
+PLAN_PREFIX = """Refine the following task description into detailed refactoring plan. Make all the design choices. You operate completely AUTONOMOUSLY in this sandboxed environment. DO NOT ASK FOR CLARIFICATIONS.
+The final plan must be in markdown format. The final plan MUST be placed in this exact file: '/output/refactoring_plan.md'."""
+
+DESCRIPTION_FILES = {
+    "standard": "description.md",
+    "minimal": "minimal_description.md",
+    "nano": "nano_description.md",
+    "open": "open_description.md",
+    "abstract": "abstract_description.md",
+}
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
 
 def get_instance_output_dir(instance: InstanceRow, agent_id: str, output_dir: Path) -> Path:
     """
@@ -118,42 +132,50 @@ def cleanup_temp_dir(temp_description_dir: Path, instance_logger: logging.Logger
             except Exception as e2:
                 instance_logger.error(f"Failed to remove temporary description directory: {e}, {e2}")
 
+def _load_template(instance: InstanceRow, description_type: str) -> str:
+    """Internal helper to read a description template from disk."""
+    filename = DESCRIPTION_FILES.get(description_type)
+    if not filename:
+        raise ValueError(f"Unknown type: {description_type}. Valid: {list(DESCRIPTION_FILES.keys())}")
 
-def prepare_temp_description(instance: InstanceRow, description_type: str, instance_logger: logging.Logger) -> Path:
-    project_root = Path(__file__).parent.parent.parent
-    source_dir = project_root / instance.asset_dir("descriptions")
+    path = (PROJECT_ROOT / instance.asset_dir("descriptions") / filename).resolve()
+    if not path.exists():
+        raise FileNotFoundError(f"Template not found: {path}")
 
-    type_to_file = {
-        "standard": "description.md",
-        "minimal": "minimal_description.md",
-        "nano": "nano_description.md",
-        "open": "open_description.md",
-        "abstract": "abstract_description.md",
-    }
+    return path.read_text(encoding="utf-8")
 
-    source_filename = type_to_file.get(description_type)
-    if not source_filename:
-        raise ValueError(f"Unknown description_type: {description_type}. Valid types: {list(type_to_file.keys())}")
-
-    source_file = source_dir / source_filename
-    if not source_file.exists():
-        raise FileNotFoundError(
-            f"Description file not found for type '{description_type}': {source_file}. "
-            f"Ensure the file exists in {source_dir}"
-        )
-
-    # Create temporary directory (don't use tempfile due to sticky bit issues)
+def create_temporary_description_dir(instance: InstanceRow, content: str) -> Path:
+    """Creates a temporary directory, writes description.md, and sets 0o777 permissions."""
     temp_dir = Path(f"./.tmp_descriptions/{instance.id}-{secrets.token_hex(8)}")
     temp_dir.mkdir(parents=True, exist_ok=True)
-
-    # Copy content as description.md (agents always read description.md)
+    
     target_file = temp_dir / "description.md"
-    content = source_file.read_text(encoding="utf-8")
     target_file.write_text(content, encoding="utf-8")
 
-    # Set permissive permissions for container access
-    os.chmod(temp_dir, 0o777)
-    os.chmod(target_file, 0o777)
+    for p in [temp_dir, target_file]:
+        p.chmod(0o777)
+    return temp_dir.resolve()
 
-    instance_logger.debug(f"Prepared description: {source_filename} -> description.md")
-    return temp_dir
+def prepare_temp_task_description(
+    instance: InstanceRow, 
+    logger: logging.Logger, 
+    description_type: Optional[str] = None, 
+    content: Optional[str] = None
+) -> Path:
+    """Prepares a task description using either a template type OR direct content."""
+    base_content = content or _load_template(instance, description_type)
+    full_content = f"{DEFAULT_PREFIX}\n\n{base_content}"
+    logger.debug(f"Prepared Task Description (Type: {description_type or 'Injected'})")
+    return create_temporary_description_dir(instance, full_content)
+
+def prepare_temp_plan_description(
+    instance: InstanceRow, 
+    logger: logging.Logger, 
+    description_type: Optional[str] = None, 
+    content: Optional[str] = None
+) -> Path:
+    """Prepares a plan description using either a template type OR direct content."""
+    base_content = content or _load_template(instance, description_type)
+    full_content = f"{PLAN_PREFIX}\n\n{base_content}"
+    logger.debug(f"Prepared Plan Description (Type: {description_type or 'Injected'})")
+    return create_temporary_description_dir(instance, full_content)

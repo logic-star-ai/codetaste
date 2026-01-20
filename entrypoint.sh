@@ -77,25 +77,12 @@ case "$1" in
             echo "Error: Agent script not found at $AGENT_SCRIPT"
             exit 1
         fi
-        SRC_FILE="$TASK_DESC_DIR/${DESCRIPTION_TYPE}_description.md"
-        DEST_FILE="$TASK_DESC_DIR/description.md"
-        if [[ ! -f "$SRC_FILE" ]]; then
-            echo "Error: Description file for type '${DESCRIPTION_TYPE}' not found: $SRC_FILE"
+
+        if [ ! -f "$TASK_DESC_DIR/description.md" ]; then
+            echo "Error: Task description directory not found at $TASK_DESC_DIR"
             exit 1
         fi
-        case "$DESCRIPTION_TYPE" in
-            standard|minimal|nano)
-                echo "Using ${DESCRIPTION_TYPE} description with header"
-                echo "Perform the task described below. You are required to implement **all** the required changes, without user feedback. The changes must be performed directly on the codebase." > "$DEST_FILE"
-                cat "$SRC_FILE" >> "$DEST_FILE"
-                ;;
-            *)
-                echo "Using ${DESCRIPTION_TYPE} description without header"
-                mv "$SRC_FILE" "$DEST_FILE"
-                ;;
-        esac
 
-        rm -f "$TASK_DESC_DIR"/*_description.md
         create_restricted_user
         # Agent System Setup Script Can Still Use Github
         if [ -f "$AGENT_SYSTEM_SETUP_SCRIPT" ]; then
@@ -119,7 +106,6 @@ case "$1" in
             echo "=== Agent failed with exit code $? ==="
             exit $?
         fi
-
         # Harvest Results
         echo "=== Extracting Diff ==="
         sudo chown -R benchmarker:benchmarker "$REPO_ROOT"
@@ -129,6 +115,50 @@ case "$1" in
         git diff --cached --binary "$PRE_AGENT_HASH" > "$DIFF_OUTPUT"
         
         echo "Diff saved to $DIFF_OUTPUT"
+        if [ -f /output/inference_metadata.json ]; then chmod 666 /output/inference_metadata.json; fi
+        if [ -f /output/refactoring_plan.md ]; then chmod 666 /output/refactoring_plan.md; fi
+        ;;
+
+    "plan")
+        echo "=== Mode: Plan ==="
+        if [ ! -f "$AGENT_SCRIPT" ]; then
+            echo "Error: Agent script not found at $AGENT_SCRIPT"
+            exit 1
+        fi
+
+        if [ ! -f "$TASK_DESC_DIR/description.md" ]; then
+            echo "Error: Task description directory not found at $TASK_DESC_DIR"
+            exit 1
+        fi
+
+        create_restricted_user
+        # Agent System Setup Script Can Still Use Github
+        if [ -f "$AGENT_SYSTEM_SETUP_SCRIPT" ]; then
+            echo "=== Running Agent System Setup Script ==="
+            sudo bash "$AGENT_SYSTEM_SETUP_SCRIPT"
+        fi
+        block_network
+        
+        echo "[Security] Transferring repo ownership to agent_user..."
+        sudo chown -R agent_user:agent_user "$REPO_ROOT"
+        sudo chown -R agent_user:agent_user /tmp
+        
+        # Restricted Execution
+        if sudo -E -u agent_user bash -c "
+            [ -f /scripts/setup_shell.sh ] && source /scripts/setup_shell.sh
+            bash \"$AGENT_SCRIPT\"
+        "; then
+            echo "=== Agent finished successfully ==="
+        else
+            echo "=== Agent failed with exit code $? ==="
+            exit $?
+        fi
+        if [ -f /output/inference_metadata.json ]; then chmod 666 /output/inference_metadata.json; fi
+        if [ -f /output/refactoring_plan.md ]; then chmod 666 /output/refactoring_plan.md; fi
+        if [ ! -f "/output/refactoring_plan.md" ]; then
+            echo "Error: Agent did not produce a refactoring_plan.md in /output"
+            exit 1
+        fi
         ;;
 
     "eval_test")
@@ -206,7 +236,7 @@ case "$1" in
         ;;
 
     *)
-        echo "Usage: $0 {inference|eval_test|eval_rule}"
+        echo "Usage: $0 {inference|plan|eval_test|eval_rule}"
         exit 1
         ;;
 esac
