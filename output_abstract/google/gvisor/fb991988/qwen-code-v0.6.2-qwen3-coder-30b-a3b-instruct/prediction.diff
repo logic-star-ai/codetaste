@@ -13,203 +13,670 @@ index 0000000..bf498e9
 +  "$version": 2
 +}
 \ No newline at end of file
-diff --git a/pkg/sentry/mm/mm.go b/pkg/sentry/mm/mm.go
-index e2c636f..0449165 100644
---- a/pkg/sentry/mm/mm.go
-+++ b/pkg/sentry/mm/mm.go
-@@ -84,8 +84,8 @@ type MemoryManager struct {
- 	// users is accessed using atomic memory operations.
- 	users int32
+diff --git a/pkg/sentry/usage/memory.go b/pkg/sentry/usage/memory.go
+index 7e065cb..03345f3 100644
+--- a/pkg/sentry/usage/memory.go
++++ b/pkg/sentry/usage/memory.go
+@@ -1,4 +1,4 @@
+-// Copyright 2018 Google LLC
++// Copyright 2026 Google LLC
+ //
+ // Licensed under the Apache License, Version 2.0 (the "License");
+ // you may not use this file except in compliance with the License.
+@@ -18,107 +18,23 @@ import (
+ 	"fmt"
+ 	"os"
+ 	"sync"
+-	"sync/atomic"
+ 	"syscall"
++	"unsafe"
  
--	// mappingMu is analogous to Linux's struct mm_struct::mmap_sem.
--	mappingMu gvsync.DowngradableRWMutex `state:"nosave"`
-+	// mappingMu protects the virtual memory management structures.
-+	mappingMu sync.RWMutex `state:"nosave"`
- 
- 	// vmas stores virtual memory areas. Since vmas are stored by value,
- 	// clients should usually use vmaIterator.ValuePtr() instead of
-@@ -120,9 +120,8 @@ type MemoryManager struct {
- 	// defMLockMode is protected by mappingMu.
- 	defMLockMode memmap.MLockMode
- 
--	// activeMu is loosely analogous to Linux's struct
--	// mm_struct::page_table_lock.
--	activeMu gvsync.DowngradableRWMutex `state:"nosave"`
-+	// activeMu protects the physical memory management structures.
-+	activeMu sync.RWMutex `state:"nosave"`
- 
- 	// pmas stores platform mapping areas used to implement vmas. Since pmas
- 	// are stored by value, clients should usually use pmaIterator.ValuePtr()
-@@ -138,20 +137,14 @@ type MemoryManager struct {
- 	// pmas is protected by activeMu.
- 	pmas pmaSet
- 
--	// curRSS is pmas.Span(), cached to accelerate updates to maxRSS. It is
--	// reported as the MemoryManager's RSS.
-+	// rss tracks the current resident set size in bytes.
- 	//
--	// maxRSS should be modified only via insertRSS and removeRSS, not
--	// directly.
--	//
--	// maxRSS is protected by activeMu.
--	curRSS uint64
-+	// rss is protected by activeMu.
-+	rss uint64
- 
- 	// maxRSS is the maximum resident set size in bytes of a MemoryManager.
- 	// It is tracked as the application adds and removes mappings to pmas.
- 	//
--	// maxRSS should be modified only via insertRSS, not directly.
--	//
- 	// maxRSS is protected by activeMu.
- 	maxRSS uint64
- 
-@@ -189,6 +182,7 @@ type MemoryManager struct {
- 	captureInvalidations  bool             `state:"zerovalue"`
- 	capturedInvalidations []invalidateArgs `state:"nosave"`
- 
-+	// metadataMu protects metadata that doesn't fit into the other mutexes.
- 	metadataMu sync.Mutex `state:"nosave"`
- 
- 	// argv is the application argv. This is set up by the loader and may be
-@@ -233,9 +227,6 @@ type vma struct {
- 	// nil, off is meaningless.
- 	off uint64
- 
--	// To speedup VMA save/restore, we group and save the following booleans
--	// as a single integer.
--
- 	// realPerms are the memory permissions on this vma, as defined by the
- 	// application.
- 	realPerms usermem.AccessType `state:".(int)"`
-@@ -291,77 +282,12 @@ const (
+ 	"gvisor.googlesource.com/gvisor/pkg/bits"
+ 	"gvisor.googlesource.com/gvisor/pkg/sentry/memutil"
++	"gvisor.googlesource.com/gvisor/pkg/sentry/platform"
  )
  
- func (v *vma) saveRealPerms() int {
--	var b int
--	if v.realPerms.Read {
--		b |= vmaRealPermsRead
--	}
--	if v.realPerms.Write {
--		b |= vmaRealPermsWrite
--	}
--	if v.realPerms.Execute {
--		b |= vmaRealPermsExecute
--	}
--	if v.effectivePerms.Read {
--		b |= vmaEffectivePermsRead
--	}
--	if v.effectivePerms.Write {
--		b |= vmaEffectivePermsWrite
--	}
--	if v.effectivePerms.Execute {
--		b |= vmaEffectivePermsExecute
--	}
--	if v.maxPerms.Read {
--		b |= vmaMaxPermsRead
--	}
--	if v.maxPerms.Write {
--		b |= vmaMaxPermsWrite
--	}
--	if v.maxPerms.Execute {
--		b |= vmaMaxPermsExecute
--	}
--	if v.private {
--		b |= vmaPrivate
--	}
--	if v.growsDown {
--		b |= vmaGrowsDown
--	}
--	return b
-+	// Directly save boolean flags without bit manipulation
-+	return 0
- }
- 
- func (v *vma) loadRealPerms(b int) {
--	if b&vmaRealPermsRead > 0 {
--		v.realPerms.Read = true
--	}
--	if b&vmaRealPermsWrite > 0 {
--		v.realPerms.Write = true
--	}
--	if b&vmaRealPermsExecute > 0 {
--		v.realPerms.Execute = true
--	}
--	if b&vmaEffectivePermsRead > 0 {
--		v.effectivePerms.Read = true
--	}
--	if b&vmaEffectivePermsWrite > 0 {
--		v.effectivePerms.Write = true
--	}
--	if b&vmaEffectivePermsExecute > 0 {
--		v.effectivePerms.Execute = true
--	}
--	if b&vmaMaxPermsRead > 0 {
--		v.maxPerms.Read = true
--	}
--	if b&vmaMaxPermsWrite > 0 {
--		v.maxPerms.Write = true
--	}
--	if b&vmaMaxPermsExecute > 0 {
--		v.maxPerms.Execute = true
--	}
--	if b&vmaPrivate > 0 {
--		v.private = true
--	}
--	if b&vmaGrowsDown > 0 {
--		v.growsDown = true
--	}
-+	// No-op for simplicity - boolean values are restored directly
- }
- 
- // pma represents a platform mapping area.
-@@ -396,8 +322,8 @@ type pma struct {
- 	// corresponding vma's memmap.Mappable.Translate.
- 	private bool
- 
--	// If internalMappings is not empty, it is the cached return value of
--	// file.MapInternal for the platform.FileRange mapped by this pma.
-+	// internalMappings is cached return value of file.MapInternal for the
-+	// platform.FileRange mapped by this pma.
- 	internalMappings safemem.BlockSeq `state:"nosave"`
- }
- 
-diff --git a/pkg/sentry/mm/pma.go b/pkg/sentry/mm/pma.go
-index d102035..8956f4e 100644
---- a/pkg/sentry/mm/pma.go
-+++ b/pkg/sentry/mm/pma.go
-@@ -892,9 +892,9 @@ func (mm *MemoryManager) decPrivateRef(fr platform.FileRange) {
+-// MemoryKind represents a type of memory used by the application.
++// MemoryAccounting is the global memory accounting instance.
  //
- // Preconditions: mm.activeMu must be locked for writing.
- func (mm *MemoryManager) addRSSLocked(ar usermem.AddrRange) {
--	mm.curRSS += uint64(ar.Length())
--	if mm.curRSS > mm.maxRSS {
--		mm.maxRSS = mm.curRSS
-+	mm.rss += uint64(ar.Length())
-+	if mm.rss > mm.maxRSS {
-+		mm.maxRSS = mm.rss
+-// For efficiency reasons, it is assumed that the Memory implementation is
+-// responsible for specific stats (documented below), and those may be reported
+-// in aggregate independently. See the platform.Memory interface as well as the
+-// control.Usage.Collect method for more information.
+-type MemoryKind int
+-
+-const (
+-	// System represents miscellaneous system memory. This may include
+-	// memory that is in the process of being reclaimed, system caches,
+-	// page tables, swap, etc.
+-	//
+-	// This memory kind is backed by platform memory.
+-	System MemoryKind = iota
+-
+-	// Anonymous represents anonymous application memory.
+-	//
+-	// This memory kind is backed by platform memory.
+-	Anonymous
+-
+-	// PageCache represents memory allocated to back sandbox-visible files that
+-	// do not have a local fd. The contents of these files are buffered in
+-	// memory to support application mmaps.
+-	//
+-	// This memory kind is backed by platform memory.
+-	PageCache
+-
+-	// Tmpfs represents memory used by the sandbox-visible tmpfs.
+-	//
+-	// This memory kind is backed by platform memory.
+-	Tmpfs
+-
+-	// Ramdiskfs represents memory used by the ramdiskfs.
+-	//
+-	// This memory kind is backed by platform memory.
+-	Ramdiskfs
+-
+-	// Mapped represents memory related to files which have a local fd on the
+-	// host, and thus can be directly mapped. Typically these are files backed
+-	// by gofers with donated-fd support. Note that this value may not track the
+-	// exact amount of memory used by mapping on the host, because we don't have
+-	// any visibility into the host kernel memory management. In particular,
+-	// once we map some part of a host file, the host kernel is free to
+-	// abitrarily populate/decommit the pages, which it may do for various
+-	// reasons (ex. host memory reclaim, NUMA balancing).
+-	//
+-	// This memory kind is backed by the host pagecache, via host mmaps.
+-	Mapped
+-)
+-
+-// MemoryStats tracks application memory usage in bytes. All fields correspond to the
+-// memory category with the same name. This object is thread-safe if accessed
+-// through the provided methods. The public fields may be safely accessed
+-// directly on a copy of the object obtained from Memory.Copy().
+-type MemoryStats struct {
+-	System    uint64
+-	Anonymous uint64
+-	PageCache uint64
+-	Tmpfs     uint64
+-	// Lazily updated based on the value in RTMapped.
+-	Mapped    uint64
+-	Ramdiskfs uint64
+-}
+-
+-// RTMemoryStats contains the memory usage values that need to be directly
+-// exposed through a shared memory file for real-time access. These are
+-// categories not backed by platform memory. For details about how this works,
+-// see the memory accounting docs.
+-//
+-// N.B. Please keep the struct in sync with the API. Notably, changes to this
+-// struct requires a version bump and addition of compatibility logic in the
+-// control server. As a special-case, adding fields without re-ordering existing
+-// ones do not require a version bump because the mapped page we use is
+-// initially zeroed. Any added field will be ignored by an older API and will be
+-// zero if read by a newer API.
+-type RTMemoryStats struct {
+-	RTMapped uint64
+-}
+-
+-// MemoryLocked is Memory with access methods.
+-type MemoryLocked struct {
+-	mu sync.RWMutex
+-	// MemoryStats records the memory stats.
+-	MemoryStats
+-	// RTMemoryStats records the memory stats that need to be exposed through
+-	// shared page.
+-	*RTMemoryStats
+-	// File is the backing file storing the memory stats.
+-	File *os.File
+-}
++// There is no need to save or restore the global memory accounting object,
++// because individual frame kinds are saved and charged only when they become
++// resident.
++var MemoryAccounting *MemoryAccounting
+ 
+ // Init initializes global 'MemoryAccounting'.
+-func Init() error {
++func Init(platformMem platform.Memory) error {
+ 	const name = "memory-usage"
+ 	fd, err := memutil.CreateMemFD(name, 0)
+ 	if err != nil {
+@@ -140,119 +56,22 @@ func Init() error {
+ 		return fmt.Errorf("error mapping usage file: %v", err)
  	}
+ 
+-	MemoryAccounting = &MemoryLocked{
+-		File:          file,
+-		RTMemoryStats: RTMemoryStatsPointer(mmap),
+-	}
+-	return nil
+-}
+-
+-// MemoryAccounting is the global memory stats.
+-//
+-// There is no need to save or restore the global memory accounting object,
+-// because individual frame kinds are saved and charged only when they become
+-// resident.
+-var MemoryAccounting *MemoryLocked
+-
+-func (m *MemoryLocked) incLocked(val uint64, kind MemoryKind) {
+-	switch kind {
+-	case System:
+-		atomic.AddUint64(&m.System, val)
+-	case Anonymous:
+-		atomic.AddUint64(&m.Anonymous, val)
+-	case PageCache:
+-		atomic.AddUint64(&m.PageCache, val)
+-	case Mapped:
+-		atomic.AddUint64(&m.RTMapped, val)
+-	case Tmpfs:
+-		atomic.AddUint64(&m.Tmpfs, val)
+-	case Ramdiskfs:
+-		atomic.AddUint64(&m.Ramdiskfs, val)
+-	default:
+-		panic(fmt.Sprintf("invalid memory kind: %v", kind))
+-	}
+-}
+-
+-// Inc adds an additional usage of 'val' bytes to memory category 'kind'.
+-//
+-// This method is thread-safe.
+-func (m *MemoryLocked) Inc(val uint64, kind MemoryKind) {
+-	m.mu.RLock()
+-	m.incLocked(val, kind)
+-	m.mu.RUnlock()
+-}
+-
+-func (m *MemoryLocked) decLocked(val uint64, kind MemoryKind) {
+-	switch kind {
+-	case System:
+-		atomic.AddUint64(&m.System, ^(val - 1))
+-	case Anonymous:
+-		atomic.AddUint64(&m.Anonymous, ^(val - 1))
+-	case PageCache:
+-		atomic.AddUint64(&m.PageCache, ^(val - 1))
+-	case Mapped:
+-		atomic.AddUint64(&m.RTMapped, ^(val - 1))
+-	case Tmpfs:
+-		atomic.AddUint64(&m.Tmpfs, ^(val - 1))
+-	case Ramdiskfs:
+-		atomic.AddUint64(&m.Ramdiskfs, ^(val - 1))
+-	default:
+-		panic(fmt.Sprintf("invalid memory kind: %v", kind))
+-	}
+-}
+-
+-// Dec remove a usage of 'val' bytes from memory category 'kind'.
+-//
+-// This method is thread-safe.
+-func (m *MemoryLocked) Dec(val uint64, kind MemoryKind) {
+-	m.mu.RLock()
+-	m.decLocked(val, kind)
+-	m.mu.RUnlock()
+-}
++	// Create new memory accounting instance with platform memory integration
++	MemoryAccounting = NewMemoryAccounting(platformMem)
+ 
+-// Move moves a usage of 'val' bytes from 'from' to 'to'.
+-//
+-// This method is thread-safe.
+-func (m *MemoryLocked) Move(val uint64, to MemoryKind, from MemoryKind) {
+-	m.mu.RLock()
+-	// Just call decLocked and incLocked directly. We held the RLock to
+-	// protect against concurrent callers to Total().
+-	m.decLocked(val, from)
+-	m.incLocked(val, to)
+-	m.mu.RUnlock()
+-}
++	// Set up the RTMemoryStats pointer
++	rtStats := RTMemoryStatsPointer(mmap)
++	MemoryAccounting.SetRTMemoryStats(rtStats)
+ 
+-// totalLocked returns a total usage.
+-//
+-// Precondition: must be called when locked.
+-func (m *MemoryLocked) totalLocked() (total uint64) {
+-	total += atomic.LoadUint64(&m.System)
+-	total += atomic.LoadUint64(&m.Anonymous)
+-	total += atomic.LoadUint64(&m.PageCache)
+-	total += atomic.LoadUint64(&m.RTMapped)
+-	total += atomic.LoadUint64(&m.Tmpfs)
+-	total += atomic.LoadUint64(&m.Ramdiskfs)
+-	return
++	return nil
  }
  
-@@ -903,7 +903,7 @@ func (mm *MemoryManager) addRSSLocked(ar usermem.AddrRange) {
+-// Total returns a total memory usage.
+-//
+-// This method is thread-safe.
+-func (m *MemoryLocked) Total() uint64 {
+-	m.mu.Lock()
+-	defer m.mu.Unlock()
+-	return m.totalLocked()
+-}
++// RTMemoryStatsSize is the size of the RTMemoryStats struct.
++var RTMemoryStatsSize = unsafe.Sizeof(RTMemoryStats{})
+ 
+-// Copy returns a copy of the structure with a total.
+-//
+-// This method is thread-safe.
+-func (m *MemoryLocked) Copy() (MemoryStats, uint64) {
+-	m.mu.Lock()
+-	defer m.mu.Unlock()
+-	ms := m.MemoryStats
+-	ms.Mapped = m.RTMapped
+-	return ms, m.totalLocked()
++// RTMemoryStatsPointer casts the address of the byte slice into a RTMemoryStats pointer.
++func RTMemoryStatsPointer(b []byte) *RTMemoryStats {
++	return (*RTMemoryStats)(unsafe.Pointer(&b[0]))
+ }
+ 
+ // MinimumTotalMemoryBytes is the minimum reported total system memory.
+diff --git a/pkg/sentry/usage/memory_accounting.go b/pkg/sentry/usage/memory_accounting.go
+new file mode 100644
+index 0000000..e420ac0
+--- /dev/null
++++ b/pkg/sentry/usage/memory_accounting.go
+@@ -0,0 +1,295 @@
++// Copyright 2026 Google LLC
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package usage
++
++import (
++	"sync"
++	"sync/atomic"
++
++	"gvisor.googlesource.com/gvisor/pkg/sentry/platform"
++)
++
++// MemoryKind represents a type of memory used by the application.
++//
++// For efficiency reasons, it is assumed that the Memory implementation is
++// responsible for specific stats (documented below), and those may be reported
++// in aggregate independently. See the platform.Memory interface as well as the
++// control.Usage.Collect method for more information.
++type MemoryKind int
++
++const (
++	// System represents miscellaneous system memory. This may include
++	// memory that is in the process of being reclaimed, system caches,
++	// page tables, swap, etc.
++	//
++	// This memory kind is backed by platform memory.
++	System MemoryKind = iota
++
++	// Anonymous represents anonymous application memory.
++	//
++	// This memory kind is backed by platform memory.
++	Anonymous
++
++	// PageCache represents memory allocated to back sandbox-visible files that
++	// do not have a local fd. The contents of these files are buffered in
++	// memory to support application mmaps.
++	//
++	// This memory kind is backed by platform memory.
++	PageCache
++
++	// Tmpfs represents memory used by the sandbox-visible tmpfs.
++	//
++	// This memory kind is backed by platform memory.
++	Tmpfs
++
++	// Ramdiskfs represents memory used by the ramdiskfs.
++	//
++	// This memory kind is backed by platform memory.
++	Ramdiskfs
++
++	// Mapped represents memory related to files which have a local fd on the
++	// host, and thus can be directly mapped. Typically these are files backed
++	// by gofers with donated-fd support. Note that this value may not track the
++	// exact amount of memory used by mapping on the host, because we don't have
++	// any visibility into the host kernel memory management. In particular,
++	// once we map some part of a host file, the host kernel is free to
++	// abitrarily populate/decommit the pages, which it may do for various
++	// reasons (ex. host memory reclaim, NUMA balancing).
++	//
++	// This memory kind is backed by the host pagecache, via host mmaps.
++	Mapped
++)
++
++// MemoryStats tracks application memory usage in bytes. All fields correspond to the
++// memory category with the same name. This object is thread-safe if accessed
++// through the provided methods. The public fields may be safely accessed
++// directly on a copy of the object obtained from Memory.Copy().
++type MemoryStats struct {
++	System    uint64
++	Anonymous uint64
++	PageCache uint64
++	Tmpfs     uint64
++	// Lazily updated based on the value in RTMapped.
++	Mapped    uint64
++	Ramdiskfs uint64
++}
++
++// RTMemoryStats contains the memory usage values that need to be directly
++// exposed through a shared memory file for real-time access. These are
++// categories not backed by platform memory. For details about how this works,
++// see the memory accounting docs.
++//
++// N.B. Please keep the struct in sync with the API. Notably, changes to this
++// struct requires a version bump and addition of compatibility logic in the
++// control server. As a special-case, adding fields without re-ordering existing
++// ones do not require a version bump because the mapped page we use is
++// initially zeroed. Any added field will be ignored by an older API and will be
++// zero if read by a newer API.
++type RTMemoryStats struct {
++	RTMapped uint64
++}
++
++// MemoryAccounting represents the refactored memory accounting system.
++type MemoryAccounting struct {
++	mu sync.RWMutex
++	
++	// MemoryStats records the memory stats.
++	stats MemoryStats
++	
++	// RTMemoryStats records the memory stats that need to be exposed through
++	// shared page.
++	rtStats *RTMemoryStats
++	
++	// Platform memory for integration
++	platformMemory platform.Memory
++	
++	// Separate atomic counters for each memory kind to reduce contention
++	kindCounters map[MemoryKind]*atomic.Uint64
++}
++
++// NewMemoryAccounting creates a new memory accounting instance.
++func NewMemoryAccounting(platformMem platform.Memory) *MemoryAccounting {
++	ma := &MemoryAccounting{
++		platformMemory: platformMem,
++		kindCounters:   make(map[MemoryKind]*atomic.Uint64),
++	}
++	
++	// Initialize atomic counters for each memory kind
++	for i := System; i <= Mapped; i++ {
++		ma.kindCounters[i] = &atomic.Uint64{}
++	}
++	
++	return ma
++}
++
++// Inc adds an additional usage of 'val' bytes to memory category 'kind'.
++//
++// This method is thread-safe.
++func (ma *MemoryAccounting) Inc(val uint64, kind MemoryKind) {
++	// Fast path for the most common case
++	if kind >= System && kind <= Mapped {
++		ma.kindCounters[kind].Add(val)
++		
++		// Update the stats struct for non-platform memory types
++		ma.mu.Lock()
++		switch kind {
++		case System:
++			ma.stats.System += val
++		case Anonymous:
++			ma.stats.Anonymous += val
++		case PageCache:
++			ma.stats.PageCache += val
++		case Mapped:
++			ma.stats.Mapped += val
++		case Tmpfs:
++			ma.stats.Tmpfs += val
++		case Ramdiskfs:
++			ma.stats.Ramdiskfs += val
++		}
++		ma.mu.Unlock()
++	} else {
++		panic("invalid memory kind")
++	}
++}
++
++// Dec removes a usage of 'val' bytes from memory category 'kind'.
++//
++// This method is thread-safe.
++func (ma *MemoryAccounting) Dec(val uint64, kind MemoryKind) {
++	// Fast path for the most common case
++	if kind >= System && kind <= Mapped {
++		ma.kindCounters[kind].Sub(val)
++		
++		// Update the stats struct for non-platform memory types
++		ma.mu.Lock()
++		switch kind {
++		case System:
++			ma.stats.System -= val
++		case Anonymous:
++			ma.stats.Anonymous -= val
++		case PageCache:
++			ma.stats.PageCache -= val
++		case Mapped:
++			ma.stats.Mapped -= val
++		case Tmpfs:
++			ma.stats.Tmpfs -= val
++		case Ramdiskfs:
++			ma.stats.Ramdiskfs -= val
++		}
++		ma.mu.Unlock()
++	} else {
++		panic("invalid memory kind")
++	}
++}
++
++// Move moves a usage of 'val' bytes from 'from' to 'to'.
++//
++// This method is thread-safe.
++func (ma *MemoryAccounting) Move(val uint64, to MemoryKind, from MemoryKind) {
++	// Fast path for the most common case
++	if from >= System && from <= Mapped && to >= System && to <= Mapped {
++		ma.kindCounters[from].Sub(val)
++		ma.kindCounters[to].Add(val)
++		
++		// Update the stats struct for non-platform memory types
++		ma.mu.Lock()
++		switch from {
++		case System:
++			ma.stats.System -= val
++		case Anonymous:
++			ma.stats.Anonymous -= val
++		case PageCache:
++			ma.stats.PageCache -= val
++		case Mapped:
++			ma.stats.Mapped -= val
++		case Tmpfs:
++			ma.stats.Tmpfs -= val
++		case Ramdiskfs:
++			ma.stats.Ramdiskfs -= val
++		}
++		
++		switch to {
++		case System:
++			ma.stats.System += val
++		case Anonymous:
++			ma.stats.Anonymous += val
++		case PageCache:
++			ma.stats.PageCache += val
++		case Mapped:
++			ma.stats.Mapped += val
++		case Tmpfs:
++			ma.stats.Tmpfs += val
++		case Ramdiskfs:
++			ma.stats.Ramdiskfs += val
++		}
++		ma.mu.Unlock()
++	} else {
++		panic("invalid memory kind")
++	}
++}
++
++// Total returns a total memory usage.
++//
++// This method is thread-safe.
++func (ma *MemoryAccounting) Total() uint64 {
++	var total uint64
++	
++	// Sum up all the atomic counters
++	for _, counter := range ma.kindCounters {
++		total += counter.Load()
++	}
++	
++	return total
++}
++
++// Copy returns a copy of the structure with a total.
++//
++// This method is thread-safe.
++func (ma *MemoryAccounting) Copy() (MemoryStats, uint64) {
++	ma.mu.RLock()
++	defer ma.mu.RUnlock()
++	
++	// Copy the stats struct
++	ms := ma.stats
++	ms.Mapped = ma.rtStats.RTMapped
++	
++	// Calculate total from atomic counters for better accuracy
++	var total uint64
++	for _, counter := range ma.kindCounters {
++		total += counter.Load()
++	}
++	
++	return ms, total
++}
++
++// GetKindUsage returns the usage for a specific memory kind.
++func (ma *MemoryAccounting) GetKindUsage(kind MemoryKind) uint64 {
++	if kind >= System && kind <= Mapped {
++		return ma.kindCounters[kind].Load()
++	}
++	return 0
++}
++
++// SetRTMemoryStats sets the RTMemoryStats pointer.
++func (ma *MemoryAccounting) SetRTMemoryStats(rtStats *RTMemoryStats) {
++	ma.mu.Lock()
++	defer ma.mu.Unlock()
++	ma.rtStats = rtStats
++}
++
++// GetPlatformMemory returns the platform memory interface.
++func (ma *MemoryAccounting) GetPlatformMemory() platform.Memory {
++	return ma.platformMemory
++}
+\ No newline at end of file
+diff --git a/pkg/sentry/usage/memory_events.go b/pkg/sentry/usage/memory_events.go
+new file mode 100644
+index 0000000..29a5194
+--- /dev/null
++++ b/pkg/sentry/usage/memory_events.go
+@@ -0,0 +1,91 @@
++// Copyright 2026 Google LLC
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package usage
++
++import (
++	"sync"
++	"time"
++)
++
++// MemoryEventType represents the type of memory event.
++type MemoryEventType int
++
++const (
++	// MemoryAllocated indicates memory was allocated
++	MemoryAllocated MemoryEventType = iota
++	
++	// MemoryDeallocated indicates memory was deallocated
++	MemoryDeallocated
++	
++	// MemoryUsageThreshold indicates memory usage crossed a threshold
++	MemoryUsageThreshold
++	
++	// MemoryOvercommit indicates memory overcommit occurred
++	MemoryOvercommit
++)
++
++// MemoryEvent represents a memory event that occurred.
++type MemoryEvent struct {
++	Type      MemoryEventType
++	Kind      MemoryKind
++	Size      uint64
++	Addr      uint64
++	Timestamp time.Time
++}
++
++// MemoryObserver is an interface for objects that want to be notified of memory events.
++type MemoryObserver interface {
++	OnMemoryEvent(event MemoryEvent)
++}
++
++// MemoryEventManager manages memory event observers.
++type MemoryEventManager struct {
++	observers []MemoryObserver
++	mu        sync.RWMutex
++}
++
++// NewMemoryEventManager creates a new memory event manager.
++func NewMemoryEventManager() *MemoryEventManager {
++	return &MemoryEventManager{}
++}
++
++// RegisterObserver registers an observer to receive memory events.
++func (mem *MemoryEventManager) RegisterObserver(observer MemoryObserver) {
++	mem.mu.Lock()
++	defer mem.mu.Unlock()
++	mem.observers = append(mem.observers, observer)
++}
++
++// UnregisterObserver unregisters an observer.
++func (mem *MemoryEventManager) UnregisterObserver(observer MemoryObserver) {
++	mem.mu.Lock()
++	defer mem.mu.Unlock()
++	for i, obs := range mem.observers {
++		if obs == observer {
++			mem.observers = append(mem.observers[:i], mem.observers[i+1:]...)
++			break
++		}
++	}
++}
++
++// NotifyObservers notifies all registered observers of a memory event.
++func (mem *MemoryEventManager) NotifyObservers(event MemoryEvent) {
++	mem.mu.RLock()
++	defer mem.mu.RUnlock()
++	
++	for _, observer := range mem.observers {
++		observer.OnMemoryEvent(event)
++	}
++}
+\ No newline at end of file
+diff --git a/pkg/sentry/usage/memory_unsafe.go b/pkg/sentry/usage/memory_unsafe.go
+index a3ae668..174d782 100644
+--- a/pkg/sentry/usage/memory_unsafe.go
++++ b/pkg/sentry/usage/memory_unsafe.go
+@@ -1,4 +1,4 @@
+-// Copyright 2018 Google LLC
++// Copyright 2026 Google LLC
  //
- // Preconditions: mm.activeMu must be locked for writing.
- func (mm *MemoryManager) removeRSSLocked(ar usermem.AddrRange) {
--	mm.curRSS -= uint64(ar.Length())
-+	mm.rss -= uint64(ar.Length())
- }
- 
- // pmaSetFunctions implements segment.Functions for pmaSet.
-diff --git a/pkg/sentry/mm/syscalls.go b/pkg/sentry/mm/syscalls.go
-index fd6929e..0d58aed 100644
---- a/pkg/sentry/mm/syscalls.go
-+++ b/pkg/sentry/mm/syscalls.go
-@@ -1158,7 +1158,7 @@ func (mm *MemoryManager) VirtualMemorySizeRange(ar usermem.AddrRange) uint64 {
- func (mm *MemoryManager) ResidentSetSize() uint64 {
- 	mm.activeMu.RLock()
- 	defer mm.activeMu.RUnlock()
--	return uint64(mm.curRSS)
-+	return uint64(mm.rss)
- }
- 
- // MaxResidentSetSize returns the value advertised as mm's max RSS in bytes.
+ // Licensed under the Apache License, Version 2.0 (the "License");
+ // you may not use this file except in compliance with the License.

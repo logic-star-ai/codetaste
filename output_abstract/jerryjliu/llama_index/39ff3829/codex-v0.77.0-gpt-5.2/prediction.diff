@@ -1,0 +1,252 @@
+diff --git a/llama_index/llm_predictor/base.py b/llama_index/llm_predictor/base.py
+index d65cbb7..77ee177 100644
+--- a/llama_index/llm_predictor/base.py
++++ b/llama_index/llm_predictor/base.py
+@@ -100,6 +100,7 @@ class LLMPredictor(BaseLLMPredictor):
+     def predict(self, prompt: Prompt, **prompt_args: Any) -> str:
+         """Predict."""
+         if self._llm.metadata.is_chat_model:
++            prompt_args = self._extend_prompt_args(prompt_args)
+             messages = prompt.format_messages(llm=self._llm, **prompt_args)
+             messages = self._extend_messages(messages)
+             chat_response = self._llm.chat(messages)
+@@ -107,8 +108,9 @@ class LLMPredictor(BaseLLMPredictor):
+             # NOTE: this is an approximation, only for token counting
+             formatted_prompt = messages_to_prompt(messages)
+         else:
+-            prompt = self._extend_prompt(prompt)
++            prompt_args = self._extend_prompt_args(prompt_args)
+             formatted_prompt = prompt.format(llm=self._llm, **prompt_args)
++            formatted_prompt = self._extend_prompt_text(formatted_prompt)
+             response = self._llm.complete(formatted_prompt)
+             output = response.text
+ 
+@@ -119,13 +121,15 @@ class LLMPredictor(BaseLLMPredictor):
+     def stream(self, prompt: Prompt, **prompt_args: Any) -> TokenGen:
+         """Stream."""
+         if self._llm.metadata.is_chat_model:
++            prompt_args = self._extend_prompt_args(prompt_args)
+             messages = prompt.format_messages(llm=self._llm, **prompt_args)
+             messages = self._extend_messages(messages)
+             chat_response = self._llm.stream_chat(messages)
+             stream_tokens = stream_chat_response_to_tokens(chat_response)
+         else:
+-            prompt = self._extend_prompt(prompt)
++            prompt_args = self._extend_prompt_args(prompt_args)
+             formatted_prompt = prompt.format(llm=self._llm, **prompt_args)
++            formatted_prompt = self._extend_prompt_text(formatted_prompt)
+             stream_response = self._llm.stream_complete(formatted_prompt)
+             stream_tokens = stream_completion_response_to_tokens(stream_response)
+         return stream_tokens
+@@ -133,6 +137,7 @@ class LLMPredictor(BaseLLMPredictor):
+     async def apredict(self, prompt: Prompt, **prompt_args: Any) -> str:
+         """Async predict."""
+         if self._llm.metadata.is_chat_model:
++            prompt_args = self._extend_prompt_args(prompt_args)
+             messages = prompt.format_messages(llm=self._llm, **prompt_args)
+             messages = self._extend_messages(messages)
+             chat_response = await self._llm.achat(messages)
+@@ -140,8 +145,9 @@ class LLMPredictor(BaseLLMPredictor):
+             # NOTE: this is an approximation, only for token counting
+             formatted_prompt = messages_to_prompt(messages)
+         else:
+-            prompt = self._extend_prompt(prompt)
++            prompt_args = self._extend_prompt_args(prompt_args)
+             formatted_prompt = prompt.format(llm=self._llm, **prompt_args)
++            formatted_prompt = self._extend_prompt_text(formatted_prompt)
+             response = await self._llm.acomplete(formatted_prompt)
+             output = response.text
+ 
+@@ -152,30 +158,38 @@ class LLMPredictor(BaseLLMPredictor):
+     async def astream(self, prompt: Prompt, **prompt_args: Any) -> TokenAsyncGen:
+         """Async stream."""
+         if self._llm.metadata.is_chat_model:
++            prompt_args = self._extend_prompt_args(prompt_args)
+             messages = prompt.format_messages(llm=self._llm, **prompt_args)
+             messages = self._extend_messages(messages)
+             chat_response = await self._llm.astream_chat(messages)
+             stream_tokens = await astream_chat_response_to_tokens(chat_response)
+         else:
+-            prompt = self._extend_prompt(prompt)
++            prompt_args = self._extend_prompt_args(prompt_args)
+             formatted_prompt = prompt.format(llm=self._llm, **prompt_args)
++            formatted_prompt = self._extend_prompt_text(formatted_prompt)
+             stream_response = await self._llm.astream_complete(formatted_prompt)
+             stream_tokens = await astream_completion_response_to_tokens(stream_response)
+         return stream_tokens
+ 
+-    def _extend_prompt(self, prompt: Prompt) -> Prompt:
+-        """Add system and query wrapper prompts to base prompt"""
+-        if self.system_prompt:
+-            prompt.prompt_selector.default_prompt.template = (
+-                self.system_prompt
+-                + "\n\n"
+-                + prompt.prompt_selector.default_prompt.template
+-            )
+-        if self.query_wrapper_prompt:
+-            prompt.partial_dict["query_str"] = self.query_wrapper_prompt.format(
+-                query_str=prompt.partial_dict["query_str"]
+-            )
+-        return prompt
++    def _extend_prompt_args(self, prompt_args: Any) -> Any:
++        """Wrap input args (without mutating the passed dict)."""
++        if not self.query_wrapper_prompt:
++            return prompt_args
++
++        if "query_str" not in prompt_args:
++            return prompt_args
++
++        new_args = dict(prompt_args)
++        new_args["query_str"] = self.query_wrapper_prompt.format(
++            query_str=new_args["query_str"]
++        )
++        return new_args
++
++    def _extend_prompt_text(self, formatted_prompt: str) -> str:
++        """Prepend system prompt to a formatted string prompt."""
++        if not self.system_prompt:
++            return formatted_prompt
++        return self.system_prompt + "\n\n" + formatted_prompt
+ 
+     def _extend_messages(self, messages: List[ChatMessage]) -> List[ChatMessage]:
+         """Add system prompt to chat message list"""
+diff --git a/llama_index/prompts/base.py b/llama_index/prompts/base.py
+index 3911404..61d6298 100644
+--- a/llama_index/prompts/base.py
++++ b/llama_index/prompts/base.py
+@@ -1,5 +1,4 @@
+ """Base module for prompts."""
+-from copy import deepcopy
+ from typing import Any, Dict, List, Optional
+ 
+ from llama_index.bridge.langchain import BasePromptTemplate as BaseLangchainPrompt
+@@ -70,6 +69,11 @@ class Prompt:
+         # identifiers that users can pass along with the prompt.
+         self.metadata = metadata or {}
+ 
++    def _get_format_args(self, kwargs: Dict[str, Any]) -> Dict[str, Any]:
++        """Get formatting args without mutating the input dict."""
++        # NOTE: partial args should override call-time args.
++        return {**kwargs, **self.partial_dict}
++
+     @property
+     def original_template(self) -> str:
+         """Return the originally specified template, if supplied."""
+@@ -99,19 +103,17 @@ class Prompt:
+         Return an instance of itself.
+ 
+         """
+-        try:
+-            # NOTE: this is a hack to get around deepcopy failing on output parser
+-            output_parser = self.output_parser
+-            self.output_parser = None
+-
+-            copy_obj = deepcopy(self)
+-            copy_obj.output_parser = output_parser
+-            copy_obj.partial_dict.update(kwargs)
+-            self.output_parser = output_parser
+-        except Exception as e:
+-            raise e
+-
+-        return copy_obj
++        # NOTE: we avoid deepcopy(self) because output parsers are often not deepcopy-able.
++        from copy import copy as shallow_copy
++
++        copied = shallow_copy(self)
++        copied.prompt_selector = self.prompt_selector.copy(deep=True)
++        copied.prompt = copied.prompt_selector.default_prompt
++        copied.partial_dict = dict(self.partial_dict)
++        copied.prompt_kwargs = dict(self.prompt_kwargs)
++        copied.metadata = dict(self.metadata)
++        copied.partial_dict.update(kwargs)
++        return copied
+ 
+     @classmethod
+     def from_prompt(
+@@ -149,7 +151,7 @@ class Prompt:
+ 
+     def format(self, llm: Optional[LLM] = None, **kwargs: Any) -> str:
+         """Format the prompt into a string."""
+-        kwargs.update(self.partial_dict)
++        kwargs = self._get_format_args(kwargs)
+         lc_prompt = self.get_langchain_prompt(llm=llm)
+         return lc_prompt.format(**kwargs)
+ 
+@@ -157,7 +159,7 @@ class Prompt:
+         self, llm: Optional[LLM] = None, **kwargs: Any
+     ) -> List[ChatMessage]:
+         """Format the prompt into a list of chat messages."""
+-        kwargs.update(self.partial_dict)
++        kwargs = self._get_format_args(kwargs)
+         lc_template = self.get_langchain_prompt(llm=llm)
+         lc_value = lc_template.format_prompt(**kwargs)
+         lc_messages = lc_value.to_messages()
+@@ -169,5 +171,4 @@ class Prompt:
+         Hack to pass into Langchain to pass validation.
+ 
+         """
+-        kwargs.update(self.partial_dict)
+-        return kwargs
++        return self._get_format_args(dict(kwargs))
+diff --git a/tests/llm_predictor/test_base.py b/tests/llm_predictor/test_base.py
+index 01ed7dc..838218c 100644
+--- a/tests/llm_predictor/test_base.py
++++ b/tests/llm_predictor/test_base.py
+@@ -6,6 +6,7 @@ from unittest.mock import patch
+ from llama_index.llm_predictor.structured import LLMPredictor, StructuredLLMPredictor
+ from llama_index.types import BaseOutputParser
+ from llama_index.prompts.prompts import Prompt, SimpleInputPrompt
++from llama_index.llms.mock import MockLLM
+ 
+ try:
+     gptcache_installed = True
+@@ -46,6 +47,21 @@ def test_struct_llm_predictor(mock_init: Any, mock_predict: Any) -> None:
+     assert llm_prediction == "hello world"
+ 
+ 
++def test_llm_predictor_system_and_query_wrapper_do_not_mutate_prompt() -> None:
++    """Ensure system/query wrapper are applied without mutating the Prompt object."""
++    llm_predictor = LLMPredictor(llm=MockLLM())
++    llm_predictor.system_prompt = "SYSTEM"
++    llm_predictor.query_wrapper_prompt = SimpleInputPrompt("Wrapped({query_str})")
++
++    base_prompt = SimpleInputPrompt("Q: {query_str}")
++    output = llm_predictor.predict(base_prompt, query_str="hello")
++
++    # MockLLM echoes the prompt, so we can verify exact formatting.
++    assert output == "SYSTEM\n\nQ: Wrapped(hello)"
++    # Prompt should remain unchanged across calls.
++    assert base_prompt.format(query_str="hello") == "Q: hello"
++
++
+ # TODO: bring back gptcache tests
+ # @pytest.mark.skipif(not gptcache_installed, reason="gptcache not installed")
+ # def test_struct_llm_predictor_with_cache() -> None:
+diff --git a/tests/prompts/test_base.py b/tests/prompts/test_base.py
+index aa15074..71c8844 100644
+--- a/tests/prompts/test_base.py
++++ b/tests/prompts/test_base.py
+@@ -25,6 +25,7 @@ def test_partial_format() -> None:
+ 
+     assert isinstance(prompt_fmt, Prompt)
+     assert prompt_fmt.format(text="world") == "hello world bar"
++    assert prompt.partial_dict == {}
+ 
+ 
+ def test_from_prompt() -> None:
+@@ -39,6 +40,15 @@ def test_from_prompt() -> None:
+     assert prompt_new.format(text="world2") == "hello world2 bar"
+ 
+ 
++def test_get_full_format_args_does_not_mutate_input() -> None:
++    prompt = Prompt("hello {text} {foo}").partial_format(foo="bar")
++    prompt_args = {"text": "world"}
++    full_args = prompt.get_full_format_args(prompt_args)
++
++    assert prompt_args == {"text": "world"}
++    assert full_args == {"text": "world", "foo": "bar"}
++
++
+ def test_from_langchain_prompt() -> None:
+     """Test from langchain prompt."""
+     prompt_txt = "hello {text} {foo}"

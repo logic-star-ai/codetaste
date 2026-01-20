@@ -1,31 +1,18 @@
 diff --git a/llama_index/llm_predictor/vellum/prompt_registry.py b/llama_index/llm_predictor/vellum/prompt_registry.py
-index 4421c75..820e10e 100644
+index 4421c75..18d62c6 100644
 --- a/llama_index/llm_predictor/vellum/prompt_registry.py
 +++ b/llama_index/llm_predictor/vellum/prompt_registry.py
-@@ -1,14 +1,21 @@
- from __future__ import annotations
- 
--from typing import TYPE_CHECKING, Any, List, Tuple
-+from typing import TYPE_CHECKING, Any, Tuple
- from uuid import uuid4
- 
- from llama_index import Prompt
-+from llama_index.bridge.langchain import (
-+    AIMessagePromptTemplate,
-+    ChatPromptTemplate,
-+    HumanMessagePromptTemplate,
-+    SystemMessagePromptTemplate,
-+)
- from llama_index.llm_predictor.vellum.types import (
-     VellumCompiledPrompt,
+@@ -9,6 +9,9 @@ from llama_index.llm_predictor.vellum.types import (
      VellumRegisteredPrompt,
  )
  from llama_index.llm_predictor.vellum.utils import convert_to_kebab_case
++import re
++
 +from llama_index.prompts.template_utils import python_format_to_jinja
  
  if TYPE_CHECKING:
      import vellum  # noqa: F401
-@@ -178,60 +185,81 @@ class VellumPromptRegistry:
+@@ -178,12 +181,6 @@ class VellumPromptRegistry:
  
          import vellum
  
@@ -35,263 +22,102 @@ index 4421c75..820e10e 100644
 -                input_variable, f"{{ {input_variable} }}"
 -            )
 -
--        block: vellum.PromptTemplateBlockRequest
--        jinja_block = vellum.PromptTemplateBlockRequest(
--            id=str(uuid4()),
--            block_type=vellum.BlockTypeEnum.JINJA,
--            properties=vellum.PromptTemplateBlockPropertiesRequest(
--                template=self._prepare_prompt_jinja_template(
--                    prompt.original_template,
--                    prompt.get_langchain_prompt().input_variables,
--                ),
--            ),
--        )
--        if for_chat_model:
--            block = vellum.PromptTemplateBlockRequest(
-+        lc_prompt = prompt.get_langchain_prompt()
-+        input_variables = lc_prompt.input_variables
-+
-+        blocks: list[vellum.PromptTemplateBlockRequest] = []
-+        if for_chat_model and isinstance(lc_prompt, ChatPromptTemplate):
-+            for msg in lc_prompt.messages:
-+                chat_role: vellum.ChatMessageRole
-+                template: str
-+
-+                if isinstance(msg, SystemMessagePromptTemplate):
-+                    chat_role = vellum.ChatMessageRole.SYSTEM
-+                    template = msg.prompt.template
-+                elif isinstance(msg, HumanMessagePromptTemplate):
-+                    chat_role = vellum.ChatMessageRole.USER
-+                    template = msg.prompt.template
-+                elif isinstance(msg, AIMessagePromptTemplate):
-+                    chat_role = vellum.ChatMessageRole.ASSISTANT
-+                    template = msg.prompt.template
-+                else:
-+                    # Skip unsupported message template types (e.g. placeholders).
-+                    continue
-+
-+                jinja_block = vellum.PromptTemplateBlockRequest(
-+                    id=str(uuid4()),
-+                    block_type=vellum.BlockTypeEnum.JINJA,
-+                    properties=vellum.PromptTemplateBlockPropertiesRequest(
-+                        template=python_format_to_jinja(template),
-+                    ),
-+                )
-+                blocks.append(
-+                    vellum.PromptTemplateBlockRequest(
-+                        id=str(uuid4()),
-+                        block_type=vellum.BlockTypeEnum.CHAT_MESSAGE,
-+                        properties=vellum.PromptTemplateBlockPropertiesRequest(
-+                            chat_role=chat_role,
-+                            blocks=[jinja_block],
-+                        ),
-+                    )
-+                )
-+        else:
-+            # Text-only prompt (or chat prompt treated as text).
-+            template = prompt.original_template
-+            jinja_block = vellum.PromptTemplateBlockRequest(
-                 id=str(uuid4()),
--                block_type=vellum.BlockTypeEnum.CHAT_MESSAGE,
-+                block_type=vellum.BlockTypeEnum.JINJA,
-                 properties=vellum.PromptTemplateBlockPropertiesRequest(
--                    chat_role=vellum.ChatMessageRole.SYSTEM,
--                    blocks=[jinja_block],
-+                    template=python_format_to_jinja(template),
-                 ),
-             )
--        else:
--            block = jinja_block
-+            if for_chat_model:
-+                blocks.append(
-+                    vellum.PromptTemplateBlockRequest(
-+                        id=str(uuid4()),
-+                        block_type=vellum.BlockTypeEnum.CHAT_MESSAGE,
-+                        properties=vellum.PromptTemplateBlockPropertiesRequest(
-+                            chat_role=vellum.ChatMessageRole.SYSTEM,
-+                            blocks=[jinja_block],
-+                        ),
-+                    )
-+                )
-+            else:
-+                blocks.append(jinja_block)
+         block: vellum.PromptTemplateBlockRequest
+         jinja_block = vellum.PromptTemplateBlockRequest(
+             id=str(uuid4()),
+@@ -223,12 +220,21 @@ class VellumPromptRegistry:
+         self, original_template: str, input_variables: List[str]
+     ) -> str:
+         """Converts a prompt template into a Jinja template."""
++        # Parse the template rather than doing naive string replacement so escaped
++        # braces (e.g. for JSON literals) remain intact.
++        prompt_template = python_format_to_jinja(original_template)
  
-         return vellum.RegisterPromptPromptInfoRequest(
-             prompt_syntax_version=2,
-             prompt_block_data=vellum.PromptTemplateBlockDataRequest(
-                 version=1,
--                blocks=[block],
-+                blocks=blocks,
-             ),
-             input_variables=[
-                 {"key": input_var}
--                for input_var in prompt.get_langchain_prompt().input_variables
-+                for input_var in input_variables
-             ],
-         )
- 
--    def _prepare_prompt_jinja_template(
--        self, original_template: str, input_variables: List[str]
--    ) -> str:
--        """Converts a prompt template into a Jinja template."""
--
 -        prompt_template = original_template
--        for input_variable in input_variables:
++        # Sanity check: ensure the converted template mentions all expected variables.
++        # This helps catch cases where someone used a non-format placeholder style.
+         for input_variable in input_variables:
 -            prompt_template = prompt_template.replace(
 -                ("{" + input_variable + "}"), ("{{ " + input_variable + " }}")
 -            )
--
--        return prompt_template
--
-     def _get_default_llm_meta(
-         self,
-     ) -> Tuple[vellum.ProviderEnum, str, vellum.RegisterPromptModelParametersRequest]:
++            # Allow dotted/indexed accesses like `{{ foo.bar }}` or `{{ foo[0] }}`.
++            # LangChain's `input_variables` may be the root name even if the template
++            # uses an expression.
++            pattern = r"{{\\s*" + re.escape(input_variable) + r"(\\b|[\\.\\[])"
++            if not re.search(pattern, prompt_template):
++                raise ValueError(
++                    f"Expected input variable '{input_variable}' not found in template."
++                )
+ 
+         return prompt_template
+ 
 diff --git a/llama_index/prompts/base.py b/llama_index/prompts/base.py
-index 3911404..377ae6a 100644
+index 3911404..eace6c7 100644
 --- a/llama_index/prompts/base.py
 +++ b/llama_index/prompts/base.py
-@@ -1,13 +1,22 @@
- """Base module for prompts."""
-+from __future__ import annotations
+@@ -24,12 +24,21 @@ class Prompt:
+         template: Optional[str] = None,
+         langchain_prompt: Optional[BaseLangchainPrompt] = None,
+         langchain_prompt_selector: Optional[PromptSelector] = None,
++        prompt_selector: Optional[PromptSelector] = None,
+         output_parser: Optional[BaseOutputParser] = None,
+         prompt_type: str = PromptType.CUSTOM,
+         metadata: Optional[Dict[str, Any]] = None,
+         **prompt_kwargs: Any,
+     ) -> None:
+         """Init params."""
++        if prompt_selector is not None:
++            if langchain_prompt_selector is not None:
++                raise ValueError(
++                    "Both `prompt_selector` and `langchain_prompt_selector` are "
++                    "provided; please specify only one."
++                )
++            langchain_prompt_selector = prompt_selector
 +
- from copy import deepcopy
- from typing import Any, Dict, List, Optional
- 
- from llama_index.bridge.langchain import BasePromptTemplate as BaseLangchainPrompt
- from llama_index.bridge.langchain import PromptTemplate as LangchainPrompt
-+from llama_index.bridge.langchain import (
-+    AIMessagePromptTemplate,
-+    ChatPromptTemplate,
-+    HumanMessagePromptTemplate,
-+    SystemMessagePromptTemplate,
-+)
- from llama_index.llms.base import LLM, ChatMessage
- from llama_index.llms.langchain_utils import from_lc_messages
- from llama_index.prompts.prompt_selector import PromptSelector
- from llama_index.prompts.prompt_type import PromptType
-+from llama_index.prompts.template_utils import as_chat_role_prefix
- from llama_index.types import BaseOutputParser
- 
- 
-@@ -63,7 +72,9 @@ class Prompt:
+         # first check if langchain_prompt_selector is provided
+         # TODO: self.prompt is deprecated, switch to prompt_selector under the hood
+         if langchain_prompt_selector is not None:
+@@ -63,7 +72,13 @@ class Prompt:
  
          self.output_parser = output_parser
  
 -        self._original_template = template
-+        self._original_template = template or self._infer_original_template(
-+            self.prompt_selector.default_prompt
-+        )
++        # Keep track of the original template string when available. This enables
++        # downstream integrations that require a template source-of-truth (e.g. Vellum).
++        if template is not None:
++            self._original_template = template
++        else:
++            maybe_template = getattr(self.prompt, "template", None)
++            self._original_template = maybe_template if isinstance(maybe_template, str) else None
  
          # Metadata is used to pass arbitrary information to other consumers of the
          # prompt. For example, VellumPromptRegistry uses this to access vellum-specific
-@@ -75,7 +86,12 @@ class Prompt:
-         """Return the originally specified template, if supplied."""
- 
-         if not self._original_template:
--            raise ValueError("No original template specified.")
-+            # Best-effort fallback for prompts created from LangChain prompt objects.
-+            inferred = self._infer_original_template(self.prompt_selector.default_prompt)
-+            if inferred:
-+                self._original_template = inferred
-+            else:
-+                raise ValueError("No original template specified.")
- 
-         return self._original_template
- 
-@@ -99,18 +115,8 @@ class Prompt:
-         Return an instance of itself.
- 
-         """
--        try:
--            # NOTE: this is a hack to get around deepcopy failing on output parser
--            output_parser = self.output_parser
--            self.output_parser = None
--
--            copy_obj = deepcopy(self)
--            copy_obj.output_parser = output_parser
--            copy_obj.partial_dict.update(kwargs)
--            self.output_parser = output_parser
--        except Exception as e:
--            raise e
--
-+        copy_obj = self._clone()
-+        copy_obj.partial_dict.update(kwargs)
-         return copy_obj
- 
-     @classmethod
-@@ -171,3 +177,55 @@ class Prompt:
-         """
-         kwargs.update(self.partial_dict)
-         return kwargs
-+
-+    def _clone(self) -> "Prompt":
-+        """Create a shallow clone of this prompt with copied partial state."""
-+
-+        clone = Prompt(
-+            langchain_prompt_selector=self.prompt_selector,
-+            output_parser=self.output_parser,
-+            prompt_type=self.prompt_type,
-+            metadata=deepcopy(self.metadata),
-+            **self.prompt_kwargs,
-+        )
-+        clone.partial_dict = dict(self.partial_dict)
-+        clone._original_template = self._original_template
-+        return clone
-+
-+    @staticmethod
-+    def _infer_original_template(lc_prompt: BaseLangchainPrompt) -> Optional[str]:
-+        """Best-effort extraction of a template string from a LangChain prompt."""
-+
-+        # Standard text prompt template
-+        if hasattr(lc_prompt, "template") and isinstance(
-+            getattr(lc_prompt, "template"), str
-+        ):
-+            return getattr(lc_prompt, "template")
-+
-+        # Chat prompt template: join message templates with role prefixes.
-+        if isinstance(lc_prompt, ChatPromptTemplate):
-+            parts: list[str] = []
-+            for msg in lc_prompt.messages:
-+                role: Optional[str] = None
-+                msg_template: Optional[str] = None
-+
-+                if isinstance(msg, SystemMessagePromptTemplate):
-+                    role = "system"
-+                    msg_template = msg.prompt.template
-+                elif isinstance(msg, HumanMessagePromptTemplate):
-+                    role = "user"
-+                    msg_template = msg.prompt.template
-+                elif isinstance(msg, AIMessagePromptTemplate):
-+                    role = "assistant"
-+                    msg_template = msg.prompt.template
-+                else:
-+                    # Unsupported message template type (e.g. placeholders)
-+                    continue
-+
-+                role_prefix = as_chat_role_prefix(role) or role.upper()
-+                parts.append(f"{role_prefix}:\n{msg_template}")
-+
-+            if parts:
-+                return "\n\n".join(parts)
-+
-+        return None
 diff --git a/llama_index/prompts/guidance_utils.py b/llama_index/prompts/guidance_utils.py
-index bb80c41..9db127d 100644
+index bb80c41..cef5d71 100644
 --- a/llama_index/prompts/guidance_utils.py
 +++ b/llama_index/prompts/guidance_utils.py
-@@ -8,6 +8,8 @@ if TYPE_CHECKING:
+@@ -2,6 +2,7 @@ from typing import TYPE_CHECKING, Optional, Type, TypeVar
  
- from pydantic import BaseModel
- 
+ from llama_index.output_parsers.base import OutputParserException
+ from llama_index.output_parsers.utils import parse_json_markdown
 +from llama_index.prompts.template_utils import python_format_to_handlebars
-+
+ 
+ if TYPE_CHECKING:
+     from guidance import Program
+@@ -10,30 +11,8 @@ from pydantic import BaseModel
+ 
  
  def convert_to_handlebars(text: str) -> str:
-     """Convert a python format string to handlebars-style template.
-@@ -20,20 +22,7 @@ def convert_to_handlebars(text: str) -> str:
-     This is currently only used to convert a python format string based prompt template
-     to a guidance program template.
-     """
+-    """Convert a python format string to handlebars-style template.
+-
+-    In python format string, single braces {} are used for variable substitution,
+-        and double braces {{}} are used for escaping actual braces (e.g. for JSON dict)
+-    In handlebars template, double braces {{}} are used for variable substitution,
+-        and single braces are actual braces (e.g. for JSON dict)
+-
+-    This is currently only used to convert a python format string based prompt template
+-    to a guidance program template.
+-    """
 -    # Replace double braces with a temporary placeholder
 -    var_left = "TEMP_BRACE_LEFT"
 -    var_right = "TEMP_BRACE_RIGHT"
@@ -306,85 +132,106 @@ index bb80c41..9db127d 100644
 -    text = text.replace(var_left, "{")
 -    text = text.replace(var_right, "}")
 -    return text
++    """Convert a Python `str.format` template to Handlebars template syntax."""
 +    return python_format_to_handlebars(text)
  
  
  def wrap_json_markdown(text: str) -> str:
 diff --git a/llama_index/prompts/template_utils.py b/llama_index/prompts/template_utils.py
 new file mode 100644
-index 0000000..6f01c0b
+index 0000000..53a611c
 --- /dev/null
 +++ b/llama_index/prompts/template_utils.py
-@@ -0,0 +1,59 @@
-+"""Utilities for working with prompt templates.
+@@ -0,0 +1,65 @@
++"""Utilities for working with prompt template strings.
 +
-+These helpers focus on Python `str.format`-style templates (LangChain's default),
-+and provide safe conversions to other templating syntaxes.
++LlamaIndex prompts primarily use Python's `str.format` template syntax (e.g. `{var}`),
++which supports escaping literal braces via `{{` and `}}`.
++
++Some downstream integrations (e.g. Vellum, Guidance) use other templating syntaxes.
++These helpers centralize conversions while correctly handling escaped braces.
 +"""
 +
 +from __future__ import annotations
 +
-+from string import Formatter
-+from typing import Optional
++import string
++from typing import Iterable, Tuple
 +
 +
-+def python_format_to_jinja(template: str) -> str:
-+    """Convert a Python `str.format` template to a Jinja2 template.
++def _iter_python_format_parts(template: str) -> Iterable[Tuple[str, str | None]]:
++    """Yield `(literal_text, field_name)` pairs from a Python format string.
 +
-+    - `{var}` -> `{{ var }}`
-+    - Escaped braces `{{` / `}}` are preserved as literal braces.
-+
-+    Note: format specs / conversions (e.g. `{x!r}` or `{x:.2f}`) are not preserved.
++    `literal_text` already includes any escaped braces as literal `{` / `}`.
 +    """
 +
-+    formatter = Formatter()
-+    chunks: list[str] = []
-+    for literal_text, field_name, _format_spec, _conversion in formatter.parse(
-+        template
-+    ):
-+        chunks.append(literal_text)
-+        if field_name is not None:
-+            # `field_name` may contain attribute/index access; Jinja can handle most.
-+            chunks.append("{{ " + field_name + " }}")
-+    return "".join(chunks)
++    formatter = string.Formatter()
++    for literal_text, field_name, format_spec, conversion in formatter.parse(template):
++        if field_name == "":
++            raise ValueError(
++                "Anonymous format fields ('{}') are not supported in prompt templates."
++            )
++
++        if format_spec or conversion:
++            # We intentionally ignore format spec / conversion for cross-template
++            # conversions since syntaxes vary; callers can reject these if needed.
++            pass
++
++        yield literal_text, field_name
 +
 +
 +def python_format_to_handlebars(template: str) -> str:
-+    """Convert a Python `str.format` template to a Handlebars template.
++    """Convert a Python format string into a Handlebars-style template.
 +
-+    - `{var}` -> `{{var}}`
-+    - Escaped braces `{{` / `}}` are preserved as literal braces.
++    - `{var}` becomes `{{var}}`
++    - Escaped braces `{{`/`}}` remain literal `{`/`}`.
 +    """
 +
-+    formatter = Formatter()
-+    chunks: list[str] = []
-+    for literal_text, field_name, _format_spec, _conversion in formatter.parse(
-+        template
-+    ):
-+        chunks.append(literal_text)
++    out_parts: list[str] = []
++    for literal_text, field_name in _iter_python_format_parts(template):
++        out_parts.append(literal_text)
 +        if field_name is not None:
-+            chunks.append("{{" + field_name + "}}")
-+    return "".join(chunks)
++            out_parts.append("{{" + field_name + "}}")
++    return "".join(out_parts)
 +
 +
-+def as_chat_role_prefix(role: str) -> Optional[str]:
-+    """Normalize a role name into a stable, human-readable prefix."""
++def python_format_to_jinja(template: str) -> str:
++    """Convert a Python format string into a Jinja-style template.
 +
-+    role_upper = role.upper()
-+    if role_upper in {"SYSTEM", "USER", "ASSISTANT", "TOOL"}:
-+        return role_upper
-+    return None
++    - `{var}` becomes `{{ var }}`
++    - Escaped braces `{{`/`}}` remain literal `{`/`}`.
++    """
 +
-diff --git a/tests/llm_predictor/vellum/conftest.py b/tests/llm_predictor/vellum/conftest.py
-index 29cfb14..a9cf351 100644
---- a/tests/llm_predictor/vellum/conftest.py
-+++ b/tests/llm_predictor/vellum/conftest.py
-@@ -30,7 +30,7 @@ def fake_vellum_api_key() -> str:
- 
- @pytest.fixture
- def mock_vellum_client_factory() -> Callable[..., mock.MagicMock]:
--    import vellum
-+    vellum = pytest.importorskip("vellum")
- 
-     def _create_vellum_client(
-         compiled_prompt_text: str = "<example-compiled-prompt-text>",
++    out_parts: list[str] = []
++    for literal_text, field_name in _iter_python_format_parts(template):
++        out_parts.append(literal_text)
++        if field_name is not None:
++            out_parts.append("{{ " + field_name + " }}")
++    return "".join(out_parts)
++
+diff --git a/tests/prompts/test_template_utils.py b/tests/prompts/test_template_utils.py
+new file mode 100644
+index 0000000..5b6ab1e
+--- /dev/null
++++ b/tests/prompts/test_template_utils.py
+@@ -0,0 +1,21 @@
++from llama_index.prompts.template_utils import (
++    python_format_to_handlebars,
++    python_format_to_jinja,
++)
++
++
++def test_python_format_to_handlebars__escaped_braces() -> None:
++    template = 'A {var} and a literal dict: {{"k": "v"}}.'
++    assert (
++        python_format_to_handlebars(template)
++        == 'A {{var}} and a literal dict: {"k": "v"}.'
++    )
++
++
++def test_python_format_to_jinja__escaped_braces() -> None:
++    template = 'A {var} and a literal dict: {{"k": "v"}}.'
++    assert (
++        python_format_to_jinja(template)
++        == 'A {{ var }} and a literal dict: {"k": "v"}.'
++    )
++

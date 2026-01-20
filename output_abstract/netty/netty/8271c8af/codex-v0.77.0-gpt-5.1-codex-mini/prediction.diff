@@ -1,11 +1,11 @@
 diff --git a/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsCodecUtil.java b/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsCodecUtil.java
 new file mode 100644
-index 0000000..895dfce
+index 0000000..abe07e8
 --- /dev/null
 +++ b/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsCodecUtil.java
-@@ -0,0 +1,161 @@
+@@ -0,0 +1,200 @@
 +/*
-+ * Copyright 2013 The Netty Project
++ * Copyright 2016 The Netty Project
 + *
 + * The Netty Project licenses this file to you under the Apache License,
 + * version 2.0 (the "License"); you may not use this file except in compliance
@@ -22,195 +22,373 @@ index 0000000..895dfce
 +package io.netty.handler.codec.dns;
 +
 +import io.netty.buffer.ByteBuf;
++import io.netty.buffer.ByteBufUtil;
 +import io.netty.handler.codec.CorruptedFrameException;
++import io.netty.handler.codec.EncoderException;
 +import io.netty.util.CharsetUtil;
 +
 +/**
-+ * Utility methods used for encoding and decoding of DNS messages.
++ * Shared DNS codec utilities (name encoding/decoding, header flags).
 + */
-+public final class DnsCodecUtil {
++final class DnsCodecUtil {
 +
-+    private static final int MAX_LABEL_LEN = 63;
-+    private static final int MAX_NAME_LEN = 255;
++    static final int MAX_LABEL_LENGTH = 63;
++    static final int MAX_NAME_LENGTH = 255;
 +
 +    private DnsCodecUtil() {
 +    }
 +
-+    /**
-+     * Decodes a domain name given a buffer containing a DNS packet. If the name contains a pointer, the position of
-+     * the buffer will be set to directly after the pointer's index after the name has been read.
-+     *
-+     * @param buf the buffer containing the DNS packet
-+     * @return the decoded domain name. The root domain is represented as an empty string.
-+     */
-+    public static String decodeDomainName(ByteBuf buf) {
++    static void encodeQueryHeader(DnsHeader header, ByteBuf out) {
++        out.writeShort(header.id());
++
++        int flags = 0;
++        flags |= (header.type() & 0x1) << 15;
++        flags |= (header.opcode() & 0xf) << 11;
++        flags |= header.isRecursionDesired() ? 1 << 8 : 0;
++        flags |= (header.z() & 0x7) << 4;
++        out.writeShort(flags);
++
++        writeUnsignedShort(out, header.questionCount(), "QDCOUNT");
++        out.writeShort(0); // ANCOUNT
++        out.writeShort(0); // NSCOUNT
++        writeUnsignedShort(out, header.additionalResourceCount(), "ARCOUNT");
++    }
++
++    static void encodeQuestion(DnsQuestion question, DnsNameEncoder nameEncoder, ByteBuf out) {
++        nameEncoder.encodeName(question.name(), out);
++        out.writeShort(question.type().intValue());
++        out.writeShort(question.dnsClass().intValue());
++    }
++
++    static void encodeResource(DnsResource resource, DnsNameEncoder nameEncoder, ByteBuf out) {
++        nameEncoder.encodeName(resource.name(), out);
++        out.writeShort(resource.type().intValue());
++        out.writeShort(resource.dnsClass().intValue());
++
++        long ttl = resource.timeToLive();
++        if (ttl < 0 || ttl > 0xFFFFFFFFL) {
++            throw new EncoderException("TTL must be between 0 and 0xFFFFFFFF: " + ttl);
++        }
++        out.writeInt((int) ttl);
++
++        ByteBuf content = resource.content();
++        int contentLen = content.readableBytes();
++        writeUnsignedShort(out, contentLen, "RDLENGTH");
++        out.writeBytes(content, content.readerIndex(), contentLen);
++    }
++
++    static String decodeName(ByteBuf in, int dnsStart, int dnsEnd) {
 +        int position = -1;
 +        int checked = 0;
-+        int length = buf.writerIndex();
 +        StringBuilder name = new StringBuilder(64);
 +
-+        while (buf.isReadable()) {
-+            int len = buf.readUnsignedByte();
++        while (true) {
++            if (!in.isReadable()) {
++                throw new CorruptedFrameException("truncated name.");
++            }
++
++            short len = in.readUnsignedByte();
 +            if (len == 0) {
 +                break;
 +            }
 +
 +            boolean pointer = (len & 0xc0) == 0xc0;
 +            if (pointer) {
-+                if (!buf.isReadable()) {
-+                    throw new CorruptedFrameException("truncated pointer in a name.");
++                if (!in.isReadable()) {
++                    throw new CorruptedFrameException("truncated pointer in name.");
 +                }
 +
 +                if (position == -1) {
-+                    position = buf.readerIndex() + 1;
++                    position = in.readerIndex() + 1;
 +                }
 +
-+                int next = (len & 0x3f) << 8 | buf.readUnsignedByte();
-+                if (next >= length) {
-+                    throw new CorruptedFrameException("name has an out-of-range pointer.");
++                int offset = (len & 0x3f) << 8 | in.readUnsignedByte();
++                int pointerIndex = dnsStart + offset;
++                if (pointerIndex < dnsStart || pointerIndex >= dnsEnd) {
++                    throw new CorruptedFrameException("name pointer out of range: " + offset);
 +                }
 +
-+                buf.readerIndex(next);
++                in.readerIndex(pointerIndex);
++
 +                checked += 2;
-+            } else {
-+                if (len > MAX_LABEL_LEN) {
-+                    throw new CorruptedFrameException("name contains a label with length greater than 63.");
++                if (checked >= dnsEnd - dnsStart) {
++                    throw new CorruptedFrameException("name contains a loop.");
 +                }
-+                if (buf.readableBytes() < len) {
-+                    throw new CorruptedFrameException("truncated label in a name.");
-+                }
-+
-+                name.append(buf.toString(buf.readerIndex(), len, CharsetUtil.US_ASCII)).append('.');
-+                buf.skipBytes(len);
-+                checked += 1 + len;
++                continue;
 +            }
 +
-+            // Guard against pointer loops and other malformed names.
-+            if (checked >= length) {
-+                throw new CorruptedFrameException("name contains a loop.");
++            if (len > MAX_LABEL_LENGTH) {
++                throw new CorruptedFrameException("name label is longer than 63 bytes.");
 +            }
-+            if (name.length() > MAX_NAME_LEN) {
-+                throw new CorruptedFrameException("name is too long.");
++            if (len > in.readableBytes()) {
++                throw new CorruptedFrameException("truncated label in name.");
 +            }
++
++            name.append(in.toString(in.readerIndex(), len, CharsetUtil.UTF_8)).append('.');
++            in.skipBytes(len);
 +        }
 +
 +        if (position != -1) {
-+            buf.readerIndex(position);
++            in.readerIndex(position);
 +        }
 +
 +        if (name.length() == 0) {
 +            return "";
 +        }
-+
 +        return name.substring(0, name.length() - 1);
 +    }
 +
-+    /**
-+     * Encodes a domain name according to RFC 1035.
-+     *
-+     * @param buf  the output buffer
-+     * @param name the domain name. The root domain can be represented as either an empty string or {@code "."}.
-+     */
-+    public static void encodeDomainName(ByteBuf buf, String name) {
++    static void validateName(String name) {
 +        if (name == null) {
 +            throw new NullPointerException("name");
 +        }
++        if (name.isEmpty()) {
++            return; // root
++        }
 +
-+        if (name.length() == 0 || ".".equals(name)) {
-+            buf.writeByte(0);
++        int end = name.length();
++        if (name.charAt(end - 1) == '.') {
++            end--;
++        }
++        if (end == 0) {
++            return; // "."
++        }
++
++        int expandedLen = 1; // terminator
++        int labelLen = 0;
++        boolean lastWasDot = true;
++
++        for (int i = 0; i < end; i++) {
++            char c = name.charAt(i);
++            if (c == '.') {
++                if (lastWasDot) {
++                    throw new EncoderException("name contains empty label: " + name);
++                }
++                if (labelLen > MAX_LABEL_LENGTH) {
++                    throw new EncoderException("name label is longer than 63 bytes: " + name);
++                }
++                expandedLen += 1 + labelLen;
++                labelLen = 0;
++                lastWasDot = true;
++                continue;
++            }
++            if (c > 0x7f) {
++                throw new EncoderException("name contains non-ASCII character: " + name);
++            }
++            labelLen++;
++            lastWasDot = false;
++        }
++
++        if (lastWasDot) {
++            throw new EncoderException("name must not end with empty label: " + name);
++        }
++        if (labelLen > MAX_LABEL_LENGTH) {
++            throw new EncoderException("name label is longer than 63 bytes: " + name);
++        }
++        expandedLen += 1 + labelLen;
++
++        if (expandedLen > MAX_NAME_LENGTH) {
++            throw new EncoderException("name exceeds 255 bytes: " + name);
++        }
++    }
++
++    static void writeAscii(ByteBuf out, CharSequence value) {
++        ByteBufUtil.writeAscii(out, value);
++    }
++
++    private static void writeUnsignedShort(ByteBuf out, int value, String fieldName) {
++        if ((value & 0xFFFF0000) != 0) {
++            throw new EncoderException(fieldName + " does not fit into 16 bits: " + value);
++        }
++        out.writeShort(value);
++    }
++}
++
+diff --git a/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsNameEncoder.java b/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsNameEncoder.java
+new file mode 100644
+index 0000000..7706f01
+--- /dev/null
++++ b/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsNameEncoder.java
+@@ -0,0 +1,83 @@
++/*
++ * Copyright 2016 The Netty Project
++ *
++ * The Netty Project licenses this file to you under the Apache License,
++ * version 2.0 (the "License"); you may not use this file except in compliance
++ * with the License. You may obtain a copy of the License at:
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++ * License for the specific language governing permissions and limitations
++ * under the License.
++ */
++package io.netty.handler.codec.dns;
++
++import io.netty.buffer.ByteBuf;
++
++import java.util.HashMap;
++import java.util.Map;
++
++/**
++ * Stateful DNS name encoder which supports RFC1035 name compression.
++ */
++final class DnsNameEncoder {
++
++    private final int dnsStart;
++    private final Map<String, Integer> suffixes = new HashMap<String, Integer>(32);
++
++    DnsNameEncoder(int dnsStart) {
++        this.dnsStart = dnsStart;
++    }
++
++    void encodeName(String name, ByteBuf out) {
++        DnsCodecUtil.validateName(name);
++
++        if (name.isEmpty() || ".".equals(name)) {
++            out.writeByte(0);
 +            return;
 +        }
 +
-+        final int nameLen = name.length();
-+        int totalLen = 1; // includes the terminating zero byte
++        String normalized = name.charAt(name.length() - 1) == '.' ? name.substring(0, name.length() - 1) : name;
++        String[] labels = normalized.split("\\.");
 +
-+        int labelStart = 0;
-+        for (int i = 0; i <= nameLen; i++) {
-+            char c = i == nameLen ? '.' : name.charAt(i);
-+            if (c == '.') {
-+                int labelLen = i - labelStart;
-+                if (labelLen == 0) {
-+                    // Allow a trailing dot, but reject empty labels elsewhere.
-+                    if (i == nameLen) {
-+                        break;
-+                    }
-+                    throw new IllegalArgumentException("name contains an empty label: " + name);
-+                }
-+                if (labelLen > MAX_LABEL_LEN) {
-+                    throw new IllegalArgumentException("name contains a label longer than 63 characters: " + name);
-+                }
++        for (int i = 0; i < labels.length; i++) {
++            String suffix = join(labels, i);
 +
-+                totalLen += 1 + labelLen;
-+                if (totalLen > MAX_NAME_LEN) {
-+                    throw new IllegalArgumentException("name is too long: " + name);
-+                }
-+
-+                buf.writeByte(labelLen);
-+                for (int j = labelStart; j < i; j++) {
-+                    char labelChar = name.charAt(j);
-+                    if (labelChar > 0x7f) {
-+                        throw new IllegalArgumentException(
-+                                "name contains non-ASCII character: " + name);
-+                    }
-+                    buf.writeByte((byte) labelChar);
-+                }
-+
-+                labelStart = i + 1;
-+            } else if (c > 0x7f) {
-+                throw new IllegalArgumentException("name contains non-ASCII character: " + name);
++            Integer existingOffset = suffixes.get(suffix);
++            if (existingOffset != null) {
++                out.writeShort(0xC000 | existingOffset);
++                return;
 +            }
++
++            int offset = out.writerIndex() - dnsStart;
++            if (offset <= 0x3FFF) {
++                suffixes.put(suffix, offset);
++            }
++
++            String label = labels[i];
++            int len = label.length();
++            out.writeByte(len);
++            DnsCodecUtil.writeAscii(out, label);
 +        }
 +
-+        buf.writeByte(0); // marks end of name field
++        out.writeByte(0);
++    }
++
++    private static String join(String[] labels, int start) {
++        if (start == labels.length - 1) {
++            return labels[start];
++        }
++        StringBuilder b = new StringBuilder(64);
++        for (int i = start; i < labels.length; i++) {
++            if (i != start) {
++                b.append('.');
++            }
++            b.append(labels[i]);
++        }
++        return b.toString();
 +    }
 +}
 +
 diff --git a/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsQueryEncoder.java b/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsQueryEncoder.java
-index 2cdc562..d8c951b 100644
+index 2cdc562..2b3953a 100644
 --- a/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsQueryEncoder.java
 +++ b/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsQueryEncoder.java
-@@ -21,7 +21,6 @@ import io.netty.channel.ChannelHandlerContext;
+@@ -20,10 +20,7 @@ import io.netty.channel.ChannelHandler;
+ import io.netty.channel.ChannelHandlerContext;
  import io.netty.channel.socket.DatagramPacket;
  import io.netty.handler.codec.MessageToMessageEncoder;
- import io.netty.util.CharsetUtil;
+-import io.netty.util.CharsetUtil;
 -import io.netty.util.internal.StringUtil;
  
- import java.nio.charset.Charset;
+-import java.nio.charset.Charset;
  import java.util.List;
-@@ -57,12 +56,13 @@ public class DnsQueryEncoder extends MessageToMessageEncoder<DnsQuery> {
+ 
+ /**
+@@ -37,14 +34,10 @@ public class DnsQueryEncoder extends MessageToMessageEncoder<DnsQuery> {
+     @Override
+     protected void encode(ChannelHandlerContext ctx, DnsQuery query, List<Object> out) throws Exception {
+         ByteBuf buf = ctx.alloc().buffer();
++        DnsNameEncoder nameEncoder = newNameEncoder(buf);
+         encodeHeader(query.header(), buf);
+-        List<DnsQuestion> questions = query.questions();
+-        for (DnsQuestion question : questions) {
+-            encodeQuestion(question, CharsetUtil.US_ASCII, buf);
+-        }
+-        for (DnsResource resource: query.additionalResources()) {
+-            encodeResource(resource, CharsetUtil.US_ASCII, buf);
+-        }
++        encodeQuestions(query, nameEncoder, buf);
++        encodeAdditionals(query, nameEncoder, buf);
+         out.add(new DatagramPacket(buf, query.recipient(), null));
+     }
+ 
+@@ -57,17 +50,8 @@ public class DnsQueryEncoder extends MessageToMessageEncoder<DnsQuery> {
       * @param buf
       *            the buffer the encoded data should be written to
       */
 -    private static void encodeHeader(DnsHeader header, ByteBuf buf) {
-+    protected void encodeHeader(DnsHeader header, ByteBuf buf) {
-         buf.writeShort(header.id());
-         int flags = 0;
-         flags |= header.type() << 15;
+-        buf.writeShort(header.id());
+-        int flags = 0;
+-        flags |= header.type() << 15;
 -        flags |= header.opcode() << 14;
-+        flags |= (header.opcode() & 0xf) << 11;
-         flags |= header.isRecursionDesired() ? 1 << 8 : 0;
-+        flags |= (header.z() & 0x7) << 4;
-         buf.writeShort(flags);
-         buf.writeShort(header.questionCount());
-         buf.writeShort(0); // answerCount
-@@ -81,13 +81,13 @@ public class DnsQueryEncoder extends MessageToMessageEncoder<DnsQuery> {
-      * @param buf
+-        flags |= header.isRecursionDesired() ? 1 << 8 : 0;
+-        buf.writeShort(flags);
+-        buf.writeShort(header.questionCount());
+-        buf.writeShort(0); // answerCount
+-        buf.writeShort(0); // authorityResourceCount
+-        buf.writeShort(header.additionalResourceCount());
++    protected void encodeHeader(DnsHeader header, ByteBuf buf) {
++        DnsCodecUtil.encodeQueryHeader(header, buf);
+     }
+ 
+     /**
+@@ -76,41 +60,33 @@ public class DnsQueryEncoder extends MessageToMessageEncoder<DnsQuery> {
+      *
+      * @param question
+      *            the question being encoded
+-     * @param charset
+-     *            charset names are encoded in
+-     * @param buf
++     * @param nameEncoder
++     *            the encoder for DNS names (may compress)
++     * @param out
       *            the buffer the encoded data should be written to
       */
 -    private static void encodeQuestion(DnsQuestion question, Charset charset, ByteBuf buf) {
-+    protected void encodeQuestion(DnsQuestion question, Charset charset, ByteBuf buf) {
-         encodeName(question.name(), charset, buf);
-         buf.writeShort(question.type().intValue());
-         buf.writeShort(question.dnsClass().intValue());
+-        encodeName(question.name(), charset, buf);
+-        buf.writeShort(question.type().intValue());
+-        buf.writeShort(question.dnsClass().intValue());
++    protected void encodeQuestion(DnsQuestion question, DnsNameEncoder nameEncoder, ByteBuf out) {
++        DnsCodecUtil.encodeQuestion(question, nameEncoder, out);
      }
  
 -    private static void encodeResource(DnsResource resource, Charset charset, ByteBuf buf) {
-+    protected void encodeResource(DnsResource resource, Charset charset, ByteBuf buf) {
-         encodeName(resource.name(), charset, buf);
+-        encodeName(resource.name(), charset, buf);
+-
+-        buf.writeShort(resource.type().intValue());
+-        buf.writeShort(resource.dnsClass().intValue());
+-        buf.writeInt((int) resource.timeToLive());
++    protected void encodeResource(DnsResource resource, DnsNameEncoder nameEncoder, ByteBuf out) {
++        DnsCodecUtil.encodeResource(resource, nameEncoder, out);
++    }
  
-         buf.writeShort(resource.type().intValue());
-@@ -101,16 +101,43 @@ public class DnsQueryEncoder extends MessageToMessageEncoder<DnsQuery> {
-         buf.writeBytes(content, content.readerIndex(), contentLen);
+-        ByteBuf content = resource.content();
+-        int contentLen = content.readableBytes();
++    protected DnsNameEncoder newNameEncoder(ByteBuf out) {
++        return new DnsNameEncoder(out.writerIndex());
++    }
+ 
+-        buf.writeShort(contentLen);
+-        buf.writeBytes(content, content.readerIndex(), contentLen);
++    protected void encodeQuestions(DnsQuery query, DnsNameEncoder nameEncoder, ByteBuf out) {
++        List<DnsQuestion> questions = query.questions();
++        for (DnsQuestion question : questions) {
++            encodeQuestion(question, nameEncoder, out);
++        }
      }
  
 -    private static void encodeName(String name, Charset charset, ByteBuf buf) {
@@ -219,92 +397,87 @@ index 2cdc562..d8c951b 100644
 -            final int partLen = part.length();
 -            if (partLen == 0) {
 -                continue;
-+    protected void encodeName(String name, Charset charset, ByteBuf buf) {
-+        if (charset == CharsetUtil.US_ASCII) {
-+            DnsCodecUtil.encodeDomainName(buf, name);
-+            return;
-+        }
-+
-+        // Backward-compatible fallback for custom charsets.
-+        // Validation is intentionally delegated to the caller-provided charset behavior.
-+        if (name == null) {
-+            throw new NullPointerException("name");
-+        }
-+        if (name.length() == 0 || ".".equals(name)) {
-+            buf.writeByte(0);
-+            return;
-+        }
-+
-+        final int nameLen = name.length();
-+        int labelStart = 0;
-+        for (int i = 0; i <= nameLen; i++) {
-+            char c = i == nameLen ? '.' : name.charAt(i);
-+            if (c == '.') {
-+                int labelLen = i - labelStart;
-+                if (labelLen == 0) {
-+                    if (i == nameLen) {
-+                        break;
-+                    }
-+                    throw new IllegalArgumentException("name contains an empty label: " + name);
-+                }
-+                byte[] labelBytes = name.substring(labelStart, i).getBytes(charset);
-+                if (labelBytes.length > 63) {
-+                    throw new IllegalArgumentException("name contains a label longer than 63 bytes: " + name);
-+                }
-+                buf.writeByte(labelBytes.length);
-+                buf.writeBytes(labelBytes);
-+                labelStart = i + 1;
-             }
+-            }
 -            buf.writeByte(partLen);
 -            buf.writeBytes(part.getBytes(charset));
++    protected void encodeAdditionals(DnsQuery query, DnsNameEncoder nameEncoder, ByteBuf out) {
++        for (DnsResource resource : query.additionalResources()) {
++            encodeResource(resource, nameEncoder, out);
          }
 -        buf.writeByte(0); // marks end of name field
-+        buf.writeByte(0);
      }
  }
-diff --git a/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsQuestion.java b/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsQuestion.java
-index 4b7df6b..c05814f 100644
---- a/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsQuestion.java
-+++ b/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsQuestion.java
-@@ -51,10 +51,6 @@ public final class DnsQuestion extends DnsEntry {
-      */
-     public DnsQuestion(String name, DnsType type, DnsClass qClass) {
-         super(name, type, qClass);
--
--        if (name.isEmpty()) {
--            throw new IllegalArgumentException("name must not be left blank.");
--        }
-     }
- 
-     @Override
 diff --git a/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsResponseDecoder.java b/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsResponseDecoder.java
-index 957055a..9c43e6e 100644
+index 957055a..34834d7 100644
 --- a/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsResponseDecoder.java
 +++ b/codec-dns/src/main/java/io/netty/handler/codec/dns/DnsResponseDecoder.java
-@@ -19,9 +19,7 @@ import io.netty.buffer.ByteBuf;
- import io.netty.channel.ChannelHandler;
- import io.netty.channel.ChannelHandlerContext;
+@@ -21,7 +21,6 @@ import io.netty.channel.ChannelHandlerContext;
  import io.netty.channel.socket.DatagramPacket;
--import io.netty.handler.codec.CorruptedFrameException;
+ import io.netty.handler.codec.CorruptedFrameException;
  import io.netty.handler.codec.MessageToMessageDecoder;
 -import io.netty.util.CharsetUtil;
  
  import java.util.List;
  
-@@ -59,11 +57,6 @@ public class DnsResponseDecoder extends MessageToMessageDecoder<DatagramPacket>
+@@ -36,13 +35,23 @@ public class DnsResponseDecoder extends MessageToMessageDecoder<DatagramPacket>
+     @Override
+     protected void decode(ChannelHandlerContext ctx, DatagramPacket packet, List<Object> out) throws Exception {
+         ByteBuf buf = packet.content();
++        if (buf.readableBytes() < 12) {
++            throw new CorruptedFrameException("truncated DNS response header.");
++        }
++        final int dnsStart = buf.readerIndex();
++        final int dnsEnd = buf.writerIndex();
+ 
+         int id = buf.readUnsignedShort();
+ 
+         DnsResponse response = new DnsResponse(id, packet.sender());
+         DnsResponseHeader header = response.header();
+         int flags = buf.readUnsignedShort();
+-        header.setType(flags >> 15);
++
++        int type = flags >>> 15;
++        if (type != DnsHeader.TYPE_RESPONSE) {
++            throw new CorruptedFrameException("not a DNS response.");
++        }
++        header.setType(type);
+         header.setOpcode(flags >> 11 & 0xf);
+         header.setRecursionDesired((flags >> 8 & 1) == 1);
+         header.setAuthoritativeAnswer((flags >> 10 & 1) == 1);
+@@ -57,7 +66,7 @@ public class DnsResponseDecoder extends MessageToMessageDecoder<DatagramPacket>
+         int additionals = buf.readUnsignedShort();
+ 
          for (int i = 0; i < questions; i++) {
-             response.addQuestion(decodeQuestion(buf));
+-            response.addQuestion(decodeQuestion(buf));
++            response.addQuestion(decodeQuestion(buf, dnsStart, dnsEnd));
          }
--        if (header.responseCode() != DnsResponseCode.NOERROR) {
--            // response code for error
--            out.add(response);
--            return;
--        }
+         if (header.responseCode() != DnsResponseCode.NOERROR) {
+             // response code for error
+@@ -67,13 +76,13 @@ public class DnsResponseDecoder extends MessageToMessageDecoder<DatagramPacket>
          boolean release = true;
          try {
              for (int i = 0; i < answers; i++) {
-@@ -104,36 +97,8 @@ public class DnsResponseDecoder extends MessageToMessageDecoder<DatagramPacket>
+-                response.addAnswer(decodeResource(buf));
++                response.addAnswer(decodeResource(buf, dnsStart, dnsEnd));
+             }
+             for (int i = 0; i < authorities; i++) {
+-                response.addAuthorityResource(decodeResource(buf));
++                response.addAuthorityResource(decodeResource(buf, dnsStart, dnsEnd));
+             }
+             for (int i = 0; i < additionals; i++) {
+-                response.addAdditionalResource(decodeResource(buf));
++                response.addAdditionalResource(decodeResource(buf, dnsStart, dnsEnd));
+             }
+             out.add(response);
+             release = false;
+@@ -102,38 +111,14 @@ public class DnsResponseDecoder extends MessageToMessageDecoder<DatagramPacket>
+      *
+      * @param buf
       *            the byte buffer containing the DNS packet
++     * @param dnsStart
++     *            the start index of this DNS message in {@code buf}
++     * @param dnsEnd
++     *            the end index (exclusive) of this DNS message in {@code buf}
       * @return the domain name for an entry
       */
 -    private static String readName(ByteBuf buf) {
@@ -337,37 +510,62 @@ index 957055a..9c43e6e 100644
 -        }
 -
 -        return name.substring(0, name.length() - 1);
-+    protected String readName(ByteBuf buf) {
-+        return DnsCodecUtil.decodeDomainName(buf);
++    protected String readName(ByteBuf buf, int dnsStart, int dnsEnd) {
++        return DnsCodecUtil.decodeName(buf, dnsStart, dnsEnd);
      }
  
      /**
-@@ -143,7 +108,7 @@ public class DnsResponseDecoder extends MessageToMessageDecoder<DatagramPacket>
+@@ -141,10 +126,14 @@ public class DnsResponseDecoder extends MessageToMessageDecoder<DatagramPacket>
+      *
+      * @param buf
       *            the byte buffer containing the DNS packet
++     * @param dnsStart
++     *            the start index of this DNS message in {@code buf}
++     * @param dnsEnd
++     *            the end index (exclusive) of this DNS message in {@code buf}
       * @return a decoded {@link DnsQuestion}
       */
 -    private static DnsQuestion decodeQuestion(ByteBuf buf) {
-+    protected DnsQuestion decodeQuestion(ByteBuf buf) {
-         String name = readName(buf);
+-        String name = readName(buf);
++    protected DnsQuestion decodeQuestion(ByteBuf buf, int dnsStart, int dnsEnd) {
++        String name = readName(buf, dnsStart, dnsEnd);
          DnsType type = DnsType.valueOf(buf.readUnsignedShort());
          DnsClass qClass = DnsClass.valueOf(buf.readUnsignedShort());
-@@ -157,7 +122,7 @@ public class DnsResponseDecoder extends MessageToMessageDecoder<DatagramPacket>
+         return new DnsQuestion(name, type, qClass);
+@@ -155,15 +144,23 @@ public class DnsResponseDecoder extends MessageToMessageDecoder<DatagramPacket>
+      *
+      * @param buf
       *            the byte buffer containing the DNS packet
++     * @param dnsStart
++     *            the start index of this DNS message in {@code buf}
++     * @param dnsEnd
++     *            the end index (exclusive) of this DNS message in {@code buf}
       * @return a {@link DnsResource} record containing response data
       */
 -    private static DnsResource decodeResource(ByteBuf buf) {
-+    protected DnsResource decodeResource(ByteBuf buf) {
-         String name = readName(buf);
+-        String name = readName(buf);
++    protected DnsResource decodeResource(ByteBuf buf, int dnsStart, int dnsEnd) {
++        String name = readName(buf, dnsStart, dnsEnd);
          DnsType type = DnsType.valueOf(buf.readUnsignedShort());
          DnsClass aClass = DnsClass.valueOf(buf.readUnsignedShort());
-diff --git a/codec-dns/src/test/java/io/netty/handler/codec/dns/DnsCodecUtilTest.java b/codec-dns/src/test/java/io/netty/handler/codec/dns/DnsCodecUtilTest.java
+         long ttl = buf.readUnsignedInt();
+         int len = buf.readUnsignedShort();
+ 
++        if (len > buf.readableBytes()) {
++            throw new CorruptedFrameException("truncated resource record payload.");
++        }
++
+         int readerIndex = buf.readerIndex();
+         ByteBuf payload = buf.duplicate().setIndex(readerIndex, readerIndex + len).retain();
+         buf.readerIndex(readerIndex + len);
+diff --git a/codec-dns/src/test/java/io/netty/handler/codec/dns/DnsCodecComplianceTest.java b/codec-dns/src/test/java/io/netty/handler/codec/dns/DnsCodecComplianceTest.java
 new file mode 100644
-index 0000000..4493502
+index 0000000..7b16a60
 --- /dev/null
-+++ b/codec-dns/src/test/java/io/netty/handler/codec/dns/DnsCodecUtilTest.java
-@@ -0,0 +1,58 @@
++++ b/codec-dns/src/test/java/io/netty/handler/codec/dns/DnsCodecComplianceTest.java
+@@ -0,0 +1,135 @@
 +/*
-+ * Copyright 2013 The Netty Project
++ * Copyright 2016 The Netty Project
 + *
 + * The Netty Project licenses this file to you under the Apache License,
 + * version 2.0 (the "License"); you may not use this file except in compliance
@@ -384,140 +582,120 @@ index 0000000..4493502
 +package io.netty.handler.codec.dns;
 +
 +import io.netty.buffer.ByteBuf;
-+import io.netty.buffer.Unpooled;
++import io.netty.channel.embedded.EmbeddedChannel;
++import io.netty.channel.socket.DatagramPacket;
++import io.netty.handler.codec.CorruptedFrameException;
++import io.netty.handler.codec.EncoderException;
 +import org.junit.Assert;
++import org.junit.Rule;
 +import org.junit.Test;
++import org.junit.rules.ExpectedException;
 +
-+public class DnsCodecUtilTest {
++import java.net.InetSocketAddress;
++
++public class DnsCodecComplianceTest {
++
++    @Rule
++    public ExpectedException exception = ExpectedException.none();
 +
 +    @Test
-+    public void encodeRootDomainName() {
-+        ByteBuf out = Unpooled.buffer();
-+        DnsCodecUtil.encodeDomainName(out, "");
-+        Assert.assertEquals(1, out.readableBytes());
-+        Assert.assertEquals(0, out.readUnsignedByte());
++    public void queryOpcodeEncodedInCorrectBits() {
++        InetSocketAddress addr = new InetSocketAddress(0);
++        EmbeddedChannel channel = new EmbeddedChannel(new DnsQueryEncoder());
++        DnsQuery query = new DnsQuery(1, addr)
++                .addQuestion(new DnsQuestion("www.example.com", DnsType.A));
++        query.header().setOpcode(DnsHeader.OPCODE_IQUERY);
 +
-+        out.clear();
-+        DnsCodecUtil.encodeDomainName(out, ".");
-+        Assert.assertEquals(1, out.readableBytes());
-+        Assert.assertEquals(0, out.readUnsignedByte());
-+    }
-+
-+    @Test(expected = IllegalArgumentException.class)
-+    public void encodeRejectsEmptyLabel() {
-+        DnsCodecUtil.encodeDomainName(Unpooled.buffer(), "www..example.com");
-+    }
-+
-+    @Test(expected = IllegalArgumentException.class)
-+    public void encodeRejectsLeadingDot() {
-+        DnsCodecUtil.encodeDomainName(Unpooled.buffer(), ".example.com");
-+    }
-+
-+    @Test(expected = IllegalArgumentException.class)
-+    public void encodeRejectsTooLongLabel() {
-+        StringBuilder sb = new StringBuilder(80);
-+        for (int i = 0; i < 64; i++) {
-+            sb.append('a');
++        channel.writeOutbound(query);
++        DatagramPacket packet = channel.readOutbound();
++        try {
++            ByteBuf content = packet.content();
++            int flags = content.getUnsignedShort(2);
++            Assert.assertEquals(0x0900, flags);
++            Assert.assertEquals(0, flags & 0x4000);
++        } finally {
++            packet.release();
 +        }
-+        sb.append(".com");
-+        DnsCodecUtil.encodeDomainName(Unpooled.buffer(), sb.toString());
++    }
++
++    @Test
++    public void queryNameLabelTooLongFailsFast() {
++        InetSocketAddress addr = new InetSocketAddress(0);
++        EmbeddedChannel channel = new EmbeddedChannel(new DnsQueryEncoder());
++
++        StringBuilder label = new StringBuilder(64);
++        for (int i = 0; i < 64; i++) {
++            label.append('a');
++        }
++
++        DnsQuery query = new DnsQuery(1, addr)
++                .addQuestion(new DnsQuestion(label + ".com", DnsType.A));
++
++        exception.expect(EncoderException.class);
++        channel.writeOutbound(query);
++    }
++
++    @Test
++    public void queryNameTooLongFailsFast() {
++        InetSocketAddress addr = new InetSocketAddress(0);
++        EmbeddedChannel channel = new EmbeddedChannel(new DnsQueryEncoder());
++
++        StringBuilder label = new StringBuilder(63);
++        for (int i = 0; i < 63; i++) {
++            label.append('a');
++        }
++
++        String name = label + "." + label + "." + label + "." + label;
++        DnsQuery query = new DnsQuery(1, addr)
++                .addQuestion(new DnsQuestion(name, DnsType.A));
++
++        exception.expect(EncoderException.class);
++        channel.writeOutbound(query);
++    }
++
++    @Test
++    public void responseNamePointerOutOfRangeFails() {
++        byte[] packet = {
++                0, 1, -127, -128, 0, 1, 0, 0, 0, 0, 0, 0,
++                -64, -1, 0, 1, 0, 1
++        };
++        EmbeddedChannel channel = new EmbeddedChannel(new DnsResponseDecoder());
++
++        exception.expect(CorruptedFrameException.class);
++        ByteBuf content = channel.alloc().buffer(packet.length).writeBytes(packet);
++        channel.writeInbound(new DatagramPacket(content, null, new InetSocketAddress(0)));
++    }
++
++    @Test
++    public void responseNameLabelTooLongFails() {
++        byte[] packet = new byte[12 + 1 + 64 + 1 + 4];
++        int idx = 0;
++        packet[idx++] = 0;
++        packet[idx++] = 1;
++        packet[idx++] = -127;
++        packet[idx++] = -128;
++        packet[idx++] = 0;
++        packet[idx++] = 1;
++        packet[idx++] = 0;
++        packet[idx++] = 0;
++        packet[idx++] = 0;
++        packet[idx++] = 0;
++        packet[idx++] = 0;
++        packet[idx++] = 0;
++        packet[idx++] = 64;
++        for (int i = 0; i < 64; i++) {
++            packet[idx++] = 'a';
++        }
++        packet[idx++] = 0;
++        packet[idx++] = 0;
++        packet[idx++] = 1;
++        packet[idx++] = 0;
++        packet[idx++] = 1;
++
++        EmbeddedChannel channel = new EmbeddedChannel(new DnsResponseDecoder());
++        exception.expect(CorruptedFrameException.class);
++        ByteBuf content = channel.alloc().buffer(packet.length).writeBytes(packet);
++        channel.writeInbound(new DatagramPacket(content, null, new InetSocketAddress(0)));
 +    }
 +}
 +
-diff --git a/codec-dns/src/test/java/io/netty/handler/codec/dns/DnsQueryTest.java b/codec-dns/src/test/java/io/netty/handler/codec/dns/DnsQueryTest.java
-index fd9be0d..b62df15 100644
---- a/codec-dns/src/test/java/io/netty/handler/codec/dns/DnsQueryTest.java
-+++ b/codec-dns/src/test/java/io/netty/handler/codec/dns/DnsQueryTest.java
-@@ -18,6 +18,7 @@ package io.netty.handler.codec.dns;
- import io.netty.channel.embedded.EmbeddedChannel;
- 
- import io.netty.channel.socket.DatagramPacket;
-+import io.netty.buffer.ByteBuf;
- import org.junit.Assert;
- import org.junit.Test;
- 
-@@ -54,4 +55,21 @@ public class DnsQueryTest {
-             Assert.assertNull(embedder.readOutbound());
-         }
-     }
-+
-+    @Test
-+    public void writeQueryWithOpcodeTest() throws Exception {
-+        InetSocketAddress addr = new InetSocketAddress(0);
-+        DnsQuery query = new DnsQuery(1, addr).addQuestion(new DnsQuestion("www.example.com", DnsType.A));
-+        query.header().setOpcode(DnsHeader.OPCODE_IQUERY);
-+
-+        EmbeddedChannel embedder = new EmbeddedChannel(new DnsQueryEncoder());
-+        embedder.writeOutbound(query);
-+
-+        DatagramPacket packet = embedder.readOutbound();
-+        ByteBuf content = packet.content();
-+        int flags = content.getUnsignedShort(2);
-+        Assert.assertEquals((DnsHeader.OPCODE_IQUERY & 0xf) << 11, flags & 0x7800);
-+        packet.release();
-+        Assert.assertNull(embedder.readOutbound());
-+    }
- }
-diff --git a/resolver-dns/src/main/java/io/netty/resolver/dns/DnsNameResolverContext.java b/resolver-dns/src/main/java/io/netty/resolver/dns/DnsNameResolverContext.java
-index 538e2c9..0072080 100644
---- a/resolver-dns/src/main/java/io/netty/resolver/dns/DnsNameResolverContext.java
-+++ b/resolver-dns/src/main/java/io/netty/resolver/dns/DnsNameResolverContext.java
-@@ -18,13 +18,14 @@ package io.netty.resolver.dns;
- 
- import io.netty.buffer.ByteBuf;
- import io.netty.channel.socket.InternetProtocolFamily;
-+import io.netty.handler.codec.CorruptedFrameException;
-+import io.netty.handler.codec.dns.DnsCodecUtil;
- import io.netty.handler.codec.dns.DnsClass;
- import io.netty.handler.codec.dns.DnsQuestion;
- import io.netty.handler.codec.dns.DnsResource;
- import io.netty.handler.codec.dns.DnsResponse;
- import io.netty.handler.codec.dns.DnsResponseDecoder;
- import io.netty.handler.codec.dns.DnsType;
--import io.netty.util.CharsetUtil;
- import io.netty.util.ReferenceCountUtil;
- import io.netty.util.concurrent.Future;
- import io.netty.util.concurrent.FutureListener;
-@@ -397,38 +398,10 @@ final class DnsNameResolverContext {
-     static String decodeDomainName(ByteBuf buf) {
-         buf.markReaderIndex();
-         try {
--            int position = -1;
--            int checked = 0;
--            int length = buf.writerIndex();
--            StringBuilder name = new StringBuilder(64);
--            for (int len = buf.readUnsignedByte(); buf.isReadable() && len != 0; len = buf.readUnsignedByte()) {
--                boolean pointer = (len & 0xc0) == 0xc0;
--                if (pointer) {
--                    if (position == -1) {
--                        position = buf.readerIndex() + 1;
--                    }
--                    buf.readerIndex((len & 0x3f) << 8 | buf.readUnsignedByte());
--                    // check for loops
--                    checked += 2;
--                    if (checked >= length) {
--                        // Name contains a loop; give up.
--                        return null;
--                    }
--                } else {
--                    name.append(buf.toString(buf.readerIndex(), len, CharsetUtil.UTF_8)).append('.');
--                    buf.skipBytes(len);
--                }
--            }
--
--            if (position != -1) {
--                buf.readerIndex(position);
--            }
--
--            if (name.length() == 0) {
--                return null;
--            }
--
--            return name.substring(0, name.length() - 1);
-+            String name = DnsCodecUtil.decodeDomainName(buf);
-+            return name.length() == 0 ? null : name;
-+        } catch (CorruptedFrameException ignored) {
-+            return null;
-         } finally {
-             buf.resetReaderIndex();
-         }

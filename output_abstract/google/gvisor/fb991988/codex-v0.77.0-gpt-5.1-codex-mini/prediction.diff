@@ -1,31 +1,197 @@
 diff --git a/pkg/sentry/mm/BUILD b/pkg/sentry/mm/BUILD
-index a85ffde..572ec3c 100644
+index a85ffde..8b86c8c 100644
 --- a/pkg/sentry/mm/BUILD
 +++ b/pkg/sentry/mm/BUILD
 @@ -87,6 +87,7 @@ go_library(
          "mm.go",
          "pma.go",
          "pma_set.go",
-+        "private_refs.go",
++        "private_memory.go",
          "procfs.go",
          "save_restore.go",
          "shm.go",
-@@ -125,7 +126,10 @@ go_library(
- go_test(
-     name = "mm_test",
-     size = "small",
--    srcs = ["mm_test.go"],
-+    srcs = [
-+        "mm_test.go",
-+        "private_refs_test.go",
-+    ],
-     embed = [":mm"],
-     deps = [
-         "//pkg/sentry/arch",
+diff --git a/pkg/sentry/mm/README.md b/pkg/sentry/mm/README.md
+index e485a5c..25177fb 100644
+--- a/pkg/sentry/mm/README.md
++++ b/pkg/sentry/mm/README.md
+@@ -270,6 +270,9 @@ In the sentry:
+ -   Host VMAs are represented in the sentry by type [`mm.pma`][mm] ("platform
+     mapping area"), stored in `mm.MemoryManager.pmas`.
+ 
++-   Ownership of private pages allocated from `platform.Platform.Memory()` is
++    tracked separately from active pmas, by `mm.MemoryManager.privateMemory`.
++
+ -   Creation and destruction of host VMAs is abstracted through interface
+     methods
+     [`platform.AddressSpace.MapFile` and `platform.AddressSpace.Unmap`][platform].
+diff --git a/pkg/sentry/mm/lifecycle.go b/pkg/sentry/mm/lifecycle.go
+index 1ee8ae7..7d5a9ee 100644
+--- a/pkg/sentry/mm/lifecycle.go
++++ b/pkg/sentry/mm/lifecycle.go
+@@ -30,12 +30,12 @@ import (
+ // NewMemoryManager returns a new MemoryManager with no mappings and 1 user.
+ func NewMemoryManager(p platform.Platform) *MemoryManager {
+ 	return &MemoryManager{
+-		p:           p,
+-		haveASIO:    p.SupportsAddressSpaceIO(),
+-		privateRefs: &privateRefs{},
+-		users:       1,
+-		auxv:        arch.Auxv{},
+-		aioManager:  aioManager{contexts: make(map[uint64]*AIOContext)},
++		p:             p,
++		haveASIO:      p.SupportsAddressSpaceIO(),
++		privateMemory: &privateMemory{},
++		users:         1,
++		auxv:          arch.Auxv{},
++		aioManager:    aioManager{contexts: make(map[uint64]*AIOContext)},
+ 	}
+ }
+ 
+@@ -59,13 +59,13 @@ func (mm *MemoryManager) Fork(ctx context.Context) (*MemoryManager, error) {
+ 	mm.mappingMu.RLock()
+ 	defer mm.mappingMu.RUnlock()
+ 	mm2 := &MemoryManager{
+-		p:           mm.p,
+-		haveASIO:    mm.haveASIO,
+-		layout:      mm.layout,
+-		privateRefs: mm.privateRefs,
+-		users:       1,
+-		brk:         mm.brk,
+-		usageAS:     mm.usageAS,
++		p:             mm.p,
++		haveASIO:      mm.haveASIO,
++		layout:        mm.layout,
++		privateMemory: mm.privateMemory,
++		users:         1,
++		brk:           mm.brk,
++		usageAS:       mm.usageAS,
+ 		// "The child does not inherit its parent's memory locks (mlock(2),
+ 		// mlockall(2))." - fork(2). So lockedAS is 0 and defMLockMode is
+ 		// MLockNone, both of which are zero values. vma.mlockMode is reset
+@@ -139,7 +139,7 @@ func (mm *MemoryManager) Fork(ctx context.Context) (*MemoryManager, error) {
+ 			}
+ 		}
+ 		fr := srcpseg.fileRange()
+-		mm2.incPrivateRef(fr)
++		mm2.privateMemory.Inc(fr)
+ 		srcpseg.ValuePtr().file.IncRef(fr)
+ 		addrRange := srcpseg.Range()
+ 		mm2.addRSSLocked(addrRange)
+diff --git a/pkg/sentry/mm/mm.go b/pkg/sentry/mm/mm.go
+index e2c636f..5570bf2 100644
+--- a/pkg/sentry/mm/mm.go
++++ b/pkg/sentry/mm/mm.go
+@@ -18,16 +18,17 @@
+ // Lock order:
+ //
+ // fs locks, except for memmap.Mappable locks
+-//   mm.MemoryManager.metadataMu
+-//     mm.MemoryManager.mappingMu
+-//       Locks taken by memmap.Mappable methods other than Translate
+-//         mm.MemoryManager.activeMu
+-//           Locks taken by memmap.Mappable.Translate
+-//             mm.privateRefs.mu
+-//               platform.AddressSpace locks
+-//                 platform.File locks
+-//         mm.aioManager.mu
+-//           mm.AIOContext.mu
++//
++//	mm.MemoryManager.metadataMu
++//	  mm.MemoryManager.mappingMu
++//	    Locks taken by memmap.Mappable methods other than Translate
++//	      mm.MemoryManager.activeMu
++//	        Locks taken by memmap.Mappable.Translate
++//	          mm.privateMemory.mu
++//	            platform.AddressSpace locks
++//	              platform.File locks
++//	      mm.aioManager.mu
++//	        mm.AIOContext.mu
+ //
+ // Only mm.MemoryManager.Fork is permitted to lock mm.MemoryManager.activeMu in
+ // multiple mm.MemoryManagers, as it does so in a well-defined order (forked
+@@ -67,15 +68,12 @@ type MemoryManager struct {
+ 	// layout is set by the binary loader before the MemoryManager can be used.
+ 	layout arch.MmapLayout
+ 
+-	// privateRefs stores reference counts for private memory (memory whose
+-	// ownership is shared by one or more pmas instead of being owned by a
+-	// memmap.Mappable).
+-	//
+-	// NOTE: This should be replaced using refcounts on
+-	// platform.File.
++	// privateMemory tracks "ownership" references for private memory ranges
++	// allocated from p.Memory(). This is distinct from pma.file references,
++	// which track active pmas (resident mappings) for those same pages.
+ 	//
+-	// privateRefs is immutable.
+-	privateRefs *privateRefs
++	// privateMemory is immutable (shared by forks).
++	privateMemory *privateMemory
+ 
+ 	// users is the number of dependences on the mappings in the MemoryManager.
+ 	// When the number of references in users reaches zero, all mappings are
+@@ -388,7 +386,7 @@ type pma struct {
+ 	// private is true if this pma represents private memory.
+ 	//
+ 	// If private is true, file must be platform.Platform.Memory(), the pma
+-	// holds a reference on the mapped memory that is tracked in privateRefs,
++	// holds an ownership reference tracked in privateMemory,
+ 	// and calls to Invalidate for which
+ 	// memmap.InvalidateOpts.InvalidatePrivate is false should ignore the pma.
+ 	//
+@@ -401,16 +399,6 @@ type pma struct {
+ 	internalMappings safemem.BlockSeq `state:"nosave"`
+ }
+ 
+-// +stateify savable
+-type privateRefs struct {
+-	mu sync.Mutex `state:"nosave"`
+-
+-	// refs maps offsets into Platform.Memory() to the number of pmas (or,
+-	// equivalently, MemoryManagers) that share ownership of the memory at that
+-	// offset.
+-	refs fileRefcountSet
+-}
+-
+ type invalidateArgs struct {
+ 	ar   usermem.AddrRange
+ 	opts memmap.InvalidateOpts
 diff --git a/pkg/sentry/mm/pma.go b/pkg/sentry/mm/pma.go
-index d102035..59a6023 100644
+index d102035..2710ed4 100644
 --- a/pkg/sentry/mm/pma.go
 +++ b/pkg/sentry/mm/pma.go
+@@ -333,7 +333,7 @@ func (mm *MemoryManager) insertPMAsLocked(ctx context.Context, vseg vmaIterator,
+ 		if err != nil {
+ 			return pgap, err
+ 		}
+-		mm.incPrivateRef(fr)
++		mm.privateMemory.Inc(fr)
+ 
+ 		if checkInvariants {
+ 			if !fr.WellFormed() || fr.Length() != uint64(allocAR.Length()) {
+@@ -448,11 +448,11 @@ func (mm *MemoryManager) breakCopyOnWriteLocked(pseg pmaIterator, ar usermem.Add
+ 			if fr.Length() == 0 {
+ 				return pseg.PrevGap(), invalidatedIterators, err
+ 			}
+-			mm.incPrivateRef(fr)
++			mm.privateMemory.Inc(fr)
+ 			mem.IncRef(fr)
+ 
+ 			// Unmap all of maskAR, not just copyAR, to minimize host syscalls.
+-			// AddressSpace mappings must be removed before mm.decPrivateRef().
++			// AddressSpace mappings must be removed before privateMemory.Dec().
+ 			if !didUnmapAS {
+ 				mm.unmapASLocked(maskAR)
+ 				didUnmapAS = true
+@@ -467,7 +467,7 @@ func (mm *MemoryManager) breakCopyOnWriteLocked(pseg pmaIterator, ar usermem.Add
+ 			}
+ 			pma := pseg.ValuePtr()
+ 			if pma.private {
+-				mm.decPrivateRef(pseg.fileRange())
++				mm.privateMemory.Dec(mm.p.Memory(), pseg.fileRange())
+ 			}
+ 			pma.file.DecRef(pseg.fileRange())
+ 
 @@ -519,12 +519,8 @@ func (mm *MemoryManager) isPMACopyOnWriteLocked(pseg pmaIterator) bool {
  	// ownership of it instead of copying. If we do hold the only reference,
  	// additional references can only be taken by mm.Fork(), which is excluded
@@ -36,14 +202,31 @@ index d102035..59a6023 100644
 -	// This check relies on mm.privateRefs.refs being kept fully merged.
 -	rseg := mm.privateRefs.refs.FindSegment(fr.Start)
 -	if rseg.Ok() && rseg.Value() == 1 && fr.End <= rseg.End() {
-+	if mm.privateRefs.soleOwner(fr) {
++	if mm.privateMemory.IsSoleOwner(fr) {
  		pma.needCOW = false
  		return false
  	}
-@@ -842,47 +838,13 @@ func (mm *MemoryManager) vecInternalMappingsLocked(ars usermem.AddrRangeSeq) saf
+@@ -570,12 +566,12 @@ func (mm *MemoryManager) invalidateLocked(ar usermem.AddrRange, invalidatePrivat
+ 			if !didUnmapAS {
+ 				// Unmap all of ar, not just pseg.Range(), to minimize host
+ 				// syscalls. AddressSpace mappings must be removed before
+-				// mm.decPrivateRef().
++				// privateMemory.Dec().
+ 				mm.unmapASLocked(ar)
+ 				didUnmapAS = true
+ 			}
+ 			if pma.private {
+-				mm.decPrivateRef(pseg.fileRange())
++				mm.privateMemory.Dec(mm.p.Memory(), pseg.fileRange())
+ 			}
+ 			mm.removeRSSLocked(pseg.Range())
+ 			pma.file.DecRef(pseg.fileRange())
+@@ -840,53 +836,6 @@ func (mm *MemoryManager) vecInternalMappingsLocked(ars usermem.AddrRangeSeq) saf
+ 	return safemem.BlockSeqFromSlice(ims)
+ }
  
- // incPrivateRef acquires a reference on private pages in fr.
- func (mm *MemoryManager) incPrivateRef(fr platform.FileRange) {
+-// incPrivateRef acquires a reference on private pages in fr.
+-func (mm *MemoryManager) incPrivateRef(fr platform.FileRange) {
 -	mm.privateRefs.mu.Lock()
 -	defer mm.privateRefs.mu.Unlock()
 -	refSet := &mm.privateRefs.refs
@@ -61,11 +244,10 @@ index d102035..59a6023 100644
 -			return
 -		}
 -	}
-+	mm.privateRefs.inc(fr)
- }
- 
- // decPrivateRef releases a reference on private pages in fr.
- func (mm *MemoryManager) decPrivateRef(fr platform.FileRange) {
+-}
+-
+-// decPrivateRef releases a reference on private pages in fr.
+-func (mm *MemoryManager) decPrivateRef(fr platform.FileRange) {
 -	var freed []platform.FileRange
 -
 -	mm.privateRefs.mu.Lock()
@@ -84,97 +266,21 @@ index d102035..59a6023 100644
 -	refSet.MergeAdjacent(fr)
 -	mm.privateRefs.mu.Unlock()
 -
- 	mem := mm.p.Memory()
+-	mem := mm.p.Memory()
 -	for _, fr := range freed {
-+	for _, fr := range mm.privateRefs.dec(fr) {
- 		mem.DecRef(fr)
- 	}
- }
-diff --git a/pkg/sentry/mm/private_refs.go b/pkg/sentry/mm/private_refs.go
+-		mem.DecRef(fr)
+-	}
+-}
+-
+ // addRSSLocked updates the current and maximum resident set size of a
+ // MemoryManager to reflect the insertion of a pma at ar.
+ //
+diff --git a/pkg/sentry/mm/private_memory.go b/pkg/sentry/mm/private_memory.go
 new file mode 100644
-index 0000000..7b1d3c5
+index 0000000..041fb8d
 --- /dev/null
-+++ b/pkg/sentry/mm/private_refs.go
-@@ -0,0 +1,73 @@
-+// Copyright 2018 Google LLC
-+//
-+// Licensed under the Apache License, Version 2.0 (the "License");
-+// you may not use this file except in compliance with the License.
-+// You may obtain a copy of the License at
-+//
-+//     http://www.apache.org/licenses/LICENSE-2.0
-+//
-+// Unless required by applicable law or agreed to in writing, software
-+// distributed under the License is distributed on an "AS IS" BASIS,
-+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-+// See the License for the specific language governing permissions and
-+// limitations under the License.
-+
-+package mm
-+
-+import "gvisor.googlesource.com/gvisor/pkg/sentry/platform"
-+
-+// inc acquires a reference on private pages in fr.
-+func (pr *privateRefs) inc(fr platform.FileRange) {
-+	pr.mu.Lock()
-+	defer pr.mu.Unlock()
-+
-+	refSet := &pr.refs
-+	seg, gap := refSet.Find(fr.Start)
-+	for {
-+		switch {
-+		case seg.Ok() && seg.Start() < fr.End:
-+			seg = refSet.Isolate(seg, fr)
-+			seg.SetValue(seg.Value() + 1)
-+			seg, gap = seg.NextNonEmpty()
-+		case gap.Ok() && gap.Start() < fr.End:
-+			seg, gap = refSet.InsertWithoutMerging(gap, gap.Range().Intersect(fr), 1).NextNonEmpty()
-+		default:
-+			refSet.MergeAdjacent(fr)
-+			return
-+		}
-+	}
-+}
-+
-+// dec releases a reference on private pages in fr, returning the ranges that
-+// should have their references released on platform.Platform.Memory().
-+func (pr *privateRefs) dec(fr platform.FileRange) []platform.FileRange {
-+	var freed []platform.FileRange
-+
-+	pr.mu.Lock()
-+	refSet := &pr.refs
-+	seg := refSet.LowerBoundSegment(fr.Start)
-+	for seg.Ok() && seg.Start() < fr.End {
-+		seg = refSet.Isolate(seg, fr)
-+		if old := seg.Value(); old == 1 {
-+			freed = append(freed, seg.Range())
-+			seg = refSet.Remove(seg).NextSegment()
-+		} else {
-+			seg.SetValue(old - 1)
-+			seg = seg.NextSegment()
-+		}
-+	}
-+	refSet.MergeAdjacent(fr)
-+	pr.mu.Unlock()
-+
-+	return freed
-+}
-+
-+// soleOwner returns true if exactly one reference is held on all pages in fr.
-+func (pr *privateRefs) soleOwner(fr platform.FileRange) bool {
-+	pr.mu.Lock()
-+	defer pr.mu.Unlock()
-+
-+	// This check relies on pr.refs being kept fully merged.
-+	rseg := pr.refs.FindSegment(fr.Start)
-+	return rseg.Ok() && rseg.Value() == 1 && fr.End <= rseg.End()
-+}
-diff --git a/pkg/sentry/mm/private_refs_test.go b/pkg/sentry/mm/private_refs_test.go
-new file mode 100644
-index 0000000..50e2605
---- /dev/null
-+++ b/pkg/sentry/mm/private_refs_test.go
-@@ -0,0 +1,67 @@
++++ b/pkg/sentry/mm/private_memory.go
+@@ -0,0 +1,94 @@
 +// Copyright 2018 Google LLC
 +//
 +// Licensed under the Apache License, Version 2.0 (the "License");
@@ -192,53 +298,99 @@ index 0000000..50e2605
 +package mm
 +
 +import (
-+	"testing"
++	"sync"
 +
 +	"gvisor.googlesource.com/gvisor/pkg/sentry/platform"
 +)
 +
-+func TestPrivateRefsMergeSoleOwnerAndFree(t *testing.T) {
-+	var pr privateRefs
++// privateMemory tracks "ownership" references for platform.Memory ranges used
++// as private (anonymous or COW-copied) pages.
++//
++// This ownership is distinct from pma.file references, which track active pmas
++// (resident mappings) for those same pages.
++//
++// +stateify savable
++type privateMemory struct {
++	mu sync.Mutex `state:"nosave"`
 +
-+	fr0 := platform.FileRange{Start: 0x0, End: 0x3000}
-+	fr1 := platform.FileRange{Start: 0x3000, End: 0x4000}
-+	full := platform.FileRange{Start: 0x0, End: 0x4000}
++	// refs maps offsets into Platform.Memory() to the number of MemoryManagers
++	// that share ownership of the memory at that offset.
++	refs fileRefcountSet
++}
 +
-+	pr.inc(fr0)
-+	if !pr.soleOwner(fr0) {
-+		t.Fatalf("soleOwner(%v) = false, want true", fr0)
-+	}
++// Inc acquires an ownership reference on private pages in fr.
++func (pm *privateMemory) Inc(fr platform.FileRange) {
++	pm.mu.Lock()
++	defer pm.mu.Unlock()
 +
-+	// Ensure that adjacent ranges with identical refcounts are merged, since
-+	// soleOwner() relies on the refcount set being fully merged.
-+	pr.inc(fr1)
-+	if !pr.soleOwner(full) {
-+		t.Fatalf("soleOwner(%v) = false, want true (expected merged refcount segments)", full)
-+	}
-+
-+	// Create a refcount split: [0,0x3000) => 2, [0x3000,0x4000) => 1.
-+	pr.inc(fr0)
-+	if pr.soleOwner(fr0) {
-+		t.Fatalf("soleOwner(%v) = true, want false (refcount > 1)", fr0)
-+	}
-+	if pr.soleOwner(full) {
-+		t.Fatalf("soleOwner(%v) = true, want false (mixed refcounts)", full)
-+	}
-+
-+	// Drop back to a single owner, which should re-merge.
-+	if freed := pr.dec(fr0); len(freed) != 0 {
-+		t.Fatalf("dec(%v) freed %v, want none", fr0, freed)
-+	}
-+	if !pr.soleOwner(full) {
-+		t.Fatalf("soleOwner(%v) = false, want true (expected re-merged refcount segments)", full)
-+	}
-+
-+	// Release the final reference; the full range should be freed.
-+	freed := pr.dec(full)
-+	if len(freed) != 1 || freed[0] != full {
-+		t.Fatalf("dec(%v) freed %v, want [%v]", full, freed, full)
-+	}
-+	if pr.soleOwner(full) {
-+		t.Fatalf("soleOwner(%v) = true, want false (no references remain)", full)
++	refSet := &pm.refs
++	seg, gap := refSet.Find(fr.Start)
++	for {
++		switch {
++		case seg.Ok() && seg.Start() < fr.End:
++			seg = refSet.Isolate(seg, fr)
++			seg.SetValue(seg.Value() + 1)
++			seg, gap = seg.NextNonEmpty()
++		case gap.Ok() && gap.Start() < fr.End:
++			seg, gap = refSet.InsertWithoutMerging(gap, gap.Range().Intersect(fr), 1).NextNonEmpty()
++		default:
++			refSet.MergeAdjacent(fr)
++			return
++		}
 +	}
 +}
++
++// Dec releases an ownership reference on private pages in fr.
++func (pm *privateMemory) Dec(mem platform.Memory, fr platform.FileRange) {
++	var freed []platform.FileRange
++
++	pm.mu.Lock()
++	refSet := &pm.refs
++	seg := refSet.LowerBoundSegment(fr.Start)
++	for seg.Ok() && seg.Start() < fr.End {
++		seg = refSet.Isolate(seg, fr)
++		if old := seg.Value(); old == 1 {
++			freed = append(freed, seg.Range())
++			seg = refSet.Remove(seg).NextSegment()
++		} else {
++			seg.SetValue(old - 1)
++			seg = seg.NextSegment()
++		}
++	}
++	refSet.MergeAdjacent(fr)
++	pm.mu.Unlock()
++
++	for _, freedFR := range freed {
++		mem.DecRef(freedFR)
++	}
++}
++
++// IsSoleOwner returns true if the calling MemoryManager is the only owner of
++// the private pages in fr.
++func (pm *privateMemory) IsSoleOwner(fr platform.FileRange) bool {
++	pm.mu.Lock()
++	defer pm.mu.Unlock()
++
++	// This relies on pm.refs being kept fully merged.
++	rseg := pm.refs.FindSegment(fr.Start)
++	return rseg.Ok() && rseg.Value() == 1 && fr.End <= rseg.End()
++}
+diff --git a/pkg/sentry/mm/syscalls.go b/pkg/sentry/mm/syscalls.go
+index fd6929e..2fac155 100644
+--- a/pkg/sentry/mm/syscalls.go
++++ b/pkg/sentry/mm/syscalls.go
+@@ -997,12 +997,12 @@ func (mm *MemoryManager) Decommit(addr usermem.Addr, length uint64) error {
+ 			if !didUnmapAS {
+ 				// Unmap all of ar, not just pseg.Range(), to minimize host
+ 				// syscalls. AddressSpace mappings must be removed before
+-				// mm.decPrivateRef().
++				// privateMemory.Dec().
+ 				mm.unmapASLocked(ar)
+ 				didUnmapAS = true
+ 			}
+ 			if pma.private {
+-				mm.decPrivateRef(pseg.fileRange())
++				mm.privateMemory.Dec(mm.p.Memory(), pseg.fileRange())
+ 			}
+ 			pma.file.DecRef(pseg.fileRange())
+ 			mm.removeRSSLocked(pseg.Range())
