@@ -65,8 +65,8 @@ def bootstrap_runtime_phase(
             podman_utils.copy_to_container(container, f.read(), "/usr/local/bin/entrypoint.sh")
         container.exec_run(["bash", "-c", "timeout 5m sudo chmod +x /usr/local/bin/entrypoint.sh"])
 
-        # 2. Inject Rules & Descriptions
-        for folder, target in [("rules", "/rules"), ("descriptions", "/task_description")]:
+        # 2. Inject Rules (descriptions are now provided at inference time)
+        for folder, target in [("rules", "/rules")]:
             src = project_root / row.asset_dir(folder)
             if src.exists():
                 for filename in os.listdir(src):

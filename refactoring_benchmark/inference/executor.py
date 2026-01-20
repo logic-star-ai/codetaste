@@ -26,7 +26,6 @@ from refactoring_benchmark.podman import utils as podman_utils
 from refactoring_benchmark.utils.logger import get_logger
 from refactoring_benchmark.utils.models import InstanceRow
 
-ABSTRACT_HEADER = """Perform the task described below in it's ENTIRETY. You operate completely AUTONOMOUSLY in this sandboxed environment. You must EDIT the codebase DIRECTLY to complete the task.\n"""
 
 def _output_container_logs(container: PodmanContainer, output_path: Path, instance_logger: logging.Logger) -> None:
     """Helper to output container logs to file and logger."""
@@ -47,23 +46,43 @@ def _cleanup_temp_dir(temp_description_dir: Path, instance_logger: logging.Logge
             except Exception as e2:
                 instance_logger.error(f"Failed to remove temporary description directory: {e}, {e2}")
 
-def _prepare_temp_description(instance: InstanceRow, instance_logger: logging.Logger) -> Path:
+def _prepare_temp_description(instance: InstanceRow, description_type: str, instance_logger: logging.Logger) -> Path:
     project_root = Path(__file__).parent.parent.parent
     source_dir = project_root / instance.asset_dir("descriptions")
-    # don't use tempfile because of sticky bit
-    path = "./.tmp_descriptions/" + instance.id + "-" + secrets.token_hex(8)
-    temp_dir = Path(path)
-    if source_dir.exists():
-        shutil.copytree(source_dir, temp_dir, dirs_exist_ok=True)
-    for abstract_file in temp_dir.rglob("abstract_description.md"):
-        try:
-            content = abstract_file.read_text(encoding="utf-8")
-            abstract_file.write_text(ABSTRACT_HEADER + content, encoding="utf-8")
-        except Exception as e:
-            instance_logger.error(f"Failed to prepend header to {abstract_file}: {e}")   
+
+    type_to_file = {
+        "standard": "description.md",
+        "minimal": "minimal_description.md",
+        "nano": "nano_description.md",
+        "open": "open_description.md",
+        "abstract": "abstract_description.md",
+    }
+
+    source_filename = type_to_file.get(description_type)
+    if not source_filename:
+        raise ValueError(f"Unknown description_type: {description_type}. Valid types: {list(type_to_file.keys())}")
+
+    source_file = source_dir / source_filename
+    if not source_file.exists():
+        raise FileNotFoundError(
+            f"Description file not found for type '{description_type}': {source_file}. "
+            f"Ensure the file exists in {source_dir}"
+        )
+
+    # Create temporary directory (don't use tempfile due to sticky bit issues)
+    temp_dir = Path(f"./.tmp_descriptions/{instance.id}-{secrets.token_hex(8)}")
+    temp_dir.mkdir(parents=True, exist_ok=True)
+
+    # Copy content as description.md (agents always read description.md)
+    target_file = temp_dir / "description.md"
+    content = source_file.read_text(encoding="utf-8")
+    target_file.write_text(content, encoding="utf-8")
+
+    # Set permissive permissions for container access
     os.chmod(temp_dir, 0o777)
-    for path in temp_dir.rglob('*'):
-        os.chmod(path, 0o777)
+    os.chmod(target_file, 0o777)
+
+    instance_logger.debug(f"Prepared description: {source_filename} -> description.md")
     return temp_dir
 
 def run_single_instance(instance: InstanceRow, config: InferenceConfig) -> bool:
@@ -96,7 +115,7 @@ def run_single_instance(instance: InstanceRow, config: InferenceConfig) -> bool:
         return False
 
     container: Optional[PodmanContainer] = None
-    temp_description_dir: Path = _prepare_temp_description(instance, instance_logger).resolve()
+    temp_description_dir: Path = _prepare_temp_description(instance, config.description_type, instance_logger).resolve()
     try:
         # 3. Execute Container
         instance_logger.info(f"Starting inference for {instance.display_path}")
