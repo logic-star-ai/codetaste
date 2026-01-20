@@ -17,13 +17,16 @@ def metric_ifr(result: EvaluationResult) -> float:
     """Total IFR metric (0-1 range)."""
     return result.agent_rule_metrics.ifr
 
+
 def metric_ifr_added(result: EvaluationResult) -> float:
     """IFR for added lines only (0-1 range)."""
     return result.agent_rule_metrics.positive_ifr
 
+
 def metric_ifr_removed(result: EvaluationResult) -> float:
     """IFR for removed lines only (0-1 range)."""
     return result.agent_rule_metrics.negative_ifr
+
 
 def metric_ifr_ratio(result: EvaluationResult) -> float | None:
     """Ratio of removed IFR to total IFR (0-1 range, None if no rules)."""
@@ -34,6 +37,7 @@ def metric_ifr_ratio(result: EvaluationResult) -> float | None:
         return 0.0
     return removed_ifr / total
 
+
 def metric_test_success(result: EvaluationResult) -> float:
     """Test success metric (1.0 if valid, 0.0 otherwise, None if no test data)."""
     if check_test_validity(result) == ValidityStatus.VALID:
@@ -41,20 +45,23 @@ def metric_test_success(result: EvaluationResult) -> float:
     else:
         return 0.0
 
+
 def metric_ifr_x_test_success(result: EvaluationResult) -> float | None:
     """Combined IFR x Test Success metric."""
     return metric_ifr(result) * metric_test_success(result)
 
+
 def metric_f1_score(result: EvaluationResult) -> float | None:
     """Harmonic mean of precision and instruction following (recall)."""
     p = metric_precision_overall(result)
-    r = metric_ifr(result) # Your TPR equivalent
-    
+    r = metric_ifr(result)  # Your TPR equivalent
+
     if p is not None and r is not None:
         if (p + r) == 0:
             return 0.0
         return 2 * (p * r) / (p + r)
     return None
+
 
 def _calculate_precision(result: EvaluationResult) -> InstanceAgentPrecision | None:
     """Helper to calculate precision metrics (requires ./output_pseudo_agents/)."""
@@ -78,11 +85,13 @@ def metric_precision_overall(result: EvaluationResult) -> float | None:
     precision_result = _calculate_precision(result)
     return precision_result.metrics.precision_overall if precision_result else None
 
+
 def metric_cost(result: EvaluationResult) -> float | None:
     """Cost in USD (None if not available)."""
     if result.inference_metadata is None:
         return None
     return result.inference_metadata.cost_usd
+
 
 # Registry of available metrics
 METRICS: dict[str, MetricFunction] = {
@@ -96,7 +105,7 @@ METRICS: dict[str, MetricFunction] = {
     "precision_added": metric_precision_added,
     "precision_removed": metric_precision_removed,
     "precision_overall": metric_precision_overall,
-    "cost": metric_cost
+    "cost": metric_cost,
 }
 
 # All available metrics

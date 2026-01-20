@@ -14,6 +14,7 @@ from refactoring_benchmark.inference.models import InferenceMetadata
 from refactoring_benchmark.utils.models import InstanceRow
 from podman.domain.containers import Container as PodmanContainer
 
+
 def get_instance_output_dir(instance: InstanceRow, agent_id: str, output_dir: Path) -> Path:
     """
     Construct the output directory path for a given instance and agent.
@@ -96,6 +97,7 @@ def output_exists(output_dir: Path) -> bool:
     prediction_path = output_dir / "prediction.diff"
     return prediction_path.exists() and prediction_path.stat().st_size > 3
 
+
 def output_container_logs(container: PodmanContainer, output_path: Path, instance_logger: logging.Logger) -> None:
     """Helper to output container logs to file and logger."""
     raw_logs = container.logs(stream=False, follow=False)
@@ -103,6 +105,7 @@ def output_container_logs(container: PodmanContainer, output_path: Path, instanc
     stdout = raw_logs.decode("utf-8", errors="replace")
     instance_logger.error(stdout)
     output_path.write_text(stdout, encoding="utf-8")
+
 
 def cleanup_temp_dir(temp_description_dir: Path, instance_logger: logging.Logger) -> None:
     """Helper to cleanup temporary description directory."""
@@ -114,6 +117,7 @@ def cleanup_temp_dir(temp_description_dir: Path, instance_logger: logging.Logger
                 subprocess.run(["podman", "unshare", "rm", "-rf", str(temp_description_dir)], check=False)
             except Exception as e2:
                 instance_logger.error(f"Failed to remove temporary description directory: {e}, {e2}")
+
 
 def prepare_temp_description(instance: InstanceRow, description_type: str, instance_logger: logging.Logger) -> Path:
     project_root = Path(__file__).parent.parent.parent

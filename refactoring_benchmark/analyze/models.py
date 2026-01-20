@@ -12,7 +12,7 @@ class MetricPoint(BaseModel):
     """Single metric value for one instance."""
 
     instance_key: str = Field(description="Instance identifier (owner/repo/hash)")
-    value: float # = Field(ge=0, le=1, description="Metric value in [0, 1] range")
+    value: float  # = Field(ge=0, le=1, description="Metric value in [0, 1] range")
 
 
 class AgentDescriptionData(BaseModel):
@@ -47,12 +47,12 @@ class AgentDescriptionData(BaseModel):
         if n <= 1:
             m = self.mean
             return (m, m)
-        
+
         m = self.mean
         se = self.standard_error
-        
+
         # Use t-distribution for small samples, which approaches Z as n grows
-        h = se * stats.t.ppf((1 + confidence) / 2., n - 1)
+        h = se * stats.t.ppf((1 + confidence) / 2.0, n - 1)
         return m - h, m + h
 
     @property

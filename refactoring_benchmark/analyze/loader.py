@@ -53,7 +53,6 @@ def load_all_results(
         else:
             agent_ids = []
 
-
     # Load from all output directories
     for output_dir in output_dirs:
         for instance in instances:
@@ -80,7 +79,6 @@ def load_all_results(
             print(f"    - {path}: {error}")
 
     return results
-
 
 
 def organize_data(
@@ -124,10 +122,12 @@ def organize_data(
             continue
 
         # Create instance key
-        instance_key = f"{result.instance_metadata.owner}/{result.instance_metadata.repo}/{result.instance_metadata.base_hash[:8]}"
+        instance_key = (
+            f"{result.instance_metadata.owner}/{result.instance_metadata.repo}/{result.instance_metadata.base_hash[:8]}"
+        )
 
         # Add to analysis data
-        analysis_data.add_metric_point(agent_id, description_type, instance_key, metric_value) 
+        analysis_data.add_metric_point(agent_id, description_type, instance_key, metric_value)
     return analysis_data
 
 

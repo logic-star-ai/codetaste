@@ -1,4 +1,3 @@
-
 import shutil
 from pathlib import Path
 from typing import Optional
@@ -104,7 +103,9 @@ class InstanceInferenceRunner:
         self.logger.info(f"  Output: {self.output_dir}")
 
         env = {**self.config.env_vars, "DESCRIPTION_TYPE": self.config.description_type}
-        self.logger.debug(f"  Environment Variables: {[(k, v[:10] if isinstance(v, str) else v) for k, v in env.items()]}")
+        self.logger.debug(
+            f"  Environment Variables: {[(k, v[:10] if isinstance(v, str) else v) for k, v in env.items()]}"
+        )
 
         try:
             # Run container
@@ -117,12 +118,16 @@ class InstanceInferenceRunner:
                 volumes={
                     str(self.config.agent_dir): {"bind": "/agent", "mode": "rw"},
                     str(self.output_dir): {"bind": "/output", "mode": "rw"},
-                    str(self.temp_description_dir): {"bind": "/task_description", "mode": "rw", "extended_mode": ["U", "z"]},
+                    str(self.temp_description_dir): {
+                        "bind": "/task_description",
+                        "mode": "rw",
+                        "extended_mode": ["U", "z"],
+                    },
                 },
                 network_mode="host",
                 working_dir="/testbed",
                 remove=False,
-                nano_cpus=int(8e9)
+                nano_cpus=int(8e9),
             )
 
             # Wait for completion
@@ -134,7 +139,7 @@ class InstanceInferenceRunner:
                     self.output_dir,
                     "timeout",
                     description_type=self.config.description_type,
-                    additional={"error": f"Container timed out: {str(e)}"}
+                    additional={"error": f"Container timed out: {str(e)}"},
                 )
 
             # Output logs
@@ -185,7 +190,9 @@ class InstanceInferenceRunner:
             try:
                 self.container.remove(force=True)
             except Exception as e:
-                self.logger.warning(f"Failed to remove container [{self.instance.id}]. Probably already removed. Error: {e}")
+                self.logger.warning(
+                    f"Failed to remove container [{self.instance.id}]. Probably already removed. Error: {e}"
+                )
 
         if self.temp_description_dir:
             cleanup_temp_dir(self.temp_description_dir, self.logger)
@@ -223,5 +230,3 @@ class InstanceInferenceRunner:
         finally:
             # Phase 5: Cleanup
             self.cleanup()
-
-

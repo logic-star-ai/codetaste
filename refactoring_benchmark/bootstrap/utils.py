@@ -95,7 +95,7 @@ def setup_testbed_container(
         environment={"ANTHROPIC_API_KEY": api_key},
         working_dir="/testbed",
         remove=True,
-        nano_cpus=int(16e9)
+        nano_cpus=int(16e9),
     )
 
     for cmd in [

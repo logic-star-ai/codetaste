@@ -53,6 +53,7 @@ def filter_by_agent_id(agent_ids: str | Sequence[str]) -> ResultFilter:
 
     return filter_fn
 
+
 def filter_no_timeouts() -> ResultFilter:
     """
     Create a filter that excludes results which timed out during execution.
@@ -68,6 +69,7 @@ def filter_no_timeouts() -> ResultFilter:
         return result.inference_metadata.finish_reason != "timeout"
 
     return filter_fn
+
 
 def filter_by_owner(owners: str | Sequence[str]) -> ResultFilter:
     """

@@ -83,7 +83,7 @@ def _plot_line(
 
         for desc_type in description_types:
             agent_desc_data = data.get_data(agent_id, desc_type)
-            
+
             if agent_desc_data and agent_desc_data.count > 0:
                 val = agent_desc_data.mean if aggregation == "mean" else agent_desc_data.median
                 values.append(val)
@@ -141,11 +141,11 @@ def _plot_bar(
 
         for desc_type in description_types:
             agent_desc_data = data.get_data(agent_id, desc_type)
-            
+
             if agent_desc_data and agent_desc_data.count > 0:
                 val = agent_desc_data.mean if aggregation == "mean" else agent_desc_data.median
                 values.append(val)
-                
+
                 # Use symmetric margin from CI logic
                 if config.show_error_bars and aggregation == "mean":
                     low, _ = agent_desc_data.confidence_interval()
@@ -166,11 +166,12 @@ def _plot_bar(
             alpha=config.bar_alpha,
             yerr=margins if config.show_error_bars else None,
             capsize=config.error_bar_capsize,
-            error_kw={'alpha': config.error_bar_alpha} # Cleanly apply error bar transparency
+            error_kw={"alpha": config.error_bar_alpha},  # Cleanly apply error bar transparency
         )
 
     ax.set_xticks(x + width * (len(agents) - 1) / 2)
     ax.set_xticklabels(description_types, fontsize=config.tick_fontsize)
+
 
 def _plot_scatter(
     ax: plt.Axes,
@@ -190,11 +191,11 @@ def _plot_scatter(
 
         for desc_type in description_types:
             agent_desc_data = data.get_data(agent_id, desc_type)
-            
+
             if agent_desc_data and agent_desc_data.count > 0:
                 val = agent_desc_data.mean if aggregation == "mean" else agent_desc_data.median
                 values.append(val)
-                
+
                 if config.show_error_bars and aggregation == "mean":
                     low, _ = agent_desc_data.confidence_interval()
                     margins.append(val - low)
@@ -205,7 +206,7 @@ def _plot_scatter(
                 margins.append(np.nan)
 
         # Small jitter so points/bars don't stack perfectly on top of each other
-        x_pos = x + (i - len(agents)/2) * 0.1 
+        x_pos = x + (i - len(agents) / 2) * 0.1
 
         ax.scatter(
             x_pos,
@@ -215,7 +216,7 @@ def _plot_scatter(
             s=config.marker_size**2,
             marker=config.marker_style,
             alpha=config.alpha,
-            zorder=3
+            zorder=3,
         )
 
         if config.show_error_bars:
@@ -227,11 +228,12 @@ def _plot_scatter(
                 ecolor=colors[i],
                 capsize=config.error_bar_capsize,
                 alpha=config.error_bar_alpha,
-                zorder=2
+                zorder=2,
             )
 
     ax.set_xticks(x)
     ax.set_xticklabels(description_types, fontsize=config.tick_fontsize)
+
 
 def save_plot(fig: plt.Figure, output_path: Path, dpi: int = 300) -> None:
     """Save plot to file.

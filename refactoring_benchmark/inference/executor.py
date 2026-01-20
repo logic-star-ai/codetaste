@@ -15,6 +15,7 @@ from refactoring_benchmark.podman import utils as podman_utils
 from refactoring_benchmark.utils.logger import get_logger
 from refactoring_benchmark.utils.models import InstanceRow
 
+
 def run_single_instance(instance: InstanceRow, config: InferenceConfig) -> bool:
     """
     Run inference on a single benchmark instance.
@@ -30,6 +31,7 @@ def run_single_instance(instance: InstanceRow, config: InferenceConfig) -> bool:
     """
     runner = InstanceInferenceRunner(instance, config)
     return runner.run()
+
 
 class InferenceOrchestrator:
     """Orchestrates parallel inference execution with signal handling."""

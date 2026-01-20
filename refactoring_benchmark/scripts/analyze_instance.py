@@ -160,7 +160,9 @@ Examples:
     print(f"Metrics to plot: {', '.join(metrics_to_plot)}")
 
     # Load evaluation results
-    print(f"Scanning {len(output_dirs)} output director{'y' if len(output_dirs) == 1 else 'ies'} for evaluation results...")
+    print(
+        f"Scanning {len(output_dirs)} output director{'y' if len(output_dirs) == 1 else 'ies'} for evaluation results..."
+    )
     results = load_all_results(output_dirs, instances, agent_ids=args.agent_ids)
     print(f"Found {len(results)} evaluation results")
 
@@ -229,6 +231,7 @@ Examples:
         except Exception as e:
             print(f"  Error generating plot: {e}")
             import traceback
+
             traceback.print_exc()
 
     print("\nDone!")

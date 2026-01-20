@@ -32,14 +32,14 @@ def read_file_lines(file_path: Path, max_lines: int = 15) -> str:
         return f"[File not found: {file_path}]"
 
     try:
-        with open(file_path, 'r', encoding='utf-8') as f:
+        with open(file_path, "r", encoding="utf-8") as f:
             lines = []
             for i, line in enumerate(f):
                 if i >= max_lines:
                     lines.append(f"... (truncated after {max_lines} lines)")
                     break
                 lines.append(line.rstrip())
-            return '\n'.join(lines)
+            return "\n".join(lines)
     except Exception as e:
         return f"[Error reading file: {e}]"
 
@@ -53,23 +53,23 @@ def investigate_instance(row: dict, base_path: Path, description_type: str) -> N
         base_path: Base path for the repository (parent of assets/)
         description_type: Type of description to use (e.g., 'nano')
     """
-    owner = row['owner']
-    repo = row['repo']
-    commit_hash = row['commit_hash']
-    golden_commit_hash = row['golden_commit_hash']
-    combined_score = row.get('combined_score', '')
-    category = row['category']
-    language = row['language']
+    owner = row["owner"]
+    repo = row["repo"]
+    commit_hash = row["commit_hash"]
+    golden_commit_hash = row["golden_commit_hash"]
+    combined_score = row.get("combined_score", "")
+    category = row["category"]
+    language = row["language"]
 
     short_hash = commit_hash[:8]
 
     # Construct paths
-    descriptions_dir = base_path / 'assets' / 'descriptions'
-    rules_dir = base_path / 'assets' / 'rules'
+    descriptions_dir = base_path / "assets" / "descriptions"
+    rules_dir = base_path / "assets" / "rules"
 
-    nano_desc_path = descriptions_dir / owner / repo / short_hash / f'{description_type}_description.md'
-    positive_rules_path = rules_dir / owner / repo / short_hash / 'rules_positive.yml'
-    negative_rules_path = rules_dir / owner / repo / short_hash / 'rules_negative.yml'
+    nano_desc_path = descriptions_dir / owner / repo / short_hash / f"{description_type}_description.md"
+    positive_rules_path = rules_dir / owner / repo / short_hash / "rules_positive.yml"
+    negative_rules_path = rules_dir / owner / repo / short_hash / "rules_negative.yml"
 
     # Print CSV line
     print("=" * 80)
@@ -103,28 +103,15 @@ def investigate_instance(row: dict, base_path: Path, description_type: str) -> N
 def main():
     """Main entry point."""
     parser = argparse.ArgumentParser(
-        description='Investigate benchmark instances manually',
+        description="Investigate benchmark instances manually",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
-    parser.add_argument(
-        '--instances-csv',
-        type=Path,
-        required=True,
-        help='Path to instances.csv file'
-    )
+    parser.add_argument("--instances-csv", type=Path, required=True, help="Path to instances.csv file")
 
+    parser.add_argument("--nr_instances", type=int, required=True, help="Number of instances to investigate")
     parser.add_argument(
-        '--nr_instances',
-        type=int,
-        required=True,
-        help='Number of instances to investigate'
-    )
-    parser.add_argument(
-        '--description-type',
-        type=str,
-        default='nano',
-        help='Type of description to use (default: nano)'
+        "--description-type", type=str, default="nano", help="Type of description to use (default: nano)"
     )
 
     args = parser.parse_args()
@@ -142,16 +129,16 @@ def main():
     # Start from CSV's parent and walk up until we find the directory containing 'assets'
     base_path = args.instances_csv.parent
     while base_path != base_path.parent:
-        if (base_path / 'assets').exists():
+        if (base_path / "assets").exists():
             break
         base_path = base_path.parent
 
     # If we didn't find assets directory, assume current working directory
-    if not (base_path / 'assets').exists():
+    if not (base_path / "assets").exists():
         base_path = Path.cwd()
 
     # Read and process instances
-    with open(args.instances_csv, 'r', encoding='utf-8') as f:
+    with open(args.instances_csv, "r", encoding="utf-8") as f:
         reader = csv.DictReader(f)
 
         for i, row in enumerate(reader):
@@ -164,5 +151,5 @@ def main():
     return 0
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     exit(main())

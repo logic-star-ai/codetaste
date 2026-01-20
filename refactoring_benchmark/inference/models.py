@@ -50,7 +50,9 @@ class InferenceConfig(BaseModel):
     class Config:
         arbitrary_types_allowed = True
 
+
 FinishReason = Literal["success", "timeout", "execution_error", "error", "unknown", "budget_exceeded"]
+
 
 class InferenceMetadata(BaseModel):
     """Metadata for inference results (created by agent or as fallback)."""
@@ -66,7 +68,6 @@ class InferenceMetadata(BaseModel):
         populate_by_name = True
         extra = "allow"
 
-
     def load_from_json(json_path: Path) -> "InferenceMetadata":
         """Load InferenceMetadata from a JSON file."""
         import json
@@ -74,7 +75,7 @@ class InferenceMetadata(BaseModel):
         with open(json_path, "r", encoding="utf-8") as f:
             data = json.load(f)
         return InferenceMetadata.model_validate(data)
-    
+
     def save_to_json(self, json_path: Path) -> None:
         """Save InferenceMetadata to a JSON file."""
         import json

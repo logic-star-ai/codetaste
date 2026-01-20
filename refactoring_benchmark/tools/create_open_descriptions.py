@@ -11,7 +11,7 @@ from pathlib import Path
 
 # The open prompt text
 # OPEN_DESCRIPTION = "Without any user intervention. Improve and refactor the entire codebase. Perform modifications on the actual codebase; do NOT output analysis, plan, roadmap or similar files."
-OPEN_DESCRIPTION="""You are a senior software architect tasked with refactoring the provided codebase. Your goal is to maximize understandability, changeability, and maintainability.
+OPEN_DESCRIPTION = """You are a senior software architect tasked with refactoring the provided codebase. Your goal is to maximize understandability, changeability, and maintainability.
 1. Core Directives
 KISS & Scout: Prioritize simplicity. Leave every file cleaner than you found it.
 Root Cause: Do not patch symptoms; refactor the underlying logic causing the issue.
@@ -35,6 +35,7 @@ Rigidity: Changes causing a cascade of subsequent changes.
 Fragility: Single changes breaking unrelated parts of the system.
 Complexity/Repetition: Unnecessary abstractions or DRY violations.
 """
+
 
 def create_open_descriptions(instances_csv: Path, descriptions_dir: Path) -> None:
     """
