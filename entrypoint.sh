@@ -115,8 +115,7 @@ case "$1" in
         git diff --cached --binary "$PRE_AGENT_HASH" > "$DIFF_OUTPUT"
         
         echo "Diff saved to $DIFF_OUTPUT"
-        if [ -f /output/inference_metadata.json ]; then chmod 666 /output/inference_metadata.json; fi
-        if [ -f /output/refactoring_plan.md ]; then chmod 666 /output/refactoring_plan.md; fi
+        if [ -d /output ]; then chmod -R 777 /output; fi
         ;;
 
     "plan")
@@ -153,8 +152,7 @@ case "$1" in
             echo "=== Agent failed with exit code $? ==="
             exit $?
         fi
-        if [ -f /output/inference_metadata.json ]; then chmod 666 /output/inference_metadata.json; fi
-        if [ -f /output/refactoring_plan.md ]; then chmod 666 /output/refactoring_plan.md; fi
+        if [ -d /output ]; then chmod -R 777 /output; fi
         if [ ! -f "/output/refactoring_plan.md" ]; then
             echo "Error: Agent did not produce a refactoring_plan.md in /output"
             exit 1
