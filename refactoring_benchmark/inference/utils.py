@@ -17,9 +17,18 @@ from podman.domain.containers import Container as PodmanContainer
 DEFAULT_PREFIX = """Perform the task described below in it's ENTIRETY. You operate completely AUTONOMOUSLY in a sandboxed environment. DO NOT ASK FOR CLARIFICATIONS. You must EDIT the codebase DIRECTLY to complete the task. DO NOT create reports, plans or similar files.\n"""
 
 PLAN_PREFIX = """Conduct IN-DEPTH EXPLORATION and ANALYSIS of the codebase.
-Refine the following task description into a carefully crafted refactoring plan. Make ALL the design choices.
+Refine the following task description into a CONCRETE and ACTIONABLE refactoring plan. Make ALL the design choices. DO NOT propose broad, multi-stage changes.
 You operate completely AUTONOMOUSLY in this sandboxed environment. DO NOT ASK FOR CLARIFICATIONS.
-The final plan must be in markdown format. The final plan MUST be placed in this exact file: '/output/refactoring_plan.md'. Output NOTHING BUT the final plan."""
+The final plan must be in markdown format:
+```
+# Title
+<Summary>
+## Changes
+...
+## Why
+...
+```
+You MUST PLACE the final plan in this file: '/output/refactoring_plan.md'."""
 
 DESCRIPTION_FILES = {
     "standard": "description.md",
@@ -136,7 +145,8 @@ def cleanup_temp_dir(temp_description_dir: Path, instance_logger: logging.Logger
 
 def _load_template(instance: InstanceRow, description_type: str) -> str:
     """Internal helper to read a description template from disk."""
-    filename = DESCRIPTION_FILES.get(description_type)
+    base_type = description_type.removesuffix("_plan")
+    filename = DESCRIPTION_FILES.get(base_type)
     if not filename:
         raise ValueError(f"Unknown type: {description_type}. Valid: {list(DESCRIPTION_FILES.keys())}")
 

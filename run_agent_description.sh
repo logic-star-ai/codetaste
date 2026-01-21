@@ -2,8 +2,8 @@
 
 # --- CONFIGURATION ---
 # To switch agents, simply uncomment the one you want to use
-AGENT_DIR="./agents/codex/gpt51-codex-mini"; AGENT_ID="codex-v0.77.0-gpt-5.1-codex-mini"
-# AGENT_DIR="./agents/codex/gpt52"; AGENT_ID="codex-v0.77.0-gpt-5.2"
+# AGENT_DIR="./agents/codex/gpt51-codex-mini"; AGENT_ID="codex-v0.77.0-gpt-5.1-codex-mini"
+AGENT_DIR="./agents/codex/gpt52"; AGENT_ID="codex-v0.77.0-gpt-5.2"
 # AGENT_DIR="./agents/qwen-code/qwen3-coder-30b-a3b-instruct"; AGENT_ID="qwen-code-v0.6.2-qwen3-coder-30b-a3b-instruct"
 # AGENT_DIR="./agents/claude/sonnet45"; AGENT_ID="claude-code-v2.0.76-sonnet45"
 
@@ -13,9 +13,10 @@ DESCRIPTION_TYPE="abstract" # Options: standard, nano, problem, open, abstract
 INSTANCES_CSV="./instances.csv"
 NR_INSTANCES=20
 # Inference
-FORCE_INFERENCE="--force" # Set to "--force", "--force-unsuccessful", or ""
-REUSE_PLAN_ON_FORCE="" # Set to "--reuse-successful-plan" or ""
-PLAN="--plan" # Set to "--plan" to enable two-step inference (planning + execution)
+# FORCE_INFERENCE in ["--force", "--force-unsuccessful", ""]; REUSE_PLAN_ON_FORCE in ["--reuse-successful-plan", ""]; PLAN in ["--multiplan", "--plan", ""]
+FORCE_INFERENCE=""; REUSE_PLAN_ON_FORCE=""; PLAN="--plan"
+# FORCE_INFERENCE=""; REUSE_PLAN_ON_FORCE=""; PLAN=""
+
 # Evaluation
 FORCE_EVALUATION="" # Set to "--force" or ""
 

@@ -237,10 +237,13 @@ class InstanceInferenceRunner:
             except Exception as e:
                 self.logger.error(f"{mode.capitalize()} step timed out: {e}")
                 finish_reason = "error_planmode" if mode == "plan" else "timeout"
+                description_type = self.config.description_type
+                if self.plan_path:
+                    description_type = f"{description_type}_plan"
                 create_fallback_inference_metadata(
                     self.output_dir,
                     finish_reason,
-                    description_type=self.config.description_type,
+                    description_type=description_type,
                     additional={"error": f"{mode.capitalize()} container timed out: {str(e)}"},
                 )
                 return False
@@ -269,7 +272,7 @@ class InstanceInferenceRunner:
             self.logger.error(f"Plan step failed: {error}")
             create_fallback_inference_metadata(
                 self.output_dir, "error_planmode",
-                description_type=self.config.description_type,
+                description_type=self.config.description_type + "_plan",
                 additional={"error": error},
             )
             return False
@@ -282,6 +285,9 @@ class InstanceInferenceRunner:
         if inference_metadata_path.exists():
             try:
                 inference_metadata_path.rename(plan_metadata_path)
+                inference_metadata: InferenceMetadata = InferenceMetadata.load_from_json(plan_metadata_path)
+                inference_metadata.description_type = self.config.description_type + "_plan"
+                inference_metadata.save_to_json(plan_metadata_path)
                 self.logger.info("Renamed inference_metadata.json to plan_metadata.json")
             except Exception as e:
                 self.logger.warning(f"Failed to rename inference_metadata.json to plan_metadata.json: {e}")
@@ -337,7 +343,12 @@ class InstanceInferenceRunner:
         # Check C: Success reason
         metadata: InferenceMetadata = InferenceMetadata.load_from_json(metadata_path)
         is_success = metadata.finish_reason.lower() == "success"
-        metadata.description_type = self.config.description_type
+
+        # Set description_type with _plan suffix if plan was used
+        description_type = self.config.description_type
+        if self.plan_path:  # Plan was used for inference
+            description_type = f"{description_type}_plan"
+        metadata.description_type = description_type
         metadata.save_to_json(metadata_path)
 
         if is_success:
