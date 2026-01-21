@@ -14,10 +14,12 @@ from refactoring_benchmark.inference.models import InferenceMetadata
 from refactoring_benchmark.utils.models import InstanceRow
 from podman.domain.containers import Container as PodmanContainer
 
-DEFAULT_PREFIX = """Perform the task described below in it's ENTIRETY. You operate completely AUTONOMOUSLY in a sandboxed environment. DO NOT ASK FOR CLARIFICATIONS. You must EDIT the codebase DIRECTLY to complete the task.\n"""
+DEFAULT_PREFIX = """Perform the task described below in it's ENTIRETY. You operate completely AUTONOMOUSLY in a sandboxed environment. DO NOT ASK FOR CLARIFICATIONS. You must EDIT the codebase DIRECTLY to complete the task. DO NOT create reports, plans or similar files.\n"""
 
-PLAN_PREFIX = """Refine the following task description into detailed refactoring plan. Make all the design choices. You operate completely AUTONOMOUSLY in this sandboxed environment. DO NOT ASK FOR CLARIFICATIONS.
-The final plan must be in markdown format. The final plan MUST be placed in this exact file: '/output/refactoring_plan.md'."""
+PLAN_PREFIX = """Conduct IN-DEPTH EXPLORATION and ANALYSIS of the codebase.
+Refine the following task description into a carefully crafted refactoring plan. Make ALL the design choices.
+You operate completely AUTONOMOUSLY in this sandboxed environment. DO NOT ASK FOR CLARIFICATIONS.
+The final plan must be in markdown format. The final plan MUST be placed in this exact file: '/output/refactoring_plan.md'. Output NOTHING BUT the final plan."""
 
 DESCRIPTION_FILES = {
     "standard": "description.md",

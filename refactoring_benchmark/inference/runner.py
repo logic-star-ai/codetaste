@@ -64,18 +64,75 @@ class InstanceInferenceRunner:
                 return True, False
         return False, False
 
+    def _check_existing_plan(self) -> bool:
+        """
+        Check if a successful plan already exists (plan_metadata.json with success status).
+
+        Returns:
+            True if successful plan exists and should be reused, False otherwise
+        """
+        # Plan reuse logic: reuse if (not force) OR reuse_successful_plan
+        should_reuse = (not self.config.force) or self.config.reuse_successful_plan
+        if not should_reuse:
+            self.logger.info("--force specified without --reuse-successful-plan, will generate new plan")
+            return False
+
+        plan_metadata_path = self.output_dir / "plan_metadata.json"
+        if not plan_metadata_path.exists():
+            return False
+
+        try:
+            metadata: InferenceMetadata = InferenceMetadata.load_from_json(plan_metadata_path)
+            is_success = metadata.finish_reason.lower() == "success"
+            if is_success:
+                self.logger.info("Found existing successful plan, reusing it")
+                # Load the existing refactoring_plan.md
+                plan_path = self.output_dir / "refactoring_plan.md"
+                if plan_path.exists():
+                    self.plan_path = plan_path
+                    return True
+                else:
+                    self.logger.warning("plan_metadata.json exists but refactoring_plan.md missing")
+                    return False
+            else:
+                self.logger.info(f"Found plan_metadata.json with non-success status: {metadata.finish_reason}")
+                return False
+        except Exception as e:
+            self.logger.warning(f"Failed to load plan_metadata.json: {e}")
+            return False
+
     def prepare_environment(self) -> bool:
         """
         Prepare output directory and Podman client.
+        Preserves plan_metadata.json and refactoring_plan.md if they exist.
 
         Returns:
             True if preparation successful, False otherwise
         """
-        # Clean and create output directory
+        should_preserve_plans = self.config.plan and (
+            (not self.config.force) or self.config.reuse_successful_plan
+        )
+        saved_plan_metadata = None
+        saved_plan_content = None
+
         if self.output_dir.exists():
+            plan_metadata_path = self.output_dir / "plan_metadata.json"
+            plan_path = self.output_dir / "refactoring_plan.md"
+
+            if should_preserve_plans and plan_metadata_path.exists() and plan_path.exists():
+                saved_plan_metadata = plan_metadata_path.read_text(encoding="utf-8")
+                saved_plan_content = plan_path.read_text(encoding="utf-8")
+
+            # Clean output directory
             shutil.rmtree(self.output_dir)
+
+        # Create fresh output directory
         self.output_dir.mkdir(parents=True, exist_ok=True)
         copy_agent_config(self.config.agent_dir, self.output_dir)
+
+        if saved_plan_metadata and saved_plan_content:
+            (self.output_dir / "plan_metadata.json").write_text(saved_plan_metadata, encoding="utf-8")
+            (self.output_dir / "refactoring_plan.md").write_text(saved_plan_content, encoding="utf-8")
 
         # Connect to Podman
         self.client = podman_utils.get_local_client(timeout=self.config.timeout + 120)
@@ -218,6 +275,17 @@ class InstanceInferenceRunner:
             return False
         self.logger.info(f"Plan validation successful: {plan_path.stat().st_size} bytes")
         self.plan_path = plan_path
+
+        # Rename inference_metadata.json to plan_metadata.json after successful plan
+        inference_metadata_path = self.output_dir / "inference_metadata.json"
+        plan_metadata_path = self.output_dir / "plan_metadata.json"
+        if inference_metadata_path.exists():
+            try:
+                inference_metadata_path.rename(plan_metadata_path)
+                self.logger.info("Renamed inference_metadata.json to plan_metadata.json")
+            except Exception as e:
+                self.logger.warning(f"Failed to rename inference_metadata.json to plan_metadata.json: {e}")
+
         return True
 
     def execute_plan(self) -> bool:
@@ -318,12 +386,17 @@ class InstanceInferenceRunner:
 
             # Phase 3: Plan step (if enabled)
             if self.config.plan:
-                if not self.prepare_plan_environment():
-                    return False
-                if not self.execute_plan():
-                    return False
-                if not self._validate_plan_output():
-                    return False
+                # Check if successful plan already exists
+                if not self._check_existing_plan():
+                    # Need to run plan step
+                    if not self.prepare_plan_environment():
+                        return False
+                    if not self.execute_plan():
+                        return False
+                    if not self._validate_plan_output():
+                        return False
+                else:
+                    self.logger.info("Skipping plan execution, using existing plan")
 
             # Phase 4: Inference step (always executed, description depends on plan mode)
             if not self.prepare_inference_environment():

@@ -42,6 +42,7 @@ class InferenceConfig(BaseModel):
     instances_limit: int = Field(gt=0)
     force: bool
     force_unsuccessful: bool
+    reuse_successful_plan: bool
     agent_config: AgentConfig
     sanitized_agent_id: str
     env_vars: Dict[str, str] = Field(default_factory=dict)

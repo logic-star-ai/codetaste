@@ -71,6 +71,12 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument(
+        "--reuse-successful-plan",
+        action="store_true",
+        help="Reuse existing plan if plan_metadata.json shows success (optimization for --plan mode)",
+    )
+
+    parser.add_argument(
         "--env",
         action="append",
         default=[],

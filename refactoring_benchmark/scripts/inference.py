@@ -100,6 +100,7 @@ def main():
         env_vars=args.env_vars,
         description_type=args.description_type,
         force_unsuccessful=args.force_unsuccessful,
+        reuse_successful_plan=args.reuse_successful_plan,
         plan=args.plan,
         plan_timeout=args.plan_timeout,
     )
