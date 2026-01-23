@@ -3,6 +3,7 @@
 from pathlib import Path
 from typing import Callable
 
+from refactoring_benchmark.analyze.diff_stats import parse_diff_file
 from refactoring_benchmark.analyze.validation import ValidityStatus, check_test_validity
 from refactoring_benchmark.evaluation.models import EvaluationResult
 from refactoring_benchmark.utils.models import ReducedInstanceRow
@@ -37,6 +38,26 @@ def metric_ifr_ratio(result: EvaluationResult) -> float | None:
         return 0.0
     return removed_ifr / total
 
+def metric_diff_added_lines(result: EvaluationResult) -> int | None:
+    try:
+        diff_stat = parse_diff_file(Path(result.eval_dir.parent) / "prediction.diff")
+    except FileNotFoundError:
+        return None
+    return diff_stat.added_lines
+
+def metric_diff_removed_lines(result: EvaluationResult) -> int | None:
+    try:
+        diff_stat = parse_diff_file(Path(result.eval_dir.parent) / "prediction.diff")
+    except FileNotFoundError:
+        return None
+    return diff_stat.removed_lines
+
+def metric_diff_delta_lines(result: EvaluationResult) -> int | None:
+    try:
+        diff_stat = parse_diff_file(Path(result.eval_dir.parent) / "prediction.diff")
+    except FileNotFoundError:
+        return None
+    return diff_stat.added_lines - diff_stat.removed_lines
 
 def metric_test_success(result: EvaluationResult) -> float:
     """Test success metric (1.0 if valid, 0.0 otherwise, None if no test data)."""
@@ -101,6 +122,9 @@ METRICS: dict[str, MetricFunction] = {
     "ifr_added": metric_ifr_added,
     "ifr_removed": metric_ifr_removed,
     "ifr_ratio": metric_ifr_ratio,
+    "diff_added_lines": metric_diff_added_lines,
+    "diff_removed_lines": metric_diff_removed_lines,
+    "diff_delta_lines": metric_diff_delta_lines,
     "test_success": metric_test_success,
     "precision_added": metric_precision_added,
     "precision_removed": metric_precision_removed,
