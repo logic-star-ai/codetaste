@@ -102,6 +102,7 @@ def main():
         force_unsuccessful=args.force_unsuccessful,
         reuse_successful_plan=args.reuse_successful_plan,
         plan=args.plan,
+        multiplan=args.multiplan,
         plan_timeout=args.plan_timeout,
     )
 

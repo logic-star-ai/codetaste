@@ -1,12 +1,14 @@
+from datetime import timezone
 import shutil
 from pathlib import Path
-import time
+import traceback
 from typing import Optional
 
 import podman
 from podman.domain.containers import Container as PodmanContainer
 
-from refactoring_benchmark.inference.models import InferenceConfig, InferenceMetadata
+from refactoring_benchmark.inference.models import InferenceConfig, InferenceMetadata, MultiplanMetadata
+from refactoring_benchmark.inference.judge import judge_best_plan
 from refactoring_benchmark.inference.utils import (
     copy_agent_config,
     create_fallback_inference_metadata,
@@ -15,12 +17,16 @@ from refactoring_benchmark.inference.utils import (
     cleanup_temp_dir,
     output_container_logs,
     prepare_temp_task_description,
-    prepare_temp_plan_description
+    prepare_temp_plan_description,
+    prepare_temp_multiplan_description,
+    NUM_MULTIPLAN,
 )
 from refactoring_benchmark.podman import utils as podman_utils
 from refactoring_benchmark.utils.logger import get_logger
 from refactoring_benchmark.utils.models import InstanceRow
+from datetime import datetime
 
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 class InstanceInferenceRunner:
     """Encapsulates the phases of running inference on a single instance."""
@@ -43,6 +49,8 @@ class InstanceInferenceRunner:
         self.temp_description_dir: Optional[Path] = None
         self.client: Optional[podman.PodmanClient] = None
         self.plan_path: Optional[Path] = None
+        self.selected_plan_content: Optional[str] = None
+        self.multiplan_metadata: Optional[MultiplanMetadata] = None
 
     def should_skip(self) -> tuple[bool, bool]:
         """
@@ -161,7 +169,8 @@ class InstanceInferenceRunner:
     def prepare_inference_environment(self) -> bool:
         """
         Prepare temp description directory for inference step.
-        Uses plan content if plan mode is active, otherwise uses standard description.
+        Uses selected plan content if multiplan mode is active,
+        uses plan content if plan mode is active, otherwise uses standard description.
 
         Returns:
             True if preparation successful, False otherwise
@@ -171,7 +180,14 @@ class InstanceInferenceRunner:
             cleanup_temp_dir(self.temp_description_dir, self.logger)
             self.temp_description_dir = None
 
-        if self.plan_path:
+        if self.selected_plan_content:
+            self.temp_description_dir = prepare_temp_task_description(
+                self.instance,
+                logger=self.logger,
+                description_type=None,
+                content=self.selected_plan_content,
+            )
+        elif self.plan_path:
             plan_content = self.plan_path.read_text(encoding="utf-8")
             self.temp_description_dir = prepare_temp_task_description(
                 self.instance,
@@ -180,7 +196,6 @@ class InstanceInferenceRunner:
                 content=plan_content,
             )
         else:
-            # Use standard task description
             self.temp_description_dir = prepare_temp_task_description(
                 self.instance,
                 logger=self.logger,
@@ -307,6 +322,183 @@ class InstanceInferenceRunner:
             return False
         return True
 
+    # ===== MULTIPLAN MODE METHODS =====
+    def prepare_multiplan_environment(self) -> bool:
+        """
+        Prepare temp description directory for multiplan description.
+
+        Returns:
+            True if preparation successful, False otherwise
+        """
+        self.temp_description_dir = prepare_temp_multiplan_description(
+            self.instance,
+            logger=self.logger,
+            description_type=self.config.description_type,
+        )
+        if not self.temp_description_dir:
+            self.logger.error("Failed to prepare multiplan description")
+            return False
+        return True
+
+    def execute_multiplan(self) -> bool:
+        """
+        Execute the multiplan generation step (creates 5 refactoring plans).
+
+        Returns:
+            True if multiplan step completed without errors, False otherwise
+        """
+        self.logger.info("=== MULTIPLAN STEP ===")
+        if not self._execute_container_step("multiplan", timeout=self.config.plan_timeout):
+            self.logger.error("Multiplan step failed - aborting")
+            return False
+        return True
+
+    def _validate_multiplan_output(self) -> bool:
+        """Validate that multiplan step created expected number of valid plan files."""
+        plans_dir = self.output_dir / "refactoring_plans"
+
+        if not plans_dir.exists():
+            error = "refactoring_plans directory does not exist"
+            self.logger.error(f"Multiplan step failed: {error}")
+            create_fallback_inference_metadata(
+                self.output_dir, "error_multiplan",
+                description_type=self.config.description_type + "_multiplan",
+                additional={"error": error}
+            )
+            return False
+
+        # Check for expected plans
+        expected_plans = {f"refactoring_plan{i}.md" for i in range(NUM_MULTIPLAN)}
+        missing = [name for name in expected_plans if not (plans_dir / name).exists()]
+        small = [name for name in expected_plans if (plans_dir / name).exists() and (plans_dir / name).stat().st_size < 10]
+
+        if missing or small:
+            errors = [f"missing: {', '.join(missing)}" if missing else None,
+                     f"empty/small: {', '.join(small)}" if small else None]
+            error = f"Invalid plans ({'; '.join(filter(None, errors))})"
+            self.logger.error(f"Multiplan step failed: {error}")
+            create_fallback_inference_metadata(
+                self.output_dir, "error_multiplan",
+                description_type=self.config.description_type + "_multiplan",
+                additional={"error": error}
+            )
+            return False
+
+        # Rename inference_metadata.json to multiplan_generation_metadata.json after successful multiplan
+        inference_metadata_path = self.output_dir / "inference_metadata.json"
+        multiplan_generation_metadata_path = self.output_dir / "multiplan_generation_metadata.json"
+        if inference_metadata_path.exists():
+            try:
+                inference_metadata_path.rename(multiplan_generation_metadata_path)
+                inference_metadata: InferenceMetadata = InferenceMetadata.load_from_json(multiplan_generation_metadata_path)
+                inference_metadata.description_type = self.config.description_type + "_multiplan"
+                inference_metadata.save_to_json(multiplan_generation_metadata_path)
+                self.logger.info("Renamed inference_metadata.json to multiplan_generation_metadata.json")
+            except Exception as e:
+                self.logger.warning(f"Failed to rename inference_metadata.json to multiplan_generation_metadata.json: {e}")
+
+        return True
+
+    def _execute_judge(self) -> tuple[int, dict]:
+        """
+        Execute LLM judge to select best plan from candidates.
+
+        Returns:
+            Tuple of (selected_plan_index, judge_metadata_dict)
+
+        Raises:
+            Exception: If judge execution fails
+        """
+        self.logger.info("=== JUDGE STEP ===")
+
+        # Load full original description from assets
+        description_path = PROJECT_ROOT / self.instance.asset_dir("descriptions") / "description.md"
+        original_description = description_path.read_text(encoding="utf-8")
+        self.logger.info(f"Loaded full description from {description_path}")
+
+        # Load all candidate plans dynamically
+        plans_dir = self.output_dir / "refactoring_plans"
+        candidate_plans = {
+            i: (plans_dir / f"refactoring_plan{i}.md").read_text(encoding="utf-8")
+            for i in range(NUM_MULTIPLAN)
+        }
+
+        # Call judge
+        try:
+            selected_index, judge_metadata = judge_best_plan(original_description, candidate_plans)
+            self.logger.info(f"Judge selected plan {selected_index} (cost: ${judge_metadata['judge_cost_usd']:.4f})")
+            # Save judge output to file for inspection
+            judge_output_path = self.output_dir / "judge.out"
+            judge_output_path.write_text(judge_metadata.get("judge_reasoning", ""), encoding="utf-8")
+            self.logger.info(f"Saved judge output to {judge_output_path}")
+
+            return selected_index, judge_metadata
+        except Exception as e:
+            self.logger.error(f"Judge execution failed:\n{traceback.format_exc()}\n\n{e}")
+            raise e
+
+    def _save_multiplan_metadata(self, selected_index: int, judge_metadata: dict, start_time: str) -> None:
+        """Save multiplan metadata to multiplan_metadata.json."""
+
+        multiplan_metadata = MultiplanMetadata(
+            start_time=start_time,
+            finish_time=datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
+            finish_reason="success",
+            plans_generated=NUM_MULTIPLAN,
+            selected_plan_index=selected_index,
+            judge_reasoning=judge_metadata.get("judge_reasoning"),
+            judge_cost_usd=judge_metadata.get("judge_cost_usd"),
+            judge_latency_seconds=judge_metadata.get("judge_latency_seconds"),
+            judge_input_tokens=judge_metadata.get("judge_input_tokens"),
+            judge_output_tokens=judge_metadata.get("judge_output_tokens"),
+        )
+
+        metadata_path = self.output_dir / "multiplan_metadata.json"
+        multiplan_metadata.save_to_json(metadata_path)
+        self.logger.info(f"Saved multiplan metadata to {metadata_path}")
+        self.multiplan_metadata = multiplan_metadata
+
+    def _load_selected_plan(self, selected_index: int) -> None:
+        """Load the selected plan content for use in inference step."""
+        plans_dir = self.output_dir / "refactoring_plans"
+        selected_plan_path = plans_dir / f"refactoring_plan{selected_index}.md"
+        self.selected_plan_content = selected_plan_path.read_text(encoding="utf-8")
+        self.logger.info(f"Loaded selected plan {selected_index} ({len(self.selected_plan_content)} chars)")
+
+    def _check_existing_multiplan(self) -> bool:
+        """
+        Check if a successful multiplan result already exists.
+
+        Returns:
+            True if successful multiplan exists and should be reused, False otherwise
+        """
+        if not ((not self.config.force) or self.config.reuse_successful_plan):
+            self.logger.info("--force specified without --reuse-successful-plan, will generate new multiplan")
+            return False
+
+        multiplan_metadata_path = self.output_dir / "multiplan_metadata.json"
+        if not multiplan_metadata_path.exists():
+            return False
+
+        try:
+            metadata = MultiplanMetadata.load_from_json(multiplan_metadata_path)
+            if metadata.finish_reason.lower() != "success" or metadata.selected_plan_index is None:
+                self.logger.info(f"Found multiplan_metadata.json with status: {metadata.finish_reason}")
+                return False
+
+            self.logger.info("Found existing successful multiplan, verifying plans...")
+            plans_dir = self.output_dir / "refactoring_plans"
+            if all((plans_dir / f"refactoring_plan{i}.md").exists() for i in range(NUM_MULTIPLAN)):
+                self._load_selected_plan(metadata.selected_plan_index)
+                self.multiplan_metadata = metadata
+                return True
+
+            self.logger.warning("multiplan_metadata.json exists but some plans are missing")
+            return False
+        except Exception as e:
+            self.logger.warning(f"Failed to load multiplan_metadata.json: {e}")
+            return False
+
     def execute_inference(self) -> bool:
         """
         Execute the inference step (applies refactoring to codebase).
@@ -344,9 +536,11 @@ class InstanceInferenceRunner:
         metadata: InferenceMetadata = InferenceMetadata.load_from_json(metadata_path)
         is_success = metadata.finish_reason.lower() == "success"
 
-        # Set description_type with _plan suffix if plan was used
+        # Set description_type with _multiplan or _plan suffix if used
         description_type = self.config.description_type
-        if self.plan_path:  # Plan was used for inference
+        if self.selected_plan_content:  # Multiplan was used for inference
+            description_type = f"{description_type}_multiplan"
+        elif self.plan_path:  # Plan was used for inference
             description_type = f"{description_type}_plan"
         metadata.description_type = description_type
         metadata.save_to_json(metadata_path)
@@ -409,7 +603,39 @@ class InstanceInferenceRunner:
                 else:
                     self.logger.info("Skipping plan execution, using existing plan")
 
-            # Phase 4: Inference step (always executed, description depends on plan mode)
+            # Phase 3.5: Multiplan step (if enabled)
+            if self.config.multiplan:
+                # Check if successful multiplan already exists
+                if not self._check_existing_multiplan():
+                    # Need to run multiplan step
+                    multiplan_start_time = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
+
+                    if not self.prepare_multiplan_environment():
+                        return False
+                    if not self.execute_multiplan():
+                        return False
+                    if not self._validate_multiplan_output():
+                        return False
+
+                    # Execute judge to select best plan
+                    try:
+                        selected_index, judge_metadata = self._execute_judge()
+                        self.logger.info(f"Judge selected plan index: {selected_index}")
+                        self._save_multiplan_metadata(selected_index, judge_metadata, multiplan_start_time)
+                        self._load_selected_plan(selected_index)
+                    except Exception as e:
+                        self.logger.error(f"Judge execution failed: {e}")
+                        create_fallback_inference_metadata(
+                            self.output_dir,
+                            "error_judge",
+                            description_type=self.config.description_type + "_multiplan",
+                            additional={"error": str(e)},
+                        )
+                        return False
+                else:
+                    self.logger.info("Skipping multiplan execution, using existing multiplan result")
+
+            # Phase 4: Inference step (always executed, description depends on plan/multiplan mode)
             if not self.prepare_inference_environment():
                 return False
             if not self.execute_inference():

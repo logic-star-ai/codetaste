@@ -3,19 +3,20 @@
 # --- CONFIGURATION ---
 # To switch agents, simply uncomment the one you want to use
 # AGENT_DIR="./agents/codex/gpt51-codex-mini"; AGENT_ID="codex-v0.77.0-gpt-5.1-codex-mini"
-AGENT_DIR="./agents/codex/gpt52"; AGENT_ID="codex-v0.77.0-gpt-5.2"
+# AGENT_DIR="./agents/codex/gpt52"; AGENT_ID="codex-v0.77.0-gpt-5.2"
 # AGENT_DIR="./agents/qwen-code/qwen3-coder-30b-a3b-instruct"; AGENT_ID="qwen-code-v0.6.2-qwen3-coder-30b-a3b-instruct"
-# AGENT_DIR="./agents/claude/sonnet45"; AGENT_ID="claude-code-v2.0.76-sonnet45"
+AGENT_DIR="./agents/claude/sonnet45"; AGENT_ID="claude-code-v2.0.76-sonnet45"
 
 # Change this variable to switch task descriptions
-DESCRIPTION_TYPE="abstract" # Options: standard, nano, problem, open, abstract
+DESCRIPTION_TYPE="open" # Options: standard, nano, problem, open, abstract
 
 INSTANCES_CSV="./instances.csv"
 NR_INSTANCES=20
 # Inference
 # FORCE_INFERENCE in ["--force", "--force-unsuccessful", ""]; REUSE_PLAN_ON_FORCE in ["--reuse-successful-plan", ""]; PLAN in ["--multiplan", "--plan", ""]
-FORCE_INFERENCE=""; REUSE_PLAN_ON_FORCE=""; PLAN="--plan"
-# FORCE_INFERENCE=""; REUSE_PLAN_ON_FORCE=""; PLAN=""
+# FORCE_INFERENCE=""; REUSE_PLAN_ON_FORCE=""; PLAN="--multiplan"
+# FORCE_INFERENCE="--force-unsuccessful"; REUSE_PLAN_ON_FORCE=""; PLAN="--plan"
+FORCE_INFERENCE=""; REUSE_PLAN_ON_FORCE=""; PLAN=""
 
 # Evaluation
 FORCE_EVALUATION="" # Set to "--force" or ""
@@ -38,6 +39,9 @@ esac
 if [ "$PLAN" == "--plan" ]; then
     OUTPUT_DIR="${OUTPUT_DIR}_plan"
 fi
+if [ "$PLAN" == "--multiplan" ]; then
+    OUTPUT_DIR="${OUTPUT_DIR}_multiplan"
+fi
 
 echo "Running benchmark for Agent: $AGENT_ID"
 echo "Task Type: $DESCRIPTION_TYPE -> Output: $OUTPUT_DIR"
@@ -59,12 +63,15 @@ python -m refactoring_benchmark.scripts.inference \
     $REUSE_PLAN_ON_FORCE \
     $FORCE_INFERENCE
 
-# 2. Evaluation Step
-python -m refactoring_benchmark.scripts.evaluate \
-    --instances "$NR_INSTANCES" \
-    --nr-workers 5 \
-    --agent-id "$AGENT_ID" \
-    --output-dir "$OUTPUT_DIR" \
-    $FORCE_EVALUATION
-
-echo "Process completed successfully."
+if [ $? -ne 0 ]; then
+    echo "Inference step failed. Skipping evaluation."
+else 
+    echo "Inference step completed successfully."
+    python -m refactoring_benchmark.scripts.evaluate \
+        --instances "$NR_INSTANCES" \
+        --nr-workers 5 \
+        --agent-id "$AGENT_ID" \
+        --output-dir "$OUTPUT_DIR" \
+        $FORCE_EVALUATION
+    echo "Process completed successfully."
+fi

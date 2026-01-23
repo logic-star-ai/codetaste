@@ -104,6 +104,12 @@ def parse_args() -> argparse.Namespace:
         help="Timeout in seconds for the planning step when --plan is enabled (default: 1800 = 30 minutes)",
     )
 
+    parser.add_argument(
+        "--multiplan",
+        action="store_true",
+        help="Enable multi-plan inference: generate 5 different plans, use LLM to select best, then execute it (mutually exclusive with --plan)",
+    )
+
     args = parser.parse_args()
 
     # Convert paths to absolute
@@ -112,7 +118,9 @@ def parse_args() -> argparse.Namespace:
             base_name = "output"
         else:
             base_name = f"output_{args.description_type}"
-        if args.plan:
+        if args.multiplan:
+            args.output_dir = Path(f"./{base_name}_multiplan")
+        elif args.plan:
             args.output_dir = Path(f"./{base_name}_plan")
         else:
             args.output_dir = Path(f"./{base_name}")

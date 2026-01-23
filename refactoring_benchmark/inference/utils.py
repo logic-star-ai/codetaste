@@ -30,6 +30,28 @@ The final plan must be in markdown format:
 ```
 You MUST PLACE the final plan in this file: '/output/refactoring_plan.md'."""
 
+NUM_MULTIPLAN = 5
+
+MULTIPLAN_PREFIX = f"""Conduct IN-DEPTH EXPLORATION and ANALYSIS of the codebase.
+Generate {NUM_MULTIPLAN} DISTINCT and DIFFERENT refactoring plans for the following task. There can be partial overlap.
+You operate completely AUTONOMOUSLY in this sandboxed environment. DO NOT ASK FOR CLARIFICATIONS.
+
+For each approach, create a COMPLETE, CONCRETE and ACTIONABLE refactoring plan. Make ALL the design choices. DO NOT propose broad, multi-stage changes.
+Each plan must be in markdown format:
+```
+# Title
+<Summary>
+## Changes
+...
+## Why
+...
+```
+
+You MUST create EXACTLY {NUM_MULTIPLAN} plans and save them as:
+{chr(10).join(f"- '/output/refactoring_plans/refactoring_plan{i}.md'" for i in range(NUM_MULTIPLAN))}
+
+Ensure each plan represents a meaningfully different approach to solving the task."""
+
 DESCRIPTION_FILES = {
     "standard": "description.md",
     "minimal": "minimal_description.md",
@@ -181,13 +203,26 @@ def prepare_temp_task_description(
     return create_temporary_description_dir(instance, full_content)
 
 def prepare_temp_plan_description(
-    instance: InstanceRow, 
-    logger: logging.Logger, 
-    description_type: Optional[str] = None, 
+    instance: InstanceRow,
+    logger: logging.Logger,
+    description_type: Optional[str] = None,
     content: Optional[str] = None
 ) -> Path:
     """Prepares a plan description using either a template type OR direct content."""
     base_content = content or _load_template(instance, description_type)
     full_content = f"{PLAN_PREFIX}\n\n{base_content}"
     logger.debug(f"Prepared Plan Description (Type: {description_type or 'Injected'})")
+    return create_temporary_description_dir(instance, full_content)
+
+
+def prepare_temp_multiplan_description(
+    instance: InstanceRow,
+    logger: logging.Logger,
+    description_type: Optional[str] = None,
+    content: Optional[str] = None
+) -> Path:
+    """Prepares a multiplan description using either a template type OR direct content."""
+    base_content = content or _load_template(instance, description_type)
+    full_content = f"{MULTIPLAN_PREFIX}\n\n{base_content}"
+    logger.debug(f"Prepared Multiplan Description (Type: {description_type or 'Injected'})")
     return create_temporary_description_dir(instance, full_content)
