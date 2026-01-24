@@ -1,0 +1,1 @@
+Reorganize internal model namespace

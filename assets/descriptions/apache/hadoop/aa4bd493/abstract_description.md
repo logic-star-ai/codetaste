@@ -1,0 +1,1 @@
+Refactor protocol API terminology

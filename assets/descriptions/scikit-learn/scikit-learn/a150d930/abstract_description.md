@@ -1,0 +1,1 @@
+Remove backward compatibility code

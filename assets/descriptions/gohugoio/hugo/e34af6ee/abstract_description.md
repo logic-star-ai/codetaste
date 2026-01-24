@@ -1,0 +1,1 @@
+Eliminate global state

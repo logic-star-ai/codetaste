@@ -1,0 +1,1 @@
+Rename data catalog class

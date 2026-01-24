@@ -1,0 +1,1 @@
+Introduce specialized factory type
