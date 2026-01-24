@@ -28,7 +28,10 @@ The final plan must be in markdown format:
 ## Why
 ...
 ```
-You MUST PLACE the final plan in this file: '/output/refactoring_plan.md'."""
+You MUST PLACE the final plan in this file: '/output/refactoring_plan.md'.
+
+Task:
+"""
 
 NUM_MULTIPLAN = 5
 
@@ -50,7 +53,8 @@ Each plan must be in markdown format:
 You MUST create EXACTLY {NUM_MULTIPLAN} plans and save them as:
 {chr(10).join(f"- '/output/refactoring_plans/refactoring_plan{i}.md'" for i in range(NUM_MULTIPLAN))}
 
-Ensure each plan represents a meaningfully different approach to solving the task."""
+Task:
+"""
 
 DESCRIPTION_FILES = {
     "standard": "description.md",
