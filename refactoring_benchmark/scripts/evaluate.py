@@ -60,6 +60,7 @@ def main():
         timeout_test=args.timeout_test,
         timeout_rule=args.timeout_rule,
         force=args.force,
+        retry_null_tests=args.retry_null_tests,
     )
 
     # Create and run orchestrator

@@ -71,6 +71,12 @@ def parse_args() -> argparse.Namespace:
         help="Force re-evaluation even if results already exist",
     )
 
+    parser.add_argument(
+        "--retry-null-tests",
+        action="store_true",
+        help="Retry evaluation for instances where test metrics are null (e.g., due to timeouts or crashes)",
+    )
+
     args = parser.parse_args()
 
     # Convert paths to absolute

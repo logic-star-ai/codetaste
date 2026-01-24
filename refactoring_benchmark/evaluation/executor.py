@@ -88,9 +88,25 @@ def evaluate_single_instance(instance: InstanceRow, agent_id: str, config: Evalu
         return False
 
     # Check if evaluation already exists
-    if evaluation_exists(eval_dir) and not config.force:
-        instance_logger.info(f"Skipping {instance.id}, evaluation already exists")
-        return True
+    if evaluation_exists(eval_dir):
+        if not config.force and not config.retry_null_tests:
+            instance_logger.info(f"Skipping {instance.id}, evaluation already exists")
+            return True
+
+        # If retry_null_tests is set, check if test metrics are null
+        if config.retry_null_tests and not config.force:
+            try:
+                result = EvaluationResult.load_from_json(eval_dir / "evaluation_result.json")
+                if result.agent_test_metrics is not None:
+                    instance_logger.info(f"Skipping {instance.id}, test metrics exist")
+                    return True
+                else:
+                    instance_logger.info(f"Retrying {instance.id}, test metrics are null")
+            except Exception as e:
+                instance_logger.warning(f"Could not load evaluation result: {e}, will retry")
+        elif not config.force:
+            instance_logger.info(f"Skipping {instance.id}, evaluation already exists")
+            return True
 
     # Create evaluation directory
     eval_dir.mkdir(parents=True, exist_ok=True)
