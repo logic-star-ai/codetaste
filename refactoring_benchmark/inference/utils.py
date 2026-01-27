@@ -146,7 +146,7 @@ def output_exists(output_dir: Path) -> bool:
         True if prediction.diff exists, False otherwise
     """
     prediction_path = output_dir / "prediction.diff"
-    return prediction_path.exists() and prediction_path.stat().st_size > 3
+    return prediction_path.exists()
 
 
 def output_container_logs(container: PodmanContainer, output_path: Path, instance_logger: logging.Logger) -> None:

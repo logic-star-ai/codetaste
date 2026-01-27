@@ -7,7 +7,7 @@ from refactoring_benchmark.coverage.models import SARIFOpengrep
 @pytest.fixture
 def sarif_file_path():
     """Path to a sample SARIF file for testing."""
-    return Path("./output_minimal/go-gitea/gitea/3945c267/golden_agent/evaluation/rules_positive.sarif")
+    return Path("./archive/output_24012025/output_nano/go-gitea/gitea/3945c267/golden_agent/evaluation/rules_positive.sarif")
 
 
 def test_sarif_opengrep_model_loads_and_preserves_structure(sarif_file_path):

@@ -1,6 +1,7 @@
 """Calculate line-level precision metrics for refactoring changes."""
 
 import json
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -12,7 +13,10 @@ from refactoring_benchmark.coverage.models import (
 from refactoring_benchmark.coverage.parse import parse_diff, parse_sarif
 from refactoring_benchmark.evaluation.models import EvaluationResult
 from refactoring_benchmark.utils.models import ReducedInstanceRow
+from joblib import Memory
 
+cachedir = './.cache_dir'
+memory = Memory(cachedir, verbose=1)
 
 def _debug_print_line_intersections(
     metrics: PrecisionMetrics,
@@ -77,6 +81,20 @@ def calculate_precision(
     diff_path: Path,
     debug: bool = False,
 ) -> PrecisionMetrics:
+    paths = [sarif_negative_path, sarif_positive_path, diff_path]
+    mtimes = tuple(os.path.getmtime(p) for p in paths)
+    return _cached_calculate_precision(
+        sarif_negative_path, sarif_positive_path, diff_path, mtimes, debug
+    )
+
+@memory.cache
+def _cached_calculate_precision(
+    sarif_negative_path: Path,
+    sarif_positive_path: Path,
+    diff_path: Path,
+    mtimes: tuple,
+    debug: bool = False,
+) -> PrecisionMetrics:
     """
     Calculate line-level precision metrics for refactoring changes.
 
@@ -101,7 +119,7 @@ def calculate_precision(
     lines_matched_by_addition_rules = parse_sarif(sarif_pos, "predicted")
 
     # Load and parse diff
-    diff_content = diff_path.read_text()
+    diff_content = diff_path.read_text(errors='replace')
     lines_removed, lines_added = parse_diff(diff_content, "base", "predicted")
 
     # Create PrecisionMetrics object
@@ -177,7 +195,8 @@ def calculate_precision_eval_result(
         return None
     if not sarif_positive_path.exists():
         return None
-    if not diff_path.exists():
+    if not diff_path.exists() or diff_path.stat().st_size > 10_000_000:
+        print(f"  Warning: Skipping precision calculation for {instance.display_path}/{result.agent_config.id} due to missing or too large diff file.")
         return None
 
     try:
