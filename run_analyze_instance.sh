@@ -1,0 +1,6 @@
+python -m refactoring_benchmark.scripts.analyze_instance --metric ifr --metric test_success --metric precision_overall --plot-type heatmap --output-dir output_pseudo_agents/ --plots-dir "plots/instance/pseudo_agents/"
+python -m refactoring_benchmark.scripts.analyze_instance --metric ifr --metric test_success --metric precision_overall --plot-type heatmap --output-dir output_abstract/ --plots-dir "plots/instance/abstract/"
+python -m refactoring_benchmark.scripts.analyze_instance --metric ifr --metric test_success --metric precision_overall --plot-type heatmap --output-dir output_abstract_plan/ --plots-dir "plots/instance/abstract_plan/"
+python -m refactoring_benchmark.scripts.analyze_instance --metric ifr --metric test_success --metric precision_overall --plot-type heatmap --output-dir output_abstract_multiplan/ --plots-dir "plots/instance/abstract_multiplan/"
+python -m refactoring_benchmark.scripts.analyze_instance --metric ifr --metric test_success --metric precision_overall --plot-type heatmap --output-dir output_open/ --plots-dir "plots/instance/open/"
+python -m refactoring_benchmark.scripts.analyze_instance --metric ifr --metric test_success --metric precision_overall --plot-type heatmap --output-dir output/ --plots-dir "plots/instance/standard/"
