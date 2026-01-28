@@ -4,10 +4,12 @@ import json
 import os
 from pathlib import Path
 from typing import Optional
+from functools import lru_cache
 
 from refactoring_benchmark.coverage.models import (
     SARIFOpengrep,
     PrecisionMetrics,
+    PrecisionMetricsResult,
     InstanceAgentPrecision,
 )
 from refactoring_benchmark.coverage.parse import parse_diff, parse_sarif
@@ -75,38 +77,41 @@ def _debug_print_line_intersections(
     print()
 
 
+@lru_cache(maxsize=1024)
 def calculate_precision(
     sarif_negative_path: Path,
     sarif_positive_path: Path,
     diff_path: Path,
     debug: bool = False,
-) -> PrecisionMetrics:
+) -> PrecisionMetricsResult:
+    # Convert to string paths for efficient cache key
+    paths_str = (str(sarif_negative_path), str(sarif_positive_path), str(diff_path))
     paths = [sarif_negative_path, sarif_positive_path, diff_path]
     mtimes = tuple(os.path.getmtime(p) for p in paths)
-    return _cached_calculate_precision(
-        sarif_negative_path, sarif_positive_path, diff_path, mtimes, debug
-    )
+    return _cached_calculate_precision(paths_str, mtimes, debug)
 
 @memory.cache
 def _cached_calculate_precision(
-    sarif_negative_path: Path,
-    sarif_positive_path: Path,
-    diff_path: Path,
+    paths_str: tuple[str, str, str],
     mtimes: tuple,
     debug: bool = False,
-) -> PrecisionMetrics:
+) -> PrecisionMetricsResult:
     """
     Calculate line-level precision metrics for refactoring changes.
 
     Args:
-        sarif_negative_path: Path to rules_negative.sarif (negative rules on base code)
-        sarif_positive_path: Path to rules_positive.sarif (positive rules on predicted code)
-        diff_path: Path to prediction.diff
+        paths_str: Tuple of (sarif_negative, sarif_positive, diff) path strings
+        mtimes: Modification times for cache invalidation
         debug: Whether to print debug information
 
     Returns:
-        PrecisionMetrics object with precision scores and line sets
+        PrecisionMetricsResult with computed precision scores (optimized for caching)
     """
+    # Reconstruct Path objects from string paths
+    sarif_negative_path = Path(paths_str[0])
+    sarif_positive_path = Path(paths_str[1])
+    diff_path = Path(paths_str[2])
+
     # Load SARIF files
     with open(sarif_negative_path) as f:
         sarif_neg = SARIFOpengrep.model_validate(json.load(f))
@@ -122,7 +127,7 @@ def _cached_calculate_precision(
     diff_content = diff_path.read_text(errors='replace')
     lines_removed, lines_added = parse_diff(diff_content, "base", "predicted")
 
-    # Create PrecisionMetrics object
+    # Create PrecisionMetrics object for computation
     metrics = PrecisionMetrics(
         lines_added=lines_added,
         lines_removed=lines_removed,
@@ -147,7 +152,16 @@ def _cached_calculate_precision(
             diff_path,
         )
 
-    return metrics
+    # Convert to result format (only scalar values, no line sets)
+    return PrecisionMetricsResult(
+        precision_added=metrics.precision_added,
+        precision_removed=metrics.precision_removed,
+        precision_overall=metrics.precision_overall,
+        lines_added_count=len(metrics.lines_added),
+        lines_removed_count=len(metrics.lines_removed),
+        relevant_added_count=len(metrics.relevant_added_lines),
+        relevant_removed_count=len(metrics.relevant_removed_lines),
+    )
 
 
 def calculate_precision_eval_result(
@@ -195,7 +209,7 @@ def calculate_precision_eval_result(
         return None
     if not sarif_positive_path.exists():
         return None
-    if not diff_path.exists() or diff_path.stat().st_size > 10_000_000:
+    if not diff_path.exists() or diff_path.stat().st_size > 1_000_000_000:
         print(f"  Warning: Skipping precision calculation for {instance.display_path}/{result.agent_config.id} due to missing or too large diff file.")
         return None
 

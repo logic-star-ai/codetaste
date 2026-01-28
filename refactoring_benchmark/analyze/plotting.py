@@ -40,12 +40,14 @@ _apply_science_style()
 METRIC_LABELS = {
     "f1": r"F$_1$ Score",
     "ifr": "IFR (Recall)",
-    "ifr_x_test_success": r"IFR $\times$ Test Success",
+    "ifr_x_test_success": r"\textsc{Ifr} $\times$ Test Success",
+    "ifr_added_x_test_success": r"\textsc{PosIfr} $\times$ Test Success",
+    "ifr_removed_x_test_success": r"\textsc{NegIfr} $\times$ Test Success",
     "strict_ifr_x_test_success": "Strict Success Rate",
     "total_score": "Total Score",
-    "ifr_added": "IFR (Added)",
-    "ifr_removed": "IFR (Removed)",
-    "ifr_ratio": "IFR Removal Ratio",
+    "ifr_added": r"\textsc{PosIfr}",
+    "ifr_removed": r"\textsc{NegIfr}",
+    "ifr_ratio": r"\textsc{NegIfr} / (\textsc{PosIfr} + \textsc{NegIfr})",
     "diff_added_lines": "Lines Added",
     "diff_removed_lines": "Lines Removed",
     "diff_delta_lines": r"$\Delta$ Lines",
@@ -86,7 +88,9 @@ def create_plot(
     if not agents or not description_types:
         raise ValueError("No data to plot")
 
-    fig, ax = plt.subplots(figsize=(config.width, config.height))
+    # Dynamic width for bar plots to keep bars equal width
+    fig_width = (len(description_types) * 1.1 + 2.0) if plot_type == "bar" else config.width
+    fig, ax = plt.subplots(figsize=(fig_width, config.height))
     
     # 1. Labels and Colors
     display_metric = METRIC_LABELS.get(metric_name, metric_name.replace("_", " ").title())
@@ -115,9 +119,9 @@ def create_plot(
     ax.legend(
         handles,
         mapped_agent_labels,
-        loc="best", 
+        loc="lower left", 
         frameon=True,
-        framealpha=0.9, 
+        framealpha=0.7, 
         edgecolor='none', 
         fontsize=9,
         handletextpad=0.5
@@ -311,6 +315,7 @@ def save_plot(fig: plt.Figure, output_path: Path, dpi: int = 300) -> None:
         output_path: Path to save the plot
         dpi: Resolution for saved plot
     """
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_path, dpi=dpi, bbox_inches="tight")
+    pdf_path = output_path.with_suffix(".pdf")
+    pdf_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(pdf_path, format="pdf", bbox_inches="tight")
     plt.close(fig)

@@ -77,6 +77,13 @@ def metric_ifr_x_test_success(result: EvaluationResult) -> float | None:
     """Combined IFR x Test Success metric."""
     return metric_ifr(result) * metric_test_success(result)
 
+def metric_ifr_added_x_test_success(result: EvaluationResult) -> float | None:
+    """Combined IFR Added x Test Success metric."""
+    return metric_ifr_added(result) * metric_test_success(result)
+
+def metric_ifr_removed_x_test_success(result: EvaluationResult) -> float | None:
+    """Combined IFR Removed x Test Success metric."""
+    return metric_ifr_removed(result) * metric_test_success(result)
 
 def metric_f1_score(result: EvaluationResult) -> float | None:
     """Harmonic mean of precision and instruction following (recall)."""
@@ -131,6 +138,8 @@ METRICS: dict[str, MetricFunction] = {
     "f1": metric_f1_score,
     "ifr": metric_ifr,
     "ifr_x_test_success": metric_ifr_x_test_success,
+    "ifr_added_x_test_success": metric_ifr_added_x_test_success,
+    "ifr_removed_x_test_success": metric_ifr_removed_x_test_success,
     "strict_ifr_x_test_success": metric_strict_ifr_x_test_success,
     "total_score": metric_total_score,
     "ifr_added": metric_ifr_added,

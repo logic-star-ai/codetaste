@@ -1,6 +1,11 @@
 import os
+from functools import lru_cache
 
 from pydantic import BaseModel
+from joblib import Memory
+
+cachedir = './.cache_dir'
+memory = Memory(cachedir, verbose=1)
 
 
 class DiffStat(BaseModel):
@@ -47,7 +52,15 @@ def parse_diff_stats(diff_input, exclude_exts=None):
 
     return DiffStat(added_lines=total_added, removed_lines=total_removed)
 
+@lru_cache(maxsize=1024)
 def parse_diff_file(diff_file_path, exclude_exts=None) -> DiffStat:
     """Parse a diff file to get added and removed line statistics."""
-    with open(diff_file_path, 'r', encoding='utf-8', errors='ignore') as f:
+    path_str = str(diff_file_path)
+    mtime = os.path.getmtime(diff_file_path)
+    return _cached_parse_diff_file(path_str, mtime, exclude_exts)
+
+@memory.cache
+def _cached_parse_diff_file(path_str: str, mtime: float, exclude_exts) -> DiffStat:
+    """Cached diff parsing using path string + mtime as cache key."""
+    with open(path_str, 'r', encoding='utf-8', errors='ignore') as f:
         return parse_diff_stats(f, exclude_exts=exclude_exts)
