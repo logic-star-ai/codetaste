@@ -65,7 +65,13 @@ def metric_test_success(result: EvaluationResult) -> float:
         return 1.0
     else:
         return 0.0
-
+    
+def metric_strict_ifr_x_test_success(result: EvaluationResult) -> float | None:
+    """Strict IFR x Test Success metric (1.0 only if both IFR and test success are perfect)."""
+    if metric_ifr(result) == 1.0 and metric_test_success(result) == 1.0:
+        return 1.0
+    else:
+        return 0.0
 
 def metric_ifr_x_test_success(result: EvaluationResult) -> float | None:
     """Combined IFR x Test Success metric."""
@@ -75,7 +81,7 @@ def metric_ifr_x_test_success(result: EvaluationResult) -> float | None:
 def metric_f1_score(result: EvaluationResult) -> float | None:
     """Harmonic mean of precision and instruction following (recall)."""
     p = metric_precision_overall(result)
-    r = metric_ifr(result)  # Your TPR equivalent
+    r = metric_ifr(result)
 
     if p is not None and r is not None:
         if (p + r) == 0:
@@ -83,6 +89,12 @@ def metric_f1_score(result: EvaluationResult) -> float | None:
         return 2 * (p * r) / (p + r)
     return None
 
+def metric_total_score(result: EvaluationResult) -> float | None:
+    f1 = metric_f1_score(result)
+    is_success = metric_test_success(result)
+    if f1 is None or is_success is None:
+        return None
+    return  f1 * is_success
 
 def _calculate_precision(result: EvaluationResult) -> InstanceAgentPrecision | None:
     """Helper to calculate precision metrics (requires ./output_pseudo_agents/)."""
@@ -119,6 +131,8 @@ METRICS: dict[str, MetricFunction] = {
     "f1": metric_f1_score,
     "ifr": metric_ifr,
     "ifr_x_test_success": metric_ifr_x_test_success,
+    "strict_ifr_x_test_success": metric_strict_ifr_x_test_success,
+    "total_score": metric_total_score,
     "ifr_added": metric_ifr_added,
     "ifr_removed": metric_ifr_removed,
     "ifr_ratio": metric_ifr_ratio,

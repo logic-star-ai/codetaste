@@ -256,7 +256,7 @@ Examples:
                 min_mean = min([v.mean for k, v in data.data.items()])
                 max_ci = max([v.standard_error for k, v in data.data.items()])
                 print(f"    Setting y-axis limit to {max_mean:.4f} for better visibility")
-                config = plot_config.model_copy(update={"ylim_max": max_mean + 1.1 * max_ci, "ylim_min": min(0, min_mean - 1.1 * max_ci)})
+                config = plot_config.model_copy(update={"ylim_max": max_mean + 1.2 * max_ci, "ylim_min": min(0, min_mean - 1.2 * max_ci)})
             else:
                 config = plot_config
             fig = create_plot(data, metric_name, plot_type=args.plot_type, aggregation=args.aggregation, config=config)
