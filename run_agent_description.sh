@@ -4,26 +4,26 @@
 # To switch agents, simply uncomment the one you want to use
 # AGENT_DIR="./agents/codex/gpt51-codex-mini"; AGENT_ID="codex-v0.77.0-gpt-5.1-codex-mini"
 # AGENT_DIR="./agents/codex/gpt52"; AGENT_ID="codex-v0.77.0-gpt-5.2"
-# AGENT_DIR="./agents/qwen-code/qwen3-coder-30b-a3b-instruct"; AGENT_ID="qwen-code-v0.6.2-qwen3-coder-30b-a3b-instruct"
-AGENT_DIR="./agents/claude/sonnet45"; AGENT_ID="claude-code-v2.0.76-sonnet45"
+AGENT_DIR="./agents/qwen-code/qwen3-coder-30b-a3b-instruct"; AGENT_ID="qwen-code-v0.6.2-qwen3-coder-30b-a3b-instruct"
+# AGENT_DIR="./agents/claude/sonnet45"; AGENT_ID="claude-code-v2.0.76-sonnet45"
 
 # Change this variable to switch task descriptions
-DESCRIPTION_TYPE="open" # Options: standard, nano, problem, open, abstract
+DESCRIPTION_TYPE="abstract" # Options: standard, nano, problem, open, abstract
 
 INSTANCES_CSV="./instances.csv"
-NR_INSTANCES=20
+NR_INSTANCES=125
 # Inference
 # FORCE_INFERENCE in ["--force", "--force-unsuccessful", ""]; REUSE_PLAN_ON_FORCE in ["--reuse-successful-plan", ""]; PLAN in ["--multiplan", "--plan", ""]
-# FORCE_INFERENCE=""; REUSE_PLAN_ON_FORCE=""; PLAN="--multiplan"
+FORCE_INFERENCE="--force-unsuccessful"; REUSE_PLAN_ON_FORCE=""; PLAN="--plan"
 # FORCE_INFERENCE="--force-unsuccessful"; REUSE_PLAN_ON_FORCE=""; PLAN="--plan"
-FORCE_INFERENCE=""; REUSE_PLAN_ON_FORCE=""; PLAN=""
+# FORCE_INFERENCE=""; REUSE_PLAN_ON_FORCE=""; PLAN=""
 
 # Evaluation
 FORCE_EVALUATION="" # Set to "--force" or ""
 
-NR_INFERENCE_WORKERS=20
+NR_INFERENCE_WORKERS=8
 if [ $AGENT_ID == "qwen-code-v0.6.2-qwen3-coder-30b-a3b-instruct" ]; then
-    NR_INFERENCE_WORKERS=5; # local
+    NR_INFERENCE_WORKERS=4; # local
 fi
 
 # --- DYNAMIC OUTPUT DIRECTORY MAPPING ---
@@ -73,5 +73,17 @@ else
         --agent-id "$AGENT_ID" \
         --output-dir "$OUTPUT_DIR" \
         $FORCE_EVALUATION
+    python -m refactoring_benchmark.scripts.evaluate \
+        --instances "$NR_INSTANCES" \
+        --nr-workers 5 \
+        --agent-id "$AGENT_ID" \
+        --output-dir "$OUTPUT_DIR" \
+        --retry-null-tests
+    python -m refactoring_benchmark.scripts.evaluate \
+        --instances "$NR_INSTANCES" \
+        --nr-workers 5 \
+        --agent-id "$AGENT_ID" \
+        --output-dir "$OUTPUT_DIR" \
+        --retry-null-tests
     echo "Process completed successfully."
 fi
