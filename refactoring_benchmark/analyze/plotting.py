@@ -17,14 +17,15 @@ def _apply_science_style():
         "text.usetex": True,
         "font.family": "serif",
         "font.serif": ["Computer Modern Roman"],
-        "font.size": 10,
-        "axes.titlesize": 10,
-        "axes.labelsize": 9,      
-        "legend.fontsize": 8,
-        "xtick.labelsize": 8,
-        "ytick.labelsize": 8,
+        "font.size": 19,
+        "axes.titlesize": 19,
+        "axes.labelsize": 17,
+        "legend.fontsize": 12,
+        "xtick.labelsize": 17,
+        "ytick.labelsize": 17,
+        "xtick.major.pad": 8,
         # Figure geometry
-        "figure.figsize": (3.25, 2.5), 
+        "figure.figsize": (3.25, 2.2), 
         "figure.dpi": 300,
         # Aesthetics
         "axes.linewidth": 0.8,
@@ -39,40 +40,40 @@ _apply_science_style()
 
 METRIC_LABELS = {
     "f1": r"F$_1$ Score",
-    "ifr": "IFR (Recall)",
-    "ifr_x_test_success": r"\textsc{Ifr} $\times$ Test Success",
-    "ifr_added_x_test_success": r"\textsc{PosIfr} $\times$ Test Success",
-    "ifr_removed_x_test_success": r"\textsc{NegIfr} $\times$ Test Success",
+    "ifr": r"\textsc{Ifr} (\%)",
+    "ifr_x_test_success": r"$\mathcal{A}$ (\%)", # $(\Gamma, \hat{X})$
+    "ifr_added_x_test_success": r"\textsc{AddA} (\%)", # $(\Gamma, \hat{X})$
+    "ifr_removed_x_test_success": r"\textsc{NegA} (\%)", # $(\Gamma, \hat{X})$
     "strict_ifr_x_test_success": "Strict Success Rate",
     "total_score": "Total Score",
-    "ifr_added": r"\textsc{PosIfr}",
-    "ifr_removed": r"\textsc{NegIfr}",
-    "ifr_ratio": r"\textsc{NegIfr} / (\textsc{PosIfr} + \textsc{NegIfr})",
+    "ifr_added": r"\textsc{Ifr}$^{+}$ (\%)",
+    "ifr_removed": r"\textsc{Ifr}$^{-}$ (\%)",
+    "ifr_ratio": r"\textsc{Ifr}$_{-}$ / (\textsc{Ifr}$_{+}$ + \textsc{Ifr}$_{-}$) (\%)",
     "diff_added_lines": "Lines Added",
     "diff_removed_lines": "Lines Removed",
     "diff_delta_lines": r"$\Delta$ Lines",
-    "test_success": "Test Pass Rate",
-    "precision_added": "Precision (Added)",
-    "precision_removed": "Precision (Removed)",
-    "precision_overall": "Overall Precision",
+    "test_success": r"\textsc{Pass} (\%)",
+    "precision_added": r"\textsc{Prec}$^{+}$ (\%)",
+    "precision_removed": r"\textsc{Prec}$^{-}$ (\%)",
+    "precision_overall": r"\textsc{Prec} (\%)",
     "cost": "Cost (USD)"
 }
 
 DESC_TYPE_MAPPING = {
-    "standard": "Detailed",
-    "abstract": "Abstract",
-    "abstract_plan": "Abstract (Plan)",
-    "abstract_multiplan": "Abstract (Multiplan)",
+    "standard": "", # Instructed Track"
+    "abstract": "Direct",
+    "abstract_plan": "Plan",
+    "abstract_multiplan": "Multiplan",
     "open": "Open"
 }
 
 AGENT_NAME_MAPPING = {
-    "claude-code-v2.0.76-sonnet45": "Claude Sonnet 4.5",
-    "codex-v0.77.0-gpt-5.1-codex-mini": "GPT-5.1 Codex Mini",
-    "codex-v0.77.0-gpt-5.2": "GPT-5.2 Codex",
+    "claude-code-v2.0.76-sonnet45": "Sonnet 4.5",
+    "codex-v0.77.0-gpt-5.1-codex-mini": "GPT-5.1 M",
+    "codex-v0.77.0-gpt-5.2": "GPT-5.2",
     "golden_agent": "Golden",
     "null_agent": "Null",
-    "qwen-code-v0.6.2-qwen3-coder-30b-a3b-instruct": "Qwen3 Coder 30B"
+    "qwen-code-v0.6.2-qwen3-coder-30b-a3b-instruct": "Qwen3"
 }
 
 def create_plot(
@@ -109,27 +110,35 @@ def create_plot(
         _plot_scatter(ax, data, agents, description_types, colors, aggregation, config, markers)
 
     # 3. Axis Configuration
-    ax.set_xlabel(r"\textbf{Description Type}", labelpad=8)
-    ax.set_ylabel(f"{display_metric}")
-    
+    if config.show_xlabel:
+        # ax.set_xlabel(r"\textbf{Description Type}", labelpad=8)
+        pass
+    if config.show_ylabel:
+        ax.set_ylabel(f"{display_metric}")
+
     # 4. Legend with Mapped Names
-    handles, labels = ax.get_legend_handles_labels()
-    mapped_agent_labels = [AGENT_NAME_MAPPING.get(l, l) for l in labels]
-    
-    ax.legend(
-        handles,
-        mapped_agent_labels,
-        loc="lower left", 
-        frameon=True,
-        framealpha=0.7, 
-        edgecolor='none', 
-        fontsize=9,
-        handletextpad=0.5
-    )
+    if config.show_legend:
+        handles, labels = ax.get_legend_handles_labels()
+        mapped_agent_labels = [AGENT_NAME_MAPPING.get(l, l) for l in labels]
+
+        ax.legend(
+            handles,
+            mapped_agent_labels,
+            loc="upper left",
+            frameon=True,
+            framealpha=0.7,
+            edgecolor='none',
+            fontsize=17,
+            handletextpad=0.5,
+            markerscale=0.3,
+            handlelength=0.5
+        )
 
     # 5. Ticks and Limits
-    ax.set_ylim(config.ylim_min, config.ylim_max * 1.05 if config.ylim_max else 1.1)
-    
+    ylim_max = config.ylim_max * 100 if config.ylim_max else 100
+    ax.set_ylim(config.ylim_min * 100, ylim_max)
+    ax.set_yticks(np.arange(0, ylim_max + 1, 5))
+
     n_agents = len(agents)
     x_indices = np.arange(len(mapped_labels))
     
@@ -168,10 +177,10 @@ def _plot_line(
             agent_desc_data = data.get_data(agent_id, desc_type)
             if agent_desc_data and agent_desc_data.count > 0:
                 val = agent_desc_data.mean if aggregation == "mean" else agent_desc_data.median
-                values.append(val)
+                values.append(val * 100)
                 if config.show_error_bars and aggregation == "mean":
                     low, _ = agent_desc_data.confidence_interval()
-                    margins.append(val - low)
+                    margins.append((val - low) * 100)
                 else:
                     margins.append(0.0)
             else:
@@ -225,10 +234,10 @@ def _plot_bar(
             agent_desc_data = data.get_data(agent_id, desc_type)
             if agent_desc_data and agent_desc_data.count > 0:
                 val = agent_desc_data.mean if aggregation == "mean" else agent_desc_data.median
-                values.append(val)
+                values.append(val * 100)
                 if config.show_error_bars and aggregation == "mean":
                     low, _ = agent_desc_data.confidence_interval()
-                    margins.append(val - low)
+                    margins.append((val - low) * 100)
                 else:
                     margins.append(0.0)
             else:
@@ -270,10 +279,10 @@ def _plot_scatter(
             agent_desc_data = data.get_data(agent_id, desc_type)
             if agent_desc_data and agent_desc_data.count > 0:
                 val = agent_desc_data.mean if aggregation == "mean" else agent_desc_data.median
-                values.append(val)
+                values.append(val * 100)
                 if config.show_error_bars and aggregation == "mean":
                     low, _ = agent_desc_data.confidence_interval()
-                    margins.append(val - low)
+                    margins.append((val - low) * 100)
                 else:
                     margins.append(0.0)
             else:

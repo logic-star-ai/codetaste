@@ -113,6 +113,21 @@ Examples:
         action="store_true",
         help="Disable 95 percent confidence interval error bars",
     )
+    parser.add_argument(
+        "--no-xlabel",
+        action="store_true",
+        help="Hide x-axis label",
+    )
+    parser.add_argument(
+        "--no-ylabel",
+        action="store_true",
+        help="Hide y-axis label",
+    )
+    parser.add_argument(
+        "--no-legend",
+        action="store_true",
+        help="Hide legend",
+    )
 
     # Other arguments
     parser.add_argument(
@@ -202,7 +217,12 @@ Examples:
         print("Filtering: Only successful inference runs (finish_reason='success')")
 
     # Create plot configuration
-    plot_config = PlotConfig(show_error_bars=not args.no_error_bars)
+    plot_config = PlotConfig(
+        show_error_bars=not args.no_error_bars,
+        show_xlabel=not args.no_xlabel,
+        show_ylabel=not args.no_ylabel,
+        show_legend=not args.no_legend,
+    )
 
     # Print finish_reason statistics if requested
     if args.statistics:
@@ -256,7 +276,7 @@ Examples:
                 min_mean = min([v.mean for k, v in data.data.items()])
                 max_ci = max([v.confidence_interval()[1] - v.mean for k, v in data.data.items()])
                 print(f"    Setting y-axis limit to {max_mean:.4f} for better visibility")
-                config = plot_config.model_copy(update={"ylim_max": max_mean + 1 * max_ci, "ylim_min": min(0, min_mean - 1 * max_ci)})
+                config = plot_config.model_copy(update={"ylim_max": max_mean + 1 * max_ci, "ylim_min": 0})
             else:
                 config = plot_config
             fig = create_plot(data, metric_name, plot_type=args.plot_type, aggregation=args.aggregation, config=config)

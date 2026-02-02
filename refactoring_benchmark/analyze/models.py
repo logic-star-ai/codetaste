@@ -107,8 +107,17 @@ class AnalysisData(BaseModel):
         self.data[key].metric_values.append(MetricPoint(instance_key=instance_key, value=value))
 
     def get_agent_ids(self) -> list[str]:
-        """Get sorted list of unique agent IDs."""
-        return sorted(set(k[0] for k in self.data.keys()))
+        """Get sorted list of unique agent IDs with custom ordering."""
+        agent_order = {
+            "codex-v0.77.0-gpt-5.2": 0,
+            "codex-v0.77.0-gpt-5.1-codex-mini": 1,
+            "claude-code-v2.0.76-sonnet45": 2,
+            "qwen-code-v0.6.2-qwen3-coder-30b-a3b-instruct": 3,
+            "golden_agent": 4,
+            "null_agent": 5,
+        }
+        agents = set(k[0] for k in self.data.keys())
+        return sorted(agents, key=lambda x: agent_order.get(x, 999))
 
     def get_description_types(self) -> list[str]:
         """Get sorted list of unique description types."""
