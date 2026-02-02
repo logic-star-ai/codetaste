@@ -1,5 +1,6 @@
 """Parsing utilities for evaluation outputs."""
 
+from collections import defaultdict
 import json
 from pathlib import Path
 from typing import Dict, Optional, Tuple
@@ -65,7 +66,7 @@ def parse_sarif_file(sarif_path: Path, rules_path: Path) -> Tuple[int, int]:
             pass
 
     # Count matches from SARIF
-    rules_matched_set = set()
+    rules_matched_dict = {rule["id"].split(".")[-1]: 0 for rule in rules_data.get("rules", [])} if total_rules > 0 else defaultdict(int)
     if sarif_path.exists():
         try:
             with open(sarif_path, "r") as f:
@@ -79,12 +80,12 @@ def parse_sarif_file(sarif_path: Path, rules_path: Path) -> Tuple[int, int]:
                             if rule_id:
                                 # Clean rule ID (remove prefix)
                                 clean_id = rule_id.split(".")[-1]
-                                rules_matched_set.add(clean_id)
+                                rules_matched_dict[clean_id] += 1
         except Exception:
             pass
 
-    rules_matched = len(rules_matched_set)
-    return rules_matched, total_rules
+    rules_matched = len([r for r in rules_matched_dict if rules_matched_dict[r] > 0])
+    return rules_matched, total_rules, rules_matched_dict
 
 
 def parse_rule_evaluation(eval_dir: Path) -> RuleMetrics:
@@ -102,8 +103,14 @@ def parse_rule_evaluation(eval_dir: Path) -> RuleMetrics:
     rules_pos = eval_dir / "rules_positive.yml"
     rules_neg = eval_dir / "rules_negative.yml"
 
-    pos_matched, pos_total = parse_sarif_file(sarif_pos, rules_pos)
-    neg_matched, neg_total = parse_sarif_file(sarif_neg, rules_neg)
+    pos_matched, pos_total, pos_matched_dict = parse_sarif_file(sarif_pos, rules_pos)
+    neg_matched, neg_total, neg_matched_dict = parse_sarif_file(sarif_neg, rules_neg)
+
+    # output full report
+    with open(eval_dir / "rules_positive_report.json", "w") as f:
+        json.dump(pos_matched_dict, f, indent=2)
+    with open(eval_dir / "rules_negative_report.json", "w") as f:
+        json.dump(neg_matched_dict, f, indent=2)
 
     return RuleMetrics(
         positive_rules_matched=pos_matched,
