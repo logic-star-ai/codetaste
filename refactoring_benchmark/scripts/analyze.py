@@ -113,6 +113,21 @@ Examples:
         action="store_true",
         help="Disable 95 percent confidence interval error bars",
     )
+    parser.add_argument(
+        "--no-xlabel",
+        action="store_true",
+        help="Hide x-axis label",
+    )
+    parser.add_argument(
+        "--no-ylabel",
+        action="store_true",
+        help="Hide y-axis label",
+    )
+    parser.add_argument(
+        "--no-legend",
+        action="store_true",
+        help="Hide legend",
+    )
 
     # Other arguments
     parser.add_argument(
@@ -185,7 +200,9 @@ Examples:
     print(f"Metrics to plot: {', '.join(metrics_to_plot)}")
 
     # Load evaluation results
-    print(f"Scanning {len(output_dirs)} output director{'y' if len(output_dirs) == 1 else 'ies'} for evaluation results...")
+    print(
+        f"Scanning {len(output_dirs)} output director{'y' if len(output_dirs) == 1 else 'ies'} for evaluation results..."
+    )
     results = load_all_results(output_dirs, instances, agent_ids=args.agent_ids)
     print(f"Found {len(results)} evaluation results")
 
@@ -200,7 +217,12 @@ Examples:
         print("Filtering: Only successful inference runs (finish_reason='success')")
 
     # Create plot configuration
-    plot_config = PlotConfig(show_error_bars=not args.no_error_bars)
+    plot_config = PlotConfig(
+        show_error_bars=not args.no_error_bars,
+        show_xlabel=not args.no_xlabel,
+        show_ylabel=not args.no_ylabel,
+        show_legend=not args.no_legend,
+    )
 
     # Print finish_reason statistics if requested
     if args.statistics:
@@ -209,7 +231,8 @@ Examples:
             filtered_results = [r for r in filtered_results if r.agent_config.id in args.agent_ids]
         if args.description_types:
             filtered_results = [
-                r for r in filtered_results
+                r
+                for r in filtered_results
                 if r.inference_metadata and r.inference_metadata.description_type in args.description_types
             ]
         print_finish_reason_table(filtered_results, "Filtered by Description Type and Agent ID")
@@ -241,25 +264,22 @@ Examples:
 
         # Print summary
         print(f"  Found {len(data.get_agent_ids())} agents: {', '.join(data.get_agent_ids())}")
-        print(f"  Found {len(data.get_description_types())} description types: {', '.join(data.get_description_types())}")
+        print(
+            f"  Found {len(data.get_description_types())} description types: {', '.join(data.get_description_types())}"
+        )
 
         # Generate plot
         print(f"  Generating {args.plot_type} plot with {args.aggregation} aggregation...")
         try:
-            if metric_name in ["cost"]:
+            if len(output_dirs) != 1:
                 max_mean = max([v.mean for k, v in data.data.items()])
-                max_ci = max([v.standard_error for k, v in data.data.items()])
+                min_mean = min([v.mean for k, v in data.data.items()])
+                max_ci = max([v.confidence_interval()[1] - v.mean for k, v in data.data.items()])
                 print(f"    Setting y-axis limit to {max_mean:.4f} for better visibility")
-                config = plot_config.model_copy(update={"ylim_max": max_mean + max_ci })
+                config = plot_config.model_copy(update={"ylim_max": max_mean + 1 * max_ci, "ylim_min": 0})
             else:
                 config = plot_config
-            fig = create_plot(
-                data,
-                metric_name,
-                plot_type=args.plot_type,
-                aggregation=args.aggregation,
-                config=config
-            )
+            fig = create_plot(data, metric_name, plot_type=args.plot_type, aggregation=args.aggregation, config=config)
 
             # Print statistics table if requested
             if args.statistics:
@@ -274,6 +294,7 @@ Examples:
         except Exception as e:
             print(f"  Error generating plot: {e}")
             import traceback
+
             traceback.print_exc()
 
     print("\nDone!")

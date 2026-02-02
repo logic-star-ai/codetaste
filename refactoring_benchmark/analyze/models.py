@@ -12,7 +12,7 @@ class MetricPoint(BaseModel):
     """Single metric value for one instance."""
 
     instance_key: str = Field(description="Instance identifier (owner/repo/hash)")
-    value: float # = Field(ge=0, le=1, description="Metric value in [0, 1] range")
+    value: float  # = Field(ge=0, le=1, description="Metric value in [0, 1] range")
 
 
 class AgentDescriptionData(BaseModel):
@@ -47,12 +47,12 @@ class AgentDescriptionData(BaseModel):
         if n <= 1:
             m = self.mean
             return (m, m)
-        
+
         m = self.mean
         se = self.standard_error
-        
+
         # Use t-distribution for small samples, which approaches Z as n grows
-        h = se * stats.t.ppf((1 + confidence) / 2., n - 1)
+        h = se * stats.t.ppf((1 + confidence) / 2.0, n - 1)
         return m - h, m + h
 
     @property
@@ -107,12 +107,29 @@ class AnalysisData(BaseModel):
         self.data[key].metric_values.append(MetricPoint(instance_key=instance_key, value=value))
 
     def get_agent_ids(self) -> list[str]:
-        """Get sorted list of unique agent IDs."""
-        return sorted(set(k[0] for k in self.data.keys()))
+        """Get sorted list of unique agent IDs with custom ordering."""
+        agent_order = {
+            "codex-v0.77.0-gpt-5.2": 0,
+            "codex-v0.77.0-gpt-5.1-codex-mini": 1,
+            "claude-code-v2.0.76-sonnet45": 2,
+            "qwen-code-v0.6.2-qwen3-coder-30b-a3b-instruct": 3,
+            "golden_agent": 4,
+            "null_agent": 5,
+        }
+        agents = set(k[0] for k in self.data.keys())
+        return sorted(agents, key=lambda x: agent_order.get(x, 999))
 
     def get_description_types(self) -> list[str]:
         """Get sorted list of unique description types."""
-        return sorted(set(k[1] for k in self.data.keys()))
+        d = {"open": 0, "abstract": 10, "problem": 20, "nano": 30, "standard": 40}
+        d_suffix = {"": 0, "plan": 1, "multiplan": 2}
+        def sort_description_type(desc_type: str) -> tuple[int, int]:
+            parts = desc_type.split("_")
+            base = parts[0]
+            suffix = parts[1] if len(parts) > 1 else ""
+            return d.get(base, 100) + d_suffix.get(suffix, 5)
+            
+        return sorted(set(k[1] for k in self.data.keys()), key=sort_description_type)
 
     def get_data(self, agent_id: str, description_type: str) -> AgentDescriptionData | None:
         """Get data for a specific (agent_id, description_type) combination.

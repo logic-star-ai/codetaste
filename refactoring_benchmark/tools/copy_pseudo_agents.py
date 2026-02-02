@@ -139,8 +139,8 @@ def main() -> int:
     parser.add_argument(
         "--description-type",
         type=str,
-        required=True,
-        choices=["standard", "minimal", "nano", "open", "problem"],
+        # required=True,
+        # choices=["standard", "minimal", "nano", "open", "problem"],
         help="Description type to set in metadata files",
     )
 
@@ -158,7 +158,7 @@ def main() -> int:
     )
 
     parser.add_argument(
-        "--dry-run",
+        "--not-dry-run",
         action="store_true",
         help="Show what would be copied without actually copying",
     )
@@ -196,7 +196,7 @@ def main() -> int:
     print(f"Description type: {args.description_type}")
     print(f"Agents to copy: {', '.join(agents_to_copy)}")
     print(f"Force overwrite: {args.force}")
-    print(f"Dry run: {args.dry_run}")
+    print(f"Dry run: {not args.not_dry_run}")
     print()
 
     # Find all agent output directories
@@ -225,7 +225,7 @@ def main() -> int:
         relative_display = dest_path.relative_to(output_dir)
 
         try:
-            if args.dry_run:
+            if not args.not_dry_run:
                 print(f"  [DRY RUN] Would copy: {relative_display}")
                 success_count += 1
             else:

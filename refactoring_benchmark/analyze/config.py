@@ -30,11 +30,14 @@ class PlotConfig(BaseModel):
     error_bar_alpha: float = Field(default=0.5, ge=0, le=1, description="Error bar transparency")
 
     # Text settings
-    xlabel_fontsize: int = Field(default=12, ge=1, description="X-axis label font size")
-    ylabel_fontsize: int = Field(default=12, ge=1, description="Y-axis label font size")
-    title_fontsize: int = Field(default=14, ge=1, description="Title font size")
-    tick_fontsize: int = Field(default=10, ge=1, description="Tick label font size")
-    legend_fontsize: int = Field(default=10, ge=1, description="Legend font size")
+    show_xlabel: bool = Field(default=True, description="Show x-axis label")
+    show_ylabel: bool = Field(default=True, description="Show y-axis label")
+    show_legend: bool = Field(default=True, description="Show legend")
+    xlabel_fontsize: int = Field(default=21, ge=1, description="X-axis label font size")
+    ylabel_fontsize: int = Field(default=20, ge=1, description="Y-axis label font size")
+    title_fontsize: int = Field(default=23, ge=1, description="Title font size")
+    tick_fontsize: int = Field(default=19, ge=1, description="Tick label font size")
+    legend_fontsize: int = Field(default=18, ge=1, description="Legend font size")
 
     # Grid settings
     grid_alpha: float = Field(default=0.3, ge=0, le=1, description="Grid transparency")

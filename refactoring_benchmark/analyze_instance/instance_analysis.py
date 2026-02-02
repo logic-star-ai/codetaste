@@ -29,9 +29,7 @@ class InstanceData(BaseModel):
 
     instance_key: str = Field(description="Instance identifier (owner/repo/hash)")
     instance_display: str = Field(description="Short display name for the instance")
-    agent_values: dict[str, InstanceMetricPoint] = Field(
-        default_factory=dict, description="Metric values by agent_id"
-    )
+    agent_values: dict[str, InstanceMetricPoint] = Field(default_factory=dict, description="Metric values by agent_id")
 
     def add_agent_value(self, agent_id: str, value: float) -> None:
         """Add a metric value for an agent."""
@@ -59,9 +57,7 @@ class InstanceAnalysisData(BaseModel):
             value: Metric value in [0, 1] range
         """
         if instance_key not in self.instances:
-            self.instances[instance_key] = InstanceData(
-                instance_key=instance_key, instance_display=instance_display
-            )
+            self.instances[instance_key] = InstanceData(instance_key=instance_key, instance_display=instance_display)
         self.instances[instance_key].add_agent_value(agent_id, value)
 
     def get_instance_keys(self) -> list[str]:
@@ -110,9 +106,7 @@ class InstanceAnalysisData(BaseModel):
             if instance_key in self.instances:
                 instance_data = self.instances[instance_key]
                 for agent_id, point in instance_data.agent_values.items():
-                    filtered_data.add_metric_point(
-                        instance_key, instance_data.instance_display, agent_id, point.value
-                    )
+                    filtered_data.add_metric_point(instance_key, instance_data.instance_display, agent_id, point.value)
         return filtered_data
 
 
@@ -152,7 +146,9 @@ def organize_instance_data(
             continue
 
         # Create instance key and display name
-        instance_key = f"{result.instance_metadata.owner}/{result.instance_metadata.repo}/{result.instance_metadata.base_hash[:8]}"
+        instance_key = (
+            f"{result.instance_metadata.owner}/{result.instance_metadata.repo}/{result.instance_metadata.base_hash[:8]}"
+        )
         instance_display = f"{result.instance_metadata.repo[:20]}/{result.instance_metadata.base_hash[:8]}"
 
         # Extract agent_id
@@ -210,6 +206,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 
+
 def _plot_instance_heatmap(
     data: InstanceAnalysisData,
     metric_name: str,
@@ -219,7 +216,7 @@ def _plot_instance_heatmap(
     config: PlotConfig,
 ) -> plt.Figure:
     """Create a heatmap showing metric values for each (instance, agent) pair."""
-    
+
     # 1. Initialize matrix with NaNs instead of zeros
     matrix = np.full((len(agents), len(instance_keys)), np.nan)
 
@@ -238,7 +235,7 @@ def _plot_instance_heatmap(
 
     # 3. Configure the colormap to show NaNs as black
     current_cmap = cm.get_cmap("RdYlGn").copy()
-    current_cmap.set_bad(color='black')
+    current_cmap.set_bad(color="black")
 
     # 4. Use the modified colormap
     im = ax.imshow(matrix, cmap=current_cmap, aspect="auto", vmin=0, vmax=1)

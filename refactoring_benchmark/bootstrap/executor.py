@@ -84,7 +84,8 @@ def bootstrap_single_instance(instance: InstanceRow, config: BootstrapConfig, is
 
         # Run setup + runtime (with fallback for new/rebuild)
         is_supported = any(lang in instance.language.lower() for lang in config.supported_languages)
-
+        if not is_supported:
+            raise BootstrapError(f"Language '{instance.language}' not supported for execution environment.")
         # Force runtime rebuild when setup is updated/rebuilt
         force_runtime = config.force_full_build or config.rerun_metrics
 
@@ -111,6 +112,7 @@ def bootstrap_single_instance(instance: InstanceRow, config: BootstrapConfig, is
             instance_logger.info(f"✅ Successfully bootstrapped {instance.id}.")
 
         except (RuntimeError, TimeoutError, BootstrapError) as e:
+            raise e
             # Fallback: retry with base image (no agent)
             instance_logger.error(f"Attempt failed for {instance.id} ({e}). Retrying with base image...")
             setup_img = bootstrap_setup_phase(client, instance, metadata, config, instance_logger, use_base_image=True)

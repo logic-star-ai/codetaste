@@ -3,11 +3,78 @@
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+import seaborn as sns
 import numpy as np
 
 from refactoring_benchmark.analyze.models import AnalysisData, AggregationType
 from refactoring_benchmark.analyze.config import PlotConfig, PlotType
 
+import matplotlib as mpl
+
+# setup
+def _apply_science_style():
+    mpl.rcParams.update({
+        "text.usetex": True,
+        "font.family": "serif",
+        "font.serif": ["Computer Modern Roman"],
+        "font.size": 19,
+        "axes.titlesize": 19,
+        "axes.labelsize": 17,
+        "legend.fontsize": 12,
+        "xtick.labelsize": 17,
+        "ytick.labelsize": 17,
+        "xtick.major.pad": 8,
+        # Figure geometry
+        "figure.figsize": (3.25, 2.2), 
+        "figure.dpi": 300,
+        # Aesthetics
+        "axes.linewidth": 0.8,
+        "axes.spines.top": False,
+        "axes.spines.right": False,
+        "axes.grid": True,
+        "grid.alpha": 0.15,
+        "grid.linestyle": "--",
+    })
+
+_apply_science_style()
+
+METRIC_LABELS = {
+    "f1": r"F$_1$ Score",
+    "ifr": r"\textsc{Ifr} (\%)",
+    "ifr_x_test_success": r"$\mathcal{A}$ (\%)", # $(\Gamma, \hat{X})$
+    "ifr_added_x_test_success": r"\textsc{AddA} (\%)", # $(\Gamma, \hat{X})$
+    "ifr_removed_x_test_success": r"\textsc{NegA} (\%)", # $(\Gamma, \hat{X})$
+    "strict_ifr_x_test_success": "Strict Success Rate",
+    "total_score": "Total Score",
+    "ifr_added": r"\textsc{Ifr}$^{+}$ (\%)",
+    "ifr_removed": r"\textsc{Ifr}$^{-}$ (\%)",
+    "ifr_ratio": r"\textsc{Ifr}$_{-}$ / (\textsc{Ifr}$_{+}$ + \textsc{Ifr}$_{-}$) (\%)",
+    "diff_added_lines": "Lines Added",
+    "diff_removed_lines": "Lines Removed",
+    "diff_delta_lines": r"$\Delta$ Lines",
+    "test_success": r"\textsc{Pass} (\%)",
+    "precision_added": r"\textsc{Prec}$^{+}$ (\%)",
+    "precision_removed": r"\textsc{Prec}$^{-}$ (\%)",
+    "precision_overall": r"\textsc{Prec} (\%)",
+    "cost": "Cost (USD)"
+}
+
+DESC_TYPE_MAPPING = {
+    "standard": "", # Instructed Track"
+    "abstract": "Direct",
+    "abstract_plan": "Plan",
+    "abstract_multiplan": "Multiplan",
+    "open": "Open"
+}
+
+AGENT_NAME_MAPPING = {
+    "claude-code-v2.0.76-sonnet45": "Sonnet 4.5",
+    "codex-v0.77.0-gpt-5.1-codex-mini": "GPT-5.1 M",
+    "codex-v0.77.0-gpt-5.2": "GPT-5.2",
+    "golden_agent": "Golden",
+    "null_agent": "Null",
+    "qwen-code-v0.6.2-qwen3-coder-30b-a3b-instruct": "Qwen3"
+}
 
 def create_plot(
     data: AnalysisData,
@@ -16,52 +83,75 @@ def create_plot(
     aggregation: AggregationType = "mean",
     config: PlotConfig = PlotConfig(),
 ) -> plt.Figure:
-    """Create a plot comparing agents across description types.
-
-    Args:
-        data: Analysis data containing metric values grouped by agent and description type
-        metric_name: Name of the metric being plotted (for axis labels)
-        plot_type: Type of plot ("line", "bar", "scatter")
-        aggregation: How to aggregate values ("mean" or "median")
-        config: Plot configuration settings
-
-    Returns:
-        Matplotlib figure object
-    """
     agents = data.get_agent_ids()
     description_types = data.get_description_types()
 
     if not agents or not description_types:
         raise ValueError("No data to plot")
 
-    # Create figure
-    fig, ax = plt.subplots(figsize=(config.width, config.height))
-
-    # Prepare colors for agents
-    colors = plt.cm.tab10(np.linspace(0, 1, len(agents)))
-
+    # Dynamic width for bar plots to keep bars equal width
+    fig_width = (len(description_types) * 1.1 + 2.0) if plot_type == "bar" else config.width
+    fig, ax = plt.subplots(figsize=(fig_width, config.height))
+    
+    # 1. Labels and Colors
+    display_metric = METRIC_LABELS.get(metric_name, metric_name.replace("_", " ").title())
+    mapped_labels = [DESC_TYPE_MAPPING.get(t, t) for t in description_types]
+    
+    # Using 'turbo' for a bright, high-contrast spectrum
+    colors = sns.color_palette("pastel", len(agents))
+    markers = ['o', 's', '^', 'D', 'v', 'p', '*', 'h']
+    
+    # 2. Plotting logic
     if plot_type == "line":
-        _plot_line(ax, data, agents, description_types, colors, aggregation, config)
+        _plot_line(ax, data, agents, description_types, colors, aggregation, config, markers)
     elif plot_type == "bar":
-        _plot_bar(ax, data, agents, description_types, colors, aggregation, config)
+        _plot_bar(ax, data, agents, description_types, colors, aggregation, config, markers)
     elif plot_type == "scatter":
-        _plot_scatter(ax, data, agents, description_types, colors, aggregation, config)
+        _plot_scatter(ax, data, agents, description_types, colors, aggregation, config, markers)
+
+    # 3. Axis Configuration
+    if config.show_xlabel:
+        # ax.set_xlabel(r"\textbf{Description Type}", labelpad=8)
+        pass
+    if config.show_ylabel:
+        ax.set_ylabel(f"{display_metric}")
+
+    # 4. Legend with Mapped Names
+    if config.show_legend:
+        handles, labels = ax.get_legend_handles_labels()
+        mapped_agent_labels = [AGENT_NAME_MAPPING.get(l, l) for l in labels]
+
+        ax.legend(
+            handles,
+            mapped_agent_labels,
+            loc="upper left",
+            frameon=True,
+            framealpha=0.7,
+            edgecolor='none',
+            fontsize=17,
+            handletextpad=0.5,
+            markerscale=0.3,
+            handlelength=0.5
+        )
+
+    # 5. Ticks and Limits
+    ylim_max = config.ylim_max * 100 if config.ylim_max else 100
+    ax.set_ylim(config.ylim_min * 100, ylim_max)
+    ax.set_yticks(np.arange(0, ylim_max + 1, 5))
+
+    n_agents = len(agents)
+    x_indices = np.arange(len(mapped_labels))
+    
+    if plot_type == "bar":
+        width = config.bar_width / n_agents
+        center_offset = (width * (n_agents - 1)) / 2
+        ax.set_xticks(x_indices + center_offset)
     else:
-        raise ValueError(f"Unknown plot type: {plot_type}")
-
-    # Configure axes
-    ax.set_xlabel("Description Type", fontsize=config.xlabel_fontsize)
-    ax.set_ylabel(f"{metric_name.upper()} ({aggregation})", fontsize=config.ylabel_fontsize)
-    ax.set_title(
-        f"{metric_name.upper()} by Description Type ({aggregation})",
-        fontsize=config.title_fontsize,
-        fontweight="bold",
-    )
-    ax.set_ylim(config.ylim_min, config.ylim_max)
-    ax.legend(loc="best", fontsize=config.legend_fontsize)
-    ax.grid(axis="y", alpha=config.grid_alpha, linestyle=config.grid_linestyle)
-
-    plt.tight_layout()
+        ax.set_xticks(x_indices)
+        
+    ax.set_xticklabels(mapped_labels, fontsize=config.tick_fontsize)
+    fig.tight_layout()
+    
     return fig
 
 
@@ -73,23 +163,24 @@ def _plot_line(
     colors: np.ndarray,
     aggregation: AggregationType,
     config: PlotConfig,
+    markers: list[str],
 ) -> None:
-    """Plot line chart with symmetric 95% CI error bars."""
     x = np.arange(len(description_types))
 
     for i, agent_id in enumerate(agents):
-        values = []
-        margins = []
+        values, margins = [], []
+        # Check for baseline agents to apply dotted style
+        is_baseline = any(name in agent_id.lower() for name in ["golden", "null"])
+        linestyle = ":" if is_baseline else "-"
 
         for desc_type in description_types:
             agent_desc_data = data.get_data(agent_id, desc_type)
-            
             if agent_desc_data and agent_desc_data.count > 0:
                 val = agent_desc_data.mean if aggregation == "mean" else agent_desc_data.median
-                values.append(val)
+                values.append(val * 100)
                 if config.show_error_bars and aggregation == "mean":
                     low, _ = agent_desc_data.confidence_interval()
-                    margins.append(val - low)
+                    margins.append((val - low) * 100)
                 else:
                     margins.append(0.0)
             else:
@@ -101,10 +192,13 @@ def _plot_line(
             values,
             label=agent_id,
             color=colors[i],
+            linestyle=linestyle,
             linewidth=config.line_width,
-            marker=config.marker_style,
+            marker=markers[i % len(markers)],
             markersize=config.marker_size,
             alpha=config.alpha,
+            markeredgecolor='white',
+            markeredgewidth=0.5
         )
 
         if config.show_error_bars:
@@ -118,9 +212,6 @@ def _plot_line(
                 alpha=config.error_bar_alpha,
             )
 
-    ax.set_xticks(x)
-    ax.set_xticklabels(description_types, fontsize=config.tick_fontsize)
-
 
 def _plot_bar(
     ax: plt.Axes,
@@ -130,33 +221,29 @@ def _plot_bar(
     colors: np.ndarray,
     aggregation: AggregationType,
     config: PlotConfig,
+    markers: list[str],
 ) -> None:
-    """Plot bar chart with symmetric 95% CI error bars."""
     x = np.arange(len(description_types))
     width = config.bar_width / len(agents)
 
     for i, agent_id in enumerate(agents):
-        values = []
-        margins = []
+        values, margins = [], []
+        is_baseline = any(name in agent_id.lower() for name in ["golden", "null"])
 
         for desc_type in description_types:
             agent_desc_data = data.get_data(agent_id, desc_type)
-            
             if agent_desc_data and agent_desc_data.count > 0:
                 val = agent_desc_data.mean if aggregation == "mean" else agent_desc_data.median
-                values.append(val)
-                
-                # Use symmetric margin from CI logic
+                values.append(val * 100)
                 if config.show_error_bars and aggregation == "mean":
                     low, _ = agent_desc_data.confidence_interval()
-                    margins.append(val - low)
+                    margins.append((val - low) * 100)
                 else:
                     margins.append(0.0)
             else:
                 values.append(0.0)
                 margins.append(0.0)
 
-        # Matplotlib handles yerr as +/- the value provided
         ax.bar(
             x + i * width,
             values,
@@ -166,11 +253,13 @@ def _plot_bar(
             alpha=config.bar_alpha,
             yerr=margins if config.show_error_bars else None,
             capsize=config.error_bar_capsize,
-            error_kw={'alpha': config.error_bar_alpha} # Cleanly apply error bar transparency
+            # Dotted border for baseline agents
+            edgecolor="black" if is_baseline else "none",
+            linestyle=":" if is_baseline else "-",
+            linewidth=0.8 if is_baseline else 0,
+            error_kw={"alpha": config.error_bar_alpha},
         )
 
-    ax.set_xticks(x + width * (len(agents) - 1) / 2)
-    ax.set_xticklabels(description_types, fontsize=config.tick_fontsize)
 
 def _plot_scatter(
     ax: plt.Axes,
@@ -180,42 +269,38 @@ def _plot_scatter(
     colors: np.ndarray,
     aggregation: AggregationType,
     config: PlotConfig,
+    markers: list[str],
 ) -> None:
-    """Plot scatter chart with symmetric 95% CI error bars."""
     x = np.arange(len(description_types))
 
     for i, agent_id in enumerate(agents):
-        values = []
-        margins = []
-
+        values, margins = [], []
         for desc_type in description_types:
             agent_desc_data = data.get_data(agent_id, desc_type)
-            
             if agent_desc_data and agent_desc_data.count > 0:
                 val = agent_desc_data.mean if aggregation == "mean" else agent_desc_data.median
-                values.append(val)
-                
+                values.append(val * 100)
                 if config.show_error_bars and aggregation == "mean":
                     low, _ = agent_desc_data.confidence_interval()
-                    margins.append(val - low)
+                    margins.append((val - low) * 100)
                 else:
                     margins.append(0.0)
             else:
                 values.append(np.nan)
                 margins.append(np.nan)
 
-        # Small jitter so points/bars don't stack perfectly on top of each other
-        x_pos = x + (i - len(agents)/2) * 0.1 
-
+        x_pos = x + (i - len(agents) / 2) * 0.1
         ax.scatter(
             x_pos,
             values,
             label=agent_id,
             color=colors[i],
             s=config.marker_size**2,
-            marker=config.marker_style,
+            marker=markers[i % len(markers)],
             alpha=config.alpha,
-            zorder=3
+            zorder=3,
+            edgecolors='white',
+            linewidths=0.5
         )
 
         if config.show_error_bars:
@@ -227,11 +312,9 @@ def _plot_scatter(
                 ecolor=colors[i],
                 capsize=config.error_bar_capsize,
                 alpha=config.error_bar_alpha,
-                zorder=2
+                zorder=2,
             )
 
-    ax.set_xticks(x)
-    ax.set_xticklabels(description_types, fontsize=config.tick_fontsize)
 
 def save_plot(fig: plt.Figure, output_path: Path, dpi: int = 300) -> None:
     """Save plot to file.
@@ -241,6 +324,7 @@ def save_plot(fig: plt.Figure, output_path: Path, dpi: int = 300) -> None:
         output_path: Path to save the plot
         dpi: Resolution for saved plot
     """
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_path, dpi=dpi, bbox_inches="tight")
+    pdf_path = output_path.with_suffix(".pdf")
+    pdf_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(pdf_path, format="pdf", bbox_inches="tight")
     plt.close(fig)

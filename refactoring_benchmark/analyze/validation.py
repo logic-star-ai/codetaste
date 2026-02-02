@@ -27,12 +27,14 @@ def check_test_validity(result: EvaluationResult) -> ValidityStatus:
     # If no execution environment, we don't care about test results
     if not result.instance_metadata.has_execution_environment:
         return ValidityStatus.NO_EXEC_ENV
-    
+
     if result.agent_test_metrics is None:
         if result.inference_metadata.finish_reason != "success":
             i = result.instance_metadata
             a = result.agent_config
-            print(f"WARNING: `run_tests` for the agent {a.id} on instance {i.owner}/{i.repo}/{i.base_hash[:8]} [{result.inference_metadata.description_type}] did not produce test results. However the agent also didn't finish successfully. finish_reason={result.inference_metadata.finish_reason}")
+            print(
+                f"WARNING: `run_tests` for the agent {a.id} on instance {i.owner}/{i.repo}/{i.base_hash[:8]} [{result.inference_metadata.description_type}] did not produce test results. However the agent also didn't finish successfully. finish_reason={result.inference_metadata.finish_reason}"
+            )
         return ValidityStatus.NO_TEST_RESULTS
 
     agent_passed = result.agent_test_metrics.passed
@@ -46,8 +48,7 @@ def check_test_validity(result: EvaluationResult) -> ValidityStatus:
     max_failed = max(base_failed, golden_failed)
     min_failed = min(base_failed, golden_failed)
 
-
-    if min_failed == -1: # No valid test results in either base or golden, accept any results
+    if min_failed == -1:  # No valid test results in either base or golden, accept any results
         return ValidityStatus.VALID
     elif result.agent_test_metrics is None:
         return ValidityStatus.NO_TEST_RESULTS

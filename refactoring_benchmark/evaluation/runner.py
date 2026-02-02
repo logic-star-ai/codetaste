@@ -55,9 +55,11 @@ def run_test_evaluation(
                 str(eval_dir): {"bind": "/output", "mode": "rw"},
             },
             remove=False,
-            nano_cpus=int(16e9)
+            nano_cpus=int(16e9),
         )
-        logger.debug(f"Running equivalent to: podman run --detach -v {prediction_diff}:/input/patch.diff -v {eval_dir}:/output {instance.runtime_image} eval_test")
+        logger.debug(
+            f"Running equivalent to: podman run --detach -v {prediction_diff}:/input/patch.diff -v {eval_dir}:/output {instance.runtime_image} eval_test"
+        )
         try:
             exit_code = container.wait(timeout=timeout)
         except Exception as e:
@@ -127,7 +129,7 @@ def run_rule_evaluation(
                 str(eval_dir): {"bind": "/output", "mode": "rw"},
             },
             remove=False,
-            nano_cpus=int(4e9)
+            nano_cpus=int(4e9),
         )
 
         try:

@@ -157,6 +157,23 @@ class PrecisionMetrics(BaseModel):
         return total_relevant / total_lines
 
 
+class PrecisionMetricsResult(BaseModel):
+    """Computed precision metrics without storing full line sets.
+
+    Optimized for caching - stores only scalar values, not full Line objects.
+    """
+
+    precision_added: float = Field(description="Precision of additions (0-1)")
+    precision_removed: float = Field(description="Precision of removals (0-1)")
+    precision_overall: float = Field(description="Overall precision (0-1)")
+
+    # Counts for context/debugging
+    lines_added_count: int = Field(description="Total lines added")
+    lines_removed_count: int = Field(description="Total lines removed")
+    relevant_added_count: int = Field(description="Relevant lines added")
+    relevant_removed_count: int = Field(description="Relevant lines removed")
+
+
 class PrecisionResult(BaseModel):
     precision_input: PrecisionInput
     precision_metrics: PrecisionMetrics
@@ -170,4 +187,4 @@ class InstanceAgentPrecision(BaseModel):
 
     instance: str = Field(description="Instance display path (e.g., 'apache/arrow/e434536e')")
     agent: str = Field(description="Agent name")
-    metrics: PrecisionMetrics = Field(description="Precision metrics for this instance-agent pair")
+    metrics: PrecisionMetricsResult = Field(description="Precision metrics for this instance-agent pair")

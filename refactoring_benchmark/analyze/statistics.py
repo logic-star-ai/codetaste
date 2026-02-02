@@ -32,15 +32,15 @@ def print_statistics_table(data: AnalysisData, metric_name: str, aggregation: st
 
         if all_metrics:
             combined_data = AgentDescriptionData(
-                agent_id=agent_id,
-                description_type="COMBINED",
-                metric_values=all_metrics
+                agent_id=agent_id, description_type="COMBINED", metric_values=all_metrics
             )
 
             # 1. Updated Combined Row: Added combined_data.count
             if aggregation == "mean":
                 ci_low, ci_high = combined_data.confidence_interval()
-                print(f"  {agent_id:<50} {combined_data.count:<15} {combined_data.mean:<15.4f} [{ci_low:.4f}, {ci_high:.4f}]")
+                print(
+                    f"  {agent_id:<50} {combined_data.count:<15} {combined_data.mean:<15.4f} [{ci_low:.4f}, {ci_high:.4f}]"
+                )
             else:  # median
                 print(f"  {agent_id:<50} {combined_data.count:<15} {combined_data.median:<15.4f} {'N/A (median)':<30}")
 
@@ -52,7 +52,7 @@ def print_statistics_table(data: AnalysisData, metric_name: str, aggregation: st
                     print(f"  {label:<50} {desc_data.count:<15} {desc_data.mean:<15.4f} [{ci_low:.4f}, {ci_high:.4f}]")
                 else:
                     print(f"  {label:<50} {desc_data.count:<15} {desc_data.median:<15.4f} {'N/A (median)':<30}")
-            
+
             print("  " + "." * 115)
     print("  " + "=" * 115)
 

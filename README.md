@@ -84,24 +84,10 @@ options:
   --force               Force re-evaluation even if results already exist (default: False)
 ```
 
-### Analysis Phase
+### Analyze Phase
+
+To compute and plot precision, the following `output_pseudo_agents/` directory must exist and must contain the pseudo-agents `null_agent` and `golden_agent` and it must have been evaluated as we need the sarif files.
 
 ```bash
 python -m refactoring_benchmark.scripts.analyze --help
-```
-
-```
-Generate IFR plots from evaluation results
-
-options:
-  -h, --help            show this help message and exit
-  --output-dir OUTPUT_DIR
-                        Directory containing evaluation results (default: ./output). By default, only loads instances listed in instances.csv.
-  --include-no-exec-env
-                        Include instances without execution environment (default: False)
-  --statistics          Compute and print statistics summary for all agents
-  --successful-only     Only include inference runs with finish_reason='success'
-  --with-precision      Load and include precision metrics in statistics (requires instances.csv and null_agent)
-  --instances-csv INSTANCES_CSV
-                        Path to instances.csv file (default: ./instances.csv). Required for loading evaluation results and precision metrics.
 ```

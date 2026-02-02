@@ -1,0 +1,1 @@
+Remove unnecessary wrapper class

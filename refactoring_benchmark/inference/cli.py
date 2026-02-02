@@ -71,6 +71,12 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument(
+        "--reuse-successful-plan",
+        action="store_true",
+        help="Reuse existing plan if plan_metadata.json shows success (optimization for --plan mode)",
+    )
+
+    parser.add_argument(
         "--env",
         action="append",
         default=[],
@@ -85,14 +91,39 @@ def parse_args() -> argparse.Namespace:
         help="Type of task description to use (standard: full description, minimal: title and summary only, open: open-ended refactoring prompt, nano: very brief description, files: open-ended with key files from golden diff, problem: autonomous problem-solving prompt, or any custom type)",
     )
 
+    parser.add_argument(
+        "--plan",
+        action="store_true",
+        help="Enable two-step inference: first create a plan, then execute it",
+    )
+
+    parser.add_argument(
+        "--plan-timeout",
+        type=int,
+        default=1800,
+        help="Timeout in seconds for the planning step when --plan is enabled (default: 1800 = 30 minutes)",
+    )
+
+    parser.add_argument(
+        "--multiplan",
+        action="store_true",
+        help="Enable multi-plan inference: generate 5 different plans, use LLM to select best, then execute it (mutually exclusive with --plan)",
+    )
+
     args = parser.parse_args()
 
     # Convert paths to absolute
     if args.output_dir is None:
         if args.description_type == "standard":
-            args.output_dir = Path("./output")
+            base_name = "output"
         else:
-            args.output_dir = Path(f"./output_{args.description_type}")
+            base_name = f"output_{args.description_type}"
+        if args.multiplan:
+            args.output_dir = Path(f"./{base_name}_multiplan")
+        elif args.plan:
+            args.output_dir = Path(f"./{base_name}_plan")
+        else:
+            args.output_dir = Path(f"./{base_name}")
     args.agent_dir = args.agent_dir.resolve()
     args.output_dir = args.output_dir.resolve()
     args.instances_csv = args.instances_csv.resolve()
