@@ -2,9 +2,9 @@
 
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Type, TypeVar
+from typing import Optional, Type, TypeVar, Dict, Union
 
-from pydantic import BaseModel, Field, computed_field
+from pydantic import BaseModel, Field, computed_field, model_validator
 
 from refactoring_benchmark.bootstrap.models import ExecutionInstanceMetadata
 from refactoring_benchmark.inference.models import AgentConfig, InferenceMetadata
@@ -77,6 +77,37 @@ class RuleMetrics(BaseModel):
             return 1.0
         avoided = self.total_negative_rules - self.negative_rules_matched
         return avoided / self.total_negative_rules
+
+class SingleRuleResult(BaseModel):
+    """Result for a single rule evaluation."""
+
+    rule_id: Optional[str] = Field(None, alias="id")
+    prediction_matched: int = 0
+    golden_matched: int = 0
+    
+    # All pattern types
+    pattern: Optional[str] = None
+    patterns: Optional[str] = None
+    pattern_either: Optional[str] = Field(None, alias="pattern-either")
+    pattern_regex: Optional[str] = Field(None, alias="pattern-regex")
+    pattern_not: Optional[str] = Field(None, alias="pattern-not")
+    pattern_inside: Optional[str] = Field(None, alias="pattern-inside")
+    pattern_not_inside: Optional[str] = Field(None, alias="pattern-not-inside")
+
+    @model_validator(mode="before")
+    @classmethod
+    def force_strings(cls, data: Dict[str, Union[str, int, list, dict]]) -> Dict[str, Union[str, int]]:
+        # Define fields that should remain as integers
+        numeric_fields = {"prediction_matched", "golden_matched"}
+        
+        # Convert everything else to str(val)
+        return {
+            k: (v if k in numeric_fields else str(v)) 
+            for k, v in data.items()
+        }
+
+    class Config:
+        populate_by_name = True
 
 
 class EvaluationConfig(BaseModel):

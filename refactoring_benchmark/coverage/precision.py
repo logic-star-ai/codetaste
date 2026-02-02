@@ -20,98 +20,22 @@ from joblib import Memory
 cachedir = './.cache_dir'
 memory = Memory(cachedir, verbose=1)
 
-def _debug_print_line_intersections(
-    metrics: PrecisionMetrics,
-    lines_matched_by_removal_rules: set,
-    lines_removed: set,
-    lines_matched_by_addition_rules: set,
-    lines_added: set,
-    diff_path: Path,
-) -> None:
-    """Print debug information about line intersections between SARIF and diff.
 
-    Args:
-        metrics: PrecisionMetrics object with intersection data
-        lines_matched_by_removal_rules: Lines matched by negative SARIF rules
-        lines_removed: Lines removed in the diff
-        lines_matched_by_addition_rules: Lines matched by positive SARIF rules
-        lines_added: Lines added in the diff
-        diff_path: Path to the diff file (for display purposes)
-    """
-    if not (metrics.relevant_removed_lines or metrics.relevant_added_lines):
-        return
-
-    print(f"\n  DEBUG: Intersection details for {diff_path.parent.name}/{diff_path.parent.parent.name}")
-
-    for label, intersection, sarif_src, diff_src in [
-        (
-            "NEGATIVE MATCHES",
-            metrics.relevant_removed_lines,
-            lines_matched_by_removal_rules,
-            lines_removed,
-        ),
-        (
-            "POSITIVE MATCHES",
-            metrics.relevant_added_lines,
-            lines_matched_by_addition_rules,
-            lines_added,
-        ),
-    ]:
-        if not intersection:
-            continue
-
-        print(f"\n  {label} ({len(intersection)} lines):")
-        # Speed up lookups with a dictionary
-        s_map = {(l.uri, l.line_number): l for l in sarif_src}
-        d_map = {(l.uri, l.line_number): l for l in diff_src}
-
-        for line in sorted(intersection, key=lambda x: (x.uri, x.line_number))[:5]:
-            s_line, d_line = s_map.get((line.uri, line.line_number)), d_map.get((line.uri, line.line_number))
-            s_cont = s_line.content.strip() if s_line and s_line.content else ""
-            d_cont = d_line.content.strip() if d_line and d_line.content else ""
-            match = "✓" if (s_cont and d_cont and (s_cont in d_line.content or d_cont in s_line.content)) else "✗"
-            print(f"    {match} {line.uri}:{line.line_number}")
-            print(f"      SARIF: {repr(s_cont[:70]) if s_cont else '<no content>'}")
-            print(f"      DIFF:  {repr(d_cont[:70]) if d_cont else '<no content>'}")
-
-    print()
-
-
-@lru_cache(maxsize=1024)
-def calculate_precision(
+def _load_precision_data(
     sarif_negative_path: Path,
     sarif_positive_path: Path,
     diff_path: Path,
-    debug: bool = False,
-) -> PrecisionMetricsResult:
-    # Convert to string paths for efficient cache key
-    paths_str = (str(sarif_negative_path), str(sarif_positive_path), str(diff_path))
-    paths = [sarif_negative_path, sarif_positive_path, diff_path]
-    mtimes = tuple(os.path.getmtime(p) for p in paths)
-    return _cached_calculate_precision(paths_str, mtimes, debug)
-
-@memory.cache
-def _cached_calculate_precision(
-    paths_str: tuple[str, str, str],
-    mtimes: tuple,
-    debug: bool = False,
-) -> PrecisionMetricsResult:
-    """
-    Calculate line-level precision metrics for refactoring changes.
+) -> PrecisionMetrics:
+    """Load and parse SARIF and diff files to create PrecisionMetrics.
 
     Args:
-        paths_str: Tuple of (sarif_negative, sarif_positive, diff) path strings
-        mtimes: Modification times for cache invalidation
-        debug: Whether to print debug information
+        sarif_negative_path: Path to negative SARIF file
+        sarif_positive_path: Path to positive SARIF file
+        diff_path: Path to diff file
 
     Returns:
-        PrecisionMetricsResult with computed precision scores (optimized for caching)
+        PrecisionMetrics object with parsed data
     """
-    # Reconstruct Path objects from string paths
-    sarif_negative_path = Path(paths_str[0])
-    sarif_positive_path = Path(paths_str[1])
-    diff_path = Path(paths_str[2])
-
     # Load SARIF files
     with open(sarif_negative_path) as f:
         sarif_neg = SARIFOpengrep.model_validate(json.load(f))
@@ -128,29 +52,48 @@ def _cached_calculate_precision(
     lines_removed, lines_added = parse_diff(diff_content, "base", "predicted")
 
     # Create PrecisionMetrics object for computation
-    metrics = PrecisionMetrics(
+    return PrecisionMetrics(
         lines_added=lines_added,
         lines_removed=lines_removed,
         lines_matched_by_addition_rules=lines_matched_by_addition_rules,
         lines_matched_by_removal_rules=lines_matched_by_removal_rules,
     )
 
-    # Print debug output if requested
-    if debug:
-        print(
-            (
-                f"{diff_path.parent.name}/{diff_path.parent.parent.name} : Total lines added in diff: {len(lines_added):4} lines. "
-                f"Total lines in positive SARIF: {len(lines_matched_by_addition_rules):4} lines."
-            )
-        )
-        _debug_print_line_intersections(
-            metrics,
-            lines_matched_by_removal_rules,
-            lines_removed,
-            lines_matched_by_addition_rules,
-            lines_added,
-            diff_path,
-        )
+
+@lru_cache(maxsize=1024)
+def calculate_precision(
+    sarif_negative_path: Path,
+    sarif_positive_path: Path,
+    diff_path: Path,
+) -> PrecisionMetricsResult:
+    # Convert to string paths for efficient cache key
+    paths_str = (str(sarif_negative_path), str(sarif_positive_path), str(diff_path))
+    paths = [sarif_negative_path, sarif_positive_path, diff_path]
+    mtimes = tuple(os.path.getmtime(p) for p in paths)
+    return _cached_calculate_precision(paths_str, mtimes)
+
+@memory.cache
+def _cached_calculate_precision(
+    paths_str: tuple[str, str, str],
+    mtimes: tuple,
+) -> PrecisionMetricsResult:
+    """
+    Calculate line-level precision metrics for refactoring changes.
+
+    Args:
+        paths_str: Tuple of (sarif_negative, sarif_positive, diff) path strings
+        mtimes: Modification times for cache invalidation
+
+    Returns:
+        PrecisionMetricsResult with computed precision scores (optimized for caching)
+    """
+    # Reconstruct Path objects from string paths
+    sarif_negative_path = Path(paths_str[0])
+    sarif_positive_path = Path(paths_str[1])
+    diff_path = Path(paths_str[2])
+
+    # Load and parse data
+    metrics = _load_precision_data(sarif_negative_path, sarif_positive_path, diff_path)
 
     # Convert to result format (only scalar values, no line sets)
     return PrecisionMetricsResult(
@@ -167,7 +110,6 @@ def _cached_calculate_precision(
 def calculate_precision_eval_result(
     result: EvaluationResult,
     null_agent_dir: Path = Path("output_pseudo_agents"),
-    debug: bool = False,
 ) -> Optional[InstanceAgentPrecision]:
     """
     Calculate precision metrics for a single instance-agent pair.
@@ -178,7 +120,6 @@ def calculate_precision_eval_result(
     Args:
         result: EvaluationResult object
         null_agent_dir: Directory containing pseudo agents
-        debug: Whether to print debug information
 
     Returns:
         InstanceAgentPrecision object with results, or None if files don't exist or calculation fails
@@ -218,7 +159,6 @@ def calculate_precision_eval_result(
             sarif_negative_path,
             sarif_positive_path,
             diff_path,
-            debug=debug,
         )
 
         return InstanceAgentPrecision(

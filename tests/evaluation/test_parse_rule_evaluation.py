@@ -51,7 +51,7 @@ def test_parse_rule_evaluation_creates_reports(evaluation_assets):
     """Test that parse_rule_evaluation creates JSON report files."""
     asset_dir, (pos_report, neg_report) = evaluation_assets
 
-    parse_rule_evaluation(asset_dir)
+    parse_rule_evaluation(asset_dir, create_failure_report=True)
 
     # Verify reports were created
     assert pos_report.exists()
@@ -64,6 +64,6 @@ def test_parse_rule_evaluation_creates_reports(evaluation_assets):
     assert isinstance(pos_data, dict)
     assert isinstance(neg_data, dict)
     # null_agent matched no positive rules
-    assert len([r for r in pos_data if pos_data[r] > 0]) == 0
+    assert len([r for r in pos_data if pos_data[r]['prediction_matched'] > 0]) == 0
     # all negative rules matched
-    assert len([r for r in neg_data if neg_data[r] > 0]) == 52
+    assert len([r for r in neg_data if neg_data[r]['prediction_matched'] > 0]) == 52

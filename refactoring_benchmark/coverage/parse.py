@@ -13,8 +13,8 @@ def parse_diff(diff_content: str, base_commit: str, golden_commit: str) -> Tuple
         if not diff.changes:
             continue
             
-        old_path = diff.header.old_path
-        new_path = diff.header.new_path
+        old_path = diff.header.old_path.removeprefix("a/")
+        new_path = diff.header.new_path.removeprefix("b/")
 
         for old_no, new_no, text, prefix in diff.changes:
             if isinstance(text, bytes):

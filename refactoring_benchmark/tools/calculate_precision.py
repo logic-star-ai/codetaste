@@ -36,12 +36,6 @@ def main():
         help="Agent name to calculate precision for (can be specified multiple times, e.g., --agent golden_agent --agent claude-code)",
     )
 
-    parser.add_argument(
-        "--debug",
-        action="store_true",
-        help="Print detailed debug information about line matches between SARIF and diff",
-    )
-
     args = parser.parse_args()
 
     # Resolve paths
@@ -110,7 +104,6 @@ def main():
                 sarif_negative_path=sarif_negative_path,
                 sarif_positive_path=sarif_positive_path,
                 diff_path=diff_path,
-                debug=args.debug,
             )
 
             if precision_metrics:
