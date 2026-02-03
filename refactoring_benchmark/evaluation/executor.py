@@ -168,7 +168,7 @@ def evaluate_single_instance(instance: InstanceRow, agent_id: str, config: Evalu
         return False
 
     try:
-        rule_metrics = parse_rule_evaluation(eval_dir)
+        rule_metrics = parse_rule_evaluation(eval_dir, create_report=config.create_rule_report)
     except Exception as e:
         instance_logger.error(f"Failed to parse rule metrics: {e}")
         return False
@@ -195,7 +195,7 @@ def evaluate_single_instance(instance: InstanceRow, agent_id: str, config: Evalu
         f"  Rule IFR: {rule_metrics.ifr:.3f} (pos: {rule_metrics.positive_ifr:.3f}, neg: {rule_metrics.negative_ifr:.3f})"
     )
     print(
-        f"✅ [{instance.id}] : Rule IFR: {rule_metrics.ifr:.3f}, Test Metrics: {test_metrics.model_dump() if test_metrics else 'N/A'}"
+        f"✅ [{instance.id}] : Rule IFR: {rule_metrics.ifr:.3f} (pos: {rule_metrics.positive_ifr:.3f}, neg: {rule_metrics.negative_ifr:.3f}), Test Metrics: {test_metrics.model_dump() if test_metrics else 'N/A'}"
     )
 
     return True
