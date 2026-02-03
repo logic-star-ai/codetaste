@@ -85,7 +85,7 @@ def parse_sarif_file(sarif_path: Path, rules_path: Path) -> Tuple[int, int, Dict
     rules_matched = len([r for r in rules_matched_dict if rules_matched_dict[r].prediction_matched > 0])
     return rules_matched, total_rules, rules_matched_dict
 
-def parse_rule_evaluation(eval_dir: Path, create_failure_report: bool = False) -> RuleMetrics:
+def parse_rule_evaluation(eval_dir: Path, create_report: bool = False) -> RuleMetrics:
     """
     Parse rule evaluation results from SARIF and YAML files.
     """
@@ -97,7 +97,7 @@ def parse_rule_evaluation(eval_dir: Path, create_failure_report: bool = False) -
     pos_matched, pos_total, pos_matched_dict = parse_sarif_file(sarif_pos, rules_pos)
     neg_matched, neg_total, neg_matched_dict = parse_sarif_file(sarif_neg, rules_neg)
 
-    if create_failure_report:
+    if create_report:
         with open(eval_dir / "rules_positive_report.json", "w") as f:
             json.dump({k: v.model_dump() for k, v in pos_matched_dict.items()}, f, indent=2)
         with open(eval_dir / "rules_negative_report.json", "w") as f:

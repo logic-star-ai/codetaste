@@ -51,7 +51,7 @@ def test_parse_rule_evaluation_creates_reports(evaluation_assets):
     """Test that parse_rule_evaluation creates JSON report files."""
     asset_dir, (pos_report, neg_report) = evaluation_assets
 
-    parse_rule_evaluation(asset_dir, create_failure_report=True)
+    parse_rule_evaluation(asset_dir, create_report=True)
 
     # Verify reports were created
     assert pos_report.exists()

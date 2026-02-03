@@ -1,6 +1,7 @@
 """Executor for running evaluation on benchmark instances."""
 
 import json
+import logging
 import signal
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -17,10 +18,11 @@ from refactoring_benchmark.evaluation.parser import (
     parse_test_output,
 )
 from refactoring_benchmark.evaluation.runner import run_rule_evaluation, run_test_evaluation
+from refactoring_benchmark.inference.models import AgentConfig
 from refactoring_benchmark.inference.validation import validate_agent_config
 from refactoring_benchmark.podman import utils as podman_utils
 from refactoring_benchmark.utils.logger import get_logger
-from refactoring_benchmark.utils.models import InstanceRow
+from refactoring_benchmark.utils.models import InstanceMetadata, InstanceRow
 
 
 def get_evaluation_dir(instance: InstanceRow, agent_id: str, output_dir: Path) -> Path:
@@ -50,6 +52,21 @@ def evaluation_exists(eval_dir: Path) -> bool:
     """
     return (eval_dir / "evaluation_result.json").exists()
 
+def load_metadata(agent_config_path: Path, instance_metadata_path: Path, instance_logger: logging.Logger) -> tuple[AgentConfig, InstanceMetadata]:
+    # Load agent config
+    try:
+        agent_config: AgentConfig = validate_agent_config(agent_config_path)
+    except Exception as e:
+        instance_logger.error(f"Failed to load agent config: {e}")
+        raise e
+
+    # Load instance metadata
+    try:
+        instance_metadata: InstanceMetadata = load_instance_metadata(instance_metadata_path)
+    except Exception as e:
+        instance_logger.error(f"Failed to load instance metadata: {e}")
+        raise e
+    return agent_config, instance_metadata
 
 def evaluate_single_instance(instance: InstanceRow, agent_id: str, config: EvaluationConfig) -> bool:
     """
@@ -80,11 +97,9 @@ def evaluate_single_instance(instance: InstanceRow, agent_id: str, config: Evalu
         instance_logger.warning(f"Skipping {instance.id}, no prediction.diff found at {prediction_diff}")
         return False
 
-    # Load agent config
     try:
-        agent_config = validate_agent_config(agent_config_path)
-    except Exception as e:
-        instance_logger.error(f"Failed to load agent config: {e}")
+        agent_config, instance_metadata = load_metadata(agent_config_path, instance_metadata_path, instance_logger)
+    except Exception:
         return False
 
     # Check if evaluation already exists
@@ -149,12 +164,6 @@ def evaluate_single_instance(instance: InstanceRow, agent_id: str, config: Evalu
         instance_logger.error(f"Failed to parse rule metrics: {e}")
         return False
 
-    # Load instance metadata
-    try:
-        instance_metadata = load_instance_metadata(instance_metadata_path)
-    except Exception as e:
-        instance_logger.error(f"Failed to load instance metadata: {e}")
-        return False
 
     inference_metadata = None
     if inference_metadata_path.exists():

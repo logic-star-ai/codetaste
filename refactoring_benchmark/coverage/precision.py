@@ -95,7 +95,7 @@ def _cached_calculate_precision(
     # Load and parse data
     metrics = _load_precision_data(sarif_negative_path, sarif_positive_path, diff_path)
 
-    # Convert to result format (only scalar values, no line sets)
+    # Convert to result cachable format
     return PrecisionMetricsResult(
         precision_added=metrics.precision_added,
         precision_removed=metrics.precision_removed,

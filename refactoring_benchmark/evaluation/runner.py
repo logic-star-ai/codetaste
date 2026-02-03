@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 import podman
+import podman.errors
 from podman.domain.containers import Container as PodmanContainer
 
 from refactoring_benchmark.evaluation.models import TestMetrics

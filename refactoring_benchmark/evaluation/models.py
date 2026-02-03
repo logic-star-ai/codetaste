@@ -121,6 +121,8 @@ class EvaluationConfig(BaseModel):
     timeout_rule: int = Field(gt=0, default=1200)  # 20 minutes
     force: bool = False
     retry_null_tests: bool = False
+    create_rule_report: bool = False
+    skip_tests: bool = False
 
     class Config:
         arbitrary_types_allowed = True

@@ -77,6 +77,18 @@ def parse_args() -> argparse.Namespace:
         help="Retry evaluation for instances where test metrics are null (e.g., due to timeouts or crashes)",
     )
 
+    parser.add_argument(
+        "--create-rule-report",
+        action="store_true",
+        help="Create detailed rule evaluation report files",
+    )
+    
+    parser.add_argument(
+        "--skip-tests",
+        action="store_true",
+        help="Skip test evaluation and only run rule evaluation",
+    )
+
     args = parser.parse_args()
 
     # Convert paths to absolute
