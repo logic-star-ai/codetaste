@@ -3,7 +3,7 @@
 from pathlib import Path
 from typing import Any, Dict, Literal, Optional
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class AgentInfo(BaseModel):
@@ -58,11 +58,24 @@ class InferenceConfig(BaseModel):
             raise ValueError("Cannot enable both --plan and --multiplan simultaneously")
         return self
 
-    class Config:
-        arbitrary_types_allowed = True
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
 
 FinishReason = Literal["success", "timeout", "execution_error", "error", "unknown", "budget_exceeded", "error_planmode", "error_multiplan", "error_judge"]
+
+
+class ExecutionContext(BaseModel):
+    """Execution context for plan/multiplan/inference steps."""
+
+    description_type: str
+    description_type_suffix: Literal["", "_plan", "_multiplan"] = ""
+    plan_path: Optional[Path] = None
+    plan_content: Optional[str] = None
+
+    @property
+    def full_description_type(self) -> str:
+        """Return full description_type including suffix."""
+        return f"{self.description_type}{self.description_type_suffix}"
 
 
 class InferenceMetadata(BaseModel):
@@ -75,9 +88,7 @@ class InferenceMetadata(BaseModel):
     additional: Optional[Dict[str, Any]] = None
     description_type: Optional[str] = None
 
-    class Config:
-        populate_by_name = True
-        extra = "allow"
+    model_config = ConfigDict(populate_by_name=True, extra="allow")
 
     def load_from_json(json_path: Path) -> "InferenceMetadata":
         """Load InferenceMetadata from a JSON file."""

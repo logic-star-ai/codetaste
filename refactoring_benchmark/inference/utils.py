@@ -5,7 +5,7 @@ import logging
 import os
 import secrets
 import shutil
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 import subprocess
 from typing import Optional
@@ -120,7 +120,7 @@ def create_fallback_inference_metadata(
     metadata = InferenceMetadata(
         cost_usd=cost_usd,
         finish_reason=finish_reason,
-        finish_time=datetime.utcnow().isoformat() + "Z",
+        finish_time=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         additional=additional or {},
     )
 
