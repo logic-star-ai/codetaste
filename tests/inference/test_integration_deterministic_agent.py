@@ -5,23 +5,13 @@ import subprocess
 from pathlib import Path
 
 import pytest
-
 from refactoring_benchmark.inference.models import (
     AgentConfig,
-    AgentInfo,
     InferenceConfig,
-    ModelInfo,
 )
 from refactoring_benchmark.inference.runner import InstanceInferenceRunner
 from refactoring_benchmark.inference.utils import get_instance_output_dir
 from refactoring_benchmark.utils.models import InstanceRow
-
-pytestmark = pytest.mark.integration
-
-
-# def _require_integration_env() -> None:
-#     if os.getenv("RUN_INTEGRATION") != "1":
-#         pytest.skip("Set RUN_INTEGRATION=1 to enable this test.")
 
 
 def _require_podman_and_image(image: str) -> None:
@@ -81,9 +71,8 @@ def _make_config(
     )
 
 
-def test_deterministic_agent_full_integration(tmp_path, monkeypatch):
+def test_deterministic_agent_full_integration(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Run plan, multiplan, and inference flows using a deterministic agent."""
-    # _require_integration_env()
     instance = _make_instance()
     image = instance.runtime_image
     _require_podman_and_image(image)

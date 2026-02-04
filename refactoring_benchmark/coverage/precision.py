@@ -17,7 +17,7 @@ from refactoring_benchmark.evaluation.models import EvaluationResult
 from refactoring_benchmark.utils.models import ReducedInstanceRow
 from joblib import Memory
 
-cachedir = './.cache_dir'
+cachedir = "./.cache_dir"
 memory = Memory(cachedir, verbose=1)
 
 
@@ -48,7 +48,7 @@ def _load_precision_data(
     lines_matched_by_addition_rules = parse_sarif(sarif_pos, "predicted")
 
     # Load and parse diff
-    diff_content = diff_path.read_text(errors='replace')
+    diff_content = diff_path.read_text(errors="replace")
     lines_removed, lines_added = parse_diff(diff_content, "base", "predicted")
 
     # Create PrecisionMetrics object for computation
@@ -71,6 +71,7 @@ def calculate_precision(
     paths = [sarif_negative_path, sarif_positive_path, diff_path]
     mtimes = tuple(os.path.getmtime(p) for p in paths)
     return _cached_calculate_precision(paths_str, mtimes)
+
 
 @memory.cache
 def _cached_calculate_precision(
@@ -151,7 +152,9 @@ def calculate_precision_eval_result(
     if not sarif_positive_path.exists():
         return None
     if not diff_path.exists() or diff_path.stat().st_size > 1_000_000_000:
-        print(f"  Warning: Skipping precision calculation for {instance.display_path}/{result.agent_config.id} due to missing or too large diff file.")
+        print(
+            f"  Warning: Skipping precision calculation for {instance.display_path}/{result.agent_config.id} due to missing or too large diff file."
+        )
         return None
 
     try:

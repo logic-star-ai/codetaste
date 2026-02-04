@@ -11,39 +11,43 @@ from refactoring_benchmark.analyze.config import PlotConfig, PlotType
 
 import matplotlib as mpl
 
+
 # setup
 def _apply_science_style():
-    mpl.rcParams.update({
-        "text.usetex": True,
-        "font.family": "serif",
-        "font.serif": ["Computer Modern Roman"],
-        "font.size": 19,
-        "axes.titlesize": 19,
-        "axes.labelsize": 17,
-        "legend.fontsize": 12,
-        "xtick.labelsize": 17,
-        "ytick.labelsize": 17,
-        "xtick.major.pad": 8,
-        # Figure geometry
-        "figure.figsize": (3.25, 2.2), 
-        "figure.dpi": 300,
-        # Aesthetics
-        "axes.linewidth": 0.8,
-        "axes.spines.top": False,
-        "axes.spines.right": False,
-        "axes.grid": True,
-        "grid.alpha": 0.15,
-        "grid.linestyle": "--",
-    })
+    mpl.rcParams.update(
+        {
+            "text.usetex": True,
+            "font.family": "serif",
+            "font.serif": ["Computer Modern Roman"],
+            "font.size": 19,
+            "axes.titlesize": 19,
+            "axes.labelsize": 17,
+            "legend.fontsize": 12,
+            "xtick.labelsize": 17,
+            "ytick.labelsize": 17,
+            "xtick.major.pad": 8,
+            # Figure geometry
+            "figure.figsize": (3.25, 2.2),
+            "figure.dpi": 300,
+            # Aesthetics
+            "axes.linewidth": 0.8,
+            "axes.spines.top": False,
+            "axes.spines.right": False,
+            "axes.grid": True,
+            "grid.alpha": 0.15,
+            "grid.linestyle": "--",
+        }
+    )
+
 
 _apply_science_style()
 
 METRIC_LABELS = {
     "f1": r"F$_1$ Score",
     "ifr": r"\textsc{Ifr} (\%)",
-    "ifr_x_test_success": r"$\mathcal{A}$ (\%)", # $(\Gamma, \hat{X})$
-    "ifr_added_x_test_success": r"\textsc{AddA} (\%)", # $(\Gamma, \hat{X})$
-    "ifr_removed_x_test_success": r"\textsc{NegA} (\%)", # $(\Gamma, \hat{X})$
+    "ifr_x_test_success": r"$\mathcal{A}$ (\%)",  # $(\Gamma, \hat{X})$
+    "ifr_added_x_test_success": r"\textsc{AddA} (\%)",  # $(\Gamma, \hat{X})$
+    "ifr_removed_x_test_success": r"\textsc{NegA} (\%)",  # $(\Gamma, \hat{X})$
     "strict_ifr_x_test_success": "Strict Success Rate",
     "total_score": "Total Score",
     "ifr_added": r"\textsc{Ifr}$^{+}$ (\%)",
@@ -56,15 +60,15 @@ METRIC_LABELS = {
     "precision_added": r"\textsc{Prec}$^{+}$ (\%)",
     "precision_removed": r"\textsc{Prec}$^{-}$ (\%)",
     "precision_overall": r"\textsc{Prec} (\%)",
-    "cost": "Cost (USD)"
+    "cost": "Cost (USD)",
 }
 
 DESC_TYPE_MAPPING = {
-    "standard": "", # Instructed Track"
+    "standard": "",  # Instructed Track"
     "abstract": "Direct",
     "abstract_plan": "Plan",
     "abstract_multiplan": "Multiplan",
-    "open": "Open"
+    "open": "Open",
 }
 
 AGENT_NAME_MAPPING = {
@@ -73,8 +77,9 @@ AGENT_NAME_MAPPING = {
     "codex-v0.77.0-gpt-5.2": "GPT-5.2",
     "golden_agent": "Golden",
     "null_agent": "Null",
-    "qwen-code-v0.6.2-qwen3-coder-30b-a3b-instruct": "Qwen3"
+    "qwen-code-v0.6.2-qwen3-coder-30b-a3b-instruct": "Qwen3",
 }
+
 
 def create_plot(
     data: AnalysisData,
@@ -92,15 +97,15 @@ def create_plot(
     # Dynamic width for bar plots to keep bars equal width
     fig_width = (len(description_types) * 1.1 + 2.0) if plot_type == "bar" else config.width
     fig, ax = plt.subplots(figsize=(fig_width, config.height))
-    
+
     # 1. Labels and Colors
     display_metric = METRIC_LABELS.get(metric_name, metric_name.replace("_", " ").title())
     mapped_labels = [DESC_TYPE_MAPPING.get(t, t) for t in description_types]
-    
+
     # Using 'turbo' for a bright, high-contrast spectrum
     colors = sns.color_palette("pastel", len(agents))
-    markers = ['o', 's', '^', 'D', 'v', 'p', '*', 'h']
-    
+    markers = ["o", "s", "^", "D", "v", "p", "*", "h"]
+
     # 2. Plotting logic
     if plot_type == "line":
         _plot_line(ax, data, agents, description_types, colors, aggregation, config, markers)
@@ -127,11 +132,11 @@ def create_plot(
             loc="upper left",
             frameon=True,
             framealpha=0.7,
-            edgecolor='none',
+            edgecolor="none",
             fontsize=17,
             handletextpad=0.5,
             markerscale=0.3,
-            handlelength=0.5
+            handlelength=0.5,
         )
 
     # 5. Ticks and Limits
@@ -141,17 +146,17 @@ def create_plot(
 
     n_agents = len(agents)
     x_indices = np.arange(len(mapped_labels))
-    
+
     if plot_type == "bar":
         width = config.bar_width / n_agents
         center_offset = (width * (n_agents - 1)) / 2
         ax.set_xticks(x_indices + center_offset)
     else:
         ax.set_xticks(x_indices)
-        
+
     ax.set_xticklabels(mapped_labels, fontsize=config.tick_fontsize)
     fig.tight_layout()
-    
+
     return fig
 
 
@@ -197,8 +202,8 @@ def _plot_line(
             marker=markers[i % len(markers)],
             markersize=config.marker_size,
             alpha=config.alpha,
-            markeredgecolor='white',
-            markeredgewidth=0.5
+            markeredgecolor="white",
+            markeredgewidth=0.5,
         )
 
         if config.show_error_bars:
@@ -299,8 +304,8 @@ def _plot_scatter(
             marker=markers[i % len(markers)],
             alpha=config.alpha,
             zorder=3,
-            edgecolors='white',
-            linewidths=0.5
+            edgecolors="white",
+            linewidths=0.5,
         )
 
         if config.show_error_bars:

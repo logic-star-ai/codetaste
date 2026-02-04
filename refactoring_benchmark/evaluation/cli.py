@@ -82,7 +82,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Create detailed rule evaluation report files",
     )
-    
+
     parser.add_argument(
         "--skip-tests",
         action="store_true",

@@ -39,9 +39,7 @@ class MultiplanStep:
         self.config = config
         self.output_dir = output_dir
         self.logger = logger
-        self.executor = ContainerExecutor(
-            instance, config, output_dir, logger, client
-        )
+        self.executor = ContainerExecutor(instance, config, output_dir, logger, client)
         self.temp_description_dir: Optional[Path] = None
         self.selected_plan_content: Optional[str] = None
         self.multiplan_metadata: Optional[MultiplanMetadata] = None
@@ -60,9 +58,7 @@ class MultiplanStep:
         self.logger.info("=== MULTIPLAN STEP ===")
 
         # Track start time for metadata
-        multiplan_start_time = (
-            datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-        )
+        multiplan_start_time = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
         # Prepare multiplan description
         self.temp_description_dir = prepare_temp_multiplan_description(
@@ -96,9 +92,7 @@ class MultiplanStep:
         try:
             selected_index, judge_metadata = self._execute_judge()
             self.logger.info(f"Judge selected plan index: {selected_index}")
-            self._save_multiplan_metadata(
-                selected_index, judge_metadata, multiplan_start_time
-            )
+            self._save_multiplan_metadata(selected_index, judge_metadata, multiplan_start_time)
             self._load_selected_plan(selected_index)
             return self.selected_plan_content
         except Exception as e:
@@ -126,9 +120,7 @@ class MultiplanStep:
         """
         should_reuse = (not self.config.force) or self.config.reuse_successful_plan
         if not should_reuse:
-            self.logger.info(
-                "--force specified without --reuse-successful-plan, will generate new multiplan"
-            )
+            self.logger.info("--force specified without --reuse-successful-plan, will generate new multiplan")
             return False
 
         multiplan_metadata_path = self.output_dir / "multiplan_metadata.json"
@@ -137,28 +129,18 @@ class MultiplanStep:
 
         try:
             metadata = MultiplanMetadata.load_from_json(multiplan_metadata_path)
-            if (
-                metadata.finish_reason.lower() != "success"
-                or metadata.selected_plan_index is None
-            ):
-                self.logger.info(
-                    f"Found multiplan_metadata.json with status: {metadata.finish_reason}"
-                )
+            if metadata.finish_reason.lower() != "success" or metadata.selected_plan_index is None:
+                self.logger.info(f"Found multiplan_metadata.json with status: {metadata.finish_reason}")
                 return False
 
             self.logger.info("Found existing successful multiplan, verifying plans...")
             plans_dir = self.output_dir / "refactoring_plans"
-            if all(
-                (plans_dir / f"refactoring_plan{i}.md").exists()
-                for i in range(NUM_MULTIPLAN)
-            ):
+            if all((plans_dir / f"refactoring_plan{i}.md").exists() for i in range(NUM_MULTIPLAN)):
                 self._load_selected_plan(metadata.selected_plan_index)
                 self.multiplan_metadata = metadata
                 return True
 
-            self.logger.warning(
-                "multiplan_metadata.json exists but some plans are missing"
-            )
+            self.logger.warning("multiplan_metadata.json exists but some plans are missing")
             return False
         except Exception as e:
             self.logger.warning(f"Failed to load multiplan_metadata.json: {e}")
@@ -188,9 +170,7 @@ class MultiplanStep:
         expected_plans = {f"refactoring_plan{i}.md" for i in range(NUM_MULTIPLAN)}
         missing = [name for name in expected_plans if not (plans_dir / name).exists()]
         small = [
-            name
-            for name in expected_plans
-            if (plans_dir / name).exists() and (plans_dir / name).stat().st_size < 10
+            name for name in expected_plans if (plans_dir / name).exists() and (plans_dir / name).stat().st_size < 10
         ]
 
         if missing or small:
@@ -210,20 +190,16 @@ class MultiplanStep:
 
         # Rename inference_metadata.json to multiplan_generation_metadata.json
         inference_metadata_path = self.output_dir / "inference_metadata.json"
-        multiplan_generation_metadata_path = (
-            self.output_dir / "multiplan_generation_metadata.json"
-        )
+        multiplan_generation_metadata_path = self.output_dir / "multiplan_generation_metadata.json"
         if inference_metadata_path.exists():
             try:
                 inference_metadata_path.rename(multiplan_generation_metadata_path)
-                inference_metadata: InferenceMetadata = (
-                    InferenceMetadata.load_from_json(multiplan_generation_metadata_path)
+                inference_metadata: InferenceMetadata = InferenceMetadata.load_from_json(
+                    multiplan_generation_metadata_path
                 )
                 inference_metadata.description_type = context.full_description_type
                 inference_metadata.save_to_json(multiplan_generation_metadata_path)
-                self.logger.info(
-                    "Renamed inference_metadata.json to multiplan_generation_metadata.json"
-                )
+                self.logger.info("Renamed inference_metadata.json to multiplan_generation_metadata.json")
             except Exception as e:
                 self.logger.warning(
                     f"Failed to rename inference_metadata.json to multiplan_generation_metadata.json: {e}"
@@ -244,33 +220,24 @@ class MultiplanStep:
         self.logger.info("=== JUDGE STEP ===")
 
         # Load full original description from assets
-        description_path = (
-            PROJECT_ROOT / self.instance.asset_dir("descriptions") / "description.md"
-        )
+        description_path = PROJECT_ROOT / self.instance.asset_dir("descriptions") / "description.md"
         original_description = description_path.read_text(encoding="utf-8")
         self.logger.info(f"Loaded full description from {description_path}")
 
         # Load all candidate plans
         plans_dir = self.output_dir / "refactoring_plans"
         candidate_plans = {
-            i: (plans_dir / f"refactoring_plan{i}.md").read_text(encoding="utf-8")
-            for i in range(NUM_MULTIPLAN)
+            i: (plans_dir / f"refactoring_plan{i}.md").read_text(encoding="utf-8") for i in range(NUM_MULTIPLAN)
         }
 
         # Call judge
         try:
-            selected_index, judge_metadata = judge_best_plan(
-                original_description, candidate_plans
-            )
-            self.logger.info(
-                f"Judge selected plan {selected_index} (cost: ${judge_metadata['judge_cost_usd']:.4f})"
-            )
+            selected_index, judge_metadata = judge_best_plan(original_description, candidate_plans)
+            self.logger.info(f"Judge selected plan {selected_index} (cost: ${judge_metadata['judge_cost_usd']:.4f})")
 
             # Save judge output to file for inspection
             judge_output_path = self.output_dir / "judge.out"
-            judge_output_path.write_text(
-                judge_metadata.get("judge_reasoning", ""), encoding="utf-8"
-            )
+            judge_output_path.write_text(judge_metadata.get("judge_reasoning", ""), encoding="utf-8")
             self.logger.info(f"Saved judge output to {judge_output_path}")
 
             return selected_index, judge_metadata
@@ -278,9 +245,7 @@ class MultiplanStep:
             self.logger.error(f"Judge execution failed:\n{traceback.format_exc()}\n\n{e}")
             raise e
 
-    def _save_multiplan_metadata(
-        self, selected_index: int, judge_metadata: dict, start_time: str
-    ) -> None:
+    def _save_multiplan_metadata(self, selected_index: int, judge_metadata: dict, start_time: str) -> None:
         """
         Save multiplan metadata to multiplan_metadata.json.
 
@@ -317,6 +282,4 @@ class MultiplanStep:
         plans_dir = self.output_dir / "refactoring_plans"
         selected_plan_path = plans_dir / f"refactoring_plan{selected_index}.md"
         self.selected_plan_content = selected_plan_path.read_text(encoding="utf-8")
-        self.logger.info(
-            f"Loaded selected plan {selected_index} ({len(self.selected_plan_content)} chars)"
-        )
+        self.logger.info(f"Loaded selected plan {selected_index} ({len(self.selected_plan_content)} chars)")

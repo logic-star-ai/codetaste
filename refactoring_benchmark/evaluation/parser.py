@@ -60,7 +60,7 @@ def parse_sarif_file(sarif_path: Path, rules_path: Path) -> Tuple[int, int, Dict
 
     # Count matches from SARIF
     rules_matched_dict = {
-        r["id"].split(".")[-1]: SingleRuleResult(**r, golden_matched=r["metadata"]["nr_refactored_patterns"]) 
+        r["id"].split(".")[-1]: SingleRuleResult(**r, golden_matched=r["metadata"]["nr_refactored_patterns"])
         for r in rules_data.get("rules", [])
     }
 
@@ -84,6 +84,7 @@ def parse_sarif_file(sarif_path: Path, rules_path: Path) -> Tuple[int, int, Dict
 
     rules_matched = len([r for r in rules_matched_dict if rules_matched_dict[r].prediction_matched > 0])
     return rules_matched, total_rules, rules_matched_dict
+
 
 def parse_rule_evaluation(eval_dir: Path, create_report: bool = False) -> RuleMetrics:
     """

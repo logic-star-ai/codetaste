@@ -34,10 +34,7 @@ def judge_best_plan(
     try:
         import anthropic
     except ImportError:
-        raise ImportError(
-            "anthropic package is required for multiplan mode. "
-            "Install it with: pip install anthropic"
-        )
+        raise ImportError("anthropic package is required for multiplan mode. " "Install it with: pip install anthropic")
 
     # Validate inputs
     num_plans = len(candidate_plans)
@@ -53,8 +50,7 @@ def judge_best_plan(
         api_key = os.environ.get("ANTHROPIC_API_KEY")
         if not api_key:
             raise RuntimeError(
-                "ANTHROPIC_API_KEY environment variable not set. "
-                "Required for multiplan mode LLM judge."
+                "ANTHROPIC_API_KEY environment variable not set. " "Required for multiplan mode LLM judge."
             )
 
     # Construct judge prompt
@@ -86,9 +82,7 @@ def judge_best_plan(
     # Parse selected plan index
     selected_index = _parse_plan_selection(response_text, max_index=num_plans - 1)
     if selected_index is None:
-        raise ValueError(
-            f"Could not parse valid plan selection from judge response: {response_text}"
-        )
+        raise ValueError(f"Could not parse valid plan selection from judge response: {response_text}")
 
     # Calculate cost (approximate, based on token usage)
     input_tokens = response.usage.input_tokens
@@ -105,10 +99,7 @@ def judge_best_plan(
         "judge_output_tokens": output_tokens,
     }
 
-    logger.info(
-        f"Judge selected plan {selected_index} "
-        f"(cost: ${cost_usd:.4f}, latency: {latency:.2f}s)"
-    )
+    logger.info(f"Judge selected plan {selected_index} " f"(cost: ${cost_usd:.4f}, latency: {latency:.2f}s)")
 
     return selected_index, judge_metadata
 

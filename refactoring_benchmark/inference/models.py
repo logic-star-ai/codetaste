@@ -61,7 +61,17 @@ class InferenceConfig(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
 
-FinishReason = Literal["success", "timeout", "execution_error", "error", "unknown", "budget_exceeded", "error_planmode", "error_multiplan", "error_judge"]
+FinishReason = Literal[
+    "success",
+    "timeout",
+    "execution_error",
+    "error",
+    "unknown",
+    "budget_exceeded",
+    "error_planmode",
+    "error_multiplan",
+    "error_judge",
+]
 
 
 class ExecutionContext(BaseModel):

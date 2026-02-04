@@ -52,7 +52,13 @@ def evaluation_exists(eval_dir: Path) -> bool:
     """
     return (eval_dir / "evaluation_result.json").exists()
 
-def load_metadata(agent_config_path: Path, instance_metadata_path: Path, inference_metadata_path: Path, instance_logger: logging.Logger) -> tuple[AgentConfig, InstanceMetadata, dict]:
+
+def load_metadata(
+    agent_config_path: Path,
+    instance_metadata_path: Path,
+    inference_metadata_path: Path,
+    instance_logger: logging.Logger,
+) -> tuple[AgentConfig, InstanceMetadata, dict]:
     # Load agent config
     try:
         agent_config: AgentConfig = validate_agent_config(agent_config_path)
@@ -66,7 +72,7 @@ def load_metadata(agent_config_path: Path, instance_metadata_path: Path, inferen
     except Exception as e:
         instance_logger.error(f"Failed to load instance metadata: {e}")
         raise e
-    
+
     inference_metadata = None
     if inference_metadata_path.exists():
         try:
@@ -77,6 +83,7 @@ def load_metadata(agent_config_path: Path, instance_metadata_path: Path, inferen
             instance_logger.error(f"Failed to load inference metadata: {e}")
 
     return agent_config, instance_metadata, inference_metadata
+
 
 def evaluate_single_instance(instance: InstanceRow, agent_id: str, config: EvaluationConfig) -> bool:
     """
@@ -108,7 +115,9 @@ def evaluate_single_instance(instance: InstanceRow, agent_id: str, config: Evalu
         return False
 
     try:
-        agent_config, instance_metadata, inference_metadata = load_metadata(agent_config_path, instance_metadata_path, inference_metadata_path, instance_logger)
+        agent_config, instance_metadata, inference_metadata = load_metadata(
+            agent_config_path, instance_metadata_path, inference_metadata_path, instance_logger
+        )
     except Exception:
         return False
 
@@ -172,8 +181,6 @@ def evaluate_single_instance(instance: InstanceRow, agent_id: str, config: Evalu
     except Exception as e:
         instance_logger.error(f"Failed to parse rule metrics: {e}")
         return False
-
-
 
     # Create evaluation result
     evaluation_result = EvaluationResult(

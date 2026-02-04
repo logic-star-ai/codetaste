@@ -78,13 +78,14 @@ class RuleMetrics(BaseModel):
         avoided = self.total_negative_rules - self.negative_rules_matched
         return avoided / self.total_negative_rules
 
+
 class SingleRuleResult(BaseModel):
     """Result for a single rule evaluation."""
 
     rule_id: Optional[str] = Field(None, alias="id")
     prediction_matched: int = 0
     golden_matched: int = 0
-    
+
     # All pattern types
     pattern: Optional[str] = None
     patterns: Optional[str] = None
@@ -99,12 +100,9 @@ class SingleRuleResult(BaseModel):
     def force_strings(cls, data: Dict[str, Union[str, int, list, dict]]) -> Dict[str, Union[str, int]]:
         # Define fields that should remain as integers
         numeric_fields = {"prediction_matched", "golden_matched"}
-        
+
         # Convert everything else to str(val)
-        return {
-            k: (v if k in numeric_fields else str(v)) 
-            for k, v in data.items()
-        }
+        return {k: (v if k in numeric_fields else str(v)) for k, v in data.items()}
 
     class Config:
         populate_by_name = True

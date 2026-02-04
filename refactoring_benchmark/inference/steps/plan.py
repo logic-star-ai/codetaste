@@ -32,9 +32,7 @@ class PlanStep:
         self.config = config
         self.output_dir = output_dir
         self.logger = logger
-        self.executor = ContainerExecutor(
-            instance, config, output_dir, logger, client
-        )
+        self.executor = ContainerExecutor(instance, config, output_dir, logger, client)
         self.temp_description_dir: Optional[Path] = None
 
     def run(self) -> Optional[Path]:
@@ -96,9 +94,7 @@ class PlanStep:
         # Plan reuse logic: reuse if (not force) OR reuse_successful_plan
         should_reuse = (not self.config.force) or self.config.reuse_successful_plan
         if not should_reuse:
-            self.logger.info(
-                "--force specified without --reuse-successful-plan, will generate new plan"
-            )
+            self.logger.info("--force specified without --reuse-successful-plan, will generate new plan")
             return False
 
         plan_metadata_path = self.output_dir / "plan_metadata.json"
@@ -106,9 +102,7 @@ class PlanStep:
             return False
 
         try:
-            metadata: InferenceMetadata = InferenceMetadata.load_from_json(
-                plan_metadata_path
-            )
+            metadata: InferenceMetadata = InferenceMetadata.load_from_json(plan_metadata_path)
             is_success = metadata.finish_reason.lower() == "success"
             if is_success:
                 self.logger.info("Found existing successful plan, reusing it")
@@ -117,14 +111,10 @@ class PlanStep:
                 if plan_path.exists():
                     return True
                 else:
-                    self.logger.warning(
-                        "plan_metadata.json exists but refactoring_plan.md missing"
-                    )
+                    self.logger.warning("plan_metadata.json exists but refactoring_plan.md missing")
                     return False
             else:
-                self.logger.info(
-                    f"Found plan_metadata.json with non-success status: {metadata.finish_reason}"
-                )
+                self.logger.info(f"Found plan_metadata.json with non-success status: {metadata.finish_reason}")
                 return False
         except Exception as e:
             self.logger.warning(f"Failed to load plan_metadata.json: {e}")
@@ -163,17 +153,11 @@ class PlanStep:
         if inference_metadata_path.exists():
             try:
                 inference_metadata_path.rename(plan_metadata_path)
-                inference_metadata: InferenceMetadata = (
-                    InferenceMetadata.load_from_json(plan_metadata_path)
-                )
+                inference_metadata: InferenceMetadata = InferenceMetadata.load_from_json(plan_metadata_path)
                 inference_metadata.description_type = context.full_description_type
                 inference_metadata.save_to_json(plan_metadata_path)
-                self.logger.info(
-                    "Renamed inference_metadata.json to plan_metadata.json"
-                )
+                self.logger.info("Renamed inference_metadata.json to plan_metadata.json")
             except Exception as e:
-                self.logger.warning(
-                    f"Failed to rename inference_metadata.json to plan_metadata.json: {e}"
-                )
+                self.logger.warning(f"Failed to rename inference_metadata.json to plan_metadata.json: {e}")
 
         return True

@@ -32,9 +32,7 @@ class InferenceStep:
         self.config = config
         self.output_dir = output_dir
         self.logger: logging.Logger = logger
-        self.executor = ContainerExecutor(
-            instance, config, output_dir, logger, client
-        )
+        self.executor = ContainerExecutor(instance, config, output_dir, logger, client)
         self.temp_description_dir: Optional[Path] = None
 
     def run(self, context: ExecutionContext) -> bool:
@@ -132,9 +130,7 @@ class InferenceStep:
 
         # Check B: Prediction exists
         if not prediction_path.exists():
-            self.logger.error(
-                "Agent or entrypoint.sh failed to generate / create prediction.diff"
-            )
+            self.logger.error("Agent or entrypoint.sh failed to generate / create prediction.diff")
             return False
 
         # Check C: Load metadata and check success
@@ -148,9 +144,7 @@ class InferenceStep:
         if is_success:
             self.logger.info("Inference completed successfully")
         else:
-            self.logger.error(
-                f"Inference failed with reason: {metadata.finish_reason} {metadata.additional}"
-            )
+            self.logger.error(f"Inference failed with reason: {metadata.finish_reason} {metadata.additional}")
 
         return is_success
 

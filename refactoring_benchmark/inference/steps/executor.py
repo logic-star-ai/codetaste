@@ -39,7 +39,7 @@ class ContainerExecutor:
         mode: str,
         timeout: int,
         temp_dir: Path,
-        context: Optional[ExecutionContext] = None,
+        context: ExecutionContext,
     ) -> bool:
         """
         Execute a container step (plan, multiplan, or inference).
@@ -57,7 +57,7 @@ class ContainerExecutor:
         self.logger.info(f"  Image: {self.instance.runtime_image}")
         self.logger.info(f"  Timeout: {timeout}s")
 
-        env = {**self.config.env_vars, "DESCRIPTION_TYPE": self.config.description_type}
+        env = {**self.config.env_vars, "DESCRIPTION_TYPE": self.config.description_type, "TIMEOUT": str(timeout)}
 
         try:
             self.container = podman_utils.safe_container_run(
@@ -86,11 +86,7 @@ class ContainerExecutor:
             except Exception as e:
                 self.logger.error(f"{mode.capitalize()} step timed out: {e}")
                 finish_reason = self._get_finish_reason_for_mode(mode)
-                description_type = (
-                    context.full_description_type
-                    if context is not None
-                    else self._get_description_type_for_mode(mode)
-                )
+                description_type = context.full_description_type
                 create_fallback_inference_metadata(
                     self.output_dir,
                     finish_reason,
@@ -100,13 +96,19 @@ class ContainerExecutor:
                 return False
 
             log_file = f"{mode}.out"
-            output_container_logs(
-                self.container, self.output_dir / log_file, self.logger
-            )
+            output_container_logs(self.container, self.output_dir / log_file, self.logger)
             return True
 
         except Exception as e:
             self.logger.error(f"{mode.capitalize()} step execution failed: {e}")
+            finish_reason = "error"
+            description_type = context.full_description_type
+            create_fallback_inference_metadata(
+                self.output_dir,
+                finish_reason,
+                description_type=description_type,
+                additional={"error": f"{mode.capitalize()} step execution failed: {str(e)}"},
+            )
             return False
         finally:
             self._container_cleanup()
@@ -118,14 +120,6 @@ class ContainerExecutor:
         if mode == "multiplan":
             return "error_multiplan"
         return "timeout"
-
-    def _get_description_type_for_mode(self, mode: str) -> str:
-        """Get the description type suffix for a given mode."""
-        if mode == "plan":
-            return f"{self.config.description_type}_plan"
-        if mode == "multiplan":
-            return f"{self.config.description_type}_multiplan"
-        return self.config.description_type
 
     def _container_cleanup(self) -> None:
         """Clean up container after execution."""

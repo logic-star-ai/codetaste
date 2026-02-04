@@ -43,9 +43,7 @@ class InstanceInferenceRunner:
             use_stdout=False,
             log_subdir=f"{config.sanitized_agent_id}",
         )
-        self.output_dir = get_instance_output_dir(
-            instance, config.sanitized_agent_id, config.output_dir
-        )
+        self.output_dir = get_instance_output_dir(instance, config.sanitized_agent_id, config.output_dir)
         self.client: Optional[podman.PodmanClient] = None
 
     def should_skip(self) -> tuple[bool, bool]:
@@ -55,18 +53,32 @@ class InstanceInferenceRunner:
         Returns:
             Tuple of (should_skip, is_success)
         """
-        if output_exists(self.output_dir) and not self.config.force:
+        if self.config.force:
+            return False, False
+
+        if not output_exists(self.output_dir):
+            return False, False
+
+        metadata_path = self.output_dir / "inference_metadata.json"
+        is_success = False
+        metadata_loaded = False
+
+        try:
+            metadata: InferenceMetadata = InferenceMetadata.load_from_json(metadata_path)
+            is_success = metadata.finish_reason.lower() == "success"
+            metadata_loaded = True
+        except Exception:
+            self.logger.warning("Failed to read metadata. " f"Skipping = {not self.config.force_unsuccessful}.")
+
+        if self.config.force_unsuccessful:
+            should_skip = is_success
+        else:
+            should_skip = metadata_loaded
+
+        if should_skip:
             self.logger.info(f"Skipping {self.instance.id}, output already exists.")
-            try:
-                metadata: InferenceMetadata = InferenceMetadata.load_from_json(
-                    self.output_dir / "inference_metadata.json"
-                )
-                is_success = metadata.finish_reason.lower() == "success"
-                if is_success or not self.config.force_unsuccessful:
-                    return True, is_success
-            except Exception:
-                return True, False
-        return False, False
+
+        return should_skip, is_success
 
     def prepare_environment(self) -> bool:
         """
@@ -76,9 +88,7 @@ class InstanceInferenceRunner:
             True if preparation successful, False otherwise
         """
         # reuse plans for non-forced inference or if reusing successful plans
-        should_preserve_plans = self.config.plan and (
-            (not self.config.force) or self.config.reuse_successful_plan
-        )
+        should_preserve_plans = self.config.plan and ((not self.config.force) or self.config.reuse_successful_plan)
         should_preserve_multiplan = self.config.multiplan and (
             (not self.config.force) or self.config.reuse_successful_plan
         )
@@ -101,17 +111,13 @@ class InstanceInferenceRunner:
                 multiplan_metadata_path = self.output_dir / "multiplan_metadata.json"
                 plans_dir = self.output_dir / "refactoring_plans"
                 if multiplan_metadata_path.exists() and plans_dir.exists():
-                    saved_multiplan_metadata = multiplan_metadata_path.read_text(
-                        encoding="utf-8"
-                    )
+                    saved_multiplan_metadata = multiplan_metadata_path.read_text(encoding="utf-8")
                     from refactoring_benchmark.inference.utils import NUM_MULTIPLAN
 
                     for i in range(NUM_MULTIPLAN):
                         plan_path = plans_dir / f"refactoring_plan{i}.md"
                         if plan_path.exists():
-                            saved_multiplan_plans[i] = plan_path.read_text(
-                                encoding="utf-8"
-                            )
+                            saved_multiplan_plans[i] = plan_path.read_text(encoding="utf-8")
 
             # Clean output directory
             shutil.rmtree(self.output_dir)
@@ -122,24 +128,16 @@ class InstanceInferenceRunner:
 
         # Restore plan files if they were saved
         if saved_plan_metadata and saved_plan_content:
-            (self.output_dir / "plan_metadata.json").write_text(
-                saved_plan_metadata, encoding="utf-8"
-            )
-            (self.output_dir / "refactoring_plan.md").write_text(
-                saved_plan_content, encoding="utf-8"
-            )
+            (self.output_dir / "plan_metadata.json").write_text(saved_plan_metadata, encoding="utf-8")
+            (self.output_dir / "refactoring_plan.md").write_text(saved_plan_content, encoding="utf-8")
 
         # Restore multiplan files if they were saved
         if saved_multiplan_metadata and saved_multiplan_plans:
-            (self.output_dir / "multiplan_metadata.json").write_text(
-                saved_multiplan_metadata, encoding="utf-8"
-            )
+            (self.output_dir / "multiplan_metadata.json").write_text(saved_multiplan_metadata, encoding="utf-8")
             plans_dir = self.output_dir / "refactoring_plans"
             plans_dir.mkdir(exist_ok=True)
             for i, content in saved_multiplan_plans.items():
-                (plans_dir / f"refactoring_plan{i}.md").write_text(
-                    content, encoding="utf-8"
-                )
+                (plans_dir / f"refactoring_plan{i}.md").write_text(content, encoding="utf-8")
 
         # Connect to Podman
         self.client = podman_utils.get_local_client(timeout=self.config.timeout + 120)
@@ -175,9 +173,7 @@ class InstanceInferenceRunner:
 
             # Phase 3: Plan step (if enabled)
             if self.config.plan:
-                plan_step = PlanStep(
-                    self.instance, self.config, self.output_dir, self.logger, self.client
-                )
+                plan_step = PlanStep(self.instance, self.config, self.output_dir, self.logger, self.client)
                 try:
                     plan_path = plan_step.run()
                     if not plan_path:
@@ -185,9 +181,7 @@ class InstanceInferenceRunner:
                 finally:
                     plan_step.cleanup_temp_dir()
             elif self.config.multiplan:
-                multiplan_step = MultiplanStep(
-                    self.instance, self.config, self.output_dir, self.logger, self.client
-                )
+                multiplan_step = MultiplanStep(self.instance, self.config, self.output_dir, self.logger, self.client)
                 try:
                     multiplan_content = multiplan_step.run()
                     if not multiplan_content:
@@ -213,9 +207,7 @@ class InstanceInferenceRunner:
             else:
                 context = ExecutionContext(description_type=self.config.description_type)
 
-            inference_step = InferenceStep(
-                self.instance, self.config, self.output_dir, self.logger, self.client
-            )
+            inference_step = InferenceStep(self.instance, self.config, self.output_dir, self.logger, self.client)
             try:
                 return inference_step.run(context)
             finally:

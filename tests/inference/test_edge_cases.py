@@ -2,6 +2,8 @@ import json
 import logging
 from pathlib import Path
 
+import pytest
+
 from refactoring_benchmark.inference.models import (
     AgentConfig,
     AgentInfo,
@@ -227,7 +229,7 @@ def test_container_executor_timeout_plan_metadata(tmp_path, monkeypatch):
     assert data["description_type"] == "standard_plan"
 
 
-def test_container_executor_timeout_multiplan_metadata(tmp_path, monkeypatch):
+def test_container_executor_timeout_multiplan_metadata(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Multiplan timeout writes error_multiplan with _multiplan description_type."""
     config = _make_config(tmp_path)
     output_dir = tmp_path / "output"

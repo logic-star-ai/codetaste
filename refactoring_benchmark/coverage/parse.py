@@ -1,4 +1,5 @@
 """Parse and analyze git diffs and SARIF results."""
+
 import whatthepatch
 
 from refactoring_benchmark.coverage.models import Line, SARIFOpengrep
@@ -6,13 +7,14 @@ from refactoring_benchmark.coverage.models import Line, SARIFOpengrep
 
 from typing import Set, Tuple
 
+
 def parse_diff(diff_content: str, base_commit: str, golden_commit: str) -> Tuple[Set[Line], Set[Line]]:
     base_lines: Set[Line] = set()
     golden_lines: Set[Line] = set()
     for diff in whatthepatch.parse_patch(diff_content):
         if not diff.changes:
             continue
-            
+
         old_path = diff.header.old_path.removeprefix("a/")
         new_path = diff.header.new_path.removeprefix("b/")
 
@@ -20,20 +22,10 @@ def parse_diff(diff_content: str, base_commit: str, golden_commit: str) -> Tuple
             if isinstance(text, bytes):
                 text = text.decode("utf-8", errors="ignore")
             if old_no is not None and new_no is None:
-                base_lines.add(Line(
-                    uri=old_path, 
-                    commit=base_commit, 
-                    line_number=old_no, 
-                    content=text
-                ))
+                base_lines.add(Line(uri=old_path, commit=base_commit, line_number=old_no, content=text))
             elif new_no is not None and old_no is None:
-                golden_lines.add(Line(
-                    uri=new_path, 
-                    commit=golden_commit, 
-                    line_number=new_no, 
-                    content=text
-                ))
-                
+                golden_lines.add(Line(uri=new_path, commit=golden_commit, line_number=new_no, content=text))
+
     return base_lines, golden_lines
 
 
