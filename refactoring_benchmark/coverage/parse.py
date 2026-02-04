@@ -1,11 +1,45 @@
 """Parse and analyze git diffs and SARIF results."""
 
+from pathlib import PurePosixPath
+from typing import Set, Tuple
+
 import whatthepatch
 
 from refactoring_benchmark.coverage.models import Line, SARIFOpengrep
 
 
-from typing import Set, Tuple
+# Standard ignore directories across supported languages (<= 20).
+_IGNORE_DIR_NAMES = {
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".tox",
+    ".ruff_cache",
+    "node_modules",
+    "dist",
+    "build",
+    ".next",
+    ".nuxt",
+    "target",
+    ".gradle",
+    "out",
+    "bin",
+    "obj",
+    "vendor",
+    ".cache",
+    "coverage",
+}
+
+
+def _normalize_path(path: str) -> str:
+    return path.replace("\\", "/")
+
+
+def _should_ignore_path(path: str) -> bool:
+    parts = PurePosixPath(_normalize_path(path)).parts
+    return any(part in _IGNORE_DIR_NAMES for part in parts)
 
 
 def parse_diff(diff_content: str, base_commit: str, golden_commit: str) -> Tuple[Set[Line], Set[Line]]:
@@ -17,6 +51,8 @@ def parse_diff(diff_content: str, base_commit: str, golden_commit: str) -> Tuple
 
         old_path = diff.header.old_path.removeprefix("a/")
         new_path = diff.header.new_path.removeprefix("b/")
+        if _should_ignore_path(old_path) or _should_ignore_path(new_path):
+            continue
 
         for old_no, new_no, text, prefix in diff.changes:
             if isinstance(text, bytes):
