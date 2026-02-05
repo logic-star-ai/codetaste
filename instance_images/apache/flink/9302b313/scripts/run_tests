@@ -1,0 +1,101 @@
+#!/bin/bash
+################################################################################
+# Test execution script for Apache Flink
+# This script runs a representative subset of tests and outputs JSON results
+# It should be run after sourcing setup_shell.sh
+################################################################################
+
+set -e
+
+cd /testbed
+
+# Create a temporary directory for test results
+TEST_RESULTS_DIR=$(mktemp -d)
+trap "rm -rf $TEST_RESULTS_DIR" EXIT
+
+# Run tests for the core module (a representative subset)
+# This includes the most fundamental tests that exercise core Flink functionality
+echo "Running Flink core module tests..."
+
+# Run Maven test command and capture output
+# We use the core module which contains fundamental tests
+mvn test -pl flink-core -Dflink.forkCount=2 -Dflink.forkCountTestPackage=2 -Dfast 2>&1 | tee "$TEST_RESULTS_DIR/test_output.log" || true
+
+# Parse test results from surefire reports
+# Surefire creates XML reports in target/surefire-reports/
+PASSED=0
+FAILED=0
+SKIPPED=0
+TOTAL=0
+
+# Function to parse surefire XML reports
+parse_surefire_reports() {
+    local module_dir="$1"
+    local reports_dir="$module_dir/target/surefire-reports"
+
+    if [ -d "$reports_dir" ]; then
+        # Find all TEST-*.xml files and parse them
+        for xml_file in "$reports_dir"/TEST-*.xml; do
+            if [ -f "$xml_file" ]; then
+                # Extract test counts using grep and sed
+                # Format: <testsuite name="..." tests="10" failures="2" errors="1" skipped="3" ...>
+                local tests=$(grep -oP 'tests="\K[0-9]+' "$xml_file" | head -1)
+                local failures=$(grep -oP 'failures="\K[0-9]+' "$xml_file" | head -1)
+                local errors=$(grep -oP 'errors="\K[0-9]+' "$xml_file" | head -1)
+                local skips=$(grep -oP 'skipped="\K[0-9]+' "$xml_file" | head -1)
+
+                # Default to 0 if not found
+                tests=${tests:-0}
+                failures=${failures:-0}
+                errors=${errors:-0}
+                skips=${skips:-0}
+
+                # Calculate passed tests
+                local passed=$((tests - failures - errors - skips))
+
+                # Accumulate totals
+                TOTAL=$((TOTAL + tests))
+                FAILED=$((FAILED + failures + errors))
+                SKIPPED=$((SKIPPED + skips))
+                PASSED=$((PASSED + passed))
+            fi
+        done
+    fi
+}
+
+# Parse reports from flink-core module
+parse_surefire_reports "/testbed/flink-core"
+
+# If no tests were found in surefire reports, try to parse from Maven output
+if [ $TOTAL -eq 0 ]; then
+    echo "No surefire reports found, parsing Maven output..." >&2
+
+    # Look for Maven test summary line like:
+    # "[WARNING] Tests run: 4274, Failures: 0, Errors: 0, Skipped: 34"
+    # or "[INFO] Tests run: 123, Failures: 4, Errors: 0, Skipped: 5"
+    if grep -q "Tests run:" "$TEST_RESULTS_DIR/test_output.log"; then
+        # Get the last occurrence (final summary) - it's usually a WARNING line
+        TEST_SUMMARY=$(grep "Tests run:" "$TEST_RESULTS_DIR/test_output.log" | grep -v "Time elapsed" | tail -1)
+
+        # Extract numbers
+        TOTAL=$(echo "$TEST_SUMMARY" | grep -oP 'Tests run: \K[0-9]+' || echo "0")
+        FAILED=$(echo "$TEST_SUMMARY" | grep -oP 'Failures: \K[0-9]+' || echo "0")
+        ERRORS=$(echo "$TEST_SUMMARY" | grep -oP 'Errors: \K[0-9]+' || echo "0")
+        SKIPPED=$(echo "$TEST_SUMMARY" | grep -oP 'Skipped: \K[0-9]+' || echo "0")
+
+        # Add errors to failures
+        FAILED=$((FAILED + ERRORS))
+
+        # Calculate passed
+        PASSED=$((TOTAL - FAILED - SKIPPED))
+    fi
+fi
+
+# Ensure non-negative values
+PASSED=$((PASSED < 0 ? 0 : PASSED))
+FAILED=$((FAILED < 0 ? 0 : FAILED))
+SKIPPED=$((SKIPPED < 0 ? 0 : SKIPPED))
+TOTAL=$((TOTAL < 0 ? 0 : TOTAL))
+
+# Output JSON result (required format)
+echo "{\"passed\": $PASSED, \"failed\": $FAILED, \"skipped\": $SKIPPED, \"total\": $TOTAL}"

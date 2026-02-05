@@ -1,0 +1,75 @@
+#!/bin/bash
+# Test execution script - runs the test suite
+# Must be run after sourcing setup_shell.sh
+
+set -e
+
+cd /testbed
+
+# Use site-installed joblib instead of bundled version (fixes Python 3.8 compatibility)
+export SKLEARN_SITE_JOBLIB=1
+
+# Run a representative subset of tests that completes within 15 minutes
+# We'll run tests from the main tests directory which covers core functionality
+# Using pytest with json output
+
+# Create a temporary file for test output
+TEMP_OUTPUT=$(mktemp)
+
+# Run pytest with verbose output and capture results
+# We run a subset of fast tests to complete within time limit
+# Skip slow tests, network tests, and tests that directly import vendored joblib
+python -m pytest sklearn/tests/ \
+    -v \
+    --tb=short \
+    --disable-warnings \
+    -m "not slow and not network" \
+    --maxfail=100 \
+    --ignore=sklearn/tests/test_common.py \
+    --ignore=sklearn/tests/test_site_joblib.py \
+    --ignore=sklearn/tests/test_multioutput.py \
+    --ignore=sklearn/tests/test_docstring_parameters.py \
+    2>&1 | tee "$TEMP_OUTPUT" || true
+
+# Parse the pytest output to extract test counts
+# Pytest outputs something like: "==== 100 passed, 5 failed, 2 skipped in 10.00s ===="
+
+# Extract the summary line
+SUMMARY=$(grep -E "^=+.*passed.*=+$|^=+.*failed.*=+$|^=+.*error.*=+$" "$TEMP_OUTPUT" | tail -1 || echo "")
+
+if [ -z "$SUMMARY" ]; then
+    # No summary found, might be an error
+    echo '{"passed": 0, "failed": 0, "skipped": 0, "total": 0}'
+    rm -f "$TEMP_OUTPUT"
+    exit 0
+fi
+
+# Extract numbers using grep and sed (default to 0 if not found)
+PASSED=$(echo "$SUMMARY" | grep -oP '\d+(?= passed)' | head -1)
+[[ -z "$PASSED" ]] && PASSED=0
+FAILED=$(echo "$SUMMARY" | grep -oP '\d+(?= failed)' | head -1)
+[[ -z "$FAILED" ]] && FAILED=0
+SKIPPED=$(echo "$SUMMARY" | grep -oP '\d+(?= skipped)' | head -1)
+[[ -z "$SKIPPED" ]] && SKIPPED=0
+ERRORS=$(echo "$SUMMARY" | grep -oP '\d+(?= error)' | head -1)
+[[ -z "$ERRORS" ]] && ERRORS=0
+
+# If no passed/failed/skipped found, try alternative patterns
+if [ "$PASSED" = "0" ] && [ "$FAILED" = "0" ] && [ "$SKIPPED" = "0" ]; then
+    # Try to count from verbose output
+    PASSED=$(grep -c "^sklearn/.*PASSED" "$TEMP_OUTPUT" || echo "0")
+    FAILED=$(grep -c "^sklearn/.*FAILED" "$TEMP_OUTPUT" || echo "0")
+    SKIPPED=$(grep -c "^sklearn/.*SKIPPED" "$TEMP_OUTPUT" || echo "0")
+fi
+
+# Add errors to failed count
+FAILED=$((FAILED + ERRORS))
+
+# Calculate total
+TOTAL=$((PASSED + FAILED + SKIPPED))
+
+# Output JSON result
+echo "{\"passed\": $PASSED, \"failed\": $FAILED, \"skipped\": $SKIPPED, \"total\": $TOTAL}"
+
+# Clean up
+rm -f "$TEMP_OUTPUT"

@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+#
+# Test execution script for Apache Arrow C++
+# This script runs the C++ unit tests and outputs results in JSON format
+# Environment must be set up by sourcing setup_shell.sh first
+
+set -e
+
+BUILD_DIR="/tmp/arrow-build/cpp"
+
+# Verify environment is set up
+if [ -z "${ARROW_HOME}" ] || [ ! -d "${BUILD_DIR}" ]; then
+    echo "Error: Environment not set up. Please run: source /scripts/setup_shell.sh" >&2
+    exit 1
+fi
+
+cd "${BUILD_DIR}"
+
+# Run ctest with specific options for unit tests
+# Using --output-junit to get structured output we can parse
+TEMP_JUNIT="/tmp/test_results.xml"
+
+# Run tests with proper error handling
+# --label-regex unittest: Only run unit tests (not integration/benchmarks)
+# --output-on-failure: Show output for failed tests
+# --timeout 300: 5 minute timeout per test
+# We limit parallelism to avoid overwhelming the system
+set +e
+ctest \
+    --label-regex unittest \
+    --output-on-failure \
+    --parallel $(nproc) \
+    --timeout 300 \
+    --output-junit "${TEMP_JUNIT}" \
+    2>&1 | tee /tmp/ctest_output.log
+
+CTEST_EXIT_CODE=$?
+set -e
+
+# Parse ctest output to extract test counts
+# CTest outputs a summary line like: "X% tests passed, Y tests failed out of Z"
+# or "100% tests passed, 0 tests failed out of N"
+
+TOTAL=0
+PASSED=0
+FAILED=0
+
+# Extract from ctest output log
+if [ -f /tmp/ctest_output.log ]; then
+    # Try to parse the summary line
+    SUMMARY_LINE=$(grep -E "[0-9]+% tests passed, [0-9]+ tests failed out of [0-9]+" /tmp/ctest_output.log | tail -1 || echo "")
+
+    if [ -n "$SUMMARY_LINE" ]; then
+        # Extract numbers from summary line
+        TOTAL=$(echo "$SUMMARY_LINE" | grep -oP 'out of \K[0-9]+' || echo "0")
+        FAILED=$(echo "$SUMMARY_LINE" | grep -oP ', \K[0-9]+(?= tests failed)' || echo "0")
+        PASSED=$((TOTAL - FAILED))
+    fi
+fi
+
+# Fallback: try to count from XML if available and we didn't get numbers from log
+if [ "$TOTAL" -eq 0 ] && [ -f "${TEMP_JUNIT}" ]; then
+    # Count testsuites (each ctest test is a testsuite)
+    TOTAL=$(grep -c '<testsuite' "${TEMP_JUNIT}" 2>/dev/null || echo "0")
+    # Count failures
+    FAILED=$(grep '<testsuite' "${TEMP_JUNIT}" 2>/dev/null | grep -oP 'failures="\K[0-9]+' | awk '{sum+=$1} END {print sum+0}' || echo "0")
+    PASSED=$((TOTAL - FAILED))
+fi
+
+# Skipped tests - ctest doesn't easily report these separately, set to 0
+SKIPPED=0
+
+# Output required JSON format to stdout (everything else went to log)
+echo "{\"passed\": ${PASSED}, \"failed\": ${FAILED}, \"skipped\": ${SKIPPED}, \"total\": ${TOTAL}}"
+
+# Exit with ctest's exit code
+exit ${CTEST_EXIT_CODE}

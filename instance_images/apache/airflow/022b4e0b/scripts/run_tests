@@ -1,0 +1,156 @@
+#!/bin/bash
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+# Run Apache Airflow tests and output JSON results
+# This script assumes the environment is already set up via setup_shell.sh
+
+set -e
+
+cd /testbed
+
+# Create a temporary file for pytest JSON output
+PYTEST_JSON_OUTPUT=$(mktemp)
+
+# Run a representative subset of unit tests that complete quickly
+# We'll run core tests that don't require external services
+pytest \
+    tests/core/test_core.py \
+    tests/utils/test_dates.py \
+    tests/utils/test_timezone.py \
+    tests/models/test_dagbag.py \
+    tests/models/test_baseoperator.py \
+    tests/api/common/experimental/test_pool.py \
+    -v \
+    --tb=short \
+    --disable-warnings \
+    --junit-xml=/tmp/test_results.xml \
+    2>&1 | tee /tmp/test_output.log || true
+
+# Parse the output to extract test results
+# The pytest output includes a summary line like: "=== 10 passed, 2 failed, 1 skipped in 12.34s ==="
+
+# Initialize counters
+PASSED=0
+FAILED=0
+SKIPPED=0
+TOTAL=0
+
+# Parse the test output log for the summary
+if [ -f /tmp/test_output.log ]; then
+    # Look for pytest summary line
+    SUMMARY=$(grep -E "^=+.*\s(passed|failed|skipped)" /tmp/test_output.log | tail -1 || echo "")
+
+    if [ -n "$SUMMARY" ]; then
+        # Extract passed count
+        if echo "$SUMMARY" | grep -oP '\d+(?=\s+passed)' > /dev/null 2>&1; then
+            PASSED=$(echo "$SUMMARY" | grep -oP '\d+(?=\s+passed)' || echo "0")
+        fi
+
+        # Extract failed count
+        if echo "$SUMMARY" | grep -oP '\d+(?=\s+failed)' > /dev/null 2>&1; then
+            FAILED=$(echo "$SUMMARY" | grep -oP '\d+(?=\s+failed)' || echo "0")
+        fi
+
+        # Extract skipped count
+        if echo "$SUMMARY" | grep -oP '\d+(?=\s+skipped)' > /dev/null 2>&1; then
+            SKIPPED=$(echo "$SUMMARY" | grep -oP '\d+(?=\s+skipped)' || echo "0")
+        fi
+    fi
+fi
+
+# Parse JUnit XML if summary parsing failed
+if [ "$PASSED" -eq 0 ] && [ "$FAILED" -eq 0 ] && [ -f /tmp/test_results.xml ]; then
+    # Use Python to parse the XML
+    python3 << 'EOF'
+import xml.etree.ElementTree as ET
+import sys
+
+try:
+    tree = ET.parse('/tmp/test_results.xml')
+    root = tree.getroot()
+
+    # JUnit XML format has testsuites or testsuite as root
+    if root.tag == 'testsuites':
+        testsuite = root.find('testsuite')
+    else:
+        testsuite = root
+
+    if testsuite is not None:
+        tests = int(testsuite.get('tests', 0))
+        failures = int(testsuite.get('failures', 0))
+        errors = int(testsuite.get('errors', 0))
+        skipped = int(testsuite.get('skipped', 0))
+
+        passed = tests - failures - errors - skipped
+        failed = failures + errors
+
+        print(f"{passed},{failed},{skipped},{tests}")
+    else:
+        print("0,0,0,0")
+except Exception as e:
+    print("0,0,0,0", file=sys.stderr)
+    sys.exit(0)
+EOF
+
+    # Read the Python output
+    COUNTS=$(python3 << 'EOF'
+import xml.etree.ElementTree as ET
+import sys
+
+try:
+    tree = ET.parse('/tmp/test_results.xml')
+    root = tree.getroot()
+
+    if root.tag == 'testsuites':
+        testsuite = root.find('testsuite')
+    else:
+        testsuite = root
+
+    if testsuite is not None:
+        tests = int(testsuite.get('tests', 0))
+        failures = int(testsuite.get('failures', 0))
+        errors = int(testsuite.get('errors', 0))
+        skipped = int(testsuite.get('skipped', 0))
+
+        passed = tests - failures - errors - skipped
+        failed = failures + errors
+
+        print(f"{passed},{failed},{skipped},{tests}")
+    else:
+        print("0,0,0,0")
+except:
+    print("0,0,0,0")
+EOF
+)
+
+    IFS=',' read -r PASSED FAILED SKIPPED TOTAL <<< "$COUNTS"
+fi
+
+# Calculate total if not already set
+if [ "$TOTAL" -eq 0 ]; then
+    TOTAL=$((PASSED + FAILED + SKIPPED))
+fi
+
+# Ensure all values are integers
+PASSED=${PASSED:-0}
+FAILED=${FAILED:-0}
+SKIPPED=${SKIPPED:-0}
+TOTAL=${TOTAL:-0}
+
+# Output JSON result
+echo "{\"passed\": $PASSED, \"failed\": $FAILED, \"skipped\": $SKIPPED, \"total\": $TOTAL}"

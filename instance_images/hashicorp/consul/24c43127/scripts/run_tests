@@ -1,0 +1,77 @@
+#!/bin/bash
+# Test execution script for Consul
+# This script runs a representative subset of tests and outputs results in JSON format
+
+set -e
+
+cd /testbed
+
+# Create a temporary directory for test output
+TEST_OUTPUT=$(mktemp)
+TEST_JSON=$(mktemp)
+
+# Function to extract test results from gotestsum JSON output
+parse_test_results() {
+    local json_file=$1
+    local passed=0
+    local failed=0
+    local skipped=0
+    local total=0
+
+    # Parse the JSON output from gotestsum
+    # Each line is a JSON object with Action field (pass, fail, skip, run, output, etc.)
+    if [ -f "$json_file" ] && [ -s "$json_file" ]; then
+        # Count test results by action type
+        # Only count tests (Test field is present), not packages
+        passed=$(grep '"Action":"pass"' "$json_file" | grep '"Test":"' | wc -l 2>/dev/null || echo 0)
+        failed=$(grep '"Action":"fail"' "$json_file" | grep '"Test":"' | wc -l 2>/dev/null || echo 0)
+        skipped=$(grep '"Action":"skip"' "$json_file" | grep '"Test":"' | wc -l 2>/dev/null || echo 0)
+
+        # Total is passed + failed + skipped
+        total=$((passed + failed + skipped))
+    fi
+
+    # Output the final JSON result
+    echo "{\"passed\": $passed, \"failed\": $failed, \"skipped\": $skipped, \"total\": $total}"
+}
+
+# Trap to ensure we output results even on error
+trap 'parse_test_results "$TEST_JSON"' EXIT
+
+# Run a representative subset of tests
+# We'll run tests from the main packages, focusing on core functionality
+# Limit to specific packages to complete within 15 minutes
+
+echo "Running Consul test suite..." >&2
+
+# Test the sdk submodule first (simpler, should work)
+echo "Testing sdk submodule..." >&2
+cd /testbed/sdk
+gotestsum --format=standard-verbose --jsonfile="${TEST_JSON}.sdk" -- -timeout=10m -short ./... 2>&1 | tee -a "$TEST_OUTPUT" || true
+
+# Test the api submodule (client library)
+echo "Testing api submodule..." >&2
+cd /testbed/api
+# Skip the api tests if there are build issues - this is common with Go version mismatches
+gotestsum --format=standard-verbose --jsonfile="${TEST_JSON}.api" -- -timeout=10m -short ./... 2>&1 | tee -a "$TEST_OUTPUT" || true
+
+# Test core packages from the main module (selected for representativeness)
+echo "Testing core packages..." >&2
+cd /testbed
+gotestsum --format=standard-verbose --jsonfile="${TEST_JSON}.main" -- -timeout=10m -short \
+    ./acl/... \
+    ./agent/config/... \
+    ./agent/consul/state/... \
+    ./ipaddr/... \
+    ./lib/... \
+    ./types/... \
+    ./version/... \
+    2>&1 | tee -a "$TEST_OUTPUT" || true
+
+# Merge all JSON files
+cat "${TEST_JSON}.sdk" "${TEST_JSON}.api" "${TEST_JSON}.main" > "$TEST_JSON" 2>/dev/null || true
+
+# Clean up temporary JSON files
+rm -f "${TEST_JSON}.sdk" "${TEST_JSON}.api" "${TEST_JSON}.main"
+
+# The trap will handle the output

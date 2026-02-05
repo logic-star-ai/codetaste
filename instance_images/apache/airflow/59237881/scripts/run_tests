@@ -1,0 +1,138 @@
+#!/bin/bash
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+# Test runner script for Apache Airflow
+# This script runs the test suite and outputs results in JSON format
+# Prerequisites: /scripts/setup_system.sh and /scripts/setup_shell.sh must be run first
+
+cd /testbed
+
+# Create a temporary file for pytest output
+PYTEST_OUTPUT=$(mktemp)
+trap "rm -f $PYTEST_OUTPUT" EXIT
+
+# Run a representative subset of tests that complete in reasonable time
+# We focus on simple utility tests
+echo "Running Airflow tests..." >&2
+
+# Run tests and capture output, allowing it to fail so we can parse results
+set +e
+python -m pytest \
+    tests/utils/test_timezone.py \
+    tests/models/test_pool.py \
+    tests/models/test_timestamp.py \
+    tests/cli/commands/test_info_command.py \
+    -v \
+    --tb=line \
+    2>&1 | tee "$PYTEST_OUTPUT"
+
+TEST_EXIT_CODE=$?
+set -e
+
+# Parse the test results from pytest output
+# We look for the summary line like: "==== 123 passed, 4 failed, 5 skipped in 10.23s ===="
+SUMMARY_LINE=$(grep -E "^=+.*(passed|failed|skipped|error).*in.*=+$" "$PYTEST_OUTPUT" | tail -1)
+
+echo "DEBUG: Summary line: $SUMMARY_LINE" >&2
+
+# Initialize counters
+PASSED=0
+FAILED=0
+SKIPPED=0
+ERRORS=0
+
+# Parse the summary line using simple grep patterns
+if [ -n "$SUMMARY_LINE" ]; then
+    # Extract passed count
+    if echo "$SUMMARY_LINE" | grep -q "passed"; then
+        PASSED=$(echo "$SUMMARY_LINE" | grep -oE '[0-9]+ passed' | grep -oE '[0-9]+' | head -1)
+    fi
+
+    # Extract failed count
+    if echo "$SUMMARY_LINE" | grep -q "failed"; then
+        FAILED=$(echo "$SUMMARY_LINE" | grep -oE '[0-9]+ failed' | grep -oE '[0-9]+' | head -1)
+    fi
+
+    # Extract skipped count
+    if echo "$SUMMARY_LINE" | grep -q "skipped"; then
+        SKIPPED=$(echo "$SUMMARY_LINE" | grep -oE '[0-9]+ skipped' | grep -oE '[0-9]+' | head -1)
+    fi
+
+    # Extract error count
+    if echo "$SUMMARY_LINE" | grep -q "error"; then
+        ERRORS=$(echo "$SUMMARY_LINE" | grep -oE '[0-9]+ error' | grep -oE '[0-9]+' | head -1)
+    fi
+fi
+
+# Ensure all values are numeric and handle empty values
+PASSED=${PASSED:-0}
+FAILED=${FAILED:-0}
+SKIPPED=${SKIPPED:-0}
+ERRORS=${ERRORS:-0}
+
+# Clean up and ensure numeric - use xargs to trim whitespace
+if [ -n "$PASSED" ]; then
+    PASSED=$(echo "$PASSED" | xargs)
+    if ! [[ "$PASSED" =~ ^[0-9]+$ ]]; then PASSED=0; fi
+else
+    PASSED=0
+fi
+
+if [ -n "$FAILED" ]; then
+    FAILED=$(echo "$FAILED" | xargs)
+    if ! [[ "$FAILED" =~ ^[0-9]+$ ]]; then FAILED=0; fi
+else
+    FAILED=0
+fi
+
+if [ -n "$SKIPPED" ]; then
+    SKIPPED=$(echo "$SKIPPED" | xargs)
+    if ! [[ "$SKIPPED" =~ ^[0-9]+$ ]]; then SKIPPED=0; fi
+else
+    SKIPPED=0
+fi
+
+if [ -n "$ERRORS" ]; then
+    ERRORS=$(echo "$ERRORS" | xargs)
+    if ! [[ "$ERRORS" =~ ^[0-9]+$ ]]; then ERRORS=0; fi
+else
+    ERRORS=0
+fi
+
+# Add errors to failed count
+FAILED=$((FAILED + ERRORS))
+
+# Calculate total
+TOTAL=$((PASSED + FAILED + SKIPPED))
+
+# If we couldn't parse anything, try alternative parsing from the log
+if [ $TOTAL -eq 0 ]; then
+    # Count test outcomes from the verbose output
+    PASSED=$(grep -c " PASSED" "$PYTEST_OUTPUT" 2>/dev/null || echo "0")
+    FAILED=$(grep -c " FAILED\| ERROR" "$PYTEST_OUTPUT" 2>/dev/null || echo "0")
+    SKIPPED=$(grep -c " SKIPPED" "$PYTEST_OUTPUT" 2>/dev/null || echo "0")
+    TOTAL=$((PASSED + FAILED + SKIPPED))
+fi
+
+echo "DEBUG: passed=$PASSED failed=$FAILED skipped=$SKIPPED total=$TOTAL" >&2
+
+# Output JSON result to stdout using printf to avoid any issues
+printf '{"passed": %d, "failed": %d, "skipped": %d, "total": %d}\n' "$PASSED" "$FAILED" "$SKIPPED" "$TOTAL"
+
+# Exit successfully
+exit 0

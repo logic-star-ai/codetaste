@@ -1,0 +1,68 @@
+#!/bin/bash
+# Run BlockSuite test suite
+# This script must be run after sourcing setup_shell.sh
+
+set -e
+
+cd /testbed
+
+# Create temporary output file
+TEMP_OUTPUT=$(mktemp)
+
+# Run Playwright e2e tests with custom reporter
+echo "Running Playwright e2e tests..." >&2
+
+# Start vite preview server manually in the background on port 5173 (default test port)
+# (the webServer in playwright.config uses nx which has resource issues)
+echo "Starting preview server..." >&2
+cd /testbed/packages/playground
+pnpm exec vite preview --port 5173 > /tmp/preview.log 2>&1 &
+PREVIEW_PID=$!
+cd /testbed
+
+# Wait for server to be ready
+echo "Waiting for preview server to be ready..." >&2
+for i in {1..60}; do
+    if curl -s http://localhost:5173 > /dev/null 2>&1; then
+        echo "Server is ready!" >&2
+        break
+    fi
+    if [ $i -eq 60 ]; then
+        echo "Server failed to start!" >&2
+        kill $PREVIEW_PID 2>/dev/null || true
+        exit 1
+    fi
+    sleep 1
+done
+
+# Run a representative subset of tests (to complete within 15 minutes)
+# Run basic tests only for validation (full suite has 79 test files)
+# Use custom config that doesn't start webServer (we started it manually above)
+set +e
+pnpm exec playwright test \
+  /testbed/tests/basic.spec.ts \
+  --config=/scripts/playwright.config.js \
+  --reporter=list,/scripts/json-reporter.js 2>&1 | tee "$TEMP_OUTPUT"
+TEST_EXIT_CODE=$?
+set -e
+
+# Kill the preview server
+echo "Stopping preview server..." >&2
+kill $PREVIEW_PID 2>/dev/null || true
+wait $PREVIEW_PID 2>/dev/null || true
+
+# Extract the JSON line from the output (should be the last line with JSON format)
+JSON_OUTPUT=$(grep -E '^\{.*"passed".*"failed".*"skipped".*"total".*\}$' "$TEMP_OUTPUT" | tail -1)
+
+# Clean up temp file
+rm -f "$TEMP_OUTPUT"
+
+# If we got valid JSON, output it; otherwise create a default
+if [ -n "$JSON_OUTPUT" ]; then
+    echo "$JSON_OUTPUT"
+else
+    # Fallback in case reporter didn't work
+    echo '{"passed": 0, "failed": 0, "skipped": 0, "total": 0}'
+fi
+
+exit $TEST_EXIT_CODE

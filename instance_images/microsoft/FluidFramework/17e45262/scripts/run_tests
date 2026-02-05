@@ -1,0 +1,75 @@
+#!/bin/bash
+# Test execution script for FluidFramework
+# This script runs a representative subset of tests and outputs results in JSON format
+# Usage: /scripts/run_tests
+
+set -e
+
+# Ensure we're in the testbed directory
+cd /testbed
+
+# Create a temp directory for test results
+TEMP_RESULTS_DIR=$(mktemp -d)
+trap "rm -rf $TEMP_RESULTS_DIR" EXIT
+
+# Run mocha tests with multireport mode to get JSON output
+# We'll run tests on key packages to get a representative sample
+echo "Running mocha tests..."
+FLUID_TEST_MULTIREPORT=1 pnpm run -r --no-sort --stream --no-bail test:mocha 2>&1 | tee "$TEMP_RESULTS_DIR/test_output.log" || true
+
+# Also run jest tests if any
+echo "Running jest tests..."
+node_modules/.bin/assign-test-ports && pnpm run -r --no-sort --stream --no-bail test:jest --json --outputFile="$TEMP_RESULTS_DIR/jest-results.json" 2>&1 || true
+
+# Parse all JSON reports from mocha tests
+TOTAL_PASSED=0
+TOTAL_FAILED=0
+TOTAL_SKIPPED=0
+TOTAL_TESTS=0
+
+# Find all junit-report.json files created by the test run
+for json_file in $(find /testbed -path "*/nyc/junit-report.json" 2>/dev/null); do
+    if [ -f "$json_file" ]; then
+        # Extract stats using jq or python
+        if command -v jq &> /dev/null; then
+            passes=$(jq -r '.stats.passes // 0' "$json_file")
+            failures=$(jq -r '.stats.failures // 0' "$json_file")
+            pending=$(jq -r '.stats.pending // 0' "$json_file")
+            tests=$(jq -r '.stats.tests // 0' "$json_file")
+        else
+            # Fallback to python if jq is not available
+            passes=$(python3 -c "import json; data=json.load(open('$json_file')); print(data.get('stats', {}).get('passes', 0))")
+            failures=$(python3 -c "import json; data=json.load(open('$json_file')); print(data.get('stats', {}).get('failures', 0))")
+            pending=$(python3 -c "import json; data=json.load(open('$json_file')); print(data.get('stats', {}).get('pending', 0))")
+            tests=$(python3 -c "import json; data=json.load(open('$json_file')); print(data.get('stats', {}).get('tests', 0))")
+        fi
+
+        TOTAL_PASSED=$((TOTAL_PASSED + passes))
+        TOTAL_FAILED=$((TOTAL_FAILED + failures))
+        TOTAL_SKIPPED=$((TOTAL_SKIPPED + pending))
+        TOTAL_TESTS=$((TOTAL_TESTS + tests))
+    fi
+done
+
+# Parse jest results if they exist
+if [ -f "$TEMP_RESULTS_DIR/jest-results.json" ]; then
+    if command -v jq &> /dev/null; then
+        jest_passed=$(jq -r '.numPassedTests // 0' "$TEMP_RESULTS_DIR/jest-results.json")
+        jest_failed=$(jq -r '.numFailedTests // 0' "$TEMP_RESULTS_DIR/jest-results.json")
+        jest_pending=$(jq -r '.numPendingTests // 0' "$TEMP_RESULTS_DIR/jest-results.json")
+        jest_total=$(jq -r '.numTotalTests // 0' "$TEMP_RESULTS_DIR/jest-results.json")
+    else
+        jest_passed=$(python3 -c "import json; data=json.load(open('$TEMP_RESULTS_DIR/jest-results.json')); print(data.get('numPassedTests', 0))")
+        jest_failed=$(python3 -c "import json; data=json.load(open('$TEMP_RESULTS_DIR/jest-results.json')); print(data.get('numFailedTests', 0))")
+        jest_pending=$(python3 -c "import json; data=json.load(open('$TEMP_RESULTS_DIR/jest-results.json')); print(data.get('numPendingTests', 0))")
+        jest_total=$(python3 -c "import json; data=json.load(open('$TEMP_RESULTS_DIR/jest-results.json')); print(data.get('numTotalTests', 0))")
+    fi
+
+    TOTAL_PASSED=$((TOTAL_PASSED + jest_passed))
+    TOTAL_FAILED=$((TOTAL_FAILED + jest_failed))
+    TOTAL_SKIPPED=$((TOTAL_SKIPPED + jest_pending))
+    TOTAL_TESTS=$((TOTAL_TESTS + jest_total))
+fi
+
+# Output the final JSON result
+echo "{\"passed\": $TOTAL_PASSED, \"failed\": $TOTAL_FAILED, \"skipped\": $TOTAL_SKIPPED, \"total\": $TOTAL_TESTS}"
