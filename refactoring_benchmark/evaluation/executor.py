@@ -17,7 +17,12 @@ from refactoring_benchmark.evaluation.parser import (
     parse_rule_evaluation,
     parse_test_output,
 )
-from refactoring_benchmark.evaluation.runner import run_rule_evaluation, run_test_evaluation
+from refactoring_benchmark.evaluation.runner import (
+    cleanup_temp_rules_dir,
+    prepare_temp_rules_dir,
+    run_rule_evaluation,
+    run_test_evaluation,
+)
 from refactoring_benchmark.inference.models import AgentConfig
 from refactoring_benchmark.inference.validation import validate_agent_config
 from refactoring_benchmark.podman import utils as podman_utils
@@ -148,28 +153,48 @@ def evaluate_single_instance(instance: InstanceRow, agent_id: str, config: Evalu
     instance_logger.info(f"  Agent ID: {agent_id}")
     instance_logger.info(f"  Output: {eval_dir}")
 
+    rules_dir = prepare_temp_rules_dir(instance, instance_logger)
+    if rules_dir is None:
+        instance_logger.error(f"Skipping {instance.id}: missing rules assets for evaluation")
+        return False
+
     # Run test and rule evaluation in parallel
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        # Submit both evaluations
-        if not config.skip_tests:
-            test_future = executor.submit(
-                run_test_evaluation, instance, prediction_diff, eval_dir, config.timeout_test, instance_logger
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            # Submit both evaluations
+            if not config.skip_tests:
+                test_future = executor.submit(
+                    run_test_evaluation,
+                    instance,
+                    prediction_diff,
+                    eval_dir,
+                    config.timeout_test,
+                    instance_logger,
+                    rules_dir,
+                )
+
+            rule_future = executor.submit(
+                run_rule_evaluation,
+                instance,
+                prediction_diff,
+                eval_dir,
+                config.timeout_rule,
+                instance_logger,
+                rules_dir,
             )
 
-        rule_future = executor.submit(
-            run_rule_evaluation, instance, prediction_diff, eval_dir, config.timeout_rule, instance_logger
-        )
-
-        # Gather results and write outputs
-        rule_success, rule_stdout = rule_future.result()
-        (eval_dir / "rule_output.txt").write_text(rule_stdout)
-        if not config.skip_tests:
-            test_metrics, test_stdout = test_future.result()
-            (eval_dir / "test_output.txt").write_text(test_stdout)
-            if test_metrics is None:
-                test_metrics = parse_test_output(test_stdout)
-        else:
-            test_metrics = evaluation_result.agent_test_metrics if evaluation_result else None
+            # Gather results and write outputs
+            rule_success, rule_stdout = rule_future.result()
+            (eval_dir / "rule_output.txt").write_text(rule_stdout)
+            if not config.skip_tests:
+                test_metrics, test_stdout = test_future.result()
+                (eval_dir / "test_output.txt").write_text(test_stdout)
+                if test_metrics is None:
+                    test_metrics = parse_test_output(test_stdout)
+            else:
+                test_metrics = evaluation_result.agent_test_metrics if evaluation_result else None
+    finally:
+        cleanup_temp_rules_dir(rules_dir, instance_logger)
 
     # Parse rule metrics from SARIF files
     if not rule_success:
