@@ -88,7 +88,7 @@ def stream_exec(
     env: Optional[dict] = None,
     stream_logger: Optional[logging.Logger] = None,
     is_json_output: bool = False,
-) -> str:
+) -> tuple[int, str]:
     """
     Execute a command in the container and stream its output.
 
@@ -99,7 +99,7 @@ def stream_exec(
         stream_logger: Optional logger for output streaming
 
     Returns:
-        Complete output from the command
+        Tuple of (exit_code, complete output)
     """
     if stream_logger is None:
         stream_logger = get_logger("bootstrap")
@@ -147,6 +147,16 @@ def copy_to_container(container: PodmanContainer, src_content: bytes, dst_path: 
     container.put_archive(os.path.dirname(dst_path), stream.read())
 
 
+def _safe_extractall(tar: tarfile.TarFile, path: str) -> None:
+    """Extract tar members to path, preventing path traversal."""
+    abs_path = os.path.realpath(path)
+    for member in tar.getmembers():
+        member_path = os.path.realpath(os.path.join(abs_path, member.name))
+        if not member_path.startswith(abs_path + os.sep) and member_path != abs_path:
+            raise ValueError(f"Unsafe path in tar: {member.name}")
+    tar.extractall(path=path)
+
+
 def extract_folder_from_container(container: PodmanContainer, container_path: str, local_dest: str) -> None:
     """
     Extract a folder from a container to the local filesystem.
@@ -167,7 +177,7 @@ def extract_folder_from_container(container: PodmanContainer, container_path: st
         stream.write(chunk)
     stream.seek(0)
     with tarfile.open(fileobj=stream, mode="r") as tar:
-        tar.extractall(path=local_dest)
+        _safe_extractall(tar, local_dest)
 
 
 def stop_container(container: PodmanContainer, force: bool = True, auto_unregister: bool = True) -> None:

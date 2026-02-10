@@ -65,6 +65,46 @@ def parse_diff(diff_content: str, base_commit: str, golden_commit: str) -> Tuple
     return base_lines, golden_lines
 
 
+def _lines_from_locations(locations: list, commit: str) -> Set[Line]:
+    lines: Set[Line] = set()
+
+    for location in locations:
+        # Extract physical location
+        phys_loc = location.get("physicalLocation")
+        if not phys_loc:
+            continue
+
+        # Extract file URI
+        artifact = phys_loc.get("artifactLocation")
+        if not artifact or "uri" not in artifact:
+            continue
+        uri = artifact["uri"]
+
+        # Extract region (line range)
+        region = phys_loc.get("region")
+        if not region:
+            continue
+
+        start_line = region.get("startLine")
+        end_line = region.get("endLine", start_line)
+
+        if start_line is None:
+            continue
+
+        # Extract snippet text if available
+        snippet = region.get("snippet", {})
+        snippet_text = snippet.get("text", "") if isinstance(snippet, dict) else ""
+
+        if snippet_text is not None and len(snippet_text.splitlines()) == end_line - start_line + 1:
+            for line_num, line_text in zip(range(start_line, end_line + 1), snippet_text.splitlines()):
+                lines.add(Line(uri=uri, commit=commit, line_number=line_num, content=line_text))
+        else:
+            for line_num in range(start_line, end_line + 1):
+                lines.add(Line(uri=uri, commit=commit, line_number=line_num, content=snippet_text))
+
+    return lines
+
+
 def parse_sarif(sarif: SARIFOpengrep, commit: str) -> Set[Line]:
     """
     Extract matched lines from SARIF results.
@@ -85,39 +125,35 @@ def parse_sarif(sarif: SARIFOpengrep, commit: str) -> Set[Line]:
         for result in run.results:
             if not result.locations:
                 continue
-
-            for location in result.locations:
-                # Extract physical location
-                phys_loc = location.get("physicalLocation")
-                if not phys_loc:
-                    continue
-
-                # Extract file URI
-                artifact = phys_loc.get("artifactLocation")
-                if not artifact or "uri" not in artifact:
-                    continue
-                uri = artifact["uri"]
-
-                # Extract region (line range)
-                region = phys_loc.get("region")
-                if not region:
-                    continue
-
-                start_line = region.get("startLine")
-                end_line = region.get("endLine", start_line)
-
-                if start_line is None:
-                    continue
-
-                # Extract snippet text if available
-                snippet = region.get("snippet", {})
-                snippet_text = snippet.get("text", "") if isinstance(snippet, dict) else ""
-
-                if snippet_text is not None and len(snippet_text.splitlines()) == end_line - start_line + 1:
-                    for line_num, line_text in zip(range(start_line, end_line + 1), snippet_text.splitlines()):
-                        lines.add(Line(uri=uri, commit=commit, line_number=line_num, content=line_text))
-                else:
-                    for line_num in range(start_line, end_line + 1):
-                        lines.add(Line(uri=uri, commit=commit, line_number=line_num, content=snippet_text))
+            lines.update(_lines_from_locations(result.locations, commit))
 
     return lines
+
+
+def parse_sarif_by_rule(sarif: SARIFOpengrep, commit: str) -> dict[str, Set[Line]]:
+    """
+    Extract matched lines grouped by rule ID.
+
+    Args:
+        sarif: Parsed SARIF data
+        commit: The commit hash these results correspond to
+
+    Returns:
+        Dict of rule_id -> set of Line objects matched by that rule
+    """
+    lines_by_rule: dict[str, Set[Line]] = {}
+
+    for run in sarif.runs:
+        if not run.results:
+            continue
+
+        for result in run.results:
+            if not result.locations:
+                continue
+            rule_id = result.ruleId
+            if not rule_id:
+                continue
+            clean_id = rule_id.split(".")[-1]
+            lines_by_rule.setdefault(clean_id, set()).update(_lines_from_locations(result.locations, commit))
+
+    return lines_by_rule

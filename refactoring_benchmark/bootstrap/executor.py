@@ -112,8 +112,7 @@ def bootstrap_single_instance(instance: InstanceRow, config: BootstrapConfig, is
             instance_logger.info(f"✅ Successfully bootstrapped {instance.id}.")
 
         except (RuntimeError, TimeoutError, BootstrapError) as e:
-            raise e
-            # Fallback: retry with base image (no agent)
+            raise e # If you want to allow instances without execution environment, remove this line.
             instance_logger.error(f"Attempt failed for {instance.id} ({e}). Retrying with base image...")
             setup_img = bootstrap_setup_phase(client, instance, metadata, config, instance_logger, use_base_image=True)
             metadata.save_to_json(metadata_path)
