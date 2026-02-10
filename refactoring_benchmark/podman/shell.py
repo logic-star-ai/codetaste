@@ -1,8 +1,6 @@
 import subprocess
-
-import subprocess
 import threading
-from typing import Tuple, List, Optional
+from typing import List, Optional, Tuple
 
 _shell_lock = threading.RLock()
 
@@ -31,25 +29,11 @@ def run_podman_command(args: list[str], timeout: int = 120) -> Tuple[int, Tuple[
             result = subprocess.run(full_command, check=False, capture_output=True, text=True, timeout=timeout)
             return result.returncode, (result.stdout, result.stderr)
 
-        except subprocess.TimeoutExpired as e:
-            return -1, "", f"Command timed out after {timeout} seconds."
+        except subprocess.TimeoutExpired:
+            return -1, ("", f"Command timed out after {timeout} seconds.")
 
 
-import subprocess
 import re
-from typing import Tuple, Optional
-
-
-def run_podman_command(args: list[str], timeout: int = 120) -> Tuple[int, Tuple[str, str]]:
-    """
-    Runs a Podman command securely and returns the exit code, stdout, and stderr.
-    """
-    full_command = ["podman"] + args
-    try:
-        result = subprocess.run(full_command, check=False, capture_output=True, text=True, timeout=timeout)
-        return result.returncode, (result.stdout, result.stderr)
-    except subprocess.TimeoutExpired:
-        raise TimeoutError(f"Podman command timed out after {timeout} seconds. Command: '{' '.join(full_command)}'")
 
 
 def podman_container_storage(container_id: str) -> Optional[dict]:
