@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 import time
 from typing import List
+import shutil
 
 from tqdm import tqdm
 
@@ -29,6 +30,7 @@ from refactoring_benchmark.podman import utils as podman_utils
 from refactoring_benchmark.utils.logger import get_logger
 from refactoring_benchmark.utils.models import InstanceMetadata, InstanceRow
 
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 def get_evaluation_dir(instance: InstanceRow, agent_id: str, output_dir: Path) -> Path:
     """
@@ -56,6 +58,23 @@ def evaluation_exists(eval_dir: Path) -> bool:
         True if evaluation_result.json exists
     """
     return (eval_dir / "evaluation_result.json").exists()
+
+
+def ensure_instance_metadata(
+    instance: InstanceRow, instance_metadata_path: Path, instance_logger: logging.Logger
+) -> bool:
+    if instance_metadata_path.exists():
+        return True
+    instance_metadata_src = PROJECT_ROOT / instance.instance_dir() / "instance_metadata.json"
+    if not instance_metadata_src.exists():
+        instance_logger.error(f"Instance metadata not found: {instance_metadata_src}")
+        return False
+    try:
+        shutil.copy2(instance_metadata_src, instance_metadata_path)
+        return True
+    except Exception as e:
+        instance_logger.error(f"Failed to copy instance metadata: {e}")
+        return False
 
 
 def load_metadata(
@@ -119,6 +138,10 @@ def evaluate_single_instance(instance: InstanceRow, agent_id: str, config: Evalu
         instance_logger.warning(f"Skipping {instance.id}, no prediction.diff found at {prediction_diff}")
         return False
 
+    eval_dir.mkdir(parents=True, exist_ok=True)
+    if not ensure_instance_metadata(instance, instance_metadata_path, instance_logger):
+        return False
+
     try:
         agent_config, instance_metadata, inference_metadata = load_metadata(
             agent_config_path, instance_metadata_path, inference_metadata_path, instance_logger
@@ -145,9 +168,6 @@ def evaluate_single_instance(instance: InstanceRow, agent_id: str, config: Evalu
                     instance_logger.info(f"Retrying {instance.id}, test metrics are null")
             else:
                 instance_logger.info(f"Force re-evaluation enabled, proceeding with evaluation for {instance.id}")
-
-    # Create evaluation directory
-    eval_dir.mkdir(parents=True, exist_ok=True)
 
     instance_logger.info(f"Starting evaluation for {instance.display_path}")
     instance_logger.info(f"  Agent ID: {agent_id}")

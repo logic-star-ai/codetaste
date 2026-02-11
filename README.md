@@ -47,6 +47,14 @@ python -m refactoring_benchmark.scripts.evaluate \
 python -m refactoring_benchmark.scripts.analyze --metric ifr --plot-type line
 ```
 
+### E2E pipeline (small smoke test)
+Runs inference + evaluation across instructed/open and direct/plan/multiplan for a small slice, then generates plots.
+```bash
+python -m refactoring_benchmark.scripts.e2e_pipeline \
+  --instances 2 \
+  --agent-dir ./agents/qwen-code/qwen3-coder-30b-a3b-instruct
+```
+
 ## Project layout
 ```
 refactoring_benchmark/
