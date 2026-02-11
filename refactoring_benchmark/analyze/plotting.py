@@ -126,23 +126,31 @@ def create_plot(
         handles, labels = ax.get_legend_handles_labels()
         mapped_agent_labels = [AGENT_NAME_MAPPING.get(l, l) for l in labels]
 
-        ax.legend(
-            handles,
-            mapped_agent_labels,
-            loc="upper left",
-            frameon=True,
-            framealpha=0.7,
-            edgecolor="none",
-            fontsize=17,
-            handletextpad=0.5,
-            markerscale=0.3,
-            handlelength=0.5,
-        )
+        legend_kwargs = {
+            "handles": handles,
+            "labels": mapped_agent_labels,
+            "frameon": True,
+            "framealpha": 0.7,
+            "edgecolor": "none",
+            "fontsize": 17,
+            "handletextpad": 0.5,
+            "markerscale": 0.3,
+            "handlelength": 0.5,
+        }
+
+        if config.legend_position == "upper_right":
+            legend_kwargs.update({"loc": "upper right"})
+        elif config.legend_position == "lower_left":
+            legend_kwargs.update({"loc": "lower left"})
+        else:
+            legend_kwargs.update({"loc": "upper left"})
+
+        ax.legend(**legend_kwargs)
 
     # 5. Ticks and Limits
     ylim_max = config.ylim_max * 100 if config.ylim_max else 100
     ax.set_ylim(config.ylim_min * 100, ylim_max)
-    ax.set_yticks(np.arange(0, ylim_max + 1, 5))
+    ax.set_yticks(np.arange(0, ylim_max + 1, config.ytick_step))
 
     n_agents = len(agents)
     x_indices = np.arange(len(mapped_labels))
@@ -154,7 +162,11 @@ def create_plot(
     else:
         ax.set_xticks(x_indices)
 
-    ax.set_xticklabels(mapped_labels, fontsize=config.tick_fontsize)
+    if len(mapped_labels) == 1:
+        ax.set_xticks([])
+        ax.set_xticklabels([])
+    else:
+        ax.set_xticklabels(mapped_labels, fontsize=config.tick_fontsize)
     fig.tight_layout()
 
     return fig

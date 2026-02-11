@@ -128,6 +128,19 @@ Examples:
         action="store_true",
         help="Hide legend",
     )
+    parser.add_argument(
+        "--legend-position",
+        type=str,
+        default="upper_left",
+        choices=["upper_left", "upper_right", "lower_left"],
+        help="Legend position (upper_left, upper_right, lower_left). Default: upper_left",
+    )
+    parser.add_argument(
+        "--ytick-step",
+        type=int,
+        default=None,
+        help="Y-axis tick step in percent (default: 5)",
+    )
 
     # Other arguments
     parser.add_argument(
@@ -217,12 +230,16 @@ Examples:
         print("Filtering: Only successful inference runs (finish_reason='success')")
 
     # Create plot configuration
-    plot_config = PlotConfig(
+    plot_config_kwargs = dict(
         show_error_bars=not args.no_error_bars,
         show_xlabel=not args.no_xlabel,
         show_ylabel=not args.no_ylabel,
         show_legend=not args.no_legend,
+        legend_position=args.legend_position,
     )
+    if args.ytick_step is not None:
+        plot_config_kwargs["ytick_step"] = args.ytick_step
+    plot_config = PlotConfig(**plot_config_kwargs)
 
     # Print finish_reason statistics if requested
     if args.statistics:
@@ -276,7 +293,7 @@ Examples:
                 min_mean = min([v.mean for k, v in data.data.items()])
                 max_ci = max([v.confidence_interval()[1] - v.mean for k, v in data.data.items()])
                 print(f"    Setting y-axis limit to {max_mean:.4f} for better visibility")
-                config = plot_config.model_copy(update={"ylim_max": max_mean + 1 * max_ci, "ylim_min": 0})
+                config = plot_config.model_copy(update={"ylim_max": max_mean + 1 * max_ci + 0.01, "ylim_min": 0})
             else:
                 config = plot_config
             fig = create_plot(data, metric_name, plot_type=args.plot_type, aggregation=args.aggregation, config=config)
@@ -286,7 +303,7 @@ Examples:
                 print_statistics_table(data, metric_name, args.aggregation)
 
             # Save plot
-            output_filename = f"{metric_name}_{args.plot_type}_{args.aggregation}.png"
+            output_filename = f"{metric_name}_{args.plot_type}_{args.aggregation}.pdf"
             output_path = args.plots_dir / output_filename
             save_plot(fig, output_path, dpi=args.dpi)
             print(f"  Saved plot to {output_path}")

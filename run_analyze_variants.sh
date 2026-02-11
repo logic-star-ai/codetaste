@@ -2,20 +2,20 @@
 set -euo pipefail
 
 METRICS=(
-  strict_ifr_x_test_success
   test_success
-  cost
-  ifr
   ifr_x_test_success
   ifr_added_x_test_success
   ifr_removed_x_test_success
+  ifr
   ifr_added
   ifr_removed
-  ifr_ratio
   precision_overall
   precision_added
   precision_removed
-  total_score
+  # strict_ifr_x_test_success
+  # cost
+  # ifr_ratio
+  # total_score
 )
 
 AGENTS=(
@@ -34,6 +34,11 @@ run_group() {
   local group_name=$1
   shift
   local -a output_dirs=("$@")
+  local -a extra_args=()
+
+  if [ "$group_name" == "standard" ]; then
+    extra_args+=(--ytick-step 10)
+  fi
 
   for legend_variant in no_legend legend_upper_left legend_upper_right legend_lower_left; do
     for xlabel_variant in xlabel no_xlabel; do
@@ -67,6 +72,7 @@ run_group() {
         $(printf ' --agent-id %q' "${AGENTS[@]}") \
         $(printf ' --output-dir %q' "${output_dirs[@]}") \
         "${COMMON_ARGS[@]}" \
+        "${extra_args[@]}" \
         "${legend_args[@]}" \
         "${xlabel_args[@]}" \
         --plots-dir "$plot_dir" | tee "$plot_dir/analysis.log"
@@ -76,8 +82,3 @@ run_group() {
 
 run_group "standard" "./output"
 run_group "abstract" "./output_abstract" "./output_abstract_plan" "./output_abstract_multiplan"
-
-# Examples for other datasets:
-# run_group "open" "./output_open"
-# run_group "standard_cp" "./output_cp"
-# run_group "abstract_cp" "./output_abstract_cp" "./output_abstract_plan_cp" "./output_abstract_multiplan_cp"
