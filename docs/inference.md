@@ -29,11 +29,11 @@ python -m refactoring_benchmark.scripts.inference
 5. **Inference (always)**
    - Runs the agent inside the runtime container.
    - Produces `prediction.diff` and `inference_metadata.json`.
-   - Description type is suffixed with `_plan` or `_multiplan` when applicable.
+   - Description type and mode are recorded separately.
 
 ## Outputs
 - `prediction.diff`: git diff of the agent’s changes.
-- `inference_metadata.json`: finish reason, cost, description type, timestamps.
+- `inference_metadata.json`: finish reason, cost, description type, mode, timestamps.
 - Plan mode:
   - `refactoring_plan.md`
   - `plan_metadata.json`
@@ -50,10 +50,9 @@ python -m refactoring_benchmark.scripts.inference
 - `error_multiplan`: multiplan timed out or invalid.
 - `error_judge`: judge failed.
 
-## Description type suffixes
-- Direct inference: `description_type`
-- Plan inference: `description_type_plan`
-- Multiplan inference: `description_type_multiplan`
+## Description type + mode
+- `description_type`: `instructed` or `open`
+- `mode`: `direct`, `plan`, or `multiplan`
 
 ## Description types
 - `instructed`: full task description.
