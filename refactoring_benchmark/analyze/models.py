@@ -123,12 +123,13 @@ class AnalysisData(BaseModel):
         """Get sorted list of unique description types."""
         d = {"open": 0, "abstract": 10, "problem": 20, "nano": 30, "standard": 40}
         d_suffix = {"": 0, "plan": 1, "multiplan": 2}
+
         def sort_description_type(desc_type: str) -> tuple[int, int]:
             parts = desc_type.split("_")
             base = parts[0]
             suffix = parts[1] if len(parts) > 1 else ""
             return d.get(base, 100) + d_suffix.get(suffix, 5)
-            
+
         return sorted(set(k[1] for k in self.data.keys()), key=sort_description_type)
 
     def get_data(self, agent_id: str, description_type: str) -> AgentDescriptionData | None:

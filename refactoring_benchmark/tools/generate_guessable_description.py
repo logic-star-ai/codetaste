@@ -119,8 +119,7 @@ def generate_guessable_description(agent_id: str, base_dir: Path, output_dir: Pa
     print(f"Generating guessable description for agent: {agent_id}")
     print(f"Output file: {output_file}")
 
-    with open(instances_csv, "r", encoding="utf-8") as csvfile, \
-         open(output_file, "w", encoding="utf-8") as outfile:
+    with open(instances_csv, "r", encoding="utf-8") as csvfile, open(output_file, "w", encoding="utf-8") as outfile:
 
         reader = csv.DictReader(csvfile)
         instance_count = 0
@@ -148,7 +147,9 @@ def generate_guessable_description(agent_id: str, base_dir: Path, output_dir: Pa
 
             # Part 2: Best Plan according to judge (with abstract description in heading)
             abstract_desc = read_abstract_description(owner, repo, commit_hash, base_dir)
-            outfile.write(f"# Part 2: Best Plan according to the judge output : (derived from Abstract Description : {abstract_desc})\n\n")
+            outfile.write(
+                f"# Part 2: Best Plan according to the judge output : (derived from Abstract Description : {abstract_desc})\n\n"
+            )
             best_plan = read_best_plan(owner, repo, commit_hash, agent_id, output_dir)
             outfile.write(best_plan)
             outfile.write("\n\n")
@@ -174,32 +175,22 @@ def main():
 Example:
     python -m refactoring_benchmark.tools.generate_guessable_description --agent codex-v0.77.0-gpt-5.2
     python -m refactoring_benchmark.tools.generate_guessable_description --agent claude-code-v2.0.76-sonnet45 --output-dir output_22012025/output_abstract_multiplan
-        """
+        """,
     )
 
-    parser.add_argument(
-        "--agent",
-        required=True,
-        help="Agent ID (e.g., 'codex-v0.77.0-gpt-5.2')"
-    )
+    parser.add_argument("--agent", required=True, help="Agent ID (e.g., 'codex-v0.77.0-gpt-5.2')")
 
     parser.add_argument(
         "--output-dir",
         default="output_abstract_multiplan",
-        help="Output directory containing agent results (default: output_abstract_multiplan)"
+        help="Output directory containing agent results (default: output_abstract_multiplan)",
     )
 
     parser.add_argument(
-        "--instances-csv",
-        default="instances.csv",
-        help="Path to instances.csv (default: instances.csv in repo root)"
+        "--instances-csv", default="instances.csv", help="Path to instances.csv (default: instances.csv in repo root)"
     )
 
-    parser.add_argument(
-        "--base-dir",
-        default=".",
-        help="Base directory of the repository (default: current directory)"
-    )
+    parser.add_argument("--base-dir", default=".", help="Base directory of the repository (default: current directory)")
 
     args = parser.parse_args()
 
@@ -223,6 +214,7 @@ Example:
     except Exception as e:
         print(f"Error: {e}")
         import traceback
+
         traceback.print_exc()
         return 1
 

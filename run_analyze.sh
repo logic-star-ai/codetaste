@@ -1,239 +1,83 @@
-LEGEND=""
+#!/usr/bin/env bash
+set -euo pipefail
 
-DIR=plots/standard
-if [ "$LEGEND" == "--no-legend" ]; then
-    PLOT_DIR="$DIR/no_legend/"
-else
-    PLOT_DIR="$DIR/legend/"
-fi
-mkdir -p "$PLOT_DIR"
+METRICS=(
+  strict_ifr_x_test_success
+  test_success
+  cost
+  ifr
+  ifr_x_test_success
+  ifr_added_x_test_success
+  ifr_removed_x_test_success
+  ifr_added
+  ifr_removed
+  ifr_ratio
+  precision_overall
+  precision_added
+  precision_removed
+  total_score
+)
 
-python -m refactoring_benchmark.scripts.analyze \
-    --metric strict_ifr_x_test_success \
-    --metric test_success \
-    --metric cost \
-    --metric ifr \
-    --metric ifr_x_test_success \
-    --metric ifr_added_x_test_success \
-    --metric ifr_removed_x_test_success \
-    --metric ifr_added \
-    --metric ifr_removed \
-    --metric ifr_ratio \
-    --metric precision_overall \
-    --metric precision_added \
-    --metric precision_removed \
-    --metric total_score \
-    --agent-id "codex-v0.77.0-gpt-5.1-codex-mini" \
-    --agent-id "claude-code-v2.0.76-sonnet45" \
-    --agent-id "codex-v0.77.0-gpt-5.2" \
-    --agent-id "qwen-code-v0.6.2-qwen3-coder-30b-a3b-instruct" \
-    --output-dir "./output" \
-    --plot-type bar \
-    $LEGEND \
-    --statistics \
-    --plots-dir "$PLOT_DIR" | tee "$PLOT_DIR/analysis.log"
-    # --output-dir "./output_open" \
-    # --output-dir "./output" \
-    # --agent-id "null_agent" \
-    # --agent-id "golden_agent" \
-    # --agent-id "qwen-code-v0.6.2-qwen3-coder-30b-a3b-instruct" \
-    # --output-dir "./output_abstract" \
-    # --output-dir "./output_nano" \
-    # --agent-id "qwen-code-v0.6.2-qwen3-coder-30b-a3b-instruct" \
-    # --metric f1 \
-    # --metric diff_added_lines \
-    # --metric diff_removed_lines \
-    # --metric diff_delta_lines \
-LEGEND=""
+AGENTS=(
+  "codex-v0.77.0-gpt-5.1-codex-mini"
+  "claude-code-v2.0.76-sonnet45"
+  "codex-v0.77.0-gpt-5.2"
+  "qwen-code-v0.6.2-qwen3-coder-30b-a3b-instruct"
+)
 
-DIR=plots/standard
-if [ "$LEGEND" == "--no-legend" ]; then
-    PLOT_DIR="$DIR/no_legend/"
-else
-    PLOT_DIR="$DIR/legend/"
-fi
-mkdir -p "$PLOT_DIR"
+COMMON_ARGS=(
+  --plot-type bar
+  --statistics
+)
 
-python -m refactoring_benchmark.scripts.analyze \
-    --metric strict_ifr_x_test_success \
-    --metric test_success \
-    --metric cost \
-    --metric ifr \
-    --metric ifr_x_test_success \
-    --metric ifr_added_x_test_success \
-    --metric ifr_removed_x_test_success \
-    --metric ifr_added \
-    --metric ifr_removed \
-    --metric ifr_ratio \
-    --metric precision_overall \
-    --metric precision_added \
-    --metric precision_removed \
-    --metric total_score \
-    --agent-id "codex-v0.77.0-gpt-5.1-codex-mini" \
-    --agent-id "claude-code-v2.0.76-sonnet45" \
-    --agent-id "codex-v0.77.0-gpt-5.2" \
-    --agent-id "qwen-code-v0.6.2-qwen3-coder-30b-a3b-instruct" \
-    --output-dir "./output" \
-    --plot-type bar \
-    --statistics \
-    $LEGEND \
-    --plots-dir "$PLOT_DIR" | tee "$PLOT_DIR/analysis.log"
-    # --output-dir "./output_open" \
-    # --output-dir "./output" \
-    # --agent-id "null_agent" \
-    # --agent-id "golden_agent" \
-    # --agent-id "qwen-code-v0.6.2-qwen3-coder-30b-a3b-instruct" \
-    # --output-dir "./output_abstract" \
-    # --output-dir "./output_nano" \
-    # --agent-id "qwen-code-v0.6.2-qwen3-coder-30b-a3b-instruct" \
-    # --metric f1 \
-    # --metric diff_added_lines \
-    # --metric diff_removed_lines \
-    # --metric diff_delta_lines \
+run_group() {
+  local group_name=$1
+  shift
+  local -a output_dirs=("$@")
 
+  for legend_variant in no_legend legend_upper_left legend_upper_right legend_lower_left; do
+    for xlabel_variant in xlabel no_xlabel; do
+      local -a legend_args=()
+      local -a xlabel_args=()
 
-LEGEND="--no-legend"
+      case "$legend_variant" in
+        no_legend)
+          legend_args+=(--no-legend)
+          ;;
+        legend_upper_left)
+          legend_args+=(--legend-position upper_left)
+          ;;
+        legend_upper_right)
+          legend_args+=(--legend-position upper_right)
+          ;;
+        legend_lower_left)
+          legend_args+=(--legend-position lower_left)
+          ;;
+      esac
 
-DIR=plots/standard
-if [ "$LEGEND" == "--no-legend" ]; then
-    PLOT_DIR="$DIR/no_legend/"
-else
-    PLOT_DIR="$DIR/legend/"
-fi
-mkdir -p "$PLOT_DIR"
+      if [ "$xlabel_variant" == "no_xlabel" ]; then
+        xlabel_args+=(--no-xlabel)
+      fi
 
-python -m refactoring_benchmark.scripts.analyze \
-    --metric strict_ifr_x_test_success \
-    --metric test_success \
-    --metric cost \
-    --metric ifr \
-    --metric ifr_x_test_success \
-    --metric ifr_added_x_test_success \
-    --metric ifr_removed_x_test_success \
-    --metric ifr_added \
-    --metric ifr_removed \
-    --metric ifr_ratio \
-    --metric precision_overall \
-    --metric precision_added \
-    --metric precision_removed \
-    --metric total_score \
-    --agent-id "codex-v0.77.0-gpt-5.1-codex-mini" \
-    --agent-id "claude-code-v2.0.76-sonnet45" \
-    --agent-id "codex-v0.77.0-gpt-5.2" \
-    --agent-id "qwen-code-v0.6.2-qwen3-coder-30b-a3b-instruct" \
-    --output-dir "./output" \
-    --plot-type bar \
-    --statistics \
-    $LEGEND \
-    --plots-dir "$PLOT_DIR" | tee "$PLOT_DIR/analysis.log"
-    # --output-dir "./output_open" \
-    # --output-dir "./output" \
-    # --agent-id "null_agent" \
-    # --agent-id "golden_agent" \
-    # --agent-id "qwen-code-v0.6.2-qwen3-coder-30b-a3b-instruct" \
-    # --output-dir "./output_abstract" \
-    # --output-dir "./output_nano" \
-    # --agent-id "qwen-code-v0.6.2-qwen3-coder-30b-a3b-instruct" \
-    # --metric f1 \
-    # --metric diff_added_lines \
-    # --metric diff_removed_lines \
-    # --metric diff_delta_lines \
+      local plot_dir="plots/${group_name}/${legend_variant}/${xlabel_variant}"
+      mkdir -p "$plot_dir"
 
+      python -m refactoring_benchmark.scripts.analyze \
+        $(printf ' --metric %q' "${METRICS[@]}") \
+        $(printf ' --agent-id %q' "${AGENTS[@]}") \
+        $(printf ' --output-dir %q' "${output_dirs[@]}") \
+        "${COMMON_ARGS[@]}" \
+        "${legend_args[@]}" \
+        "${xlabel_args[@]}" \
+        --plots-dir "$plot_dir" | tee "$plot_dir/analysis.log"
+    done
+  done
+}
 
-LEGEND=""
+run_group "standard" "./output"
+run_group "abstract" "./output_abstract" "./output_abstract_plan" "./output_abstract_multiplan"
 
-DIR=plots/abstract
-if [ "$LEGEND" == "--no-legend" ]; then
-    PLOT_DIR="$DIR/no_legend/"
-else
-    PLOT_DIR="$DIR/legend/"
-fi
-mkdir -p "$PLOT_DIR"
-
-python -m refactoring_benchmark.scripts.analyze \
-    --metric strict_ifr_x_test_success \
-    --metric test_success \
-    --metric cost \
-    --metric ifr \
-    --metric ifr_x_test_success \
-    --metric ifr_added_x_test_success \
-    --metric ifr_removed_x_test_success \
-    --metric ifr_added \
-    --metric ifr_removed \
-    --metric ifr_ratio \
-    --metric precision_overall \
-    --metric precision_added \
-    --metric precision_removed \
-    --metric total_score \
-    --agent-id "codex-v0.77.0-gpt-5.1-codex-mini" \
-    --agent-id "claude-code-v2.0.76-sonnet45" \
-    --agent-id "codex-v0.77.0-gpt-5.2" \
-    --agent-id "qwen-code-v0.6.2-qwen3-coder-30b-a3b-instruct" \
-    --output-dir "./output_abstract" \
-    --output-dir "./output_abstract_plan" \
-    --output-dir "./output_abstract_multiplan" \
-    --plot-type bar \
-    --statistics \
-    $LEGEND \
-    --plots-dir "$PLOT_DIR" | tee "$PLOT_DIR/analysis.log"
-    # --output-dir "./output_open" \
-    # --output-dir "./output" \
-    # --agent-id "null_agent" \
-    # --agent-id "golden_agent" \
-    # --agent-id "qwen-code-v0.6.2-qwen3-coder-30b-a3b-instruct" \
-    # --output-dir "./output_abstract" \
-    # --output-dir "./output_nano" \
-    # --agent-id "qwen-code-v0.6.2-qwen3-coder-30b-a3b-instruct" \
-    # --metric f1 \
-    # --metric diff_added_lines \
-    # --metric diff_removed_lines \
-    # --metric diff_delta_lines \
-
-LEGEND="--no-legend"
-
-DIR=plots/abstract
-if [ "$LEGEND" == "--no-legend" ]; then
-    PLOT_DIR="$DIR/no_legend/"
-else
-    PLOT_DIR="$DIR/legend/"
-fi
-mkdir -p "$PLOT_DIR"
-
-python -m refactoring_benchmark.scripts.analyze \
-    --metric strict_ifr_x_test_success \
-    --metric test_success \
-    --metric cost \
-    --metric ifr \
-    --metric ifr_x_test_success \
-    --metric ifr_added_x_test_success \
-    --metric ifr_removed_x_test_success \
-    --metric ifr_added \
-    --metric ifr_removed \
-    --metric ifr_ratio \
-    --metric precision_overall \
-    --metric precision_added \
-    --metric precision_removed \
-    --metric total_score \
-    --agent-id "codex-v0.77.0-gpt-5.1-codex-mini" \
-    --agent-id "claude-code-v2.0.76-sonnet45" \
-    --agent-id "codex-v0.77.0-gpt-5.2" \
-    --agent-id "qwen-code-v0.6.2-qwen3-coder-30b-a3b-instruct" \
-    --output-dir "./output_abstract" \
-    --output-dir "./output_abstract_plan" \
-    --output-dir "./output_abstract_multiplan" \
-    --plot-type bar \
-    --statistics \
-    $LEGEND \
-    --plots-dir "$PLOT_DIR" | tee "$PLOT_DIR/analysis.log"
-    # --output-dir "./output_open" \
-    # --output-dir "./output" \
-    # --agent-id "null_agent" \
-    # --agent-id "golden_agent" \
-    # --agent-id "qwen-code-v0.6.2-qwen3-coder-30b-a3b-instruct" \
-    # --output-dir "./output_abstract" \
-    # --output-dir "./output_nano" \
-    # --agent-id "qwen-code-v0.6.2-qwen3-coder-30b-a3b-instruct" \
-    # --metric f1 \
-    # --metric diff_added_lines \
-    # --metric diff_removed_lines \
-    # --metric diff_delta_lines \
+# Examples for other datasets:
+# run_group "open" "./output_open"
+# run_group "standard_cp" "./output_cp"
+# run_group "abstract_cp" "./output_abstract_cp" "./output_abstract_plan_cp" "./output_abstract_multiplan_cp"

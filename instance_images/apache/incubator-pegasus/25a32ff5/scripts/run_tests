@@ -1,0 +1,158 @@
+#!/bin/bash
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+# Run Pegasus tests and output JSON results
+# This script assumes the environment has been set up via setup_shell.sh
+
+set -e
+
+cd /testbed
+
+# Create report directory if it doesn't exist
+export REPORT_DIR="/testbed/test_report"
+mkdir -p "$REPORT_DIR"
+
+# Clear previous test reports
+rm -f "$REPORT_DIR"/*.xml
+
+# Configuration for tests
+export ONEBOX_OPTS="disk_min_available_space_ratio=5"
+export TEST_OPTS="disk_min_available_space_ratio=5;throttle_test_medium_value_kb=10;throttle_test_large_value_kb=25"
+
+# Select a representative subset of tests that can complete in ~15 minutes
+# These tests cover different aspects of the system without requiring onebox
+TEST_MODULES=(
+    "base_test"
+    "dsn_utils_tests"
+    "dsn_runtime_tests"
+    "dsn_http_test"
+    "dsn_client_test"
+    "dsn_aio_test"
+    "pegasus_unit_test"
+)
+
+echo "Running representative subset of Pegasus tests..."
+echo "Test modules: ${TEST_MODULES[@]}"
+
+# Track which tests passed/failed
+declare -A test_results
+total_tests=0
+passed_tests=0
+failed_tests=0
+skipped_tests=0
+
+# Run each test module
+for module in "${TEST_MODULES[@]}"; do
+    echo "========================================"
+    echo "Running test module: $module"
+    echo "========================================"
+
+    # Run the test using run.sh, capturing exit code
+    set +e
+    /testbed/run.sh test -m "$module" --onebox_opts "$ONEBOX_OPTS" --test_opts "$TEST_OPTS" 2>&1
+    test_exit_code=$?
+    set -e
+
+    if [ $test_exit_code -eq 0 ]; then
+        test_results[$module]="passed"
+        echo "✓ $module passed"
+    else
+        test_results[$module]="failed"
+        echo "✗ $module failed"
+    fi
+done
+
+# Parse XML test reports to get detailed counts
+echo ""
+echo "Parsing test results..."
+
+# Function to parse XML and extract test counts
+parse_xml_results() {
+    local total=0
+    local passed=0
+    local failed=0
+    local skipped=0
+
+    for xml_file in "$REPORT_DIR"/*.xml; do
+        if [ -f "$xml_file" ]; then
+            # Extract test counts from XML using grep and sed
+            # Google Test XML format: <testsuite ... tests="N" failures="F" disabled="D" ...>
+
+            # Count total tests
+            local tests=$(grep -o 'tests="[0-9]*"' "$xml_file" 2>/dev/null | head -1 | sed 's/tests="//;s/"//')
+            local failures=$(grep -o 'failures="[0-9]*"' "$xml_file" 2>/dev/null | head -1 | sed 's/failures="//;s/"//')
+            local disabled=$(grep -o 'disabled="[0-9]*"' "$xml_file" 2>/dev/null | head -1 | sed 's/disabled="//;s/"//')
+
+            if [ -n "$tests" ]; then
+                total=$((total + tests))
+            fi
+            if [ -n "$failures" ]; then
+                failed=$((failed + failures))
+            fi
+            if [ -n "$disabled" ]; then
+                skipped=$((skipped + disabled))
+            fi
+        fi
+    done
+
+    # Calculate passed tests
+    passed=$((total - failed - skipped))
+
+    echo "$total $passed $failed $skipped"
+}
+
+# If XML reports exist, parse them for accurate counts
+if ls "$REPORT_DIR"/*.xml 1> /dev/null 2>&1; then
+    read total_tests passed_tests failed_tests skipped_tests < <(parse_xml_results)
+else
+    # Fallback: count based on module pass/fail
+    total_tests=${#TEST_MODULES[@]}
+    for module in "${TEST_MODULES[@]}"; do
+        if [ "${test_results[$module]}" = "passed" ]; then
+            passed_tests=$((passed_tests + 1))
+        else
+            failed_tests=$((failed_tests + 1))
+        fi
+    done
+fi
+
+# Ensure we have at least basic counts if XML parsing didn't work
+if [ $total_tests -eq 0 ]; then
+    total_tests=${#TEST_MODULES[@]}
+    for module in "${TEST_MODULES[@]}"; do
+        if [ "${test_results[$module]}" = "passed" ]; then
+            passed_tests=$((passed_tests + 1))
+        else
+            failed_tests=$((failed_tests + 1))
+        fi
+    done
+fi
+
+# Output results summary
+echo ""
+echo "========================================"
+echo "Test Results Summary"
+echo "========================================"
+echo "Total:   $total_tests"
+echo "Passed:  $passed_tests"
+echo "Failed:  $failed_tests"
+echo "Skipped: $skipped_tests"
+echo ""
+
+# Output the required JSON format as the last line
+echo "{\"passed\": $passed_tests, \"failed\": $failed_tests, \"skipped\": $skipped_tests, \"total\": $total_tests}"

@@ -5,7 +5,7 @@ import logging
 import os
 import secrets
 import shutil
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 import subprocess
 from typing import Optional
@@ -120,7 +120,7 @@ def create_fallback_inference_metadata(
     metadata = InferenceMetadata(
         cost_usd=cost_usd,
         finish_reason=finish_reason,
-        finish_time=datetime.utcnow().isoformat() + "Z",
+        finish_time=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         additional=additional or {},
     )
 
@@ -154,7 +154,7 @@ def output_container_logs(container: PodmanContainer, output_path: Path, instanc
     raw_logs = container.logs(stream=False, follow=False)
     raw_logs = b"".join(raw_logs) if not isinstance(raw_logs, bytes) else raw_logs
     stdout = raw_logs.decode("utf-8", errors="replace")
-    instance_logger.error(stdout)
+    instance_logger.info(stdout)
     output_path.write_text(stdout, encoding="utf-8")
 
 
@@ -169,6 +169,7 @@ def cleanup_temp_dir(temp_description_dir: Path, instance_logger: logging.Logger
             except Exception as e2:
                 instance_logger.error(f"Failed to remove temporary description directory: {e}, {e2}")
 
+
 def _load_template(instance: InstanceRow, description_type: str) -> str:
     """Internal helper to read a description template from disk."""
     base_type = description_type.removesuffix("_plan")
@@ -182,11 +183,12 @@ def _load_template(instance: InstanceRow, description_type: str) -> str:
 
     return path.read_text(encoding="utf-8")
 
+
 def create_temporary_description_dir(instance: InstanceRow, content: str) -> Path:
     """Creates a temporary directory, writes description.md, and sets 0o777 permissions."""
     temp_dir = Path(f"./.tmp_descriptions/{instance.id}-{secrets.token_hex(8)}")
     temp_dir.mkdir(parents=True, exist_ok=True)
-    
+
     target_file = temp_dir / "description.md"
     target_file.write_text(content, encoding="utf-8")
 
@@ -194,11 +196,9 @@ def create_temporary_description_dir(instance: InstanceRow, content: str) -> Pat
         p.chmod(0o777)
     return temp_dir.resolve()
 
+
 def prepare_temp_task_description(
-    instance: InstanceRow, 
-    logger: logging.Logger, 
-    description_type: Optional[str] = None, 
-    content: Optional[str] = None
+    instance: InstanceRow, logger: logging.Logger, description_type: Optional[str] = None, content: Optional[str] = None
 ) -> Path:
     """Prepares a task description using either a template type OR direct content."""
     base_content = content or _load_template(instance, description_type)
@@ -206,11 +206,9 @@ def prepare_temp_task_description(
     logger.debug(f"Prepared Task Description (Type: {description_type or 'Injected'})")
     return create_temporary_description_dir(instance, full_content)
 
+
 def prepare_temp_plan_description(
-    instance: InstanceRow,
-    logger: logging.Logger,
-    description_type: Optional[str] = None,
-    content: Optional[str] = None
+    instance: InstanceRow, logger: logging.Logger, description_type: Optional[str] = None, content: Optional[str] = None
 ) -> Path:
     """Prepares a plan description using either a template type OR direct content."""
     base_content = content or _load_template(instance, description_type)
@@ -220,10 +218,7 @@ def prepare_temp_plan_description(
 
 
 def prepare_temp_multiplan_description(
-    instance: InstanceRow,
-    logger: logging.Logger,
-    description_type: Optional[str] = None,
-    content: Optional[str] = None
+    instance: InstanceRow, logger: logging.Logger, description_type: Optional[str] = None, content: Optional[str] = None
 ) -> Path:
     """Prepares a multiplan description using either a template type OR direct content."""
     base_content = content or _load_template(instance, description_type)

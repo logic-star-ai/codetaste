@@ -33,6 +33,9 @@ class PlotConfig(BaseModel):
     show_xlabel: bool = Field(default=True, description="Show x-axis label")
     show_ylabel: bool = Field(default=True, description="Show y-axis label")
     show_legend: bool = Field(default=True, description="Show legend")
+    legend_position: Literal["upper_left", "upper_right", "lower_left"] = Field(
+        default="upper_left", description="Legend position (upper_left, upper_right, lower_left)"
+    )
     xlabel_fontsize: int = Field(default=21, ge=1, description="X-axis label font size")
     ylabel_fontsize: int = Field(default=20, ge=1, description="Y-axis label font size")
     title_fontsize: int = Field(default=23, ge=1, description="Title font size")
@@ -46,6 +49,7 @@ class PlotConfig(BaseModel):
     # Y-axis limits
     ylim_min: float = Field(default=0.0, description="Y-axis minimum")
     ylim_max: float = Field(default=1.0, description="Y-axis maximum")
+    ytick_step: int = Field(default=5, ge=1, description="Y-axis tick step (percent)")
 
     class Config:
         frozen = True  # Make immutable

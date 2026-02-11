@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from refactoring_benchmark.coverage.models import Line, SARIFOpengrep, PrecisionMetrics
-from refactoring_benchmark.coverage.precision import calculate_precision
+from refactoring_benchmark.coverage.precision import calculate_precision, _load_precision_data
 from refactoring_benchmark.utils.models import InstanceRow
 
 
@@ -24,8 +24,8 @@ def test_calculate_precision_with_real_data():
     if not all([sarif_negative_path.exists(), sarif_positive_path.exists(), diff_path.exists()]):
         pytest.skip("Test data files not found")
 
-    # Calculate precision metrics
-    metrics = calculate_precision(
+    # Load precision data (returns PrecisionMetrics with line sets)
+    metrics = _load_precision_data(
         sarif_negative_path,
         sarif_positive_path,
         diff_path,
@@ -145,6 +145,7 @@ index 1234567..abcdefg 100644
 def test_calculate_precision_full_intersection(tmp_path):
     """Test precision when all diff lines are covered by SARIF."""
     # Create SARIF for negative (line 1) and positive (line 2)
+    # Note: URIs must match git diff format (a/ and b/ prefixes)
     sarif_neg = {
         "version": "2.1.0",
         "runs": [{
@@ -198,7 +199,8 @@ index 1234567..abcdefg 100644
     diff_path = tmp_path / "prediction.diff"
     diff_path.write_text(diff_content)
 
-    metrics = calculate_precision(
+    # Use _load_precision_data to get full PrecisionMetrics
+    metrics = _load_precision_data(
         sarif_neg_path,
         sarif_pos_path,
         diff_path,
@@ -260,8 +262,8 @@ index 1234567..abcdefg 100644
     diff_path = tmp_path / "prediction.diff"
     diff_path.write_text(diff_content)
 
-    # Calculate precision metrics
-    metrics = calculate_precision(
+    # Use _load_precision_data to get full PrecisionMetrics
+    metrics = _load_precision_data(
         sarif_neg_path,
         sarif_pos_path,
         diff_path,

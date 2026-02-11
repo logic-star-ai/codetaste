@@ -16,9 +16,7 @@ from pathlib import Path
 from refactoring_benchmark.utils.models import InstanceRow
 
 
-def has_valid_execution_environment(
-    owner: str, repo: str, commit_hash: str, instance_images_dir: Path
-) -> bool:
+def has_valid_execution_environment(owner: str, repo: str, commit_hash: str, instance_images_dir: Path) -> bool:
     """
     Check if an instance has a valid execution environment.
 
@@ -32,13 +30,7 @@ def has_valid_execution_environment(
         True if instance_metadata.json exists and has_execution_environment is true
     """
     short_hash = commit_hash[:8]
-    metadata_path = (
-        instance_images_dir
-        / owner
-        / repo
-        / short_hash
-        / "instance_metadata.json"
-    )
+    metadata_path = instance_images_dir / owner / repo / short_hash / "instance_metadata.json"
 
     if not metadata_path.exists():
         return False

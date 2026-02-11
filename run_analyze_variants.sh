@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+METRICS=(
+  test_success
+  ifr_x_test_success
+  ifr_added_x_test_success
+  ifr_removed_x_test_success
+  ifr
+  ifr_added
+  ifr_removed
+  precision_overall
+  precision_added
+  precision_removed
+  # strict_ifr_x_test_success
+  # cost
+  # ifr_ratio
+  # total_score
+)
+
+AGENTS=(
+  "codex-v0.77.0-gpt-5.1-codex-mini"
+  "claude-code-v2.0.76-sonnet45"
+  "codex-v0.77.0-gpt-5.2"
+  "qwen-code-v0.6.2-qwen3-coder-30b-a3b-instruct"
+)
+
+COMMON_ARGS=(
+  --plot-type bar
+  --statistics
+)
+
+run_group() {
+  local group_name=$1
+  shift
+  local -a output_dirs=("$@")
+  local -a extra_args=()
+
+  if [ "$group_name" == "standard" ]; then
+    extra_args+=(--ytick-step 10)
+  fi
+
+  for legend_variant in no_legend legend_upper_left legend_upper_right legend_lower_left; do
+    for xlabel_variant in xlabel no_xlabel; do
+      local -a legend_args=()
+      local -a xlabel_args=()
+
+      case "$legend_variant" in
+        no_legend)
+          legend_args+=(--no-legend)
+          ;;
+        legend_upper_left)
+          legend_args+=(--legend-position upper_left)
+          ;;
+        legend_upper_right)
+          legend_args+=(--legend-position upper_right)
+          ;;
+        legend_lower_left)
+          legend_args+=(--legend-position lower_left)
+          ;;
+      esac
+
+      if [ "$xlabel_variant" == "no_xlabel" ]; then
+        xlabel_args+=(--no-xlabel)
+      fi
+
+      local plot_dir="plots/${group_name}/${legend_variant}/${xlabel_variant}"
+      mkdir -p "$plot_dir"
+
+      python -m refactoring_benchmark.scripts.analyze \
+        $(printf ' --metric %q' "${METRICS[@]}") \
+        $(printf ' --agent-id %q' "${AGENTS[@]}") \
+        $(printf ' --output-dir %q' "${output_dirs[@]}") \
+        "${COMMON_ARGS[@]}" \
+        "${extra_args[@]}" \
+        "${legend_args[@]}" \
+        "${xlabel_args[@]}" \
+        --plots-dir "$plot_dir" | tee "$plot_dir/analysis.log"
+    done
+  done
+}
+
+run_group "standard" "./output"
+run_group "abstract" "./output_abstract" "./output_abstract_plan" "./output_abstract_multiplan"

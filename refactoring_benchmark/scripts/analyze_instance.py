@@ -223,7 +223,7 @@ Examples:
             )
 
             # Save plot
-            output_filename = f"{metric_name}_{args.plot_type}.png"
+            output_filename = f"{metric_name}_{args.plot_type}.pdf"
             output_path = args.plots_dir / output_filename
             save_instance_plot(fig, output_path, dpi=args.dpi)
             print(f"  Saved plot to {output_path}")

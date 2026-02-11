@@ -1,0 +1,193 @@
+#!/bin/bash
+# run_tests - Execute test suite and output JSON results
+# This script runs the core test suites and outputs results in JSON format
+
+set -e
+
+cd /testbed
+
+# Initialize counters
+total_passed=0
+total_failed=0
+total_skipped=0
+total_tests=0
+
+# Temporary file for test output
+temp_output=$(mktemp)
+
+# Function to run jest tests and parse output
+run_jest_tests() {
+    local workspace=$1
+    local test_cmd=$2
+    local output_file=$(mktemp)
+
+    echo "Running tests for $workspace..."
+
+    # Run tests with JSON reporter
+    if node .yarn/releases/yarn-4.3.1.cjs workspace "$workspace" "$test_cmd" --maxWorkers=1 --json --outputFile="$output_file" --testTimeout=10000 > /dev/null 2>&1; then
+        test_exit_code=0
+    else
+        test_exit_code=$?
+    fi
+
+    # Parse JSON output if it exists
+    if [ -f "$output_file" ] && [ -s "$output_file" ]; then
+        local passed=$(cat "$output_file" | node -e "
+            const fs = require('fs');
+            const data = JSON.parse(fs.readFileSync('/dev/stdin', 'utf8'));
+            console.log(data.numPassedTests || 0);
+        " 2>/dev/null || echo "0")
+
+        local failed=$(cat "$output_file" | node -e "
+            const fs = require('fs');
+            const data = JSON.parse(fs.readFileSync('/dev/stdin', 'utf8'));
+            console.log(data.numFailedTests || 0);
+        " 2>/dev/null || echo "0")
+
+        local skipped=$(cat "$output_file" | node -e "
+            const fs = require('fs');
+            const data = JSON.parse(fs.readFileSync('/dev/stdin', 'utf8'));
+            console.log(data.numPendingTests || 0);
+        " 2>/dev/null || echo "0")
+
+        local total=$(cat "$output_file" | node -e "
+            const fs = require('fs');
+            const data = JSON.parse(fs.readFileSync('/dev/stdin', 'utf8'));
+            console.log(data.numTotalTests || 0);
+        " 2>/dev/null || echo "0")
+
+        total_passed=$((total_passed + passed))
+        total_failed=$((total_failed + failed))
+        total_skipped=$((total_skipped + skipped))
+        total_tests=$((total_tests + total))
+
+        echo "  Passed: $passed, Failed: $failed, Skipped: $skipped, Total: $total"
+    fi
+
+    rm -f "$output_file"
+    return $test_exit_code
+}
+
+# Function to run vitest tests and parse output
+run_vitest_tests() {
+    local workspace=$1
+    local output_file=$(mktemp)
+
+    echo "Running vitest tests for $workspace..."
+
+    # Run vitest with JSON reporter
+    if node .yarn/releases/yarn-4.3.1.cjs workspace "$workspace" test --reporter=json --outputFile="$output_file" --run > /dev/null 2>&1; then
+        test_exit_code=0
+    else
+        test_exit_code=$?
+    fi
+
+    # Parse JSON output if it exists
+    if [ -f "$output_file" ] && [ -s "$output_file" ]; then
+        # Vitest JSON format parsing
+        local passed=$(cat "$output_file" | node -e "
+            const fs = require('fs');
+            try {
+                const data = JSON.parse(fs.readFileSync('/dev/stdin', 'utf8'));
+                let passed = 0;
+                if (data.testResults) {
+                    data.testResults.forEach(suite => {
+                        if (suite.assertionResults) {
+                            suite.assertionResults.forEach(test => {
+                                if (test.status === 'passed') passed++;
+                            });
+                        }
+                    });
+                }
+                console.log(passed);
+            } catch(e) { console.log(0); }
+        " 2>/dev/null || echo "0")
+
+        local failed=$(cat "$output_file" | node -e "
+            const fs = require('fs');
+            try {
+                const data = JSON.parse(fs.readFileSync('/dev/stdin', 'utf8'));
+                let failed = 0;
+                if (data.testResults) {
+                    data.testResults.forEach(suite => {
+                        if (suite.assertionResults) {
+                            suite.assertionResults.forEach(test => {
+                                if (test.status === 'failed') failed++;
+                            });
+                        }
+                    });
+                }
+                console.log(failed);
+            } catch(e) { console.log(0); }
+        " 2>/dev/null || echo "0")
+
+        local skipped=$(cat "$output_file" | node -e "
+            const fs = require('fs');
+            try {
+                const data = JSON.parse(fs.readFileSync('/dev/stdin', 'utf8'));
+                let skipped = 0;
+                if (data.testResults) {
+                    data.testResults.forEach(suite => {
+                        if (suite.assertionResults) {
+                            suite.assertionResults.forEach(test => {
+                                if (test.status === 'skipped' || test.status === 'pending' || test.status === 'todo') skipped++;
+                            });
+                        }
+                    });
+                }
+                console.log(skipped);
+            } catch(e) { console.log(0); }
+        " 2>/dev/null || echo "0")
+
+        local total=$((passed + failed + skipped))
+
+        total_passed=$((total_passed + passed))
+        total_failed=$((total_failed + failed))
+        total_skipped=$((total_skipped + skipped))
+        total_tests=$((total_tests + total))
+
+        echo "  Passed: $passed, Failed: $failed, Skipped: $skipped, Total: $total"
+    fi
+
+    rm -f "$output_file"
+    return $test_exit_code
+}
+
+# Run tests for each workspace
+echo "================================"
+echo "Running test suite..."
+echo "================================"
+
+# Run CRDT tests (Jest)
+run_jest_tests "@actual-app/crdt" "test" || true
+
+# Run loot-core node tests (Jest)
+run_jest_tests "loot-core" "test:node" || true
+
+# Run API tests (Jest)
+run_jest_tests "@actual-app/api" "test" || true
+
+# Run web tests (Vitest) - skip if takes too long
+run_vitest_tests "@actual-app/web" || true
+
+# Output final JSON result
+echo "================================"
+echo "Test Results Summary:"
+echo "  Total Passed:  $total_passed"
+echo "  Total Failed:  $total_failed"
+echo "  Total Skipped: $total_skipped"
+echo "  Total Tests:   $total_tests"
+echo "================================"
+
+# Output the required JSON format as the last line
+echo "{\"passed\": $total_passed, \"failed\": $total_failed, \"skipped\": $total_skipped, \"total\": $total_tests}"
+
+# Clean up
+rm -f "$temp_output"
+
+# Exit with success if no failures, otherwise exit with failure
+if [ $total_failed -eq 0 ]; then
+    exit 0
+else
+    exit 1
+fi

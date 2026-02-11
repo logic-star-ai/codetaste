@@ -1,0 +1,116 @@
+#!/bin/bash
+# Test execution script for scikit-learn
+# This script runs the test suite and outputs results in JSON format
+# Must be run after setup_shell.sh has been sourced
+
+set -e
+
+# Change to a temp directory to avoid importing from /testbed
+cd /tmp
+
+# Create a temporary file to store test output
+TEMP_OUTPUT=$(mktemp)
+TEMP_JSON=$(mktemp)
+
+# Run a representative subset of tests using nose
+# We'll run tests from core modules that should complete in ~15 minutes
+echo "Running scikit-learn test suite..."
+
+# Use pytest with module imports (not filesystem paths) to use installed package
+python -m pytest -xvs \
+    --pyargs sklearn.tests.test_common \
+    --pyargs sklearn.tests.test_base \
+    --pyargs sklearn.tests.test_pipeline \
+    --pyargs sklearn.linear_model.tests.test_logistic \
+    --pyargs sklearn.ensemble.tests.test_forest \
+    --pyargs sklearn.tree.tests.test_tree \
+    --tb=short 2>&1 | tee "$TEMP_OUTPUT" || true
+
+# Parse the output to extract test results
+cat > /tmp/parse_tests.py << 'EOF'
+import sys
+import re
+import json
+
+# Read the test output from stdin or from file argument
+if len(sys.argv) > 1:
+    with open(sys.argv[1], 'r') as f:
+        output = f.read()
+else:
+    output = sys.stdin.read()
+
+passed = 0
+failed = 0
+skipped = 0
+errors = 0
+
+# Try pytest format first
+pytest_match = re.search(r'(\d+) passed', output)
+if pytest_match:
+    passed = int(pytest_match.group(1))
+
+    failed_match = re.search(r'(\d+) failed', output)
+    if failed_match:
+        failed = int(failed_match.group(1))
+
+    skipped_match = re.search(r'(\d+) skipped', output)
+    if skipped_match:
+        skipped = int(skipped_match.group(1))
+
+    error_match = re.search(r'(\d+) errors?', output)
+    if error_match:
+        errors = int(error_match.group(1))
+else:
+    # Try nose format
+    # Look for patterns like "Ran 123 tests in 45.67s"
+    ran_match = re.search(r'Ran (\d+) tests? in', output)
+    if ran_match:
+        total_ran = int(ran_match.group(1))
+
+        # Check for failures
+        fail_match = re.search(r'FAILED \(.*?failures?=(\d+)', output)
+        if fail_match:
+            failed = int(fail_match.group(1))
+
+        # Check for errors
+        error_match = re.search(r'errors?=(\d+)', output)
+        if error_match:
+            errors = int(error_match.group(1))
+
+        # Check for skipped
+        skip_match = re.search(r'skipped?=(\d+)', output)
+        if skip_match:
+            skipped = int(skip_match.group(1))
+
+        # Calculate passed
+        passed = total_ran - failed - errors - skipped
+    else:
+        # Try counting individual test results
+        passed = len(re.findall(r'\.\.\. ok', output))
+        failed = len(re.findall(r'\.\.\. FAIL', output))
+        skipped = len(re.findall(r'\.\.\. SKIP', output))
+        errors = len(re.findall(r'\.\.\. ERROR', output))
+
+# Handle errors as failures
+failed += errors
+
+total = passed + failed + skipped
+
+result = {
+    "passed": passed,
+    "failed": failed,
+    "skipped": skipped,
+    "total": total
+}
+
+print(json.dumps(result))
+EOF
+
+# Get the JSON result
+RESULT=$(python3 /tmp/parse_tests.py "$TEMP_OUTPUT")
+
+# Clean up temp files
+rm -f "$TEMP_OUTPUT" "$TEMP_JSON" /tmp/parse_tests.py
+
+# Output the JSON result
+echo "$RESULT"

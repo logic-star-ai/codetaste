@@ -1,5 +1,6 @@
 """Parsing utilities for evaluation outputs."""
 
+from collections import defaultdict
 import json
 from pathlib import Path
 from typing import Dict, Optional, Tuple
@@ -7,7 +8,7 @@ from typing import Dict, Optional, Tuple
 import yaml
 
 from refactoring_benchmark.bootstrap.models import ExecutionInstanceMetadata
-from refactoring_benchmark.evaluation.models import RuleMetrics, TestMetrics
+from refactoring_benchmark.evaluation.models import RuleMetrics, SingleRuleResult, TestMetrics
 
 
 def parse_test_output(stdout: str) -> Optional[TestMetrics]:
@@ -42,19 +43,12 @@ def parse_test_output(stdout: str) -> Optional[TestMetrics]:
     return None
 
 
-def parse_sarif_file(sarif_path: Path, rules_path: Path) -> Tuple[int, int]:
+def parse_sarif_file(sarif_path: Path, rules_path: Path) -> Tuple[int, int, Dict[str, SingleRuleResult]]:
     """
     Parse SARIF file and count rule matches.
-
-    Args:
-        sarif_path: Path to SARIF output file
-        rules_path: Path to rules YAML file (for total count)
-
-    Returns:
-        Tuple of (rules_matched, total_rules)
     """
-    # Get total rules from YAML
     total_rules = 0
+    rules_data = {}
     if rules_path.exists():
         try:
             with open(rules_path, "r") as f:
@@ -65,7 +59,11 @@ def parse_sarif_file(sarif_path: Path, rules_path: Path) -> Tuple[int, int]:
             pass
 
     # Count matches from SARIF
-    rules_matched_set = set()
+    rules_matched_dict = {
+        r["id"].split(".")[-1]: SingleRuleResult(**r, golden_matched=r["metadata"]["nr_refactored_patterns"])
+        for r in rules_data.get("rules", [])
+    }
+
     if sarif_path.exists():
         try:
             with open(sarif_path, "r") as f:
@@ -79,31 +77,32 @@ def parse_sarif_file(sarif_path: Path, rules_path: Path) -> Tuple[int, int]:
                             if rule_id:
                                 # Clean rule ID (remove prefix)
                                 clean_id = rule_id.split(".")[-1]
-                                rules_matched_set.add(clean_id)
+                                if clean_id in rules_matched_dict:
+                                    rules_matched_dict[clean_id].prediction_matched += 1
         except Exception:
             pass
 
-    rules_matched = len(rules_matched_set)
-    return rules_matched, total_rules
+    rules_matched = len([r for r in rules_matched_dict if rules_matched_dict[r].prediction_matched > 0])
+    return rules_matched, total_rules, rules_matched_dict
 
 
-def parse_rule_evaluation(eval_dir: Path) -> RuleMetrics:
+def parse_rule_evaluation(eval_dir: Path, create_report: bool = False) -> RuleMetrics:
     """
     Parse rule evaluation results from SARIF and YAML files.
-
-    Args:
-        eval_dir: Evaluation directory containing SARIF and YAML files
-
-    Returns:
-        RuleMetrics with counts for positive and negative rules
     """
     sarif_pos = eval_dir / "rules_positive.sarif"
     sarif_neg = eval_dir / "rules_negative.sarif"
     rules_pos = eval_dir / "rules_positive.yml"
     rules_neg = eval_dir / "rules_negative.yml"
 
-    pos_matched, pos_total = parse_sarif_file(sarif_pos, rules_pos)
-    neg_matched, neg_total = parse_sarif_file(sarif_neg, rules_neg)
+    pos_matched, pos_total, pos_matched_dict = parse_sarif_file(sarif_pos, rules_pos)
+    neg_matched, neg_total, neg_matched_dict = parse_sarif_file(sarif_neg, rules_neg)
+
+    if create_report:
+        with open(eval_dir / "rules_positive_report.json", "w") as f:
+            json.dump({k: v.model_dump() for k, v in pos_matched_dict.items()}, f, indent=2)
+        with open(eval_dir / "rules_negative_report.json", "w") as f:
+            json.dump({k: v.model_dump() for k, v in neg_matched_dict.items()}, f, indent=2)
 
     return RuleMetrics(
         positive_rules_matched=pos_matched,

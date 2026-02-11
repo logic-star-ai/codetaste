@@ -61,6 +61,8 @@ def main():
         timeout_rule=args.timeout_rule,
         force=args.force,
         retry_null_tests=args.retry_null_tests,
+        create_rule_report=args.create_rule_report,
+        skip_tests=args.skip_tests,
     )
 
     # Create and run orchestrator

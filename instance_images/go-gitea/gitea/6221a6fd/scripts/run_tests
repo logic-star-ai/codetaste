@@ -1,0 +1,93 @@
+#!/bin/bash
+set -e
+
+# This script runs the test suite and outputs results in JSON format
+# It should be run after sourcing setup_shell.sh
+
+cd /testbed
+
+# Initialize counters
+go_passed=0
+go_failed=0
+go_skipped=0
+go_total=0
+js_passed=0
+js_failed=0
+js_skipped=0
+js_total=0
+
+# Run Go backend tests
+# Exclude integration tests and e2e tests to keep runtime reasonable (< 15 minutes)
+# Run unit tests only
+echo "Running Go unit tests..."
+GO_TEST_OUTPUT=$(mktemp)
+
+# Run go test with JSON output
+# Use -short flag to skip long-running tests
+# Filter out integration, e2e, and migration tests as defined in Makefile
+go test -json -short -tags='sqlite sqlite_unlock_notify' \
+  $(go list ./... | grep -v /vendor/ | grep -v 'code.gitea.io/gitea/models/migrations' | grep -v 'code.gitea.io/gitea/tests/integration' | grep -v 'code.gitea.io/gitea/tests/e2e' | grep -v 'code.gitea.io/gitea/tests$') \
+  2>&1 | tee "$GO_TEST_OUTPUT" || true
+
+# Parse Go test results from JSON output
+# Count pass/fail/skip from the test action lines
+while IFS= read -r line; do
+    if echo "$line" | grep -q '"Action":"pass"' && echo "$line" | grep -q '"Test":"'; then
+        ((go_passed++)) || true
+    elif echo "$line" | grep -q '"Action":"fail"' && echo "$line" | grep -q '"Test":"'; then
+        ((go_failed++)) || true
+    elif echo "$line" | grep -q '"Action":"skip"' && echo "$line" | grep -q '"Test":"'; then
+        ((go_skipped++)) || true
+    fi
+done < "$GO_TEST_OUTPUT"
+
+go_total=$((go_passed + go_failed + go_skipped))
+rm -f "$GO_TEST_OUTPUT"
+
+# Run JavaScript frontend tests
+echo "Running JavaScript tests..."
+JS_TEST_OUTPUT=$(mktemp)
+
+# Run vitest with reporter that provides JSON output
+# vitest outputs test results that we can parse
+npx vitest run 2>&1 | tee "$JS_TEST_OUTPUT" || true
+
+# Parse vitest output
+# Look for lines like "Test Files  X passed (Y)" or "Tests  X passed (Y)"
+if grep -q "Test Files" "$JS_TEST_OUTPUT"; then
+    # Extract test file stats
+    js_line=$(grep "Test Files" "$JS_TEST_OUTPUT" | tail -1)
+    # Try to parse "X passed (Y)" or "X passed | Y failed"
+    js_passed_files=$(echo "$js_line" | grep -oP '\d+(?= passed)' || echo "0")
+    js_failed_files=$(echo "$js_line" | grep -oP '\d+(?= failed)' || echo "0")
+
+    # For individual tests
+    if grep -q "^ *Tests " "$JS_TEST_OUTPUT"; then
+        test_line=$(grep "^ *Tests " "$JS_TEST_OUTPUT" | tail -1)
+        js_passed=$(echo "$test_line" | grep -oP '\d+(?= passed)' || echo "0")
+        js_failed=$(echo "$test_line" | grep -oP '\d+(?= failed)' || echo "0")
+        js_skipped=$(echo "$test_line" | grep -oP '\d+(?= skipped)' || echo "0")
+    else
+        # If no individual test counts, use file counts
+        js_passed=$js_passed_files
+        js_failed=$js_failed_files
+        js_skipped=0
+    fi
+fi
+
+# Handle case where no tests found
+if [ "$js_passed" = "" ]; then js_passed=0; fi
+if [ "$js_failed" = "" ]; then js_failed=0; fi
+if [ "$js_skipped" = "" ]; then js_skipped=0; fi
+
+js_total=$((js_passed + js_failed + js_skipped))
+rm -f "$JS_TEST_OUTPUT"
+
+# Calculate totals
+total_passed=$((go_passed + js_passed))
+total_failed=$((go_failed + js_failed))
+total_skipped=$((go_skipped + js_skipped))
+total_total=$((go_total + js_total))
+
+# Output JSON result
+echo "{\"passed\": $total_passed, \"failed\": $total_failed, \"skipped\": $total_skipped, \"total\": $total_total}"

@@ -1,6 +1,7 @@
 """Executor for running evaluation on benchmark instances."""
 
 import json
+import logging
 import signal
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -16,11 +17,17 @@ from refactoring_benchmark.evaluation.parser import (
     parse_rule_evaluation,
     parse_test_output,
 )
-from refactoring_benchmark.evaluation.runner import run_rule_evaluation, run_test_evaluation
+from refactoring_benchmark.evaluation.runner import (
+    cleanup_temp_rules_dir,
+    prepare_temp_rules_dir,
+    run_rule_evaluation,
+    run_test_evaluation,
+)
+from refactoring_benchmark.inference.models import AgentConfig
 from refactoring_benchmark.inference.validation import validate_agent_config
 from refactoring_benchmark.podman import utils as podman_utils
 from refactoring_benchmark.utils.logger import get_logger
-from refactoring_benchmark.utils.models import InstanceRow
+from refactoring_benchmark.utils.models import InstanceMetadata, InstanceRow
 
 
 def get_evaluation_dir(instance: InstanceRow, agent_id: str, output_dir: Path) -> Path:
@@ -49,6 +56,38 @@ def evaluation_exists(eval_dir: Path) -> bool:
         True if evaluation_result.json exists
     """
     return (eval_dir / "evaluation_result.json").exists()
+
+
+def load_metadata(
+    agent_config_path: Path,
+    instance_metadata_path: Path,
+    inference_metadata_path: Path,
+    instance_logger: logging.Logger,
+) -> tuple[AgentConfig, InstanceMetadata, dict]:
+    # Load agent config
+    try:
+        agent_config: AgentConfig = validate_agent_config(agent_config_path)
+    except Exception as e:
+        instance_logger.error(f"Failed to load agent config: {e}")
+        raise e
+
+    # Load instance metadata
+    try:
+        instance_metadata: InstanceMetadata = load_instance_metadata(instance_metadata_path)
+    except Exception as e:
+        instance_logger.error(f"Failed to load instance metadata: {e}")
+        raise e
+
+    inference_metadata = None
+    if inference_metadata_path.exists():
+        try:
+            with inference_metadata_path.open("r", encoding="utf-8") as f:
+                inference_metadata = json.load(f)
+            instance_logger.info("Loaded inference metadata successfully")
+        except Exception as e:
+            instance_logger.error(f"Failed to load inference metadata: {e}")
+
+    return agent_config, instance_metadata, inference_metadata
 
 
 def evaluate_single_instance(instance: InstanceRow, agent_id: str, config: EvaluationConfig) -> bool:
@@ -80,33 +119,32 @@ def evaluate_single_instance(instance: InstanceRow, agent_id: str, config: Evalu
         instance_logger.warning(f"Skipping {instance.id}, no prediction.diff found at {prediction_diff}")
         return False
 
-    # Load agent config
     try:
-        agent_config = validate_agent_config(agent_config_path)
-    except Exception as e:
-        instance_logger.error(f"Failed to load agent config: {e}")
+        agent_config, instance_metadata, inference_metadata = load_metadata(
+            agent_config_path, instance_metadata_path, inference_metadata_path, instance_logger
+        )
+    except Exception:
         return False
 
     # Check if evaluation already exists
+    evaluation_result = None
     if evaluation_exists(eval_dir):
-        if not config.force and not config.retry_null_tests:
-            instance_logger.info(f"Skipping {instance.id}, evaluation already exists")
-            return True
-
-        # If retry_null_tests is set, check if test metrics are null
-        if config.retry_null_tests and not config.force:
-            try:
-                result = EvaluationResult.load_from_json(eval_dir / "evaluation_result.json")
-                if result.agent_test_metrics is not None:
+        try:
+            evaluation_result = EvaluationResult.load_from_json(eval_dir / "evaluation_result.json")
+        except Exception as e:
+            instance_logger.warning(f"Could not load evaluation result: {e}, will retry")
+        if evaluation_result is not None:
+            if not config.force:
+                if not config.retry_null_tests:
+                    instance_logger.info(f"Skipping {instance.id}, evaluation already exists")
+                    return True
+                elif evaluation_result.agent_test_metrics is not None:
                     instance_logger.info(f"Skipping {instance.id}, test metrics exist")
                     return True
                 else:
                     instance_logger.info(f"Retrying {instance.id}, test metrics are null")
-            except Exception as e:
-                instance_logger.warning(f"Could not load evaluation result: {e}, will retry")
-        elif not config.force:
-            instance_logger.info(f"Skipping {instance.id}, evaluation already exists")
-            return True
+            else:
+                instance_logger.info(f"Force re-evaluation enabled, proceeding with evaluation for {instance.id}")
 
     # Create evaluation directory
     eval_dir.mkdir(parents=True, exist_ok=True)
@@ -115,28 +153,48 @@ def evaluate_single_instance(instance: InstanceRow, agent_id: str, config: Evalu
     instance_logger.info(f"  Agent ID: {agent_id}")
     instance_logger.info(f"  Output: {eval_dir}")
 
+    rules_dir = prepare_temp_rules_dir(instance, instance_logger)
+    if rules_dir is None:
+        instance_logger.error(f"Skipping {instance.id}: missing rules assets for evaluation")
+        return False
+
     # Run test and rule evaluation in parallel
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        # Submit both evaluations
-        test_future = executor.submit(
-            run_test_evaluation, instance, prediction_diff, eval_dir, config.timeout_test, instance_logger
-        )
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            # Submit both evaluations
+            if not config.skip_tests:
+                test_future = executor.submit(
+                    run_test_evaluation,
+                    instance,
+                    prediction_diff,
+                    eval_dir,
+                    config.timeout_test,
+                    instance_logger,
+                    rules_dir,
+                )
 
-        rule_future = executor.submit(
-            run_rule_evaluation, instance, prediction_diff, eval_dir, config.timeout_rule, instance_logger
-        )
+            rule_future = executor.submit(
+                run_rule_evaluation,
+                instance,
+                prediction_diff,
+                eval_dir,
+                config.timeout_rule,
+                instance_logger,
+                rules_dir,
+            )
 
-        # Wait for both to complete
-        rule_success, rule_stdout = rule_future.result()
-        test_metrics, test_stdout = test_future.result()
-
-    # Save raw outputs for debugging
-    (eval_dir / "test_output.txt").write_text(test_stdout)
-    (eval_dir / "rule_output.txt").write_text(rule_stdout)
-
-    # Parse test metrics from stdout if not already parsed
-    if test_metrics is None:
-        test_metrics = parse_test_output(test_stdout)
+            # Gather results and write outputs
+            rule_success, rule_stdout = rule_future.result()
+            (eval_dir / "rule_output.txt").write_text(rule_stdout)
+            if not config.skip_tests:
+                test_metrics, test_stdout = test_future.result()
+                (eval_dir / "test_output.txt").write_text(test_stdout)
+                if test_metrics is None:
+                    test_metrics = parse_test_output(test_stdout)
+            else:
+                test_metrics = evaluation_result.agent_test_metrics if evaluation_result else None
+    finally:
+        cleanup_temp_rules_dir(rules_dir, instance_logger)
 
     # Parse rule metrics from SARIF files
     if not rule_success:
@@ -144,26 +202,10 @@ def evaluate_single_instance(instance: InstanceRow, agent_id: str, config: Evalu
         return False
 
     try:
-        rule_metrics = parse_rule_evaluation(eval_dir)
+        rule_metrics = parse_rule_evaluation(eval_dir, create_report=config.create_rule_report)
     except Exception as e:
         instance_logger.error(f"Failed to parse rule metrics: {e}")
         return False
-
-    # Load instance metadata
-    try:
-        instance_metadata = load_instance_metadata(instance_metadata_path)
-    except Exception as e:
-        instance_logger.error(f"Failed to load instance metadata: {e}")
-        return False
-
-    inference_metadata = None
-    if inference_metadata_path.exists():
-        try:
-            with inference_metadata_path.open("r", encoding="utf-8") as f:
-                inference_metadata = json.load(f)
-            instance_logger.info("Loaded inference metadata successfully")
-        except Exception as e:
-            instance_logger.error(f"Failed to load inference metadata: {e}")
 
     # Create evaluation result
     evaluation_result = EvaluationResult(
@@ -185,7 +227,7 @@ def evaluate_single_instance(instance: InstanceRow, agent_id: str, config: Evalu
         f"  Rule IFR: {rule_metrics.ifr:.3f} (pos: {rule_metrics.positive_ifr:.3f}, neg: {rule_metrics.negative_ifr:.3f})"
     )
     print(
-        f"✅ [{instance.id}] : Rule IFR: {rule_metrics.ifr:.3f}, Test Metrics: {test_metrics.model_dump() if test_metrics else 'N/A'}"
+        f"✅ [{instance.id}] : Rule IFR: {rule_metrics.ifr:.3f} (pos: {rule_metrics.positive_ifr:.3f}, neg: {rule_metrics.negative_ifr:.3f}), Test Metrics: {test_metrics.model_dump() if test_metrics else 'N/A'}"
     )
 
     return True

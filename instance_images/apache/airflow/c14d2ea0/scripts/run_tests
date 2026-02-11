@@ -1,0 +1,115 @@
+#!/bin/bash
+# Test execution script
+# Runs the test suite and outputs results in JSON format
+
+set -e
+
+cd /testbed
+
+# Ensure airflow is available
+if ! which airflow > /dev/null 2>&1; then
+    echo "Error: airflow command not found. Did you source setup_shell.sh?" >&2
+    exit 1
+fi
+
+# Initialize the database
+echo "Initializing Airflow database..." >&2
+yes 2>/dev/null | airflow resetdb 2>&1 | head -20 >&2 || true
+airflow initdb > /dev/null 2>&1
+
+# Run tests with nose and capture output
+# We'll run a subset of tests that don't require external services like Hadoop, Hive, etc.
+# Focus on core tests that should pass with SQLite backend
+
+echo "Running Airflow tests..." >&2
+
+# Temporarily rename tests/__init__.py to avoid docker import errors
+if [ -f "tests/__init__.py" ]; then
+    mv tests/__init__.py tests/__init__.py.bak
+fi
+
+# Create a temporary file for nose output
+NOSE_OUTPUT=$(mktemp)
+NOSE_EXIT_CODE=0
+
+# Run nosetests with exclusions for tests that need external services
+# Use file paths and -e/--exclude with regex patterns
+nosetests tests/core.py tests/configuration.py tests/models.py \
+    -e 'test_import_examples' \
+    -e 'HiveServer2Test' \
+    -e 'TransferTests' \
+    -e 'HivePrestoTest' \
+    -e 'WebHdfsSensorTest' \
+    -e 'WebHDFSHookTest' \
+    -e 'MySqlTest' \
+    -e 'PostgresTest' \
+    -e 'S3HookTest' \
+    -e 'SSHHookTest' \
+    -v --no-byte-compile 2>&1 | tee "$NOSE_OUTPUT" || NOSE_EXIT_CODE=$?
+
+# Restore tests/__init__.py
+if [ -f "tests/__init__.py.bak" ]; then
+    mv tests/__init__.py.bak tests/__init__.py
+fi
+
+# Parse the output to extract test results
+# Nose output format: "Ran X tests in Y.Zs"
+# And also shows FAILED (failures=X, errors=Y) or OK (skip=X)
+
+TOTAL=0
+PASSED=0
+FAILED=0
+SKIPPED=0
+
+# Extract total from "Ran X tests"
+if grep -q "Ran [0-9]* test" "$NOSE_OUTPUT"; then
+    TOTAL=$(grep "Ran [0-9]* test" "$NOSE_OUTPUT" | sed -E 's/Ran ([0-9]*) test.*/\1/')
+fi
+
+# Parse the summary line
+if grep -q "^OK" "$NOSE_OUTPUT"; then
+    # All tests passed (possibly with skips)
+    if grep -q "SKIP=" "$NOSE_OUTPUT"; then
+        SKIPPED=$(grep "^OK" "$NOSE_OUTPUT" | sed -E 's/.*SKIP=([0-9]*).*/\1/')
+    fi
+    PASSED=$((TOTAL - SKIPPED))
+elif grep -q "^FAILED" "$NOSE_OUTPUT"; then
+    # Some tests failed
+    FAILURES=0
+    ERRORS=0
+
+    if grep -q "failures=" "$NOSE_OUTPUT"; then
+        FAILURES=$(grep "^FAILED" "$NOSE_OUTPUT" | sed -E 's/.*failures=([0-9]*).*/\1/')
+    fi
+
+    if grep -q "errors=" "$NOSE_OUTPUT"; then
+        ERRORS=$(grep "^FAILED" "$NOSE_OUTPUT" | sed -E 's/.*errors=([0-9]*).*/\1/')
+    fi
+
+    if grep -q "SKIP=" "$NOSE_OUTPUT"; then
+        SKIPPED=$(grep "^FAILED" "$NOSE_OUTPUT" | sed -E 's/.*SKIP=([0-9]*).*/\1/')
+    fi
+
+    FAILED=$((FAILURES + ERRORS))
+    PASSED=$((TOTAL - FAILED - SKIPPED))
+fi
+
+# Ensure we have sensible values
+TOTAL=${TOTAL:-0}
+PASSED=${PASSED:-0}
+FAILED=${FAILED:-0}
+SKIPPED=${SKIPPED:-0}
+
+# Clean up
+rm -f "$NOSE_OUTPUT"
+
+# Output JSON result
+echo "{\"passed\": $PASSED, \"failed\": $FAILED, \"skipped\": $SKIPPED, \"total\": $TOTAL}"
+
+# Exit with appropriate code
+if [ $NOSE_EXIT_CODE -ne 0 ] && [ $FAILED -eq 0 ]; then
+    # If nose failed but we didn't detect failures, treat as error
+    exit 1
+fi
+
+exit 0

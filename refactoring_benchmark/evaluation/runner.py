@@ -1,15 +1,78 @@
 """Container execution for test and rule evaluation."""
 
 import logging
+import os
+import shutil
+import tempfile
 from pathlib import Path
 from typing import Optional, Tuple
 
 import podman
+import podman.errors
 from podman.domain.containers import Container as PodmanContainer
 
 from refactoring_benchmark.evaluation.models import TestMetrics
 from refactoring_benchmark.podman import utils as podman_utils
 from refactoring_benchmark.utils.models import InstanceRow
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+def prepare_temp_rules_dir(instance: InstanceRow, logger: logging.Logger) -> Optional[Path]:
+    """
+    Build a temporary rules directory for evaluation and return its path.
+
+    Copies:
+      - assets/rules/<owner>/<repo>/<hash>/*
+      - instance_images/<owner>/<repo>/<hash>/instance_metadata.json
+      - assets/default.semgrepignore
+    """
+    rules_src = PROJECT_ROOT / instance.asset_dir("rules")
+    if not rules_src.exists():
+        logger.error(f"Rules directory not found: {rules_src}")
+        return None
+
+    instance_metadata_src = PROJECT_ROOT / instance.instance_dir() / "instance_metadata.json"
+    if not instance_metadata_src.exists():
+        logger.error(f"Instance metadata not found: {instance_metadata_src}")
+        return None
+
+    temp_dir = Path(tempfile.mkdtemp(prefix=f"rules-{instance.id}-"))
+    try:
+        for filename in os.listdir(rules_src):
+            src_file = rules_src / filename
+            if src_file.is_file():
+                shutil.copy2(src_file, temp_dir / filename)
+
+        shutil.copy2(instance_metadata_src, temp_dir / "instance_metadata.json")
+
+        default_semgrepignore = PROJECT_ROOT / "assets" / "default.semgrepignore"
+        if default_semgrepignore.exists():
+            shutil.copy2(default_semgrepignore, temp_dir / "default.semgrepignore")
+        else:
+            logger.warning(f"default.semgrepignore not found at {default_semgrepignore}")
+
+        # Ensure container can read/write as needed (entrypoint uses sudo chmod on /rules).
+        temp_dir.chmod(0o777)
+        for path in temp_dir.iterdir():
+            try:
+                path.chmod(0o777)
+            except Exception:
+                pass
+        return temp_dir
+    except Exception as exc:
+        logger.error(f"Failed to prepare temp rules dir: {exc}")
+        cleanup_temp_rules_dir(temp_dir, logger)
+        return None
+
+
+def cleanup_temp_rules_dir(temp_dir: Optional[Path], logger: logging.Logger) -> None:
+    """Remove a temporary rules directory."""
+    if temp_dir and temp_dir.exists():
+        try:
+            shutil.rmtree(temp_dir)
+        except Exception as exc:
+            logger.warning(f"Failed to remove temp rules dir {temp_dir}: {exc}")
 
 
 def run_test_evaluation(
@@ -18,6 +81,7 @@ def run_test_evaluation(
     eval_dir: Path,
     timeout: int,
     logger: logging.Logger,
+    rules_dir: Path,
 ) -> Tuple[Optional[TestMetrics], str]:
     """
     Run test evaluation using the runtime container.
@@ -53,6 +117,7 @@ def run_test_evaluation(
             volumes={
                 str(prediction_diff): {"bind": "/input/patch.diff", "mode": "ro"},
                 str(eval_dir): {"bind": "/output", "mode": "rw"},
+                str(rules_dir): {"bind": "/rules", "mode": "rw", "extended_mode": ["U", "z"]},
             },
             remove=False,
             nano_cpus=int(16e9),
@@ -92,6 +157,7 @@ def run_rule_evaluation(
     eval_dir: Path,
     timeout: int,
     logger: logging.Logger,
+    rules_dir: Path,
 ) -> Tuple[bool, str]:
     """
     Run rule evaluation using the runtime container.
@@ -127,6 +193,7 @@ def run_rule_evaluation(
             volumes={
                 str(prediction_diff): {"bind": "/input/patch.diff", "mode": "ro"},
                 str(eval_dir): {"bind": "/output", "mode": "rw"},
+                str(rules_dir): {"bind": "/rules", "mode": "rw", "extended_mode": ["U", "z"]},
             },
             remove=False,
             nano_cpus=int(4e9),

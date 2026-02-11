@@ -1,0 +1,88 @@
+#!/bin/bash
+# Test execution script
+# This script runs the test suite and outputs JSON results
+
+set -e
+
+# These environment variables should already be set by setup_shell.sh
+# But we ensure they're set here as well for robustness
+export JAVA_HOME=/usr/lib/jvm/java-8-openjdk-amd64
+export PATH=$JAVA_HOME/bin:$PATH
+export ANDROID_HOME=/home/benchmarker/.android-sdk
+export ANDROID_SDK_ROOT=/home/benchmarker/.android-sdk
+
+cd /testbed
+
+# Remove previous test results
+rm -rf /testbed/app/build/test-results/devDebug/ 2>/dev/null || true
+rm -rf /testbed/www/test-results.txt 2>/dev/null || true
+
+# Run Java unit tests (Robolectric tests)
+echo "Running Java unit tests..." >&2
+./gradlew testDevDebugUnitTest --no-daemon > /dev/null 2>&1
+
+# Run www JavaScript tests (linting)
+echo "Running JavaScript tests..." >&2
+cd /testbed/www
+npm test > /tmp/www-test-results.txt 2>&1 || true
+
+# Parse Java test results
+cd /testbed
+JAVA_PASSED=0
+JAVA_FAILED=0
+JAVA_SKIPPED=0
+JAVA_TOTAL=0
+
+if [ -d "/testbed/app/build/test-results/devDebug" ]; then
+    for xml_file in /testbed/app/build/test-results/devDebug/TEST-*.xml; do
+        if [ -f "$xml_file" ]; then
+            # Extract test counts from XML
+            tests=$(grep '<testsuite' "$xml_file" | sed -n 's/.*tests="\([0-9]*\)".*/\1/p')
+            failures=$(grep '<testsuite' "$xml_file" | sed -n 's/.*failures="\([0-9]*\)".*/\1/p')
+            errors=$(grep '<testsuite' "$xml_file" | sed -n 's/.*errors="\([0-9]*\)".*/\1/p')
+            skipped=$(grep '<testsuite' "$xml_file" | sed -n 's/.*skipped="\([0-9]*\)".*/\1/p')
+
+            JAVA_TOTAL=$((JAVA_TOTAL + tests))
+            JAVA_FAILED=$((JAVA_FAILED + failures + errors))
+            JAVA_SKIPPED=$((JAVA_SKIPPED + skipped))
+        fi
+    done
+    JAVA_PASSED=$((JAVA_TOTAL - JAVA_FAILED - JAVA_SKIPPED))
+fi
+
+# Parse www test results (grunt test runs jshint and jsonlint)
+# For simplicity, we count each linter pass as 1 test
+WWW_PASSED=0
+WWW_FAILED=0
+WWW_SKIPPED=0
+WWW_TOTAL=2  # jshint and jsonlint
+
+if grep -q "Done, without errors" /tmp/www-test-results.txt 2>/dev/null; then
+    WWW_PASSED=2
+elif grep -q "Warning:" /tmp/www-test-results.txt 2>/dev/null; then
+    # Has warnings but no errors
+    WWW_PASSED=2
+else
+    # Check for errors
+    if grep -q "jshint" /tmp/www-test-results.txt 2>/dev/null; then
+        WWW_PASSED=1
+        WWW_FAILED=1
+    else
+        WWW_FAILED=2
+    fi
+fi
+
+# Combine results
+TOTAL_PASSED=$((JAVA_PASSED + WWW_PASSED))
+TOTAL_FAILED=$((JAVA_FAILED + WWW_FAILED))
+TOTAL_SKIPPED=$((JAVA_SKIPPED + WWW_SKIPPED))
+TOTAL_TESTS=$((JAVA_TOTAL + WWW_TOTAL))
+
+# Output JSON result
+echo "{\"passed\": $TOTAL_PASSED, \"failed\": $TOTAL_FAILED, \"skipped\": $TOTAL_SKIPPED, \"total\": $TOTAL_TESTS}"
+
+# Restore original build.gradle after outputting results
+cd /testbed
+if [ -f .gradle/build.gradle.orig ]; then
+    cp .gradle/build.gradle.orig build.gradle
+fi

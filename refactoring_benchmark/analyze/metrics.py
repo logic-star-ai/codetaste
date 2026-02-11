@@ -38,12 +38,14 @@ def metric_ifr_ratio(result: EvaluationResult) -> float | None:
         return 0.0
     return removed_ifr / total
 
+
 def metric_diff_added_lines(result: EvaluationResult) -> int | None:
     try:
         diff_stat = parse_diff_file(Path(result.eval_dir.parent) / "prediction.diff")
     except FileNotFoundError:
         return None
     return diff_stat.added_lines
+
 
 def metric_diff_removed_lines(result: EvaluationResult) -> int | None:
     try:
@@ -52,6 +54,7 @@ def metric_diff_removed_lines(result: EvaluationResult) -> int | None:
         return None
     return diff_stat.removed_lines
 
+
 def metric_diff_delta_lines(result: EvaluationResult) -> int | None:
     try:
         diff_stat = parse_diff_file(Path(result.eval_dir.parent) / "prediction.diff")
@@ -59,13 +62,15 @@ def metric_diff_delta_lines(result: EvaluationResult) -> int | None:
         return None
     return diff_stat.added_lines - diff_stat.removed_lines
 
+
 def metric_test_success(result: EvaluationResult) -> float:
     """Test success metric (1.0 if valid, 0.0 otherwise, None if no test data)."""
     if check_test_validity(result) == ValidityStatus.VALID:
         return 1.0
     else:
         return 0.0
-    
+
+
 def metric_strict_ifr_x_test_success(result: EvaluationResult) -> float | None:
     """Strict IFR x Test Success metric (1.0 only if both IFR and test success are perfect)."""
     if metric_ifr(result) == 1.0 and metric_test_success(result) == 1.0:
@@ -73,17 +78,21 @@ def metric_strict_ifr_x_test_success(result: EvaluationResult) -> float | None:
     else:
         return 0.0
 
+
 def metric_ifr_x_test_success(result: EvaluationResult) -> float | None:
     """Combined IFR x Test Success metric."""
     return metric_ifr(result) * metric_test_success(result)
+
 
 def metric_ifr_added_x_test_success(result: EvaluationResult) -> float | None:
     """Combined IFR Added x Test Success metric."""
     return metric_ifr_added(result) * metric_test_success(result)
 
+
 def metric_ifr_removed_x_test_success(result: EvaluationResult) -> float | None:
     """Combined IFR Removed x Test Success metric."""
     return metric_ifr_removed(result) * metric_test_success(result)
+
 
 def metric_f1_score(result: EvaluationResult) -> float | None:
     """Harmonic mean of precision and instruction following (recall)."""
@@ -96,12 +105,14 @@ def metric_f1_score(result: EvaluationResult) -> float | None:
         return 2 * (p * r) / (p + r)
     return None
 
+
 def metric_total_score(result: EvaluationResult) -> float | None:
     f1 = metric_f1_score(result)
     is_success = metric_test_success(result)
     if f1 is None or is_success is None:
         return None
-    return  f1 * is_success
+    return f1 * is_success
+
 
 def _calculate_precision(result: EvaluationResult) -> InstanceAgentPrecision | None:
     """Helper to calculate precision metrics (requires ./output_pseudo_agents/)."""
