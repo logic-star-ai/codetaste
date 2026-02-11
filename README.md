@@ -11,8 +11,8 @@ A benchmarking framework for evaluating AI agents on real-world code refactoring
 ## Requirements
 - **Python** (see `pyproject.toml`) with Poetry.
 - **Podman** for container execution.
-- **opengrep** for rule evaluation inside containers.
 - **Anthropic API key** for bootstrap setup agent and multiplan judge (if used).
+- `assets/` and `instance_images/` are populated for the instances in `instances.csv`.
 
 ## Quickstart
 ```bash
@@ -68,6 +68,7 @@ instances.csv       # Benchmark instance definitions
 - **Prediction**: Agent output stored as `prediction.diff`.
 - **IFR (Instruction Following Rate)**: How well rules are followed.
 - **Description types**: Task detail level (`instructed` or `open`). Both can be used in direct, plan, or multiplan modes.
+- **Modes**: Execution strategy (`direct`, `plan`, or `multiplan`), tracked separately from description type.
 
 ## Tools & scripts
 - **Bootstrap**: `python -m refactoring_benchmark.scripts.bootstrap`
@@ -88,20 +89,9 @@ outputs/<description_type>/<mode>/<owner>/<repo>/<hash>/<agent_id>/
     test_output.txt
 ```
 
-## Migration (breaking change)
-To move legacy `output*` folders into the new layout and rewrite metadata:
-```bash
-python -m refactoring_benchmark.tools.migrate_outputs
-```
-
 ## Documentation
 Detailed phase docs:
 - `docs/bootstrap.md`
 - `docs/inference.md`
 - `docs/evaluation.md`
 - `docs/analysis.md`
-
-## Notes for public release
-- The benchmark uses **Podman** (not Docker) by default.
-- `entrypoint.sh` supports `inference`, `plan`, `multiplan`, `eval_test`, `eval_rule`.
-- Some workflows assume `assets/` and `instance_images/` are populated.

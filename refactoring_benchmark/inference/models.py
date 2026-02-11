@@ -3,7 +3,7 @@
 from pathlib import Path
 from typing import Any, Dict, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class AgentInfo(BaseModel):
@@ -47,16 +47,8 @@ class InferenceConfig(BaseModel):
     sanitized_agent_id: str
     env_vars: Dict[str, str] = Field(default_factory=dict)
     description_type: str = "instructed"
-    plan: bool = False
-    multiplan: bool = False
+    mode: Literal["direct", "plan", "multiplan"] = "direct"
     plan_timeout: int = Field(gt=0, default=1800)
-
-    @model_validator(mode="after")
-    def validate_plan_modes(self) -> "InferenceConfig":
-        """Ensure plan and multiplan are mutually exclusive."""
-        if self.plan and self.multiplan:
-            raise ValueError("Cannot enable both --plan and --multiplan simultaneously")
-        return self
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -78,14 +70,9 @@ class ExecutionContext(BaseModel):
     """Execution context for plan/multiplan/inference steps."""
 
     description_type: str
-    description_type_suffix: Literal["", "_plan", "_multiplan"] = ""
+    mode: Literal["direct", "plan", "multiplan"]
     plan_path: Optional[Path] = None
     plan_content: Optional[str] = None
-
-    @property
-    def full_description_type(self) -> str:
-        """Return full description_type including suffix."""
-        return f"{self.description_type}{self.description_type_suffix}"
 
 
 class InferenceMetadata(BaseModel):
@@ -97,6 +84,7 @@ class InferenceMetadata(BaseModel):
     start_time: Optional[str] = None
     additional: Optional[Dict[str, Any]] = None
     description_type: Optional[str] = None
+    mode: Optional[Literal["direct", "plan", "multiplan"]] = None
 
     model_config = ConfigDict(populate_by_name=True, extra="allow")
 

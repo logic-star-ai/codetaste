@@ -3,7 +3,7 @@
 Copy pseudo agent outputs to a new directory with updated description type.
 
 This tool copies agent outputs (typically from outputs/pseudo_agents/direct) to a new
-location while updating the description_type field in both inference_metadata.json
+location while updating the description_type and mode fields in both inference_metadata.json
 and evaluation_result.json files.
 """
 
@@ -17,18 +17,20 @@ from refactoring_benchmark.evaluation.models import EvaluationResult
 from refactoring_benchmark.inference.models import InferenceMetadata
 
 
-def update_inference_metadata(metadata_path: Path, description_type: str) -> None:
+def update_inference_metadata(metadata_path: Path, description_type: str, mode: str) -> None:
     """
     Update the description_type field in an inference_metadata.json file.
 
     Args:
         metadata_path: Path to inference_metadata.json
         description_type: New description type value
+        mode: New mode value
     """
     with open(metadata_path, "r") as f:
         data = json.load(f)
 
     data["description_type"] = description_type
+    data["mode"] = mode
 
     # Validate with Pydantic model
     InferenceMetadata(**data)
@@ -37,13 +39,14 @@ def update_inference_metadata(metadata_path: Path, description_type: str) -> Non
         json.dump(data, f, indent=2)
 
 
-def update_evaluation_result(result_path: Path, description_type: str) -> None:
+def update_evaluation_result(result_path: Path, description_type: str, mode: str) -> None:
     """
     Update the description_type field in evaluation_result.json.
 
     Args:
         result_path: Path to evaluation_result.json
         description_type: New description type value
+        mode: New mode value
     """
     with open(result_path, "r") as f:
         data = json.load(f)
@@ -51,6 +54,7 @@ def update_evaluation_result(result_path: Path, description_type: str) -> None:
     # Update the nested inference_metadata.description_type field
     if "inference_metadata" in data and data["inference_metadata"] is not None:
         data["inference_metadata"]["description_type"] = description_type
+        data["inference_metadata"]["mode"] = mode
 
     # Validate with Pydantic model
     EvaluationResult(**data)
@@ -63,6 +67,7 @@ def copy_agent_output(
     source_path: Path,
     dest_path: Path,
     description_type: str,
+    mode: str,
     force: bool,
 ) -> None:
     """
@@ -72,6 +77,7 @@ def copy_agent_output(
         source_path: Source agent output directory
         dest_path: Destination agent output directory
         description_type: Description type to set
+        mode: Mode to set
         force: Whether to overwrite existing destination
 
     Raises:
@@ -88,12 +94,12 @@ def copy_agent_output(
     # Update inference_metadata.json
     inference_metadata_path = dest_path / "inference_metadata.json"
     if inference_metadata_path.exists():
-        update_inference_metadata(inference_metadata_path, description_type)
+        update_inference_metadata(inference_metadata_path, description_type, mode)
 
     # Update evaluation_result.json
     evaluation_result_path = dest_path / "evaluation" / "evaluation_result.json"
     if evaluation_result_path.exists():
-        update_evaluation_result(evaluation_result_path, description_type)
+        update_evaluation_result(evaluation_result_path, description_type, mode)
 
 
 def discover_agents(source_dir: Path) -> List[str]:
@@ -139,9 +145,14 @@ def main() -> int:
     parser.add_argument(
         "--description-type",
         type=str,
-        # required=True,
-        # choices=["instructed", "open", "open_plan", "open_multiplan"],
         help="Description type to set in metadata files",
+    )
+    parser.add_argument(
+        "--mode",
+        type=str,
+        default="direct",
+        choices=["direct", "plan", "multiplan"],
+        help="Mode to set in metadata files",
     )
 
     parser.add_argument(
@@ -194,6 +205,7 @@ def main() -> int:
     print(f"Source directory: {source_dir}")
     print(f"Output directory: {output_dir}")
     print(f"Description type: {args.description_type}")
+    print(f"Mode: {args.mode}")
     print(f"Agents to copy: {', '.join(agents_to_copy)}")
     print(f"Force overwrite: {args.force}")
     print(f"Dry run: {not args.not_dry_run}")
@@ -229,7 +241,7 @@ def main() -> int:
                 print(f"  [DRY RUN] Would copy: {relative_display}")
                 success_count += 1
             else:
-                copy_agent_output(source_path, dest_path, args.description_type, args.force)
+                copy_agent_output(source_path, dest_path, args.description_type, args.mode, args.force)
                 print(f"  ✓ Copied: {relative_display}")
                 success_count += 1
 

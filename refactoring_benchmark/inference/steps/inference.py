@@ -137,8 +137,9 @@ class InferenceStep:
         metadata: InferenceMetadata = InferenceMetadata.load_from_json(metadata_path)
         is_success = metadata.finish_reason.lower() == "success"
 
-        # Set description_type with appropriate suffix
-        metadata.description_type = context.full_description_type
+        # Set description_type and mode
+        metadata.description_type = context.description_type
+        metadata.mode = context.mode
         metadata.save_to_json(metadata_path)
 
         if is_success:

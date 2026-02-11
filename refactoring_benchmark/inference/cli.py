@@ -112,6 +112,8 @@ def parse_args() -> argparse.Namespace:
     )
 
     args = parser.parse_args()
+    if args.plan and args.multiplan:
+        parser.error("Cannot enable both --plan and --multiplan simultaneously")
 
     # Convert paths to absolute
     if args.output_dir is None:
@@ -122,6 +124,7 @@ def parse_args() -> argparse.Namespace:
         elif args.plan:
             mode = "plan"
         args.output_dir = Path(base_name) / args.description_type / mode
+    args.mode = "multiplan" if args.multiplan else "plan" if args.plan else "direct"
     args.agent_dir = args.agent_dir.resolve()
     args.output_dir = args.output_dir.resolve()
     args.instances_csv = args.instances_csv.resolve()

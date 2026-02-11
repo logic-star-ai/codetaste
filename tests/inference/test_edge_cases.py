@@ -38,8 +38,7 @@ def _make_config(tmp_path: Path) -> InferenceConfig:
         sanitized_agent_id="agent-1",
         env_vars={},
         description_type="instructed",
-        plan=False,
-        multiplan=False,
+        mode="direct",
         plan_timeout=10,
     )
 
@@ -63,7 +62,7 @@ def test_should_skip_respects_force_flags(tmp_path):
     runner.output_dir.mkdir(parents=True, exist_ok=True)
     (runner.output_dir / "prediction.diff").write_text("diff", encoding="utf-8")
     (runner.output_dir / "inference_metadata.json").write_text(
-        json.dumps({"finish_reason": "error"}), encoding="utf-8"
+        json.dumps({"finish_reason": "error", "description_type": "instructed", "mode": "direct"}), encoding="utf-8"
     )
 
     print("skip check: default flags", flush=True)
@@ -77,7 +76,7 @@ def test_should_skip_respects_force_flags(tmp_path):
     runner.output_dir.mkdir(parents=True, exist_ok=True)
     (runner.output_dir / "prediction.diff").write_text("diff", encoding="utf-8")
     (runner.output_dir / "inference_metadata.json").write_text(
-        json.dumps({"finish_reason": "error"}), encoding="utf-8"
+        json.dumps({"finish_reason": "error", "description_type": "instructed", "mode": "direct"}), encoding="utf-8"
     )
     print("skip check: force_unsuccessful=True", flush=True)
     should_skip, _ = runner.should_skip()
@@ -88,7 +87,7 @@ def test_should_skip_respects_force_flags(tmp_path):
     runner.output_dir.mkdir(parents=True, exist_ok=True)
     (runner.output_dir / "prediction.diff").write_text("diff", encoding="utf-8")
     (runner.output_dir / "inference_metadata.json").write_text(
-        json.dumps({"finish_reason": "error"}), encoding="utf-8"
+        json.dumps({"finish_reason": "error", "description_type": "instructed", "mode": "direct"}), encoding="utf-8"
     )
     print("skip check: force=True", flush=True)
     should_skip, _ = runner.should_skip()
@@ -98,7 +97,7 @@ def test_should_skip_respects_force_flags(tmp_path):
 def test_plan_reuse_with_force_and_reuse_successful_plan(tmp_path):
     """PlanStep reuses successful plan when force + reuse_successful_plan is set."""
     config = _make_config(tmp_path)
-    config.plan = True
+    config.mode = "plan"
     config.force = True
     config.reuse_successful_plan = True
     instance = _make_instance()
@@ -121,7 +120,7 @@ def test_plan_reuse_with_force_and_reuse_successful_plan(tmp_path):
 def test_plan_incomplete_artifacts_reruns(tmp_path, monkeypatch):
     """PlanStep reruns when plan_metadata exists but plan file is missing."""
     config = _make_config(tmp_path)
-    config.plan = True
+    config.mode = "plan"
     instance = _make_instance()
     output_dir = tmp_path / "outputs"
     output_dir.mkdir(parents=True)
@@ -154,7 +153,7 @@ def test_plan_incomplete_artifacts_reruns(tmp_path, monkeypatch):
 def test_multiplan_incomplete_artifacts_reruns(tmp_path, monkeypatch):
     """MultiplanStep reruns when multiplan metadata exists but plans are missing."""
     config = _make_config(tmp_path)
-    config.multiplan = True
+    config.mode = "multiplan"
     instance = _make_instance()
     output_dir = tmp_path / "outputs"
     output_dir.mkdir(parents=True)
@@ -191,7 +190,7 @@ def test_multiplan_incomplete_artifacts_reruns(tmp_path, monkeypatch):
 
 
 def test_container_executor_timeout_plan_metadata(tmp_path, monkeypatch):
-    """Plan timeout writes error_planmode with _plan description_type."""
+    """Plan timeout writes error_planmode with plan mode."""
     config = _make_config(tmp_path)
     output_dir = tmp_path / "outputs"
     output_dir.mkdir(parents=True)
@@ -218,7 +217,7 @@ def test_container_executor_timeout_plan_metadata(tmp_path, monkeypatch):
     )
 
     executor = ContainerExecutor(instance, config, output_dir, logger, client=object())
-    context = ExecutionContext(description_type="instructed", description_type_suffix="_plan")
+    context = ExecutionContext(description_type="instructed", mode="plan")
     assert executor.run("plan", 1, temp_dir, context=context) is False
 
     metadata_path = output_dir / "inference_metadata.json"
@@ -226,11 +225,12 @@ def test_container_executor_timeout_plan_metadata(tmp_path, monkeypatch):
     data = json.loads(metadata_path.read_text(encoding="utf-8"))
     print("timeout plan metadata:", data, flush=True)
     assert data["finish_reason"] == "error_planmode"
-    assert data["description_type"] == "instructed_plan"
+    assert data["description_type"] == "instructed"
+    assert data["mode"] == "plan"
 
 
 def test_container_executor_timeout_multiplan_metadata(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """Multiplan timeout writes error_multiplan with _multiplan description_type."""
+    """Multiplan timeout writes error_multiplan with multiplan mode."""
     config = _make_config(tmp_path)
     output_dir = tmp_path / "outputs"
     output_dir.mkdir(parents=True)
@@ -257,9 +257,7 @@ def test_container_executor_timeout_multiplan_metadata(tmp_path: Path, monkeypat
     )
 
     executor = ContainerExecutor(instance, config, output_dir, logger, client=object())
-    context = ExecutionContext(
-        description_type="instructed", description_type_suffix="_multiplan"
-    )
+    context = ExecutionContext(description_type="instructed", mode="multiplan")
     assert executor.run("multiplan", 1, temp_dir, context=context) is False
 
     metadata_path = output_dir / "inference_metadata.json"
@@ -267,4 +265,5 @@ def test_container_executor_timeout_multiplan_metadata(tmp_path: Path, monkeypat
     data = json.loads(metadata_path.read_text(encoding="utf-8"))
     print("timeout multiplan metadata:", data, flush=True)
     assert data["finish_reason"] == "error_multiplan"
-    assert data["description_type"] == "instructed_multiplan"
+    assert data["description_type"] == "instructed"
+    assert data["mode"] == "multiplan"

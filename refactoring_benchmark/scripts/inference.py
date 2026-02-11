@@ -49,9 +49,14 @@ def main():
         sys.exit(1)
 
     logger.info(f"Description Type: {args.description_type}")
-    if args.plan:
+    logger.info(f"Mode: {args.mode}")
+    if args.mode == "plan":
         logger.info("Plan Mode: ENABLED (two-step inference)")
         logger.info(f"  Step 1: Planning phase (timeout: {args.plan_timeout}s)")
+        logger.info(f"  Step 2: Execution phase (timeout: {args.timeout}s)")
+    elif args.mode == "multiplan":
+        logger.info("Multiplan Mode: ENABLED (multi-plan inference)")
+        logger.info(f"  Step 1: Multiplan generation (timeout: {args.plan_timeout}s)")
         logger.info(f"  Step 2: Execution phase (timeout: {args.timeout}s)")
     # Sanitize agent ID for filesystem use
     try:
@@ -101,8 +106,7 @@ def main():
         description_type=args.description_type,
         force_unsuccessful=args.force_unsuccessful,
         reuse_successful_plan=args.reuse_successful_plan,
-        plan=args.plan,
-        multiplan=args.multiplan,
+        mode=args.mode,
         plan_timeout=args.plan_timeout,
     )
 

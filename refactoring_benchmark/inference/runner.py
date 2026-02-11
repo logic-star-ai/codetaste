@@ -7,7 +7,6 @@ from typing import Optional
 import podman
 
 from refactoring_benchmark.inference.models import (
-    ExecutionContext,
     InferenceConfig,
     InferenceMetadata,
 )
@@ -15,6 +14,7 @@ from refactoring_benchmark.inference.steps.plan import PlanStep
 from refactoring_benchmark.inference.steps.multiplan import MultiplanStep
 from refactoring_benchmark.inference.steps.inference import InferenceStep
 from refactoring_benchmark.inference.utils import (
+    build_context,
     copy_agent_config,
     get_instance_output_dir,
     output_exists,
@@ -88,8 +88,10 @@ class InstanceInferenceRunner:
             True if preparation successful, False otherwise
         """
         # reuse plans for non-forced inference or if reusing successful plans
-        should_preserve_plans = self.config.plan and ((not self.config.force) or self.config.reuse_successful_plan)
-        should_preserve_multiplan = self.config.multiplan and (
+        should_preserve_plans = self.config.mode == "plan" and (
+            (not self.config.force) or self.config.reuse_successful_plan
+        )
+        should_preserve_multiplan = self.config.mode == "multiplan" and (
             (not self.config.force) or self.config.reuse_successful_plan
         )
         saved_plan_metadata = None
@@ -169,43 +171,34 @@ class InstanceInferenceRunner:
                 return False
 
             plan_path: Optional[Path] = None
-            multiplan_content: Optional[str] = None
+            plan_content: Optional[str] = None
 
             # Phase 3: Plan step (if enabled)
-            if self.config.plan:
-                plan_step = PlanStep(self.instance, self.config, self.output_dir, self.logger, self.client)
+            step_map = {
+                "plan": (PlanStep, "plan_path"),
+                "multiplan": (MultiplanStep, "plan_content"),
+            }
+            step_entry = step_map.get(self.config.mode)
+            if step_entry:
+                step_cls, payload_key = step_entry
+                step: PlanStep | MultiplanStep = step_cls(self.instance, self.config, self.output_dir, self.logger, self.client)
                 try:
-                    plan_path = plan_step.run()
-                    if not plan_path:
+                    payload = step.run()
+                    if not payload:
                         return False
+                    if payload_key == "plan_path":
+                        plan_path = payload
+                    else:
+                        plan_content = payload
                 finally:
-                    plan_step.cleanup_temp_dir()
-            elif self.config.multiplan:
-                multiplan_step = MultiplanStep(self.instance, self.config, self.output_dir, self.logger, self.client)
-                try:
-                    multiplan_content = multiplan_step.run()
-                    if not multiplan_content:
-                        return False
-                finally:
-                    multiplan_step.cleanup_temp_dir()
+                    step.cleanup_temp_dir()
 
             # Phase 4: Inference step (always executed)
-            if multiplan_content:
+            if plan_content:
                 self.logger.info("Using multiplan content for inference.")
-                context = ExecutionContext(
-                    description_type=self.config.description_type,
-                    description_type_suffix="_multiplan",
-                    plan_content=multiplan_content,
-                )
             elif plan_path:
                 self.logger.info(f"Using plan file for inference. {plan_path}")
-                context = ExecutionContext(
-                    description_type=self.config.description_type,
-                    description_type_suffix="_plan",
-                    plan_path=plan_path,
-                )
-            else:
-                context = ExecutionContext(description_type=self.config.description_type)
+            context = build_context(self.config, plan_path=plan_path, plan_content=plan_content)
 
             inference_step = InferenceStep(self.instance, self.config, self.output_dir, self.logger, self.client)
             try:

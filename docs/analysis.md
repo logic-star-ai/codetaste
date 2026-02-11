@@ -16,7 +16,7 @@ outputs/<description_type>/<mode>/<owner>/<repo>/<hash>/<agent_id>/
 ## What it does
 1. **Discover output directories** (defaults to all `outputs/<description_type>/<mode>` directories).
 2. **Load evaluation results** and attach inference metadata when available.
-3. **Filter** by agent ID, description type, or success status.
+3. **Filter** by agent ID, description type, mode, or success status.
 4. **Compute metrics** (IFR, test success, precision, cost, etc.).
 5. **Generate plots** and optional summary tables.
 
@@ -30,6 +30,9 @@ python -m refactoring_benchmark.scripts.analyze --agent-id agentA --agent-id age
 
 # Only successful inference runs
 python -m refactoring_benchmark.scripts.analyze --successful-only
+
+# Filter by mode
+python -m refactoring_benchmark.scripts.analyze --mode direct --mode plan
 
 # Precision metrics (requires pseudo agents)
 python -m refactoring_benchmark.scripts.analyze --metric precision_overall

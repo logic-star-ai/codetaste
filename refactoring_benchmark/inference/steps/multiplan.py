@@ -9,14 +9,15 @@ from refactoring_benchmark.inference.judge import judge_best_plan
 from refactoring_benchmark.inference.models import (
     ExecutionContext,
     InferenceConfig,
-    InferenceMetadata,
     MultiplanMetadata,
 )
 from refactoring_benchmark.inference.steps.executor import ContainerExecutor
 from refactoring_benchmark.inference.utils import (
+    build_context,
     cleanup_temp_dir,
     prepare_temp_multiplan_description,
     create_fallback_inference_metadata,
+    finalize_step_metadata,
     NUM_MULTIPLAN,
 )
 from refactoring_benchmark.utils.models import InstanceRow
@@ -71,10 +72,7 @@ class MultiplanStep:
             return None
 
         # Execute container to generate multiple plans
-        context = ExecutionContext(
-            description_type=self.config.description_type,
-            description_type_suffix="_multiplan",
-        )
+        context = build_context(self.config, mode="multiplan")
         if not self.executor.run(
             "multiplan",
             self.config.plan_timeout,
@@ -100,7 +98,8 @@ class MultiplanStep:
             create_fallback_inference_metadata(
                 self.output_dir,
                 "error_judge",
-                description_type=context.full_description_type,
+                description_type=context.description_type,
+                mode=context.mode,
                 additional={"error": str(e)},
             )
             return None
@@ -161,7 +160,8 @@ class MultiplanStep:
             create_fallback_inference_metadata(
                 self.output_dir,
                 "error_multiplan",
-                description_type=context.full_description_type,
+                description_type=context.description_type,
+                mode=context.mode,
                 additional={"error": error},
             )
             return False
@@ -183,7 +183,8 @@ class MultiplanStep:
             create_fallback_inference_metadata(
                 self.output_dir,
                 "error_multiplan",
-                description_type=context.full_description_type,
+                description_type=context.description_type,
+                mode=context.mode,
                 additional={"error": error},
             )
             return False
@@ -191,19 +192,13 @@ class MultiplanStep:
         # Rename inference_metadata.json to multiplan_generation_metadata.json
         inference_metadata_path = self.output_dir / "inference_metadata.json"
         multiplan_generation_metadata_path = self.output_dir / "multiplan_generation_metadata.json"
-        if inference_metadata_path.exists():
-            try:
-                inference_metadata_path.rename(multiplan_generation_metadata_path)
-                inference_metadata: InferenceMetadata = InferenceMetadata.load_from_json(
-                    multiplan_generation_metadata_path
-                )
-                inference_metadata.description_type = context.full_description_type
-                inference_metadata.save_to_json(multiplan_generation_metadata_path)
-                self.logger.info("Renamed inference_metadata.json to multiplan_generation_metadata.json")
-            except Exception as e:
-                self.logger.warning(
-                    f"Failed to rename inference_metadata.json to multiplan_generation_metadata.json: {e}"
-                )
+        finalize_step_metadata(
+            src=inference_metadata_path,
+            dst=multiplan_generation_metadata_path,
+            description_type=context.description_type,
+            mode=context.mode,
+            logger=self.logger,
+        )
 
         return True
 

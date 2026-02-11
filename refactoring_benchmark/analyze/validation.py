@@ -2,6 +2,7 @@
 
 from enum import Enum
 
+from refactoring_benchmark.analyze.models import format_type_mode_label
 from refactoring_benchmark.evaluation.models import EvaluationResult
 
 
@@ -32,8 +33,11 @@ def check_test_validity(result: EvaluationResult) -> ValidityStatus:
         if result.inference_metadata.finish_reason != "success":
             i = result.instance_metadata
             a = result.agent_config
+            desc = result.inference_metadata.description_type
+            mode = result.inference_metadata.mode
+            label = format_type_mode_label(desc, mode, separator="/")
             print(
-                f"WARNING: `run_tests` for the agent {a.id} on instance {i.owner}/{i.repo}/{i.base_hash[:8]} [{result.inference_metadata.description_type}] did not produce test results. However the agent also didn't finish successfully. finish_reason={result.inference_metadata.finish_reason}"
+                f"WARNING: `run_tests` for the agent {a.id} on instance {i.owner}/{i.repo}/{i.base_hash[:8]} [{label}] did not produce test results. However the agent also didn't finish successfully. finish_reason={result.inference_metadata.finish_reason}"
             )
         return ValidityStatus.NO_TEST_RESULTS
 

@@ -10,7 +10,7 @@ from pathlib import Path
 import subprocess
 from typing import Optional
 
-from refactoring_benchmark.inference.models import InferenceMetadata
+from refactoring_benchmark.inference.models import ExecutionContext, InferenceConfig, InferenceMetadata
 from refactoring_benchmark.utils.models import InstanceRow
 from podman.domain.containers import Container as PodmanContainer
 
@@ -103,6 +103,7 @@ def create_fallback_inference_metadata(
     cost_usd: float = -1.0,
     additional: Optional[dict] = None,
     description_type: Optional[str] = None,
+    mode: Optional[str] = None,
 ) -> None:
     """
     Create a fallback inference_metadata.json file for crashed or incomplete runs.
@@ -119,6 +120,8 @@ def create_fallback_inference_metadata(
         finish_reason=finish_reason,
         finish_time=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         additional=additional or {},
+        description_type=description_type,
+        mode=mode,
     )
 
     output_path = output_dir / "inference_metadata.json"
@@ -127,9 +130,63 @@ def create_fallback_inference_metadata(
     # Add description_type if provided
     if description_type is not None:
         metadata_dict["description_type"] = description_type
+    if mode is not None:
+        metadata_dict["mode"] = mode
 
     with open(output_path, "w") as f:
         json.dump(metadata_dict, f, indent=2)
+
+
+def finalize_step_metadata(
+    src: Path,
+    dst: Path,
+    description_type: str,
+    mode: str,
+    logger: Optional[logging.Logger] = None,
+) -> None:
+    """Rename step metadata and ensure description_type/mode are persisted."""
+    if not src.exists():
+        message = f"Missing metadata file: {src}"
+        if logger:
+            logger.error(message)
+        raise FileNotFoundError(message)
+
+    try:
+        src.rename(dst)
+        inference_metadata: InferenceMetadata = InferenceMetadata.load_from_json(dst)
+        inference_metadata.description_type = description_type
+        inference_metadata.mode = mode
+        inference_metadata.save_to_json(dst)
+        if logger:
+            logger.info(f"Renamed {src.name} to {dst.name}")
+    except Exception as e:
+        message = f"Failed to rename {src.name} to {dst.name}: {e}"
+        if logger:
+            logger.error(message)
+        raise RuntimeError(message) from e
+
+
+def build_context(
+    config: InferenceConfig,
+    plan_path: Optional[Path] = None,
+    plan_content: Optional[str] = None,
+    mode: Optional[str] = None,
+) -> ExecutionContext:
+    """Build an ExecutionContext with consistent mode/description wiring."""
+    if mode is None:
+        if plan_content is not None:
+            mode = "multiplan"
+        elif plan_path is not None:
+            mode = "plan"
+        else:
+            mode = config.mode
+
+    return ExecutionContext(
+        description_type=config.description_type,
+        mode=mode,
+        plan_path=plan_path,
+        plan_content=plan_content,
+    )
 
 
 def output_exists(output_dir: Path) -> bool:
@@ -169,8 +226,7 @@ def cleanup_temp_dir(temp_description_dir: Path, instance_logger: logging.Logger
 
 def _load_template(instance: InstanceRow, description_type: str) -> str:
     """Internal helper to read a description template from disk."""
-    base_type = description_type.removesuffix("_plan")
-    filename = DESCRIPTION_FILES.get(base_type)
+    filename = DESCRIPTION_FILES.get(description_type)
     if not filename:
         raise ValueError(f"Unknown type: {description_type}. Valid: {list(DESCRIPTION_FILES.keys())}")
 

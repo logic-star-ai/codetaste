@@ -1,4 +1,4 @@
-"""Generate plots comparing agents across description types."""
+"""Generate plots comparing agents across description types and modes."""
 
 from pathlib import Path
 
@@ -63,15 +63,6 @@ METRIC_LABELS = {
     "cost": "Cost (USD)",
 }
 
-DESC_TYPE_MAPPING = {
-    "instructed": "",
-    "instructed_plan": "Instructed Plan",
-    "instructed_multiplan": "Instructed Multiplan",
-    "open": "Direct",
-    "open_plan": "Plan",
-    "open_multiplan": "Multiplan",
-}
-
 AGENT_NAME_MAPPING = {
     "claude-code-v2.0.76-sonnet45": "Sonnet 4.5",
     "codex-v0.77.0-gpt-5.1-codex-mini": "GPT-5.1 M",
@@ -90,30 +81,28 @@ def create_plot(
     config: PlotConfig = PlotConfig(),
 ) -> plt.Figure:
     agents = data.get_agent_ids()
-    description_types = data.get_description_types()
+    type_mode_pairs, mapped_labels = data.get_type_mode_pairs_with_labels()
 
-    if not agents or not description_types:
+    if not agents or not type_mode_pairs:
         raise ValueError("No data to plot")
 
     # Dynamic width for bar plots to keep bars equal width
-    fig_width = (len(description_types) * 1.1 + 2.0) if plot_type == "bar" else config.width
+    fig_width = (len(type_mode_pairs) * 1.1 + 2.0) if plot_type == "bar" else config.width
     fig, ax = plt.subplots(figsize=(fig_width, config.height))
 
     # 1. Labels and Colors
     display_metric = METRIC_LABELS.get(metric_name, metric_name.replace("_", " ").title())
-    mapped_labels = [DESC_TYPE_MAPPING.get(t, t) for t in description_types]
-
     # Using 'turbo' for a bright, high-contrast spectrum
     colors = sns.color_palette("pastel", len(agents))
     markers = ["o", "s", "^", "D", "v", "p", "*", "h"]
 
     # 2. Plotting logic
     if plot_type == "line":
-        _plot_line(ax, data, agents, description_types, colors, aggregation, config, markers)
+        _plot_line(ax, data, agents, type_mode_pairs, colors, aggregation, config, markers)
     elif plot_type == "bar":
-        _plot_bar(ax, data, agents, description_types, colors, aggregation, config, markers)
+        _plot_bar(ax, data, agents, type_mode_pairs, colors, aggregation, config, markers)
     elif plot_type == "scatter":
-        _plot_scatter(ax, data, agents, description_types, colors, aggregation, config, markers)
+        _plot_scatter(ax, data, agents, type_mode_pairs, colors, aggregation, config, markers)
 
     # 3. Axis Configuration
     if config.show_xlabel:
@@ -177,13 +166,13 @@ def _plot_line(
     ax: plt.Axes,
     data: AnalysisData,
     agents: list[str],
-    description_types: list[str],
+    type_mode_pairs: list[tuple[str, str]],
     colors: np.ndarray,
     aggregation: AggregationType,
     config: PlotConfig,
     markers: list[str],
 ) -> None:
-    x = np.arange(len(description_types))
+    x = np.arange(len(type_mode_pairs))
 
     for i, agent_id in enumerate(agents):
         values, margins = [], []
@@ -191,8 +180,8 @@ def _plot_line(
         is_baseline = any(name in agent_id.lower() for name in ["golden", "null"])
         linestyle = ":" if is_baseline else "-"
 
-        for desc_type in description_types:
-            agent_desc_data = data.get_data(agent_id, desc_type)
+        for desc_type, mode in type_mode_pairs:
+            agent_desc_data = data.get_data(agent_id, desc_type, mode)
             if agent_desc_data and agent_desc_data.count > 0:
                 val = agent_desc_data.mean if aggregation == "mean" else agent_desc_data.median
                 values.append(val * 100)
@@ -235,21 +224,21 @@ def _plot_bar(
     ax: plt.Axes,
     data: AnalysisData,
     agents: list[str],
-    description_types: list[str],
+    type_mode_pairs: list[tuple[str, str]],
     colors: np.ndarray,
     aggregation: AggregationType,
     config: PlotConfig,
     markers: list[str],
 ) -> None:
-    x = np.arange(len(description_types))
+    x = np.arange(len(type_mode_pairs))
     width = config.bar_width / len(agents)
 
     for i, agent_id in enumerate(agents):
         values, margins = [], []
         is_baseline = any(name in agent_id.lower() for name in ["golden", "null"])
 
-        for desc_type in description_types:
-            agent_desc_data = data.get_data(agent_id, desc_type)
+        for desc_type, mode in type_mode_pairs:
+            agent_desc_data = data.get_data(agent_id, desc_type, mode)
             if agent_desc_data and agent_desc_data.count > 0:
                 val = agent_desc_data.mean if aggregation == "mean" else agent_desc_data.median
                 values.append(val * 100)
@@ -283,18 +272,18 @@ def _plot_scatter(
     ax: plt.Axes,
     data: AnalysisData,
     agents: list[str],
-    description_types: list[str],
+    type_mode_pairs: list[tuple[str, str]],
     colors: np.ndarray,
     aggregation: AggregationType,
     config: PlotConfig,
     markers: list[str],
 ) -> None:
-    x = np.arange(len(description_types))
+    x = np.arange(len(type_mode_pairs))
 
     for i, agent_id in enumerate(agents):
         values, margins = [], []
-        for desc_type in description_types:
-            agent_desc_data = data.get_data(agent_id, desc_type)
+        for desc_type, mode in type_mode_pairs:
+            agent_desc_data = data.get_data(agent_id, desc_type, mode)
             if agent_desc_data and agent_desc_data.count > 0:
                 val = agent_desc_data.mean if aggregation == "mean" else agent_desc_data.median
                 values.append(val * 100)
