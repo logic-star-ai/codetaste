@@ -15,7 +15,7 @@ python -m refactoring_benchmark.scripts.bootstrap
    - Run tests on **golden** and **base** commits and record metrics.
    - Commit the container as the **setup image**.
 3. **Runtime phase** (`bootstrap/runtime.py`)
-   - Inject `entrypoint.sh` and rule assets.
+   - Inject `refactoring_benchmark/bootstrap/entrypoint.sh` and rule assets.
    - Apply security hardening and prepare for agent execution.
    - Commit the container as the **runtime image**.
 

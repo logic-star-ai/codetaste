@@ -60,7 +60,7 @@ def bootstrap_runtime_phase(
         )
 
         # 1. Inject Entrypoint
-        entrypoint_path = project_root / "entrypoint.sh"
+        entrypoint_path = project_root / "refactoring_benchmark" / "bootstrap" / "entrypoint.sh"
         with open(entrypoint_path, "rb") as f:
             podman_utils.copy_to_container(container, f.read(), "/usr/local/bin/entrypoint.sh")
         container.exec_run(["bash", "-c", "timeout 5m sudo chmod +x /usr/local/bin/entrypoint.sh"])

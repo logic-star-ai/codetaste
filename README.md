@@ -67,7 +67,7 @@ refactoring_benchmark/
   tools/            # Utilities for pseudo agents, descriptions, analysis
 assets/             # Rules, descriptions, diffs
 instance_images/    # Per-instance bootstrap artifacts
-entrypoint.sh       # Container entrypoint for inference/evaluation
+refactoring_benchmark/bootstrap/entrypoint.sh  # Container entrypoint for inference/evaluation
 instances.csv       # Benchmark instance definitions
 ```
 
@@ -83,7 +83,7 @@ instances.csv       # Benchmark instance definitions
 - **Inference**: `python -m refactoring_benchmark.scripts.inference`
 - **Evaluation**: `python -m refactoring_benchmark.scripts.evaluate`
 - **Analysis**: `python -m refactoring_benchmark.scripts.analyze`
-- **Pseudo agents**: `python -m refactoring_benchmark.tools.create_pseudo_agents`
+- **Golden and Null agents**: `python -m refactoring_benchmark.tools.create_pseudo_agents`
 
 ## Outputs (per instance + agent)
 ```
