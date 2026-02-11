@@ -32,7 +32,7 @@ python -m refactoring_benchmark.scripts.bootstrap \
 python -m refactoring_benchmark.scripts.inference \
   --instances 10 \
   --agent-dir ./agents/your-agent \
-  --description-type standard
+  --description-type instructed
 ```
 
 ### 3) Evaluate outputs
@@ -67,7 +67,7 @@ instances.csv       # Benchmark instance definitions
 - **Instance**: A specific repo + commit pair with rules and descriptions.
 - **Prediction**: Agent output stored as `prediction.diff`.
 - **IFR (Instruction Following Rate)**: How well rules are followed.
-- **Description types**: Task detail level (standard or abstract). Abstract can be used in normal, plan, or multiplan modes.
+- **Description types**: Task detail level (`instructed` or `open`). Both can be used in direct, plan, or multiplan modes.
 
 ## Tools & scripts
 - **Bootstrap**: `python -m refactoring_benchmark.scripts.bootstrap`
@@ -78,7 +78,7 @@ instances.csv       # Benchmark instance definitions
 
 ## Outputs (per instance + agent)
 ```
-output/<owner>/<repo>/<hash>/<agent_id>/
+outputs/<description_type>/<mode>/<owner>/<repo>/<hash>/<agent_id>/
   prediction.diff
   inference_metadata.json
   evaluation/
@@ -86,6 +86,12 @@ output/<owner>/<repo>/<hash>/<agent_id>/
     rules_positive.sarif
     rules_negative.sarif
     test_output.txt
+```
+
+## Migration (breaking change)
+To move legacy `output*` folders into the new layout and rewrite metadata:
+```bash
+python -m refactoring_benchmark.tools.migrate_outputs
 ```
 
 ## Documentation

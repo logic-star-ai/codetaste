@@ -51,10 +51,10 @@ python -m refactoring_benchmark.scripts.inference
 - `error_judge`: judge failed.
 
 ## Description type suffixes
-- Standard inference: `description_type`
+- Direct inference: `description_type`
 - Plan inference: `description_type_plan`
 - Multiplan inference: `description_type_multiplan`
 
 ## Description types
-- `standard`: full task description.
-- `abstract`: higher‑level abstract description (can be used in normal, plan, or multiplan modes).
+- `instructed`: full task description.
+- `open`: higher‑level abstract description (can be used in normal, plan, or multiplan modes).

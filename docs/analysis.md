@@ -7,8 +7,14 @@ The analysis phase aggregates evaluation results across agents and description t
 python -m refactoring_benchmark.scripts.analyze
 ```
 
+## Output layout
+Results are expected under:
+```
+outputs/<description_type>/<mode>/<owner>/<repo>/<hash>/<agent_id>/
+```
+
 ## What it does
-1. **Discover output directories** (defaults to all `output*` folders).
+1. **Discover output directories** (defaults to all `outputs/<description_type>/<mode>` directories).
 2. **Load evaluation results** and attach inference metadata when available.
 3. **Filter** by agent ID, description type, or success status.
 4. **Compute metrics** (IFR, test success, precision, cost, etc.).
@@ -38,6 +44,6 @@ Precision metrics require evaluated **pseudo agents** (`golden_agent` and `null_
 Use:
 ```bash
 python -m refactoring_benchmark.tools.create_pseudo_agents --agent golden --agent null
-python -m refactoring_benchmark.scripts.evaluate --agent-id golden_agent
-python -m refactoring_benchmark.scripts.evaluate --agent-id null_agent
+python -m refactoring_benchmark.scripts.evaluate --agent-id golden_agent --output-dir outputs/pseudo_agents/direct
+python -m refactoring_benchmark.scripts.evaluate --agent-id null_agent --output-dir outputs/pseudo_agents/direct
 ```

@@ -21,7 +21,7 @@ python -m refactoring_benchmark.scripts.evaluate
 
 ## Outputs
 ```
-output/<owner>/<repo>/<hash>/<agent_id>/evaluation/
+outputs/<description_type>/<mode>/<owner>/<repo>/<hash>/<agent_id>/evaluation/
   evaluation_result.json
   rules_positive.sarif
   rules_negative.sarif
