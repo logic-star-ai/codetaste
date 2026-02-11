@@ -74,10 +74,9 @@ run_group() {
   done
 }
 
-run_group "standard" "./output"
-run_group "abstract" "./output_abstract" "./output_abstract_plan" "./output_abstract_multiplan"
+run_group "instructed" "./outputs/instructed/direct"
+run_group "open" "./outputs/open/direct" "./outputs/open/plan" "./outputs/open/multiplan"
 
 # Examples for other datasets:
-# run_group "open" "./output_open"
-# run_group "standard_cp" "./output_cp"
-# run_group "abstract_cp" "./output_abstract_cp" "./output_abstract_plan_cp" "./output_abstract_multiplan_cp"
+# run_group "standard_cp" "./outputs_legacy/output_cp"
+# run_group "abstract_cp" "./outputs_legacy/output_abstract_cp" "./outputs_legacy/output_abstract_plan_cp" "./outputs_legacy/output_abstract_multiplan_cp"

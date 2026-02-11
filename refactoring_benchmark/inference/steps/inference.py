@@ -95,7 +95,7 @@ class InferenceStep:
                 content=plan_content_from_file,
             )
         else:
-            # Standard mode: use standard description
+            # Instructed/Open mode: use description template
             self.temp_description_dir = prepare_temp_task_description(
                 self.instance,
                 logger=self.logger,

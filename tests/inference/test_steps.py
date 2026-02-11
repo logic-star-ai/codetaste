@@ -35,7 +35,7 @@ def _make_config(tmp_path: Path) -> InferenceConfig:
         agent_config=agent_config,
         sanitized_agent_id="agent-1",
         env_vars={},
-        description_type="standard",
+        description_type="instructed",
         plan=False,
         multiplan=False,
         plan_timeout=10,
@@ -56,7 +56,7 @@ def _make_instance() -> InstanceRow:
 def test_plan_step_reuses_successful_plan(tmp_path, monkeypatch):
     """PlanStep skips container run when a successful plan already exists."""
     config = _make_config(tmp_path)
-    output_dir = tmp_path / "output"
+    output_dir = tmp_path / "outputs"
     output_dir.mkdir(parents=True)
     logger = logging.getLogger("test.plan")
     logger.addHandler(logging.NullHandler())
@@ -85,7 +85,7 @@ def test_plan_step_reuses_successful_plan(tmp_path, monkeypatch):
 def test_multiplan_step_reuses_successful_multiplan(tmp_path, monkeypatch):
     """MultiplanStep reuses existing plans and skips judging/containers."""
     config = _make_config(tmp_path)
-    output_dir = tmp_path / "output"
+    output_dir = tmp_path / "outputs"
     output_dir.mkdir(parents=True)
     logger = logging.getLogger("test.multiplan")
     logger.addHandler(logging.NullHandler())
@@ -127,7 +127,7 @@ def test_multiplan_step_reuses_successful_multiplan(tmp_path, monkeypatch):
 def test_inference_step_uses_context_for_description_selection(tmp_path, monkeypatch):
     """InferenceStep selects description source based on context fields."""
     config = _make_config(tmp_path)
-    output_dir = tmp_path / "output"
+    output_dir = tmp_path / "outputs"
     output_dir.mkdir(parents=True)
     logger = logging.getLogger("test.inference")
     logger.addHandler(logging.NullHandler())
@@ -161,7 +161,7 @@ def test_inference_step_uses_context_for_description_selection(tmp_path, monkeyp
     step.executor.run = fake_run
 
     context = ExecutionContext(
-        description_type="standard",
+        description_type="instructed",
         description_type_suffix="_multiplan",
         plan_content="plan",
     )
@@ -172,7 +172,7 @@ def test_inference_step_uses_context_for_description_selection(tmp_path, monkeyp
     plan_path = output_dir / "refactoring_plan.md"
     plan_path.write_text("plan file", encoding="utf-8")
     context = ExecutionContext(
-        description_type="standard",
+        description_type="instructed",
         description_type_suffix="_plan",
         plan_path=plan_path,
     )
@@ -180,7 +180,7 @@ def test_inference_step_uses_context_for_description_selection(tmp_path, monkeyp
     assert captured["description_type"] is None
     assert captured["content"] == "plan file"
 
-    context = ExecutionContext(description_type="standard")
+    context = ExecutionContext(description_type="instructed")
     assert step.run(context) is True
-    assert captured["description_type"] == "standard"
+    assert captured["description_type"] == "instructed"
     assert captured["content"] is None

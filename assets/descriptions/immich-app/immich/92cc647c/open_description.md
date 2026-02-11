@@ -1,1 +1,1 @@
-Refactor the codebase to increase maintainability.
+Consolidate scattered utilities and shared code.

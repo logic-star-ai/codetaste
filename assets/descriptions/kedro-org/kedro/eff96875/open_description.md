@@ -1,1 +1,1 @@
-Refactor the codebase to increase maintainability.
+Rename data catalog class

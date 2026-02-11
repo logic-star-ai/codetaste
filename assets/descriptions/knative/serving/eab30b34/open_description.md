@@ -1,1 +1,1 @@
-Refactor the codebase to increase maintainability.
+Reorganize test utilities for better code organization.

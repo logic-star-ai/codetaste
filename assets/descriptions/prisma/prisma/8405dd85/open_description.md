@@ -1,1 +1,1 @@
-Refactor the codebase to increase maintainability.
+Improve package modularity and separation of concerns

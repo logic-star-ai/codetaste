@@ -1,1 +1,1 @@
-Refactor the codebase to increase maintainability.
+Migrate functional tests to shared library

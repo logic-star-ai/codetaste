@@ -33,7 +33,7 @@ def _make_config(tmp_path: Path) -> InferenceConfig:
         agent_config=agent_config,
         sanitized_agent_id="agent-1",
         env_vars={},
-        description_type="standard",
+        description_type="instructed",
         plan=False,
         multiplan=False,
         plan_timeout=10,
@@ -54,7 +54,7 @@ def _make_instance() -> InstanceRow:
 def test_container_executor_timeout_uses_context_suffix(tmp_path, monkeypatch):
     """Timeout metadata uses ExecutionContext suffix for description_type."""
     config = _make_config(tmp_path)
-    output_dir = tmp_path / "output"
+    output_dir = tmp_path / "outputs"
     output_dir.mkdir(parents=True)
     temp_dir = tmp_path / "task"
     temp_dir.mkdir(parents=True)
@@ -86,7 +86,7 @@ def test_container_executor_timeout_uses_context_suffix(tmp_path, monkeypatch):
 
     executor = ContainerExecutor(instance, config, output_dir, logger, client=object())
     context = ExecutionContext(
-        description_type="standard",
+        description_type="instructed",
         description_type_suffix="_plan",
     )
     success = executor.run("inference", 1, temp_dir, context=context)
@@ -96,13 +96,13 @@ def test_container_executor_timeout_uses_context_suffix(tmp_path, monkeypatch):
     assert metadata_path.exists()
     data = json.loads(metadata_path.read_text(encoding="utf-8"))
     assert data["finish_reason"] == "timeout"
-    assert data["description_type"] == "standard_plan"
+    assert data["description_type"] == "instructed_plan"
 
 
 def test_inference_step_writes_context_description_type(tmp_path, monkeypatch):
     """Inference writes context.full_description_type into metadata."""
     config = _make_config(tmp_path)
-    output_dir: Path = tmp_path / "output"
+    output_dir: Path = tmp_path / "outputs"
     output_dir.mkdir(parents=True)
     logger = logging.getLogger("test.inference")
     logger.addHandler(logging.NullHandler())
@@ -132,7 +132,7 @@ def test_inference_step_writes_context_description_type(tmp_path, monkeypatch):
     step.executor.run = fake_run
 
     context = ExecutionContext(
-        description_type="abstract",
+        description_type="open",
         description_type_suffix="_multiplan",
         plan_content="plan",
     )
@@ -141,16 +141,16 @@ def test_inference_step_writes_context_description_type(tmp_path, monkeypatch):
     data = json.loads(
         (output_dir / "inference_metadata.json").read_text(encoding="utf-8")
     )
-    assert data["description_type"] == "abstract_multiplan"
+    assert data["description_type"] == "open_multiplan"
 
 
 def test_execution_context_full_description_type():
     """ExecutionContext concatenates base description_type and suffix."""
     context = ExecutionContext(
-        description_type="standard",
+        description_type="instructed",
         description_type_suffix="_plan",
     )
-    assert context.full_description_type == "standard_plan"
+    assert context.full_description_type == "instructed_plan"
 
-    context = ExecutionContext(description_type="standard")
-    assert context.full_description_type == "standard"
+    context = ExecutionContext(description_type="instructed")
+    assert context.full_description_type == "instructed"

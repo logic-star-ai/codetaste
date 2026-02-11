@@ -1,93 +1,107 @@
+# Refactoring Benchmark
 
+A benchmarking framework for evaluating AI agents on real-world code refactoring tasks. It builds per‑instance execution environments, runs agents in locked‑down containers, evaluates outputs with tests + static rules, and aggregates results into plots and tables.
 
-## Usage
+## What this repo provides
+- **Bootstrap**: Build per‑instance Podman images and collect baseline test metrics.
+- **Inference**: Run agents to generate patches (`prediction.diff`) with optional planning modes.
+- **Evaluation**: Apply patches, run tests, and compute rule‑based metrics (IFR).
+- **Analysis**: Aggregate results across agents/description types and generate plots.
 
-### Bootstrap Benchmark Instances
+## Requirements
+- **Python** (see `pyproject.toml`) with Poetry.
+- **Podman** for container execution.
+- **opengrep** for rule evaluation inside containers.
+- **Anthropic API key** for bootstrap setup agent and multiplan judge (if used).
 
+## Quickstart
 ```bash
-python -m refactoring_benchmark.scripts.bootstrap --help
+poetry install
+export ANTHROPIC_API_KEY=...  # required for bootstrap and multiplan judge
 ```
 
-```
-usage: bootstrap.py [-h] [--instances INSTANCES] [--instances-csv INSTANCES_CSV] [--nr-workers NR_WORKERS] [--force-runtime-build] [--rerun-metrics] [--force-full-build]
-
-Bootstrap benchmark instances
-
-options:
-  -h, --help            show this help message and exit
-  --instances INSTANCES
-                        Number of instances to bootstrap (default: 10)
-  --instances-csv INSTANCES_CSV
-                        Path to instances CSV file (default: ./instances.csv)
-  --nr-workers NR_WORKERS
-                        Number of parallel workers (default: 4)
-  --force-runtime-build
-                        Force rebuild of runtime images even if they exist (reuses setup image and metadata)
-  --rerun-metrics       Rerun metrics collection on existing setup images (cheap, reuses agent setup)
-  --force-full-build    Force full rebuild from scratch: setup + runtime (expensive, reruns agent)
-```
-
-### Inference Phase
-
+### 1) Bootstrap instances
 ```bash
-python -m refactoring_benchmark.scripts.inference --help
+python -m refactoring_benchmark.scripts.bootstrap \
+  --instances 10 \
+  --instances-csv ./instances.csv
 ```
 
-```
-Run inference on benchmark instances using agent scripts.
-
-options:
-  -h, --help            show this help message and exit
-  --instances INSTANCES
-                        Number of instances to run from the CSV file (default: 15)
-  --instances-csv INSTANCES_CSV
-                        Path to the instances CSV file (default: instances.csv)
-  --nr-workers NR_WORKERS
-                        Number of parallel workers (threads) for inference (default: 4)
-  --agent-dir AGENT_DIR
-                        Path to the agent directory containing setup_system.sh, run_agent, and agent_config.json (default: agent)
-  --output-dir OUTPUT_DIR
-                        Base directory for inference outputs (default: None)
-  --timeout TIMEOUT     Timeout in seconds for each instance inference (default: 3600)
-  --force               Force re-run inference even if outputs already exist (default: False)
-  --env KEY=VALUE       Environment variable to pass to containers (can be specified multiple times) (default: [])
-  --description-type {standard,minimal,open,nano}
-                        Type of task description to use (standard: full description, minimal: title and summary only, open: open-ended refactoring prompt, nano: very brief description) (default: standard)
-```
-
-### Evaluation Phase
-
+### 2) Run inference
 ```bash
-python -m refactoring_benchmark.scripts.evaluate --help
+python -m refactoring_benchmark.scripts.inference \
+  --instances 10 \
+  --agent-dir ./agents/your-agent \
+  --description-type instructed
 ```
 
-```
-usage: evaluate.py [-h] [--instances INSTANCES] [--instances-csv INSTANCES_CSV] --agent-id AGENT_ID [--nr-workers NR_WORKERS] [--output-dir OUTPUT_DIR] [--timeout-test TIMEOUT_TEST] [--timeout-rule TIMEOUT_RULE] [--force]
-
-Evaluate inference results using test and rule-based metrics.
-
-options:
-  -h, --help            show this help message and exit
-  --instances INSTANCES
-                        Number of instances to run from the CSV file (default: 15)
-  --instances-csv INSTANCES_CSV
-                        Path to the instances CSV file (default: instances.csv)
-  --agent-id AGENT_ID   Agent ID to evaluate (must match directory name in output) (default: None)
-  --nr-workers NR_WORKERS
-                        Number of parallel workers (threads) for evaluation (default: 4)
-  --output-dir OUTPUT_DIR
-                        Base directory for inference outputs (default: output)
-  --timeout-test TIMEOUT_TEST
-                        Timeout in seconds for test evaluation (default: 20 minutes) (default: 1200)
-  --timeout-rule TIMEOUT_RULE
-                        Timeout in seconds for rule evaluation (default: 20 minutes) (default: 1200)
-  --force               Force re-evaluation even if results already exist (default: False)
-```
-
-### Analyze Phase
-
-To compute and plot precision, the following `output_pseudo_agents/` directory must exist and must contain the pseudo-agents `null_agent` and `golden_agent` and it must have been evaluated as we need the sarif files.
-
+### 3) Evaluate outputs
 ```bash
-python -m refactoring_benchmark.scripts.analyze --help
+python -m refactoring_benchmark.scripts.evaluate \
+  --instances 10 \
+  --agent-id your-agent-id
 ```
+
+### 4) Analyze
+```bash
+python -m refactoring_benchmark.scripts.analyze --metric ifr --plot-type line
+```
+
+## Project layout
+```
+refactoring_benchmark/
+  bootstrap/        # Phase 1: container image setup
+  inference/        # Phase 2: agent execution
+  evaluation/       # Phase 3: tests + rule evaluation
+  analyze/          # Phase 4: analysis and plotting
+  podman/           # Podman helpers
+  utils/            # Shared models + helpers
+  tools/            # Utilities for pseudo agents, descriptions, analysis
+assets/             # Rules, descriptions, diffs
+instance_images/    # Per-instance bootstrap artifacts
+entrypoint.sh       # Container entrypoint for inference/evaluation
+instances.csv       # Benchmark instance definitions
+```
+
+## Core concepts
+- **Instance**: A specific repo + commit pair with rules and descriptions.
+- **Prediction**: Agent output stored as `prediction.diff`.
+- **IFR (Instruction Following Rate)**: How well rules are followed.
+- **Description types**: Task detail level (`instructed` or `open`). Both can be used in direct, plan, or multiplan modes.
+
+## Tools & scripts
+- **Bootstrap**: `python -m refactoring_benchmark.scripts.bootstrap`
+- **Inference**: `python -m refactoring_benchmark.scripts.inference`
+- **Evaluation**: `python -m refactoring_benchmark.scripts.evaluate`
+- **Analysis**: `python -m refactoring_benchmark.scripts.analyze`
+- **Pseudo agents**: `python -m refactoring_benchmark.tools.create_pseudo_agents`
+
+## Outputs (per instance + agent)
+```
+outputs/<description_type>/<mode>/<owner>/<repo>/<hash>/<agent_id>/
+  prediction.diff
+  inference_metadata.json
+  evaluation/
+    evaluation_result.json
+    rules_positive.sarif
+    rules_negative.sarif
+    test_output.txt
+```
+
+## Migration (breaking change)
+To move legacy `output*` folders into the new layout and rewrite metadata:
+```bash
+python -m refactoring_benchmark.tools.migrate_outputs
+```
+
+## Documentation
+Detailed phase docs:
+- `docs/bootstrap.md`
+- `docs/inference.md`
+- `docs/evaluation.md`
+- `docs/analysis.md`
+
+## Notes for public release
+- The benchmark uses **Podman** (not Docker) by default.
+- `entrypoint.sh` supports `inference`, `plan`, `multiplan`, `eval_test`, `eval_rule`.
+- Some workflows assume `assets/` and `instance_images/` are populated.

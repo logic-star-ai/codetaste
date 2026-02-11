@@ -47,7 +47,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("./output"),
+        default=Path("./outputs/instructed/direct"),
         help="Base directory for inference outputs",
     )
 

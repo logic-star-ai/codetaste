@@ -115,24 +115,24 @@ def metric_total_score(result: EvaluationResult) -> float | None:
 
 
 def _calculate_precision(result: EvaluationResult) -> InstanceAgentPrecision | None:
-    """Helper to calculate precision metrics (requires ./output_pseudo_agents/)."""
+    """Helper to calculate precision metrics (requires ./outputs/pseudo_agents/direct/)."""
     return calculate_precision_eval_result(result)
 
 
 def metric_precision_added(result: EvaluationResult) -> float | None:
-    """Precision of added lines (requires ./output_pseudo_agents/)."""
+    """Precision of added lines (requires ./outputs/pseudo_agents/direct/)."""
     precision_result = _calculate_precision(result)
     return precision_result.metrics.precision_added if precision_result else None
 
 
 def metric_precision_removed(result: EvaluationResult) -> float | None:
-    """Precision of removed lines (requires ./output_pseudo_agents/)."""
+    """Precision of removed lines (requires ./outputs/pseudo_agents/direct/)."""
     precision_result = _calculate_precision(result)
     return precision_result.metrics.precision_removed if precision_result else None
 
 
 def metric_precision_overall(result: EvaluationResult) -> float | None:
-    """Overall precision (requires ./output_pseudo_agents/)."""
+    """Overall precision (requires ./outputs/pseudo_agents/direct/)."""
     precision_result = _calculate_precision(result)
     return precision_result.metrics.precision_overall if precision_result else None
 

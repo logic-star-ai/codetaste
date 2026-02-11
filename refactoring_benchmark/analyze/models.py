@@ -19,7 +19,7 @@ class AgentDescriptionData(BaseModel):
     """All metric values for one (agent_id, description_type) combination."""
 
     agent_id: str = Field(description="Agent identifier")
-    description_type: str = Field(description="Description type (standard, minimal, nano, open)")
+    description_type: str = Field(description="Description type (instructed, open)")
     metric_values: list[MetricPoint] = Field(default_factory=list, description="One value per instance")
 
     @property
@@ -121,7 +121,7 @@ class AnalysisData(BaseModel):
 
     def get_description_types(self) -> list[str]:
         """Get sorted list of unique description types."""
-        d = {"open": 0, "abstract": 10, "problem": 20, "nano": 30, "standard": 40}
+        d = {"instructed": 10, "open": 20}
         d_suffix = {"": 0, "plan": 1, "multiplan": 2}
 
         def sort_description_type(desc_type: str) -> tuple[int, int]:

@@ -1,1 +1,1 @@
-Refactor the codebase to increase maintainability.
+Simplify the HLE logging interface.

@@ -29,7 +29,7 @@ def _make_config(tmp_path: str) -> InferenceConfig:
         agent_config=agent_config,
         sanitized_agent_id="agent-1",
         env_vars={},
-        description_type="standard",
+        description_type="instructed",
         plan=False,
         multiplan=False,
         plan_timeout=10,
@@ -59,7 +59,7 @@ def test_runner_wires_plan_context(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(
         "refactoring_benchmark.inference.runner.get_instance_output_dir",
-        lambda *_args, **_kwargs: tmp_path / "output",
+        lambda *_args, **_kwargs: tmp_path / "outputs",
     )
     monkeypatch.setattr(
         "refactoring_benchmark.inference.runner.copy_agent_config",
@@ -82,7 +82,7 @@ def test_runner_wires_plan_context(tmp_path, monkeypatch):
             return None
 
         def run(self):
-            return tmp_path / "output" / "refactoring_plan.md"
+            return tmp_path / "outputs" / "refactoring_plan.md"
 
         def cleanup_temp_dir(self):
             return None
@@ -106,7 +106,7 @@ def test_runner_wires_plan_context(tmp_path, monkeypatch):
     runner = runner_module.InstanceInferenceRunner(instance, config)
     assert runner.run() is True
     assert captured["suffix"] == "_plan"
-    assert captured["plan_path"] == tmp_path / "output" / "refactoring_plan.md"
+    assert captured["plan_path"] == tmp_path / "outputs" / "refactoring_plan.md"
     assert captured["plan_content"] is None
 
 
@@ -122,7 +122,7 @@ def test_runner_wires_multiplan_context(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(
         "refactoring_benchmark.inference.runner.get_instance_output_dir",
-        lambda *_args, **_kwargs: tmp_path / "output",
+        lambda *_args, **_kwargs: tmp_path / "outputs",
     )
     monkeypatch.setattr(
         "refactoring_benchmark.inference.runner.copy_agent_config",
@@ -173,8 +173,8 @@ def test_runner_wires_multiplan_context(tmp_path, monkeypatch):
     assert captured["plan_content"] == "plan content"
 
 
-def test_runner_wires_standard_context(tmp_path, monkeypatch):
-    """Runner passes standard context when no plan/multiplan is set."""
+def test_runner_wires_instructed_context(tmp_path, monkeypatch):
+    """Runner passes instructed context when no plan/multiplan is set."""
     config = _make_config(tmp_path)
     instance = _make_instance()
 
@@ -184,7 +184,7 @@ def test_runner_wires_standard_context(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(
         "refactoring_benchmark.inference.runner.get_instance_output_dir",
-        lambda *_args, **_kwargs: tmp_path / "output",
+        lambda *_args, **_kwargs: tmp_path / "outputs",
     )
     monkeypatch.setattr(
         "refactoring_benchmark.inference.runner.copy_agent_config",

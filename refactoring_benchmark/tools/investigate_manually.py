@@ -4,7 +4,7 @@ Investigate benchmark instances manually.
 
 For each instance, prints:
 - Raw CSV line
-- Nano description
+- Requested description
 - First 75 lines of positive rules
 - First 75 lines of negative rules
 
@@ -51,7 +51,7 @@ def investigate_instance(row: dict, base_path: Path, description_type: str) -> N
     Args:
         row: Dictionary from CSV DictReader
         base_path: Base path for the repository (parent of assets/)
-        description_type: Type of description to use (e.g., 'nano')
+        description_type: Type of description to use (e.g., 'open')
     """
     owner = row["owner"]
     repo = row["repo"]
@@ -67,7 +67,11 @@ def investigate_instance(row: dict, base_path: Path, description_type: str) -> N
     descriptions_dir = base_path / "assets" / "descriptions"
     rules_dir = base_path / "assets" / "rules"
 
-    nano_desc_path = descriptions_dir / owner / repo / short_hash / f"{description_type}_description.md"
+    if description_type == "instructed":
+        desc_filename = "description.md"
+    else:
+        desc_filename = f"{description_type}_description.md"
+    nano_desc_path = descriptions_dir / owner / repo / short_hash / desc_filename
     positive_rules_path = rules_dir / owner / repo / short_hash / "rules_positive.yml"
     negative_rules_path = rules_dir / owner / repo / short_hash / "rules_negative.yml"
 
@@ -77,11 +81,11 @@ def investigate_instance(row: dict, base_path: Path, description_type: str) -> N
     print("=" * 80)
     print()
 
-    # Print nano description
+    # Print description
     print(f"{description_type.capitalize()} Description:")
     print("-" * 80)
-    nano_content = read_file_lines(nano_desc_path, max_lines=999999)  # Read full nano (usually 1 line)
-    print(nano_content)
+    desc_content = read_file_lines(nano_desc_path, max_lines=999999)
+    print(desc_content)
     print()
 
     # Print first 75 lines of positive rules
@@ -111,7 +115,7 @@ def main():
 
     parser.add_argument("--nr_instances", type=int, required=True, help="Number of instances to investigate")
     parser.add_argument(
-        "--description-type", type=str, default="nano", help="Type of description to use (default: nano)"
+        "--description-type", type=str, default="open", help="Type of description to use (default: open)"
     )
 
     args = parser.parse_args()

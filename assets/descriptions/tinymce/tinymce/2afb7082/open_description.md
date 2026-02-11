@@ -1,1 +1,1 @@
-Refactor the codebase to increase maintainability.
+Remove legacy browser compatibility code

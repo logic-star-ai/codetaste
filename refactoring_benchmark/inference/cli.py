@@ -87,8 +87,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--description-type",
         type=str,
-        default="standard",
-        help="Type of task description to use (standard: full description, minimal: title and summary only, open: open-ended refactoring prompt, nano: very brief description, files: open-ended with key files from golden diff, problem: autonomous problem-solving prompt, or any custom type)",
+        default="instructed",
+        choices=["instructed", "open"],
+        help="Type of task description to use (instructed: full description, open: higher-level abstract description)",
     )
 
     parser.add_argument(
@@ -114,16 +115,13 @@ def parse_args() -> argparse.Namespace:
 
     # Convert paths to absolute
     if args.output_dir is None:
-        if args.description_type == "standard":
-            base_name = "output"
-        else:
-            base_name = f"output_{args.description_type}"
+        base_name = "outputs"
+        mode = "direct"
         if args.multiplan:
-            args.output_dir = Path(f"./{base_name}_multiplan")
+            mode = "multiplan"
         elif args.plan:
-            args.output_dir = Path(f"./{base_name}_plan")
-        else:
-            args.output_dir = Path(f"./{base_name}")
+            mode = "plan"
+        args.output_dir = Path(base_name) / args.description_type / mode
     args.agent_dir = args.agent_dir.resolve()
     args.output_dir = args.output_dir.resolve()
     args.instances_csv = args.instances_csv.resolve()

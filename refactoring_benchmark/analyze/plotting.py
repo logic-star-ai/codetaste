@@ -64,11 +64,12 @@ METRIC_LABELS = {
 }
 
 DESC_TYPE_MAPPING = {
-    "standard": "",  # Instructed Track"
-    "abstract": "Direct",
-    "abstract_plan": "Plan",
-    "abstract_multiplan": "Multiplan",
-    "open": "Open",
+    "instructed": "",
+    "instructed_plan": "Instructed Plan",
+    "instructed_multiplan": "Instructed Multiplan",
+    "open": "Direct",
+    "open_plan": "Plan",
+    "open_multiplan": "Multiplan",
 }
 
 AGENT_NAME_MAPPING = {

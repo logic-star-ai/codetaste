@@ -1,1 +1,0 @@
-Consolidate integration models.

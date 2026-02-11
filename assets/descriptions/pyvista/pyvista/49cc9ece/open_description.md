@@ -1,1 +1,1 @@
-Refactor the codebase to increase maintainability.
+Decouple core and visualization components.

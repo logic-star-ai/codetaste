@@ -1,1 +1,1 @@
-Refactor the codebase to increase maintainability.
+Refactor functional test page objects

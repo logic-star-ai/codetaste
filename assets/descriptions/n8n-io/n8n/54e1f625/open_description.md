@@ -1,1 +1,0 @@
-Without any user intervention. Improve and refactor the entire codebase. Perform modifications on the actual codebase; do NOT output analysis, plan, roadmap or similar files.

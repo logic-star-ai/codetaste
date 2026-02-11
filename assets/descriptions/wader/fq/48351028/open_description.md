@@ -1,1 +1,1 @@
-Refactor the codebase to increase maintainability.
+Update to current standards and conventions

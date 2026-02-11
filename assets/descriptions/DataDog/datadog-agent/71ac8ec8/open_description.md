@@ -1,1 +1,1 @@
-Refactor the codebase to increase maintainability.
+Remove global accessors and use dependency injection.

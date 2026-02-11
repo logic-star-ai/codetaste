@@ -1,1 +1,1 @@
-Refactor the codebase to increase maintainability.
+Decouple troubleshoot module for independent use.

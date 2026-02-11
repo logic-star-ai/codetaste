@@ -115,7 +115,7 @@ def main():
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path(__file__).parent.parent.parent / "output",
+        default=Path(__file__).parent.parent.parent / "outputs" / "pseudo_agents" / "direct",
         help="Base directory for pseudo agent outputs",
     )
 

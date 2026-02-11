@@ -1,1 +1,1 @@
-Refactor the codebase to increase maintainability.
+Fix module import structure

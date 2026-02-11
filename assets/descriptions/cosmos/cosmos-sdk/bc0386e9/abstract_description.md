@@ -1,1 +1,0 @@
-Refactor legacy message interface

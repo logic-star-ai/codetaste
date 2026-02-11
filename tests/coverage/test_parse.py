@@ -37,7 +37,7 @@ def test_parse_diff_line_count():
 def test_parse_sarif_extracts_lines():
     """Test that parse_sarif correctly extracts lines from SARIF results."""
     # Load SARIF file
-    sarif_path = Path("output/apache/arrow/e434536e/golden_agent/evaluation/rules_positive.sarif")
+    sarif_path = Path("outputs/pseudo_agents/direct/apache/arrow/e434536e/golden_agent/evaluation/rules_positive.sarif")
     with open(sarif_path) as f:
         raw_data = json.load(f)
 
@@ -63,7 +63,7 @@ def test_parse_sarif_extracts_lines():
 def test_parse_sarif_negative_and_diff_intersection():
     """Test computing intersection between SARIF negative results and diff lines."""
     # Load SARIF negative results
-    sarif_path = Path("output/apache/arrow/e434536e/null_agent/evaluation/rules_negative.sarif")
+    sarif_path = Path("outputs/pseudo_agents/direct/apache/arrow/e434536e/null_agent/evaluation/rules_negative.sarif")
     with open(sarif_path) as f:
         sarif_data = json.load(f)
 
@@ -71,7 +71,7 @@ def test_parse_sarif_negative_and_diff_intersection():
     sarif_lines = parse_sarif(sarif, "e434536e")
 
     # Load diff
-    diff_path = Path("output/apache/arrow/e434536e/golden_agent/prediction.diff")
+    diff_path = Path("outputs/pseudo_agents/direct/apache/arrow/e434536e/golden_agent/prediction.diff")
     diff_content = diff_path.read_text()
     _, golden_lines = parse_diff(diff_content, "e434536e", "predicted")
 

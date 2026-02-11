@@ -1,1 +1,1 @@
-Refactor the codebase to increase maintainability.
+Migrate component styling system

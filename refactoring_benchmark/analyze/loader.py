@@ -12,15 +12,18 @@ from refactoring_benchmark.utils.models import InstanceRow
 
 
 def discover_output_dirs(cwd: Path = Path.cwd()) -> list[Path]:
-    """Discover all directories starting with 'output' in the current working directory.
+    """Discover output directories under ./outputs/<description_type>/<mode>.
 
     Args:
         cwd: Working directory to search (defaults to current directory)
 
     Returns:
-        List of directories matching 'output*' pattern, sorted by name
+        List of output directories (e.g., outputs/instructed/direct), sorted by name
     """
-    return sorted([d for d in cwd.iterdir() if d.is_dir() and d.name.startswith("output")])
+    outputs_root = cwd / "outputs"
+    if not outputs_root.exists():
+        return []
+    return sorted([d for d in outputs_root.glob("*/*") if d.is_dir()])
 
 
 def load_all_results(

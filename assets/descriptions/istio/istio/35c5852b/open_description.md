@@ -1,1 +1,1 @@
-Refactor the codebase to increase maintainability.
+Refactor schema models for component convergence
