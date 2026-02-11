@@ -68,7 +68,6 @@ DESC_TYPE_MAPPING = {
     "abstract": "Direct",
     "abstract_plan": "Plan",
     "abstract_multiplan": "Multiplan",
-    "open": "Open",
 }
 
 AGENT_NAME_MAPPING = {

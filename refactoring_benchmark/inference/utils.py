@@ -58,9 +58,6 @@ Task:
 
 DESCRIPTION_FILES = {
     "standard": "description.md",
-    "minimal": "minimal_description.md",
-    "nano": "nano_description.md",
-    "open": "open_description.md",
     "abstract": "abstract_description.md",
 }
 PROJECT_ROOT = Path(__file__).resolve().parents[2]

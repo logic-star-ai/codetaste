@@ -88,7 +88,7 @@ def parse_args() -> argparse.Namespace:
         "--description-type",
         type=str,
         default="standard",
-        help="Type of task description to use (standard: full description, minimal: title and summary only, open: open-ended refactoring prompt, nano: very brief description, files: open-ended with key files from golden diff, problem: autonomous problem-solving prompt, or any custom type)",
+        help="Type of task description to use (standard: full description, abstract: higher-level abstract description)",
     )
 
     parser.add_argument(

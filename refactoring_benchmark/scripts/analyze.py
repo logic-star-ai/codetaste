@@ -28,13 +28,13 @@ Examples:
   python -m refactoring_benchmark.scripts.analyze
 
   # Specify output directories
-  python -m refactoring_benchmark.scripts.analyze --output-dir output --output-dir output_nano
+  python -m refactoring_benchmark.scripts.analyze --output-dir output --output-dir output_abstract
 
   # Filter by agent
   python -m refactoring_benchmark.scripts.analyze --agent-id agent1 --agent-id agent2
 
   # Filter by description type
-  python -m refactoring_benchmark.scripts.analyze --description-type standard --description-type minimal
+  python -m refactoring_benchmark.scripts.analyze --description-type standard --description-type abstract
 
   # Generate specific metrics with bar chart
   python -m refactoring_benchmark.scripts.analyze --metric ifr --plot-type bar

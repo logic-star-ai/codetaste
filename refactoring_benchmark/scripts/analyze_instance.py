@@ -26,7 +26,7 @@ Examples:
   python -m refactoring_benchmark.scripts.analyze_instance
 
   # Specify output directories
-  python -m refactoring_benchmark.scripts.analyze_instance --output-dir output --output-dir output_minimal
+  python -m refactoring_benchmark.scripts.analyze_instance --output-dir output --output-dir output_abstract
 
   # Filter by agent
   python -m refactoring_benchmark.scripts.analyze_instance --agent-id agent1 --agent-id agent2

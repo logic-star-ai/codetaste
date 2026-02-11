@@ -1,42 +1,39 @@
-# Inference Behavior (Concise)
+# Inference Phase
 
 This document summarizes how inference runs for a single instance.
+
+## Entry point
+```bash
+python -m refactoring_benchmark.scripts.inference
+```
 
 ## Phases
 1. **Skip check**
    - If `prediction.diff` exists and `--force` is not set, the instance is skipped.
-   - If skipped and `finish_reason=success`, the run returns **success**.
-   - If skipped and `finish_reason!=success`, the run returns **failure**.
-   - If `--force-unsuccessful` is set, failed outputs are **not** skipped.
+   - If `--force-unsuccessful` is set, only successful runs are skipped.
 
 2. **Prepare environment**
    - Output directory is (re)created.
-   - Agent config is copied to output.
-   - If `--reuse-successful-plan` is set (or `--force` is not set):
-     - Plan artifacts are preserved when `--plan` is used.
-     - Multiplan artifacts are preserved when `--multiplan` is used.
-   - Podman client is initialized.
+   - `agent_config.json` is copied into the output folder.
+   - Existing plan artifacts are preserved when `--reuse-successful-plan` is set.
 
 3. **Plan (optional, `--plan`)**
-   - Generates `/output/refactoring_plan.md`.
+   - Agent generates `/output/refactoring_plan.md`.
    - On success, `inference_metadata.json` is renamed to `plan_metadata.json`.
-   - Description type in metadata is suffixed with `_plan`.
 
 4. **Multiplan (optional, `--multiplan`)**
-   - Generates `/output/refactoring_plans/refactoring_plan0..4.md`.
+   - Agent generates `/output/refactoring_plans/refactoring_plan0..4.md`.
+   - A judge selects the best plan and writes `multiplan_metadata.json`.
    - On success, `inference_metadata.json` is renamed to `multiplan_generation_metadata.json`.
-   - Judge selects a plan and writes `multiplan_metadata.json`.
-   - Description type in metadata is suffixed with `_multiplan`.
 
 5. **Inference (always)**
-   - Uses plan content if `--plan` or `--multiplan` was used.
-   - Runs the agent in the runtime container.
+   - Runs the agent inside the runtime container.
    - Produces `prediction.diff` and `inference_metadata.json`.
-   - Description type in metadata is suffixed with `_plan` or `_multiplan` when applicable.
+   - Description type is suffixed with `_plan` or `_multiplan` when applicable.
 
 ## Outputs
-- `prediction.diff`: git diff of changes.
-- `inference_metadata.json`: agent metadata (finish_reason, cost, description_type).
+- `prediction.diff`: git diff of the agent’s changes.
+- `inference_metadata.json`: finish reason, cost, description type, timestamps.
 - Plan mode:
   - `refactoring_plan.md`
   - `plan_metadata.json`
@@ -58,4 +55,6 @@ This document summarizes how inference runs for a single instance.
 - Plan inference: `description_type_plan`
 - Multiplan inference: `description_type_multiplan`
 
-These suffixes also apply to timeout/fallback metadata.
+## Description types
+- `standard`: full task description.
+- `abstract`: higher‑level abstract description (can be used in normal, plan, or multiplan modes).
