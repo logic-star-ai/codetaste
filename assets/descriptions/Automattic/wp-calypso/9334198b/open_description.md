@@ -1,1 +1,1 @@
-Refactor the codebase to increase maintainability.
+Extract utilities to reusable package

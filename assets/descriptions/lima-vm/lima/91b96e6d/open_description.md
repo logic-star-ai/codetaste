@@ -1,1 +1,1 @@
-Refactor the codebase to increase maintainability.
+Extract common types into a shared package

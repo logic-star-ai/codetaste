@@ -1,1 +1,1 @@
-Refactor the codebase to increase maintainability.
+Consolidate integration models.

@@ -1,1 +1,1 @@
-Refactor the codebase to increase maintainability.
+Modernize type declarations across the codebase.

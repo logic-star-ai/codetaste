@@ -1,1 +1,1 @@
-Refactor the codebase to increase maintainability.
+Replace external utility with local implementation

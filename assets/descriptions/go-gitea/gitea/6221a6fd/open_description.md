@@ -1,1 +1,1 @@
-Refactor the codebase to increase maintainability.
+Standardize element visibility handling

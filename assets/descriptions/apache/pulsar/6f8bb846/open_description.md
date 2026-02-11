@@ -1,1 +1,1 @@
-Refactor the codebase to increase maintainability.
+Standardize nullness annotations across the codebase.

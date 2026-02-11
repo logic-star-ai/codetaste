@@ -1,1 +1,1 @@
-Refactor the codebase to increase maintainability.
+Reorganize genesis allocation types

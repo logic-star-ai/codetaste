@@ -1,1 +1,1 @@
-Refactor the codebase to increase maintainability.
+Extract framework-agnostic logic into a separate package

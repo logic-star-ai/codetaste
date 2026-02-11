@@ -1,1 +1,0 @@
-Simplify library integration

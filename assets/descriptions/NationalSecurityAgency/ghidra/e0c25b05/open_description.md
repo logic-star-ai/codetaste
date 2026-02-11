@@ -1,1 +1,1 @@
-Refactor the codebase to increase maintainability.
+Refactor label and combo box components

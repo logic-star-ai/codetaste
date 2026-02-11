@@ -1,1 +1,1 @@
-Refactor the codebase to increase maintainability.
+Refactor DNS codec for extensibility and compliance

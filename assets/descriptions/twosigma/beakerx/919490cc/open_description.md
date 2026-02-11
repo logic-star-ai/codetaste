@@ -1,1 +1,1 @@
-Refactor the codebase to increase maintainability.
+Refactor plot grid and model architecture.

@@ -1,1 +1,1 @@
-Refactor the codebase to increase maintainability.
+Introduce specialized factory type

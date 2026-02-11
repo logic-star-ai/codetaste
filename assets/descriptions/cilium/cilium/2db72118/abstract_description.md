@@ -1,1 +1,0 @@
-Refactor Kubernetes client access

@@ -1,1 +1,1 @@
-Refactor the codebase to increase maintainability.
+Remove deprecated Table API functionality

@@ -1,1 +1,0 @@
-Reorganize genesis allocation types

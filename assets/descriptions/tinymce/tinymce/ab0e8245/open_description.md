@@ -1,1 +1,1 @@
-Refactor the codebase to increase maintainability.
+Refactor UI component state APIs
