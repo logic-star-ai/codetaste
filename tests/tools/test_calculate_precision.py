@@ -12,13 +12,14 @@ from refactoring_benchmark.utils.models import InstanceRow
 
 def test_calculate_precision_with_real_data():
     """Test precision metrics calculation with real SARIF and diff data."""
-    # Use real data from test assets
-    instance_dir = Path("output/go-gitea/gitea/3945c267/claude-code-sonnet-v2.0.76")
-    instance_dir = Path("output/go-gitea/gitea/3945c267/null_agent")
+    # Use real data from pseudo agents
+    instance_base = Path("outputs/pseudo_agents/direct/tektoncd/pipeline/e115fb61")
+    null_agent_dir = instance_base / "null_agent"
+    golden_agent_dir = instance_base / "golden_agent"
 
-    sarif_negative_path = instance_dir / "evaluation/rules_negative.sarif"
-    sarif_positive_path = instance_dir / "evaluation/rules_positive.sarif"
-    diff_path = instance_dir / "prediction.diff"
+    sarif_negative_path = null_agent_dir / "evaluation/rules_negative.sarif"
+    sarif_positive_path = golden_agent_dir / "evaluation/rules_positive.sarif"
+    diff_path = golden_agent_dir / "prediction.diff"
 
     # Skip test if files don't exist
     if not all([sarif_negative_path.exists(), sarif_positive_path.exists(), diff_path.exists()]):
@@ -34,7 +35,8 @@ def test_calculate_precision_with_real_data():
     lines_added_ruled = metrics.lines_matched_by_addition_rules
     for line in lines_added_ruled:
         if line in lines_added:
-            pop_line: Line = lines_added.remove(line)
+            pop_line = (lines_added & {line}).pop()
+            lines_added.remove(pop_line)
             print(f"Matched added line: {line}")
             assert pop_line.content.strip() in line.content.strip(), f"Content mismatch for line {line}. SARIF content: {repr(line.content[:70])}, Diff content: {repr(pop_line.content[:70])}"
 
@@ -42,7 +44,8 @@ def test_calculate_precision_with_real_data():
     lines_removed_ruled = metrics.lines_matched_by_removal_rules
     for line in lines_removed_ruled:
         if line in lines_removed:
-            pop_line: Line = lines_removed.remove(line)
+            pop_line = (lines_removed & {line}).pop()
+            lines_removed.remove(pop_line)
             print(f"Matched removed line: {line}")
             assert pop_line.content.strip() in line.content.strip(), f"Content mismatch for line {line}. SARIF content: {repr(line.content[:70])}, Diff content: {repr(pop_line.content[:70])}"
 

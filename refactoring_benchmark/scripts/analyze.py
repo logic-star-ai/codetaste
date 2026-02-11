@@ -24,17 +24,17 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Use default: auto-discover all 'output*' directories
+  # Use default: auto-discover all outputs/*/* directories
   python -m refactoring_benchmark.scripts.analyze
 
   # Specify output directories
-  python -m refactoring_benchmark.scripts.analyze --output-dir output --output-dir output_abstract
+  python -m refactoring_benchmark.scripts.analyze --output-dir outputs/instructed/direct --output-dir outputs/open/direct
 
   # Filter by agent
   python -m refactoring_benchmark.scripts.analyze --agent-id agent1 --agent-id agent2
 
   # Filter by description type
-  python -m refactoring_benchmark.scripts.analyze --description-type standard --description-type abstract
+  python -m refactoring_benchmark.scripts.analyze --description-type instructed --description-type open
 
   # Generate specific metrics with bar chart
   python -m refactoring_benchmark.scripts.analyze --metric ifr --plot-type bar
@@ -59,7 +59,7 @@ Examples:
         action="append",
         dest="output_dirs",
         help="Output directory containing evaluation results (can be specified multiple times). "
-        "Default: auto-discover all directories starting with 'output' in current directory.",
+        "Default: auto-discover all directories under ./outputs/<description_type>/<mode>.",
     )
 
     # Filtering arguments
@@ -180,7 +180,7 @@ Examples:
         # Auto-discover
         output_dirs = discover_output_dirs()
         if not output_dirs:
-            print("Error: No directories starting with 'output' found in current directory")
+            print("Error: No directories found under ./outputs/<description_type>/<mode>")
             print("Hint: Use --output-dir to specify directories manually")
             return
         print(f"Auto-discovered {len(output_dirs)} output directories:")

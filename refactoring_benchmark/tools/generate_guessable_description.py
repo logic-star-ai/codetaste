@@ -33,19 +33,19 @@ def read_true_description(owner: str, repo: str, commit_hash: str, base_dir: Pat
         return f"**[Error]** Failed to read description: {e}"
 
 
-def read_abstract_description(owner: str, repo: str, commit_hash: str, base_dir: Path) -> str:
-    """Read the abstract description from assets/descriptions/ with newlines removed"""
-    desc_path = base_dir / "assets" / "descriptions" / owner / repo / commit_hash[:8] / "abstract_description.md"
+def read_open_description(owner: str, repo: str, commit_hash: str, base_dir: Path) -> str:
+    """Read the open description from assets/descriptions/ with newlines removed"""
+    desc_path = base_dir / "assets" / "descriptions" / owner / repo / commit_hash[:8] / "open_description.md"
 
     if not desc_path.exists():
-        return "[Missing abstract_description.md]"
+        return "[Missing open_description.md]"
 
     try:
         content = desc_path.read_text(encoding="utf-8")
         # Remove all newlines and extra whitespace
         return " ".join(content.split())
     except Exception as e:
-        return f"[Error reading abstract_description.md: {e}]"
+        return f"[Error reading open_description.md: {e}]"
 
 
 def read_best_plan(owner: str, repo: str, commit_hash: str, agent_id: str, output_dir: Path) -> str:
@@ -108,7 +108,7 @@ def generate_guessable_description(agent_id: str, base_dir: Path, output_dir: Pa
     Args:
         agent_id: The agent identifier (e.g., "codex-v0.77.0-gpt-5.2")
         base_dir: Base directory of the repo
-        output_dir: Output directory containing agent results (e.g., output_abstract_multiplan/)
+        output_dir: Output directory containing agent results (e.g., outputs/open/multiplan)
         instances_csv: Path to instances.csv
 
     Returns:
@@ -145,10 +145,10 @@ def generate_guessable_description(agent_id: str, base_dir: Path, output_dir: Pa
             outfile.write(true_desc)
             outfile.write("\n\n")
 
-            # Part 2: Best Plan according to judge (with abstract description in heading)
-            abstract_desc = read_abstract_description(owner, repo, commit_hash, base_dir)
+            # Part 2: Best Plan according to judge (with open description in heading)
+            open_desc = read_open_description(owner, repo, commit_hash, base_dir)
             outfile.write(
-                f"# Part 2: Best Plan according to the judge output : (derived from Abstract Description : {abstract_desc})\n\n"
+                f"# Part 2: Best Plan according to the judge output : (derived from Open Description : {open_desc})\n\n"
             )
             best_plan = read_best_plan(owner, repo, commit_hash, agent_id, output_dir)
             outfile.write(best_plan)
@@ -174,7 +174,7 @@ def main():
         epilog="""
 Example:
     python -m refactoring_benchmark.tools.generate_guessable_description --agent codex-v0.77.0-gpt-5.2
-    python -m refactoring_benchmark.tools.generate_guessable_description --agent claude-code-v2.0.76-sonnet45 --output-dir output_22012025/output_abstract_multiplan
+    python -m refactoring_benchmark.tools.generate_guessable_description --agent claude-code-v2.0.76-sonnet45 --output-dir outputs/open/multiplan
         """,
     )
 
@@ -182,8 +182,8 @@ Example:
 
     parser.add_argument(
         "--output-dir",
-        default="output_abstract_multiplan",
-        help="Output directory containing agent results (default: output_abstract_multiplan)",
+        default="outputs/open/multiplan",
+        help="Output directory containing agent results (default: outputs/open/multiplan)",
     )
 
     parser.add_argument(

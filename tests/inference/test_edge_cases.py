@@ -37,7 +37,7 @@ def _make_config(tmp_path: Path) -> InferenceConfig:
         agent_config=agent_config,
         sanitized_agent_id="agent-1",
         env_vars={},
-        description_type="standard",
+        description_type="instructed",
         plan=False,
         multiplan=False,
         plan_timeout=10,
@@ -102,7 +102,7 @@ def test_plan_reuse_with_force_and_reuse_successful_plan(tmp_path):
     config.force = True
     config.reuse_successful_plan = True
     instance = _make_instance()
-    output_dir = tmp_path / "output"
+    output_dir = tmp_path / "outputs"
     output_dir.mkdir(parents=True)
     (output_dir / "plan_metadata.json").write_text(
         json.dumps({"finish_reason": "success"}), encoding="utf-8"
@@ -123,7 +123,7 @@ def test_plan_incomplete_artifacts_reruns(tmp_path, monkeypatch):
     config = _make_config(tmp_path)
     config.plan = True
     instance = _make_instance()
-    output_dir = tmp_path / "output"
+    output_dir = tmp_path / "outputs"
     output_dir.mkdir(parents=True)
     (output_dir / "plan_metadata.json").write_text(
         json.dumps({"finish_reason": "success"}), encoding="utf-8"
@@ -156,7 +156,7 @@ def test_multiplan_incomplete_artifacts_reruns(tmp_path, monkeypatch):
     config = _make_config(tmp_path)
     config.multiplan = True
     instance = _make_instance()
-    output_dir = tmp_path / "output"
+    output_dir = tmp_path / "outputs"
     output_dir.mkdir(parents=True)
     (output_dir / "multiplan_metadata.json").write_text(
         json.dumps({"finish_reason": "success", "selected_plan_index": 0}),
@@ -193,7 +193,7 @@ def test_multiplan_incomplete_artifacts_reruns(tmp_path, monkeypatch):
 def test_container_executor_timeout_plan_metadata(tmp_path, monkeypatch):
     """Plan timeout writes error_planmode with _plan description_type."""
     config = _make_config(tmp_path)
-    output_dir = tmp_path / "output"
+    output_dir = tmp_path / "outputs"
     output_dir.mkdir(parents=True)
     temp_dir = tmp_path / "task"
     temp_dir.mkdir(parents=True)
@@ -218,7 +218,7 @@ def test_container_executor_timeout_plan_metadata(tmp_path, monkeypatch):
     )
 
     executor = ContainerExecutor(instance, config, output_dir, logger, client=object())
-    context = ExecutionContext(description_type="standard", description_type_suffix="_plan")
+    context = ExecutionContext(description_type="instructed", description_type_suffix="_plan")
     assert executor.run("plan", 1, temp_dir, context=context) is False
 
     metadata_path = output_dir / "inference_metadata.json"
@@ -226,13 +226,13 @@ def test_container_executor_timeout_plan_metadata(tmp_path, monkeypatch):
     data = json.loads(metadata_path.read_text(encoding="utf-8"))
     print("timeout plan metadata:", data, flush=True)
     assert data["finish_reason"] == "error_planmode"
-    assert data["description_type"] == "standard_plan"
+    assert data["description_type"] == "instructed_plan"
 
 
 def test_container_executor_timeout_multiplan_metadata(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Multiplan timeout writes error_multiplan with _multiplan description_type."""
     config = _make_config(tmp_path)
-    output_dir = tmp_path / "output"
+    output_dir = tmp_path / "outputs"
     output_dir.mkdir(parents=True)
     temp_dir = tmp_path / "task"
     temp_dir.mkdir(parents=True)
@@ -258,7 +258,7 @@ def test_container_executor_timeout_multiplan_metadata(tmp_path: Path, monkeypat
 
     executor = ContainerExecutor(instance, config, output_dir, logger, client=object())
     context = ExecutionContext(
-        description_type="standard", description_type_suffix="_multiplan"
+        description_type="instructed", description_type_suffix="_multiplan"
     )
     assert executor.run("multiplan", 1, temp_dir, context=context) is False
 
@@ -267,4 +267,4 @@ def test_container_executor_timeout_multiplan_metadata(tmp_path: Path, monkeypat
     data = json.loads(metadata_path.read_text(encoding="utf-8"))
     print("timeout multiplan metadata:", data, flush=True)
     assert data["finish_reason"] == "error_multiplan"
-    assert data["description_type"] == "standard_multiplan"
+    assert data["description_type"] == "instructed_multiplan"

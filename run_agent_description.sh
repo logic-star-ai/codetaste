@@ -8,7 +8,7 @@ AGENT_DIR="./agents/qwen-code/qwen3-coder-30b-a3b-instruct"; AGENT_ID="qwen-code
 # AGENT_DIR="./agents/claude/sonnet45"; AGENT_ID="claude-code-v2.0.76-sonnet45"
 
 # Change this variable to switch task descriptions
-DESCRIPTION_TYPE="abstract" # Options: standard, nano, problem, open, abstract
+DESCRIPTION_TYPE="open" # Options: instructed, open
 
 INSTANCES_CSV="./instances.csv"
 NR_INSTANCES=125
@@ -28,19 +28,16 @@ fi
 
 # --- DYNAMIC OUTPUT DIRECTORY MAPPING ---
 case "$DESCRIPTION_TYPE" in
-    standard) OUTPUT_DIR="./output" ;;
-    nano)     OUTPUT_DIR="./output_nano" ;;
-    problem)  OUTPUT_DIR="./output_problem" ;;
-    open)     OUTPUT_DIR="./output_open" ;;
-    abstract) OUTPUT_DIR="./output_abstract" ;;
+    instructed) OUTPUT_DIR="./outputs/instructed/direct" ;;
+    open) OUTPUT_DIR="./outputs/open/direct" ;;
     *) echo "Error: Unknown DESCRIPTION_TYPE: $DESCRIPTION_TYPE"; exit 1 ;;
 esac
 
 if [ "$PLAN" == "--plan" ]; then
-    OUTPUT_DIR="${OUTPUT_DIR}_plan"
+    OUTPUT_DIR="${OUTPUT_DIR%/direct}/plan"
 fi
 if [ "$PLAN" == "--multiplan" ]; then
-    OUTPUT_DIR="${OUTPUT_DIR}_multiplan"
+    OUTPUT_DIR="${OUTPUT_DIR%/direct}/multiplan"
 fi
 
 echo "Running benchmark for Agent: $AGENT_ID"

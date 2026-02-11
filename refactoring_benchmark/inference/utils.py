@@ -57,8 +57,8 @@ Task:
 """
 
 DESCRIPTION_FILES = {
-    "standard": "description.md",
-    "abstract": "abstract_description.md",
+    "instructed": "description.md",
+    "open": "open_description.md",
 }
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -67,7 +67,7 @@ def get_instance_output_dir(instance: InstanceRow, agent_id: str, output_dir: Pa
     """
     Construct the output directory path for a given instance and agent.
 
-    Path structure: output/<owner>/<repo>/<hash[:8]>/<agent_id>/
+    Path structure: outputs/<description_type>/<mode>/<owner>/<repo>/<hash[:8]>/<agent_id>/
 
     Args:
         instance: Benchmark instance

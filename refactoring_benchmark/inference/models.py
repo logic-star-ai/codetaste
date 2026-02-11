@@ -46,7 +46,7 @@ class InferenceConfig(BaseModel):
     agent_config: AgentConfig
     sanitized_agent_id: str
     env_vars: Dict[str, str] = Field(default_factory=dict)
-    description_type: str = "standard"
+    description_type: str = "instructed"
     plan: bool = False
     multiplan: bool = False
     plan_timeout: int = Field(gt=0, default=1800)

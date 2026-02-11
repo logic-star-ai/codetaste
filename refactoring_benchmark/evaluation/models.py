@@ -113,7 +113,7 @@ class EvaluationConfig(BaseModel):
 
     instances_csv: Path
     agent_id: str
-    output_dir: Path = Path("./output")
+    output_dir: Path = Path("./outputs/instructed/direct")
     nr_workers: int = Field(gt=0, default=4)
     timeout_test: int = Field(gt=0, default=1200)  # 20 minutes
     timeout_rule: int = Field(gt=0, default=1200)  # 20 minutes

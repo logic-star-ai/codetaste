@@ -110,7 +110,7 @@ def _cached_calculate_precision(
 
 def calculate_precision_eval_result(
     result: EvaluationResult,
-    null_agent_dir: Path = Path("output_pseudo_agents"),
+    null_agent_dir: Path = Path("outputs/pseudo_agents/direct"),
 ) -> Optional[InstanceAgentPrecision]:
     """
     Calculate precision metrics for a single instance-agent pair.

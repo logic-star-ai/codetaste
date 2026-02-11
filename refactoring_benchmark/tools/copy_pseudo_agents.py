@@ -2,7 +2,7 @@
 """
 Copy pseudo agent outputs to a new directory with updated description type.
 
-This tool copies agent outputs (typically from output_pseudo_agents) to a new
+This tool copies agent outputs (typically from outputs/pseudo_agents/direct) to a new
 location while updating the description_type field in both inference_metadata.json
 and evaluation_result.json files.
 """
@@ -125,7 +125,7 @@ def main() -> int:
     parser.add_argument(
         "--source-dir",
         type=Path,
-        default=Path.cwd() / "output_pseudo_agents",
+        default=Path.cwd() / "outputs" / "pseudo_agents" / "direct",
         help="Source directory containing agent outputs",
     )
 
@@ -140,7 +140,7 @@ def main() -> int:
         "--description-type",
         type=str,
         # required=True,
-        # choices=["standard", "minimal", "nano", "open", "problem"],
+        # choices=["instructed", "open", "open_plan", "open_multiplan"],
         help="Description type to set in metadata files",
     )
 

@@ -50,8 +50,14 @@ def main() -> int:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path(__file__).parent.parent.parent / "output",
+        default=Path(__file__).parent.parent.parent / "outputs" / "instructed" / "direct",
         help="Base directory containing agent outputs",
+    )
+    parser.add_argument(
+        "--null-agent-dir",
+        type=Path,
+        default=Path(__file__).parent.parent.parent / "outputs" / "pseudo_agents" / "direct",
+        help="Base directory containing null_agent outputs for precision baseline",
     )
     parser.add_argument(
         "--agent",
@@ -68,6 +74,7 @@ def main() -> int:
     args = parser.parse_args()
     instances_csv = args.instances_csv.resolve()
     output_dir = args.output_dir.resolve()
+    null_agent_dir = args.null_agent_dir.resolve()
 
     if not instances_csv.exists():
         print(f"Error: instances.csv not found at {instances_csv}")
@@ -86,6 +93,7 @@ def main() -> int:
 
     print(f"Loaded {len(instances)} instances from {instances_csv}")
     print(f"Output directory: {output_dir}")
+    print(f"Null agent directory: {null_agent_dir}")
     if args.agent:
         print(f"Agent: {args.agent}")
     print()
@@ -102,8 +110,8 @@ def main() -> int:
                     print(f"- {instance.display_path}: skipped (no agent outputs found)")
             continue
 
-        null_agent_dir = instance_dir / "null_agent"
-        sarif_negative_path = null_agent_dir / "evaluation" / "rules_negative.sarif"
+        null_agent_instance_dir = null_agent_dir / instance.owner / instance.repo / instance.short_hash / "null_agent"
+        sarif_negative_path = null_agent_instance_dir / "evaluation" / "rules_negative.sarif"
         sarif_positive_path = agent_dir / "evaluation" / "rules_positive.sarif"
         diff_path = agent_dir / "prediction.diff"
 

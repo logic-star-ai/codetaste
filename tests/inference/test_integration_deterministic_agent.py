@@ -64,7 +64,7 @@ def _make_config(
         agent_config=agent_config,
         sanitized_agent_id=agent_config.id,
         env_vars={},
-        description_type="standard",
+        description_type="instructed",
         plan=plan,
         multiplan=multiplan,
         plan_timeout=120,

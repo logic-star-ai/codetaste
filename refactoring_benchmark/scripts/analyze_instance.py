@@ -26,7 +26,7 @@ Examples:
   python -m refactoring_benchmark.scripts.analyze_instance
 
   # Specify output directories
-  python -m refactoring_benchmark.scripts.analyze_instance --output-dir output --output-dir output_abstract
+  python -m refactoring_benchmark.scripts.analyze_instance --output-dir outputs/instructed/direct --output-dir outputs/open/direct
 
   # Filter by agent
   python -m refactoring_benchmark.scripts.analyze_instance --agent-id agent1 --agent-id agent2
@@ -128,7 +128,7 @@ Examples:
         # Auto-discover
         output_dirs = discover_output_dirs()
         if not output_dirs:
-            print("Error: No directories starting with 'output' found in current directory")
+            print("Error: No directories found under ./outputs/<description_type>/<mode>")
             print("Hint: Use --output-dir to specify directories manually")
             return
         print(f"Auto-discovered {len(output_dirs)} output directories:")

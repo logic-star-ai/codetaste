@@ -24,8 +24,14 @@ def main():
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path(__file__).parent.parent.parent / "output",
+        default=Path(__file__).parent.parent.parent / "outputs" / "instructed" / "direct",
         help="Base directory containing agent outputs",
+    )
+    parser.add_argument(
+        "--null-agent-dir",
+        type=Path,
+        default=Path(__file__).parent.parent.parent / "outputs" / "pseudo_agents" / "direct",
+        help="Base directory containing null_agent outputs for precision baseline",
     )
 
     parser.add_argument(
@@ -41,6 +47,7 @@ def main():
     # Resolve paths
     instances_csv = args.instances_csv.resolve()
     output_dir = args.output_dir.resolve()
+    null_agent_dir = args.null_agent_dir.resolve()
 
     # Validate instances CSV exists
     if not instances_csv.exists():
@@ -63,8 +70,8 @@ def main():
     # Validate null_agent exists (required for baseline negative SARIF)
     null_agent_instances = 0
     for instance in instances:
-        null_agent_dir = output_dir / instance.owner / instance.repo / instance.short_hash / "null_agent"
-        if null_agent_dir.exists():
+        null_agent_instance_dir = null_agent_dir / instance.owner / instance.repo / instance.short_hash / "null_agent"
+        if null_agent_instance_dir.exists():
             null_agent_instances += 1
 
     if null_agent_instances == 0:
@@ -80,6 +87,7 @@ def main():
     print(f"Loaded {len(instances)} instances")
     print(f"Calculating precision metrics for agents: {', '.join(args.agents)}")
     print(f"Output directory: {output_dir}")
+    print(f"Null agent directory: {null_agent_dir}")
     print(f"Using null_agent baseline for precision of deletions")
     print()
 
@@ -94,8 +102,8 @@ def main():
             eval_dir = instance_agent_dir / "evaluation"
 
             # Use null_agent for baseline negative SARIF
-            null_agent_dir = instance_dir / "null_agent"
-            sarif_negative_path = null_agent_dir / "evaluation" / "rules_negative.sarif"
+            null_agent_instance_dir = null_agent_dir / instance.owner / instance.repo / instance.short_hash / "null_agent"
+            sarif_negative_path = null_agent_instance_dir / "evaluation" / "rules_negative.sarif"
             sarif_positive_path = eval_dir / "rules_positive.sarif"
             diff_path = instance_agent_dir / "prediction.diff"
 

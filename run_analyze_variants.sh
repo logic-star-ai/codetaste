@@ -36,7 +36,7 @@ run_group() {
   local -a output_dirs=("$@")
   local -a extra_args=()
 
-  if [ "$group_name" == "standard" ]; then
+  if [ "$group_name" == "instructed" ]; then
     extra_args+=(--ytick-step 10)
   fi
 
@@ -80,5 +80,5 @@ run_group() {
   done
 }
 
-run_group "standard" "./output"
-run_group "abstract" "./output_abstract" "./output_abstract_plan" "./output_abstract_multiplan"
+run_group "instructed" "./outputs/instructed/direct"
+run_group "open" "./outputs/open/direct" "./outputs/open/plan" "./outputs/open/multiplan"
