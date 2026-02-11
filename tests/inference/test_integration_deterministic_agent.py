@@ -48,8 +48,7 @@ def _make_config(
     tmp_path: Path,
     agent_dir: Path,
     agent_config: AgentConfig,
-    plan: bool = False,
-    multiplan: bool = False,
+    mode: str = "direct",
 ) -> InferenceConfig:
     return InferenceConfig(
         agent_dir=agent_dir,
@@ -65,8 +64,7 @@ def _make_config(
         sanitized_agent_id=agent_config.id,
         env_vars={},
         description_type="instructed",
-        plan=plan,
-        multiplan=multiplan,
+        mode=mode,
         plan_timeout=120,
     )
 
@@ -103,7 +101,7 @@ def test_deterministic_agent_full_integration(tmp_path: Path, monkeypatch: pytes
     print("=== Integration: plan mode ===", flush=True)
     plan_output_root = tmp_path / "plan"
     plan_output_root.mkdir(parents=True, exist_ok=True)
-    config = _make_config(plan_output_root, agent_dir, agent_config, plan=True)
+    config = _make_config(plan_output_root, agent_dir, agent_config, mode="plan")
     print(f"plan_output_root={plan_output_root}", flush=True)
     print(f"plan_output_dir={get_instance_output_dir(instance, config.sanitized_agent_id, plan_output_root)}", flush=True)
     runner = InstanceInferenceRunner(instance, config)
@@ -119,9 +117,7 @@ def test_deterministic_agent_full_integration(tmp_path: Path, monkeypatch: pytes
     print("=== Integration: multiplan mode ===", flush=True)
     multiplan_output_root = tmp_path / "multiplan"
     multiplan_output_root.mkdir(parents=True, exist_ok=True)
-    config = _make_config(
-        multiplan_output_root, agent_dir, agent_config, multiplan=True
-    )
+    config = _make_config(multiplan_output_root, agent_dir, agent_config, mode="multiplan")
     print(f"multiplan_output_root={multiplan_output_root}", flush=True)
     print(
         f"multiplan_output_dir={get_instance_output_dir(instance, config.sanitized_agent_id, multiplan_output_root)}",

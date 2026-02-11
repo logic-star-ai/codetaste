@@ -30,8 +30,7 @@ def _make_config(tmp_path: str) -> InferenceConfig:
         sanitized_agent_id="agent-1",
         env_vars={},
         description_type="instructed",
-        plan=False,
-        multiplan=False,
+        mode="direct",
         plan_timeout=10,
     )
 
@@ -50,7 +49,7 @@ def _make_instance() -> InstanceRow:
 def test_runner_wires_plan_context(tmp_path, monkeypatch):
     """Runner passes plan context to InferenceStep when plan is enabled."""
     config = _make_config(tmp_path)
-    config.plan = True
+    config.mode = "plan"
     instance = _make_instance()
 
     monkeypatch.setattr(
@@ -92,7 +91,7 @@ def test_runner_wires_plan_context(tmp_path, monkeypatch):
             return None
 
         def run(self, context):
-            captured["suffix"] = context.description_type_suffix
+            captured["mode"] = context.mode
             captured["plan_path"] = context.plan_path
             captured["plan_content"] = context.plan_content
             return True
@@ -105,7 +104,7 @@ def test_runner_wires_plan_context(tmp_path, monkeypatch):
 
     runner = runner_module.InstanceInferenceRunner(instance, config)
     assert runner.run() is True
-    assert captured["suffix"] == "_plan"
+    assert captured["mode"] == "plan"
     assert captured["plan_path"] == tmp_path / "outputs" / "refactoring_plan.md"
     assert captured["plan_content"] is None
 
@@ -113,7 +112,7 @@ def test_runner_wires_plan_context(tmp_path, monkeypatch):
 def test_runner_wires_multiplan_context(tmp_path, monkeypatch):
     """Runner passes multiplan context to InferenceStep when enabled."""
     config = _make_config(tmp_path)
-    config.multiplan = True
+    config.mode = "multiplan"
     instance = _make_instance()
 
     monkeypatch.setattr(
@@ -155,7 +154,7 @@ def test_runner_wires_multiplan_context(tmp_path, monkeypatch):
             return None
 
         def run(self, context):
-            captured["suffix"] = context.description_type_suffix
+            captured["mode"] = context.mode
             captured["plan_path"] = context.plan_path
             captured["plan_content"] = context.plan_content
             return True
@@ -168,7 +167,7 @@ def test_runner_wires_multiplan_context(tmp_path, monkeypatch):
 
     runner = runner_module.InstanceInferenceRunner(instance, config)
     assert runner.run() is True
-    assert captured["suffix"] == "_multiplan"
+    assert captured["mode"] == "multiplan"
     assert captured["plan_path"] is None
     assert captured["plan_content"] == "plan content"
 
@@ -207,7 +206,7 @@ def test_runner_wires_instructed_context(tmp_path, monkeypatch):
             return None
 
         def run(self, context):
-            captured["suffix"] = context.description_type_suffix
+            captured["mode"] = context.mode
             captured["plan_path"] = context.plan_path
             captured["plan_content"] = context.plan_content
             return True
@@ -219,7 +218,7 @@ def test_runner_wires_instructed_context(tmp_path, monkeypatch):
 
     runner = runner_module.InstanceInferenceRunner(instance, config)
     assert runner.run() is True
-    assert captured["suffix"] == ""
+    assert captured["mode"] == "direct"
     assert captured["plan_path"] is None
     assert captured["plan_content"] is None
 

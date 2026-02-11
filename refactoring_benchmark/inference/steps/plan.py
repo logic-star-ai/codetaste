@@ -10,9 +10,11 @@ from refactoring_benchmark.inference.models import (
 )
 from refactoring_benchmark.inference.steps.executor import ContainerExecutor
 from refactoring_benchmark.inference.utils import (
+    build_context,
     cleanup_temp_dir,
     prepare_temp_plan_description,
     create_fallback_inference_metadata,
+    finalize_step_metadata,
 )
 from refactoring_benchmark.utils.models import InstanceRow
 
@@ -59,10 +61,7 @@ class PlanStep:
             return None
 
         # Execute container
-        context = ExecutionContext(
-            description_type=self.config.description_type,
-            description_type_suffix="_plan",
-        )
+        context = build_context(self.config, mode="plan")
         if not self.executor.run(
             "plan",
             self.config.plan_timeout,
@@ -140,7 +139,8 @@ class PlanStep:
             create_fallback_inference_metadata(
                 self.output_dir,
                 "error_planmode",
-                description_type=context.full_description_type,
+                description_type=context.description_type,
+                mode=context.mode,
                 additional={"error": error},
             )
             return False
@@ -150,14 +150,12 @@ class PlanStep:
         # Rename inference_metadata.json to plan_metadata.json after successful plan
         inference_metadata_path = self.output_dir / "inference_metadata.json"
         plan_metadata_path = self.output_dir / "plan_metadata.json"
-        if inference_metadata_path.exists():
-            try:
-                inference_metadata_path.rename(plan_metadata_path)
-                inference_metadata: InferenceMetadata = InferenceMetadata.load_from_json(plan_metadata_path)
-                inference_metadata.description_type = context.full_description_type
-                inference_metadata.save_to_json(plan_metadata_path)
-                self.logger.info("Renamed inference_metadata.json to plan_metadata.json")
-            except Exception as e:
-                self.logger.warning(f"Failed to rename inference_metadata.json to plan_metadata.json: {e}")
+        finalize_step_metadata(
+            inference_metadata_path,
+            plan_metadata_path,
+            context.description_type,
+            context.mode,
+            logger=self.logger,
+        )
 
         return True

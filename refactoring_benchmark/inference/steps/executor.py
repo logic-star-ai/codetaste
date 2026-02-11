@@ -57,7 +57,12 @@ class ContainerExecutor:
         self.logger.info(f"  Image: {self.instance.runtime_image}")
         self.logger.info(f"  Timeout: {timeout}s")
 
-        env = {**self.config.env_vars, "DESCRIPTION_TYPE": self.config.description_type, "TIMEOUT": str(timeout)}
+        env = {
+            **self.config.env_vars,
+            "DESCRIPTION_TYPE": self.config.description_type,
+            "MODE": self.config.mode,
+            "TIMEOUT": str(timeout),
+        }
 
         try:
             self.container = podman_utils.safe_container_run(
@@ -86,11 +91,11 @@ class ContainerExecutor:
             except Exception as e:
                 self.logger.error(f"{mode.capitalize()} step timed out: {e}")
                 finish_reason = self._get_finish_reason_for_mode(mode)
-                description_type = context.full_description_type
                 create_fallback_inference_metadata(
                     self.output_dir,
                     finish_reason,
-                    description_type=description_type,
+                    description_type=context.description_type,
+                    mode=context.mode,
                     additional={"error": f"{mode.capitalize()} container timed out: {str(e)}"},
                 )
                 return False
@@ -102,11 +107,11 @@ class ContainerExecutor:
         except Exception as e:
             self.logger.error(f"{mode.capitalize()} step execution failed: {e}")
             finish_reason = "error"
-            description_type = context.full_description_type
             create_fallback_inference_metadata(
                 self.output_dir,
                 finish_reason,
-                description_type=description_type,
+                description_type=context.description_type,
+                mode=context.mode,
                 additional={"error": f"{mode.capitalize()} step execution failed: {str(e)}"},
             )
             return False

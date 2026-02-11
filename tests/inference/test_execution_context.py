@@ -34,8 +34,7 @@ def _make_config(tmp_path: Path) -> InferenceConfig:
         sanitized_agent_id="agent-1",
         env_vars={},
         description_type="instructed",
-        plan=False,
-        multiplan=False,
+        mode="direct",
         plan_timeout=10,
     )
 
@@ -51,8 +50,8 @@ def _make_instance() -> InstanceRow:
     )
 
 
-def test_container_executor_timeout_uses_context_suffix(tmp_path, monkeypatch):
-    """Timeout metadata uses ExecutionContext suffix for description_type."""
+def test_container_executor_timeout_writes_mode(tmp_path, monkeypatch):
+    """Timeout metadata uses ExecutionContext mode."""
     config = _make_config(tmp_path)
     output_dir = tmp_path / "outputs"
     output_dir.mkdir(parents=True)
@@ -87,7 +86,7 @@ def test_container_executor_timeout_uses_context_suffix(tmp_path, monkeypatch):
     executor = ContainerExecutor(instance, config, output_dir, logger, client=object())
     context = ExecutionContext(
         description_type="instructed",
-        description_type_suffix="_plan",
+        mode="plan",
     )
     success = executor.run("inference", 1, temp_dir, context=context)
     assert success is False
@@ -96,11 +95,12 @@ def test_container_executor_timeout_uses_context_suffix(tmp_path, monkeypatch):
     assert metadata_path.exists()
     data = json.loads(metadata_path.read_text(encoding="utf-8"))
     assert data["finish_reason"] == "timeout"
-    assert data["description_type"] == "instructed_plan"
+    assert data["description_type"] == "instructed"
+    assert data["mode"] == "plan"
 
 
-def test_inference_step_writes_context_description_type(tmp_path, monkeypatch):
-    """Inference writes context.full_description_type into metadata."""
+def test_inference_step_writes_context_description_and_mode(tmp_path, monkeypatch):
+    """Inference writes context description_type and mode into metadata."""
     config = _make_config(tmp_path)
     output_dir: Path = tmp_path / "outputs"
     output_dir.mkdir(parents=True)
@@ -133,7 +133,7 @@ def test_inference_step_writes_context_description_type(tmp_path, monkeypatch):
 
     context = ExecutionContext(
         description_type="open",
-        description_type_suffix="_multiplan",
+        mode="multiplan",
         plan_content="plan",
     )
     assert step.run(context) is True
@@ -141,16 +141,19 @@ def test_inference_step_writes_context_description_type(tmp_path, monkeypatch):
     data = json.loads(
         (output_dir / "inference_metadata.json").read_text(encoding="utf-8")
     )
-    assert data["description_type"] == "open_multiplan"
+    assert data["description_type"] == "open"
+    assert data["mode"] == "multiplan"
 
 
-def test_execution_context_full_description_type():
-    """ExecutionContext concatenates base description_type and suffix."""
+def test_execution_context_includes_mode():
+    """ExecutionContext exposes description_type and mode."""
     context = ExecutionContext(
         description_type="instructed",
-        description_type_suffix="_plan",
+        mode="plan",
     )
-    assert context.full_description_type == "instructed_plan"
+    assert context.description_type == "instructed"
+    assert context.mode == "plan"
 
-    context = ExecutionContext(description_type="instructed")
-    assert context.full_description_type == "instructed"
+    context = ExecutionContext(description_type="instructed", mode="direct")
+    assert context.description_type == "instructed"
+    assert context.mode == "direct"

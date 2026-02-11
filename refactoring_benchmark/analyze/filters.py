@@ -27,6 +27,30 @@ def combine_filters(*filters: ResultFilter) -> ResultFilter:
     return combined
 
 
+def filter_results(
+    results: Sequence[EvaluationResult],
+    agent_ids: Sequence[str] | None = None,
+    description_types: Sequence[str] | None = None,
+    modes: Sequence[str] | None = None,
+) -> list[EvaluationResult]:
+    """Filter evaluation results by agent, description type, and mode."""
+    filtered = []
+    for result in results:
+        if agent_ids and result.agent_config.id not in agent_ids:
+            continue
+
+        if description_types or modes:
+            metadata = result.inference_metadata
+            if metadata is None:
+                continue
+            if description_types and metadata.description_type not in description_types:
+                continue
+            if modes and metadata.mode not in modes:
+                continue
+        filtered.append(result)
+    return filtered
+
+
 # Common filter builders
 
 

@@ -1,4 +1,4 @@
-"""Load and organize evaluation results for description-type based analysis."""
+"""Load and organize evaluation results for description-type and mode analysis."""
 
 from pathlib import Path
 from typing import Sequence
@@ -89,7 +89,7 @@ def organize_data(
     metric_name: str,
     filters: Sequence[ResultFilter] | None = None,
 ) -> AnalysisData:
-    """Organize evaluation results by (agent_id, description_type) with the given metric.
+    """Organize evaluation results by (agent_id, description_type, mode) with the given metric.
 
     Args:
         results: List of evaluation results to organize
@@ -111,10 +111,15 @@ def organize_data(
         if filters:
             if not all(filter_fn(result) for filter_fn in filters):
                 continue
-        # Extract agent_id and description_type
+        # Extract agent_id, description_type, and mode
         agent_id = result.agent_config.id
-        if result.inference_metadata and result.inference_metadata.description_type:
+        if (
+            result.inference_metadata
+            and result.inference_metadata.description_type
+            and result.inference_metadata.mode
+        ):
             description_type = result.inference_metadata.description_type
+            mode = result.inference_metadata.mode
         else:
             continue
 
@@ -130,7 +135,7 @@ def organize_data(
         )
 
         # Add to analysis data
-        analysis_data.add_metric_point(agent_id, description_type, instance_key, metric_value)
+        analysis_data.add_metric_point(agent_id, description_type, mode, instance_key, metric_value)
     return analysis_data
 
 
@@ -138,6 +143,7 @@ def validate_analysis_data(
     data: AnalysisData,
     agent_ids: list[str] | None = None,
     description_types: list[str] | None = None,
+    modes: list[str] | None = None,
 ) -> None:
     """Validate analysis data and print warnings/errors about missing combinations.
 
@@ -145,6 +151,7 @@ def validate_analysis_data(
         data: Analysis data to validate
         agent_ids: Expected agent IDs (defaults to all found in data)
         description_types: Expected description types (defaults to all found in data)
+        modes: Expected modes (defaults to all found in data)
 
     Raises:
         ValueError: If an expected agent has no data at all
@@ -152,7 +159,9 @@ def validate_analysis_data(
     if agent_ids is None:
         agent_ids = data.get_agent_ids()
     if description_types is None:
-        description_types = data.get_description_types()
+        description_types = sorted({d for d, _ in data.get_type_mode_pairs()})
+    if modes is None:
+        modes = sorted({m for _, m in data.get_type_mode_pairs()})
 
     # Check for completely missing agents
     for agent_id in agent_ids:
@@ -161,24 +170,26 @@ def validate_analysis_data(
             available_agents = ", ".join(data.get_agent_ids())
             raise ValueError(f"Agent '{agent_id}' has no data.")
 
-    # 1. Calculate the maximum count for EACH description type across all agents
+    # 1. Calculate the maximum count for EACH description type and mode across all agents
     max_counts_per_type = {}
     for desc_type in description_types:
-        counts = []
-        for agent_id in agent_ids:
-            agent_desc_data = data.get_data(agent_id, desc_type)
-            counts.append(agent_desc_data.count if agent_desc_data else 0)
-        max_counts_per_type[desc_type] = max(counts) if counts else 0
+        for mode in modes:
+            counts = []
+            for agent_id in agent_ids:
+                agent_desc_data = data.get_data(agent_id, desc_type, mode)
+                counts.append(agent_desc_data.count if agent_desc_data else 0)
+            max_counts_per_type[(desc_type, mode)] = max(counts) if counts else 0
 
     # 2. Compare each agent/type combo against that type's maximum
     for agent_id in agent_ids:
         for desc_type in description_types:
-            agent_desc_data = data.get_data(agent_id, desc_type)
-            count = agent_desc_data.count if agent_desc_data else 0
-            max_val = max_counts_per_type[desc_type]
+            for mode in modes:
+                agent_desc_data = data.get_data(agent_id, desc_type, mode)
+                count = agent_desc_data.count if agent_desc_data else 0
+                max_val = max_counts_per_type[(desc_type, mode)]
 
-            if count < max_val:
-                print(
-                    f"WARNING: Agent '{agent_id}' for '{desc_type}' has fewer data points "
-                    f"({count}) than the maximum ({max_val})"
-                )
+                if count < max_val:
+                    print(
+                        f"WARNING: Agent '{agent_id}' for '{desc_type}/{mode}' has fewer data points "
+                        f"({count}) than the maximum ({max_val})"
+                    )

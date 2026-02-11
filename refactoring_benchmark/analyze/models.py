@@ -1,8 +1,8 @@
-"""Data models for description-type based analysis."""
+"""Data models for description-type and mode based analysis."""
 
 import math
 import statistics
-from typing import Dict, Literal
+from typing import Dict, Iterable, Literal
 
 from pydantic import BaseModel, Field
 from scipy import stats
@@ -16,10 +16,11 @@ class MetricPoint(BaseModel):
 
 
 class AgentDescriptionData(BaseModel):
-    """All metric values for one (agent_id, description_type) combination."""
+    """All metric values for one (agent_id, description_type, mode) combination."""
 
     agent_id: str = Field(description="Agent identifier")
     description_type: str = Field(description="Description type (instructed, open)")
+    mode: str = Field(description="Inference mode (direct, plan, multiplan)")
     metric_values: list[MetricPoint] = Field(default_factory=list, description="One value per instance")
 
     @property
@@ -85,25 +86,28 @@ class AgentDescriptionData(BaseModel):
 
 
 class AnalysisData(BaseModel):
-    """Complete analysis data grouped by (agent_id, description_type)."""
+    """Complete analysis data grouped by (agent_id, description_type, mode)."""
 
-    # Key: (agent_id, description_type)
-    data: Dict[tuple[str, str], AgentDescriptionData] = Field(
-        default_factory=dict, description="Grouped data by agent and description type"
+    # Key: (agent_id, description_type, mode)
+    data: Dict[tuple[str, str, str], AgentDescriptionData] = Field(
+        default_factory=dict, description="Grouped data by agent, description type, and mode"
     )
 
-    def add_metric_point(self, agent_id: str, description_type: str, instance_key: str, value: float) -> None:
+    def add_metric_point(
+        self, agent_id: str, description_type: str, mode: str, instance_key: str, value: float
+    ) -> None:
         """Add a metric point to the analysis data.
 
         Args:
             agent_id: Agent identifier
             description_type: Description type
+            mode: Inference mode
             instance_key: Instance identifier
             value: Metric value in [0, 1] range
         """
-        key = (agent_id, description_type)
+        key = (agent_id, description_type, mode)
         if key not in self.data:
-            self.data[key] = AgentDescriptionData(agent_id=agent_id, description_type=description_type)
+            self.data[key] = AgentDescriptionData(agent_id=agent_id, description_type=description_type, mode=mode)
         self.data[key].metric_values.append(MetricPoint(instance_key=instance_key, value=value))
 
     def get_agent_ids(self) -> list[str]:
@@ -119,30 +123,31 @@ class AnalysisData(BaseModel):
         agents = set(k[0] for k in self.data.keys())
         return sorted(agents, key=lambda x: agent_order.get(x, 999))
 
-    def get_description_types(self) -> list[str]:
-        """Get sorted list of unique description types."""
-        d = {"instructed": 10, "open": 20}
-        d_suffix = {"": 0, "plan": 1, "multiplan": 2}
+    def get_type_mode_pairs(self) -> list[tuple[str, str]]:
+        """Get sorted list of unique (description_type, mode) pairs."""
+        pairs = {(k[1], k[2]) for k in self.data.keys()}
+        return sort_type_mode_pairs(pairs)
 
-        def sort_description_type(desc_type: str) -> tuple[int, int]:
-            parts = desc_type.split("_")
-            base = parts[0]
-            suffix = parts[1] if len(parts) > 1 else ""
-            return d.get(base, 100) + d_suffix.get(suffix, 5)
+    def get_type_mode_pairs_with_labels(
+        self, separator: str = " "
+    ) -> tuple[list[tuple[str, str]], list[str]]:
+        """Return ordered (description_type, mode) pairs and display labels."""
+        pairs = self.get_type_mode_pairs()
+        labels = [format_type_mode_label(desc_type, mode, separator=separator) for desc_type, mode in pairs] if len(pairs) > 1 else [""]
+        return pairs, labels
 
-        return sorted(set(k[1] for k in self.data.keys()), key=sort_description_type)
-
-    def get_data(self, agent_id: str, description_type: str) -> AgentDescriptionData | None:
-        """Get data for a specific (agent_id, description_type) combination.
+    def get_data(self, agent_id: str, description_type: str, mode: str) -> AgentDescriptionData | None:
+        """Get data for a specific (agent_id, description_type, mode) combination.
 
         Args:
             agent_id: Agent identifier
             description_type: Description type
+            mode: Inference mode
 
         Returns:
             AgentDescriptionData if exists, None otherwise
         """
-        return self.data.get((agent_id, description_type))
+        return self.data.get((agent_id, description_type, mode))
 
     def filter_agents(self, agent_ids: list[str]) -> "AnalysisData":
         """Create a new AnalysisData containing only specified agents.
@@ -154,25 +159,63 @@ class AnalysisData(BaseModel):
             New AnalysisData with filtered agents
         """
         filtered_data = AnalysisData()
-        for (agent_id, description_type), agent_data in self.data.items():
+        for (agent_id, description_type, mode), agent_data in self.data.items():
             if agent_id in agent_ids:
-                filtered_data.data[(agent_id, description_type)] = agent_data
+                filtered_data.data[(agent_id, description_type, mode)] = agent_data
         return filtered_data
 
     def filter_description_types(self, description_types: list[str]) -> "AnalysisData":
-        """Create a new AnalysisData containing only specified description types.
-
-        Args:
-            description_types: List of description types to keep
-
-        Returns:
-            New AnalysisData with filtered description types
-        """
+        """Create a new AnalysisData containing only specified description types."""
         filtered_data = AnalysisData()
-        for (agent_id, description_type), agent_data in self.data.items():
+        for (agent_id, description_type, mode), agent_data in self.data.items():
             if description_type in description_types:
-                filtered_data.data[(agent_id, description_type)] = agent_data
+                filtered_data.data[(agent_id, description_type, mode)] = agent_data
+        return filtered_data
+
+    def filter_modes(self, modes: list[str]) -> "AnalysisData":
+        """Create a new AnalysisData containing only specified modes."""
+        filtered_data = AnalysisData()
+        for (agent_id, description_type, mode), agent_data in self.data.items():
+            if mode in modes:
+                filtered_data.data[(agent_id, description_type, mode)] = agent_data
         return filtered_data
 
 
 AggregationType = Literal["mean", "median"]
+
+
+DESC_TYPE_LABELS = {
+    "instructed": "Instructed",
+    "open": "Open",
+}
+MODE_LABELS = {
+    "direct": "Direct",
+    "plan": "Plan",
+    "multiplan": "Multiplan",
+}
+DESC_TYPE_ORDER = {
+    "instructed": 10,
+    "open": 20,
+}
+MODE_ORDER = {
+    "direct": 0,
+    "plan": 1,
+    "multiplan": 2,
+}
+
+
+def sort_type_mode_pairs(pairs: Iterable[tuple[str, str]]) -> list[tuple[str, str]]:
+    """Sort (description_type, mode) pairs in a consistent order."""
+
+    def sort_key(item: tuple[str, str]) -> tuple[int, int]:
+        desc_type, mode = item
+        return DESC_TYPE_ORDER.get(desc_type, 100), MODE_ORDER.get(mode, 9)
+
+    return sorted(set(pairs), key=sort_key)
+
+
+def format_type_mode_label(desc_type: str, mode: str, separator: str = " ") -> str:
+    """Format a description_type/mode label using display names."""
+    desc_label = DESC_TYPE_LABELS.get(desc_type, desc_type)
+    mode_label = MODE_LABELS.get(mode, mode)
+    return f"{desc_label}{separator}{mode_label}"

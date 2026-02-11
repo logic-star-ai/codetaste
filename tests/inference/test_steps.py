@@ -2,6 +2,8 @@ import json
 import logging
 from pathlib import Path
 
+import pytest
+
 from refactoring_benchmark.inference.models import (
     AgentConfig,
     AgentInfo,
@@ -13,6 +15,7 @@ from refactoring_benchmark.inference.models import (
 from refactoring_benchmark.inference.steps.inference import InferenceStep
 from refactoring_benchmark.inference.steps.multiplan import MultiplanStep
 from refactoring_benchmark.inference.steps.plan import PlanStep
+from refactoring_benchmark.inference.utils import build_context
 from refactoring_benchmark.utils.models import InstanceRow
 
 
@@ -36,8 +39,7 @@ def _make_config(tmp_path: Path) -> InferenceConfig:
         sanitized_agent_id="agent-1",
         env_vars={},
         description_type="instructed",
-        plan=False,
-        multiplan=False,
+        mode="direct",
         plan_timeout=10,
     )
 
@@ -162,7 +164,7 @@ def test_inference_step_uses_context_for_description_selection(tmp_path, monkeyp
 
     context = ExecutionContext(
         description_type="instructed",
-        description_type_suffix="_multiplan",
+        mode="multiplan",
         plan_content="plan",
     )
     assert step.run(context) is True
@@ -173,14 +175,33 @@ def test_inference_step_uses_context_for_description_selection(tmp_path, monkeyp
     plan_path.write_text("plan file", encoding="utf-8")
     context = ExecutionContext(
         description_type="instructed",
-        description_type_suffix="_plan",
+        mode="plan",
         plan_path=plan_path,
     )
     assert step.run(context) is True
     assert captured["description_type"] is None
     assert captured["content"] == "plan file"
 
-    context = ExecutionContext(description_type="instructed")
+    context = ExecutionContext(description_type="instructed", mode="direct")
     assert step.run(context) is True
     assert captured["description_type"] == "instructed"
     assert captured["content"] is None
+
+
+def test_plan_step_validate_raises_without_metadata(tmp_path):
+    """Plan validation fails fast when inference metadata is missing."""
+    config = _make_config(tmp_path)
+    output_dir = tmp_path / "outputs"
+    output_dir.mkdir(parents=True)
+    logger = logging.getLogger("test.plan.validate")
+    logger.addHandler(logging.NullHandler())
+    instance = _make_instance()
+
+    plan_path = output_dir / "refactoring_plan.md"
+    plan_path.write_text("a valid plan file", encoding="utf-8")
+
+    step = PlanStep(instance, config, output_dir, logger, client=object())
+    context = build_context(config, mode="plan")
+
+    with pytest.raises(FileNotFoundError):
+        step._validate_plan_output(context)

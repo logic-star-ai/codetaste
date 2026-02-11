@@ -1,4 +1,4 @@
-"""CLI script to analyze evaluation results and generate plots by description type."""
+"""CLI script to analyze evaluation results and generate plots by description type and mode."""
 
 import argparse
 from pathlib import Path
@@ -12,7 +12,10 @@ from refactoring_benchmark.analyze.loader import (
 from refactoring_benchmark.analyze.metrics import ALL_METRICS
 from refactoring_benchmark.analyze.plotting import create_plot, save_plot
 from refactoring_benchmark.analyze.config import PlotConfig
-from refactoring_benchmark.analyze.filters import filter_no_timeouts, filter_successful_only
+from refactoring_benchmark.analyze.filters import (
+    filter_results,
+    filter_successful_only,
+)
 from refactoring_benchmark.analyze.statistics import print_finish_reason_table, print_statistics_table
 from refactoring_benchmark.utils.common import load_instances_from_csv
 
@@ -20,7 +23,7 @@ from refactoring_benchmark.utils.common import load_instances_from_csv
 def main():
     """Analyze evaluation results and generate plots."""
     parser = argparse.ArgumentParser(
-        description="Analyze evaluation results by description type",
+        description="Analyze evaluation results by description type and mode",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -35,6 +38,9 @@ Examples:
 
   # Filter by description type
   python -m refactoring_benchmark.scripts.analyze --description-type instructed --description-type open
+
+  # Filter by mode
+  python -m refactoring_benchmark.scripts.analyze --mode direct --mode plan
 
   # Generate specific metrics with bar chart
   python -m refactoring_benchmark.scripts.analyze --metric ifr --plot-type bar
@@ -75,6 +81,13 @@ Examples:
         dest="description_types",
         help="Filter by description type (can be specified multiple times). "
         "Default: all description types found in data.",
+    )
+    parser.add_argument(
+        "--mode",
+        action="append",
+        dest="modes",
+        help="Filter by inference mode (direct, plan, multiplan). "
+        "Default: all modes found in data.",
     )
     parser.add_argument(
         "--successful-only",
@@ -243,16 +256,13 @@ Examples:
 
     # Print finish_reason statistics if requested
     if args.statistics:
-        filtered_results = results[:]
-        if args.agent_ids:
-            filtered_results = [r for r in filtered_results if r.agent_config.id in args.agent_ids]
-        if args.description_types:
-            filtered_results = [
-                r
-                for r in filtered_results
-                if r.inference_metadata and r.inference_metadata.description_type in args.description_types
-            ]
-        print_finish_reason_table(filtered_results, "Filtered by Description Type and Agent ID")
+        filtered_results = filter_results(
+            results,
+            agent_ids=args.agent_ids,
+            description_types=args.description_types,
+            modes=args.modes,
+        )
+        print_finish_reason_table(filtered_results, "Filtered by Description Type, Mode, and Agent ID")
 
     # Process each metric
     for metric_name in metrics_to_plot:
@@ -271,18 +281,21 @@ Examples:
             data = data.filter_agents(args.agent_ids)
         if args.description_types:
             data = data.filter_description_types(args.description_types)
+        if args.modes:
+            data = data.filter_modes(args.modes)
 
         # Validate data
         try:
-            validate_analysis_data(data, args.agent_ids, args.description_types)
+            validate_analysis_data(data, args.agent_ids, args.description_types, args.modes)
         except ValueError as e:
             print(f"  Error: {e}")
             return
 
         # Print summary
         print(f"  Found {len(data.get_agent_ids())} agents: {', '.join(data.get_agent_ids())}")
+        type_mode_pairs, type_mode_labels = data.get_type_mode_pairs_with_labels(separator="/")
         print(
-            f"  Found {len(data.get_description_types())} description types: {', '.join(data.get_description_types())}"
+            f"  Found {len(type_mode_pairs)} description type/mode pairs: {', '.join(type_mode_labels)}"
         )
 
         # Generate plot
