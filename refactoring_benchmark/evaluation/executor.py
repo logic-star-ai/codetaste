@@ -32,6 +32,7 @@ from refactoring_benchmark.utils.models import InstanceMetadata, InstanceRow
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
+
 def get_evaluation_dir(instance: InstanceRow, agent_id: str, output_dir: Path) -> Path:
     """
     Get evaluation directory path for an instance and agent.

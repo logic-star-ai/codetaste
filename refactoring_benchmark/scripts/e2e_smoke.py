@@ -139,9 +139,7 @@ def ensure_file(path: Path, label: str) -> None:
         raise FileNotFoundError(f"Missing {label}: {path}")
 
 
-def verify_inference_outputs(
-    instances, agent_id: str, output_dir: Path, mode: str
-) -> None:
+def verify_inference_outputs(instances, agent_id: str, output_dir: Path, mode: str) -> None:
     for inst in instances:
         base = output_dir / inst.owner / inst.repo / inst.short_hash / agent_id
         ensure_file(base / "prediction.diff", "prediction.diff")

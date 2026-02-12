@@ -102,7 +102,9 @@ def main():
             eval_dir = instance_agent_dir / "evaluation"
 
             # Use null_agent for baseline negative SARIF
-            null_agent_instance_dir = null_agent_dir / instance.owner / instance.repo / instance.short_hash / "null_agent"
+            null_agent_instance_dir = (
+                null_agent_dir / instance.owner / instance.repo / instance.short_hash / "null_agent"
+            )
             sarif_negative_path = null_agent_instance_dir / "evaluation" / "rules_negative.sarif"
             sarif_positive_path = eval_dir / "rules_positive.sarif"
             diff_path = instance_agent_dir / "prediction.diff"

@@ -113,11 +113,7 @@ def organize_data(
                 continue
         # Extract agent_id, description_type, and mode
         agent_id = result.agent_config.id
-        if (
-            result.inference_metadata
-            and result.inference_metadata.description_type
-            and result.inference_metadata.mode
-        ):
+        if result.inference_metadata and result.inference_metadata.description_type and result.inference_metadata.mode:
             description_type = result.inference_metadata.description_type
             mode = result.inference_metadata.mode
         else:

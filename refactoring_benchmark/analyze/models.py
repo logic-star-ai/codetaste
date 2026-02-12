@@ -128,12 +128,14 @@ class AnalysisData(BaseModel):
         pairs = {(k[1], k[2]) for k in self.data.keys()}
         return sort_type_mode_pairs(pairs)
 
-    def get_type_mode_pairs_with_labels(
-        self, separator: str = " "
-    ) -> tuple[list[tuple[str, str]], list[str]]:
+    def get_type_mode_pairs_with_labels(self, separator: str = " ") -> tuple[list[tuple[str, str]], list[str]]:
         """Return ordered (description_type, mode) pairs and display labels."""
         pairs = self.get_type_mode_pairs()
-        labels = [format_type_mode_label(desc_type, mode, separator=separator) for desc_type, mode in pairs] if len(pairs) > 1 else [""]
+        labels = (
+            [format_type_mode_label(desc_type, mode, separator=separator) for desc_type, mode in pairs]
+            if len(pairs) > 1
+            else [""]
+        )
         return pairs, labels
 
     def get_data(self, agent_id: str, description_type: str, mode: str) -> AgentDescriptionData | None:

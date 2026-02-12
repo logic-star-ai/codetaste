@@ -181,7 +181,9 @@ class InstanceInferenceRunner:
             step_entry = step_map.get(self.config.mode)
             if step_entry:
                 step_cls, payload_key = step_entry
-                step: PlanStep | MultiplanStep = step_cls(self.instance, self.config, self.output_dir, self.logger, self.client)
+                step: PlanStep | MultiplanStep = step_cls(
+                    self.instance, self.config, self.output_dir, self.logger, self.client
+                )
                 try:
                     payload = step.run()
                     if not payload:

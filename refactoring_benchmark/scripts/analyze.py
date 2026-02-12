@@ -86,8 +86,7 @@ Examples:
         "--mode",
         action="append",
         dest="modes",
-        help="Filter by inference mode (direct, plan, multiplan). "
-        "Default: all modes found in data.",
+        help="Filter by inference mode (direct, plan, multiplan). " "Default: all modes found in data.",
     )
     parser.add_argument(
         "--successful-only",
@@ -294,9 +293,7 @@ Examples:
         # Print summary
         print(f"  Found {len(data.get_agent_ids())} agents: {', '.join(data.get_agent_ids())}")
         type_mode_pairs, type_mode_labels = data.get_type_mode_pairs_with_labels(separator="/")
-        print(
-            f"  Found {len(type_mode_pairs)} description type/mode pairs: {', '.join(type_mode_labels)}"
-        )
+        print(f"  Found {len(type_mode_pairs)} description type/mode pairs: {', '.join(type_mode_labels)}")
 
         # Generate plot
         print(f"  Generating {args.plot_type} plot with {args.aggregation} aggregation...")
@@ -311,7 +308,9 @@ Examples:
                 ytick_step = 5
                 while (y_lim_max - y_lim_min) * 100 / ytick_step > 15:
                     ytick_step += 5
-                config = plot_config.model_copy(update={"ylim_max": y_lim_max, "ylim_min": y_lim_min, "ytick_step": ytick_step})
+                config = plot_config.model_copy(
+                    update={"ylim_max": y_lim_max, "ylim_min": y_lim_min, "ytick_step": ytick_step}
+                )
             else:
                 config = plot_config
             fig = create_plot(data, metric_name, plot_type=args.plot_type, aggregation=args.aggregation, config=config)
