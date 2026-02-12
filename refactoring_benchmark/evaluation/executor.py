@@ -12,7 +12,7 @@ import shutil
 
 from tqdm import tqdm
 
-from refactoring_benchmark.evaluation.models import EvaluationConfig, EvaluationResult
+from refactoring_benchmark.evaluation.models import EvaluationConfig, EvaluationResult, TestMetrics
 from refactoring_benchmark.evaluation.parser import (
     load_instance_metadata,
     parse_rule_evaluation,
@@ -178,20 +178,45 @@ def evaluate_single_instance(instance: InstanceRow, agent_id: str, config: Evalu
         instance_logger.error(f"Skipping {instance.id}: missing rules assets for evaluation")
         return False
 
+    def run_tests_with_retries(executor: ThreadPoolExecutor) -> TestMetrics | None:
+        test_metrics, test_stdout = executor.submit(
+            run_test_evaluation,
+            instance,
+            prediction_diff,
+            eval_dir,
+            config.timeout_test,
+            instance_logger,
+            rules_dir,
+        ).result()
+        (eval_dir / "test_output.txt").write_text(test_stdout)
+        if test_metrics is None:
+            test_metrics = parse_test_output(test_stdout)
+        if test_metrics is not None:
+            return test_metrics
+        for attempt in range(2, 5):
+            instance_logger.warning(f"Test metrics missing; retrying tests (attempt {attempt}/4)")
+            test_metrics, test_stdout = executor.submit(
+                run_test_evaluation,
+                instance,
+                prediction_diff,
+                eval_dir,
+                config.timeout_test,
+                instance_logger,
+                rules_dir,
+            ).result()
+            (eval_dir / "test_output.txt").write_text(test_stdout)
+            if test_metrics is None:
+                test_metrics = parse_test_output(test_stdout)
+            if test_metrics is not None:
+                return test_metrics
+        return None
+
     # Run test and rule evaluation in parallel
     try:
         with ThreadPoolExecutor(max_workers=2) as executor:
             # Submit both evaluations
             if not config.skip_tests:
-                test_future = executor.submit(
-                    run_test_evaluation,
-                    instance,
-                    prediction_diff,
-                    eval_dir,
-                    config.timeout_test,
-                    instance_logger,
-                    rules_dir,
-                )
+                test_future = executor.submit(run_tests_with_retries, executor)
 
             rule_future = executor.submit(
                 run_rule_evaluation,
@@ -207,10 +232,7 @@ def evaluate_single_instance(instance: InstanceRow, agent_id: str, config: Evalu
             rule_success, rule_stdout = rule_future.result()
             (eval_dir / "rule_output.txt").write_text(rule_stdout)
             if not config.skip_tests:
-                test_metrics, test_stdout = test_future.result()
-                (eval_dir / "test_output.txt").write_text(test_stdout)
-                if test_metrics is None:
-                    test_metrics = parse_test_output(test_stdout)
+                test_metrics = test_future.result()
             else:
                 test_metrics = evaluation_result.agent_test_metrics if evaluation_result else None
     finally:

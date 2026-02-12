@@ -44,7 +44,7 @@ python -m refactoring_benchmark.scripts.evaluate \
 
 ### 4) Analyze
 ```bash
-python -m refactoring_benchmark.scripts.analyze --metric ifr --plot-type line
+python -m refactoring_benchmark.scripts.analyze --metric ifr --plot-type bar
 ```
 
 ### E2E pipeline (small smoke test)
@@ -103,3 +103,4 @@ Detailed phase docs:
 - `docs/inference.md`
 - `docs/evaluation.md`
 - `docs/analysis.md`
+- `docs/benchmarking-your-agent.md`
