@@ -4,24 +4,20 @@ import logging
 import os
 import shlex
 import time
-from typing import Optional
 from concurrent.futures import TimeoutError
+from typing import Optional
 
 import podman
 from podman.domain.containers import Container as PodmanContainer
 
-from refactoring_benchmark.bootstrap.models import BootstrapConfig
+import refactoring_benchmark.podman.utils as podman_utils
+from refactoring_benchmark.bootstrap.models import (BootstrapConfig,
+                                                    ExecutionInstanceMetadata)
 from refactoring_benchmark.bootstrap.utils import (
-    BootstrapError,
-    setup_testbed_container,
-    run_metrics,
-    validate_container_size,
-    validate_and_commit_container,
-)
-from refactoring_benchmark.bootstrap.models import ExecutionInstanceMetadata
+    BootstrapError, run_metrics, setup_testbed_container,
+    validate_and_commit_container, validate_container_size)
 from refactoring_benchmark.utils.models import InstanceRow
 from refactoring_benchmark.utils.prompts import BOOTSTRAP_PROMPT
-import refactoring_benchmark.podman.utils as podman_utils
 
 
 def bootstrap_run_setup_agent(
@@ -126,7 +122,7 @@ def bootstrap_setup_phase(
                 return _finalize_fallback(container, setup_image, metadata, logger)
             # Flow 2: Build from scratch (either forced or image missing)
             if force_rebuild:
-                logger.info(f"Force rebuild: Building setup image from scratch")
+                logger.info("Force rebuild: Building setup image from scratch")
             else:
                 logger.info(f"Building new setup image: {setup_image}")
 
@@ -159,7 +155,7 @@ def bootstrap_setup_phase(
         metadata.golden_metrics = None
         metadata.base_metrics = None
         metadata.has_execution_environment = False
-        metadata.reason_no_execution_environment = f"Insufficient test coverage. "
+        metadata.reason_no_execution_environment = "Insufficient test coverage. "
         raise RuntimeError(f"Metrics validation failed for {row.id}")
 
     finally:

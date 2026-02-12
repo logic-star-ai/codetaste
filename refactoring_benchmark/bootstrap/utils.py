@@ -3,11 +3,12 @@
 import json
 import logging
 from typing import Optional
+
 from podman.domain.containers import Container as PodmanContainer
 
-from refactoring_benchmark.utils.models import Metrics
-from refactoring_benchmark.bootstrap.models import ExecutionInstanceMetadata
 import refactoring_benchmark.podman.utils as podman_utils
+from refactoring_benchmark.bootstrap.models import ExecutionInstanceMetadata
+from refactoring_benchmark.utils.models import Metrics
 
 
 class BootstrapError(Exception):

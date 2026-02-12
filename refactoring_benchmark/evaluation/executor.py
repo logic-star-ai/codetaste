@@ -2,28 +2,26 @@
 
 import json
 import logging
+import shutil
 import signal
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-import time
 from typing import List
-import shutil
 
 from tqdm import tqdm
 
-from refactoring_benchmark.evaluation.models import EvaluationConfig, EvaluationResult, TestMetrics
-from refactoring_benchmark.evaluation.parser import (
-    load_instance_metadata,
-    parse_rule_evaluation,
-    parse_test_output,
-)
-from refactoring_benchmark.evaluation.runner import (
-    cleanup_temp_rules_dir,
-    prepare_temp_rules_dir,
-    run_rule_evaluation,
-    run_test_evaluation,
-)
+from refactoring_benchmark.evaluation.models import (EvaluationConfig,
+                                                     EvaluationResult,
+                                                     TestMetrics)
+from refactoring_benchmark.evaluation.parser import (load_instance_metadata,
+                                                     parse_rule_evaluation,
+                                                     parse_test_output)
+from refactoring_benchmark.evaluation.runner import (cleanup_temp_rules_dir,
+                                                     prepare_temp_rules_dir,
+                                                     run_rule_evaluation,
+                                                     run_test_evaluation)
 from refactoring_benchmark.inference.models import AgentConfig
 from refactoring_benchmark.inference.validation import validate_agent_config
 from refactoring_benchmark.podman import utils as podman_utils
@@ -264,7 +262,7 @@ def evaluate_single_instance(instance: InstanceRow, agent_id: str, config: Evalu
     with open(result_path, "w") as f:
         json.dump(evaluation_result.model_dump(mode="json"), f, indent=2)
 
-    instance_logger.info(f"Evaluation completed successfully")
+    instance_logger.info("Evaluation completed successfully")
     instance_logger.info(f"  Test metrics: {test_metrics.model_dump() if test_metrics else 'N/A'}")
     instance_logger.info(
         f"  Rule IFR: {rule_metrics.ifr:.3f} (pos: {rule_metrics.positive_ifr:.3f}, neg: {rule_metrics.negative_ifr:.3f})"
@@ -333,7 +331,6 @@ class EvaluationOrchestrator:
         self.logger.info(f"Using {self.config.nr_workers} parallel workers")
 
         results = {"success": 0, "failed": 0, "skipped": 0}
-        interrupted = False
 
         # Manual executor management for proper shutdown control
         executor = ThreadPoolExecutor(max_workers=self.config.nr_workers)

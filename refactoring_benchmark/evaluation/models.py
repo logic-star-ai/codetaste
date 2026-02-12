@@ -2,12 +2,13 @@
 
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Type, TypeVar, Dict, Union
+from typing import Dict, Optional, Type, TypeVar, Union
 
 from pydantic import BaseModel, Field, computed_field, model_validator
 
 from refactoring_benchmark.bootstrap.models import ExecutionInstanceMetadata
-from refactoring_benchmark.inference.models import AgentConfig, InferenceMetadata
+from refactoring_benchmark.inference.models import (AgentConfig,
+                                                    InferenceMetadata)
 
 T = TypeVar("T", bound="EvaluationResult")
 

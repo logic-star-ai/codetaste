@@ -1,20 +1,17 @@
 """Instance-based analysis for comparing agent performance across benchmark instances."""
 
-import math
-import statistics
 from pathlib import Path
 from typing import Sequence
 
+import matplotlib.cm as cm
 import matplotlib.pyplot as plt
 import numpy as np
 from pydantic import BaseModel, Field
-from scipy import stats
 
 from refactoring_benchmark.analyze.config import PlotConfig
 from refactoring_benchmark.analyze.filters import ResultFilter
 from refactoring_benchmark.analyze.metrics import get_metric_function
 from refactoring_benchmark.evaluation.models import EvaluationResult
-from refactoring_benchmark.utils.models import InstanceRow
 
 
 class InstanceMetricPoint(BaseModel):
@@ -200,11 +197,6 @@ def create_instance_plot(
         return _plot_instance_bar(data, metric_name, instance_keys, instance_displays, agents, config)
     else:
         raise ValueError(f"Unknown plot type: {plot_type}")
-
-
-import numpy as np
-import matplotlib.pyplot as plt
-import matplotlib.cm as cm
 
 
 def _plot_instance_heatmap(

@@ -3,20 +3,17 @@
 import argparse
 from pathlib import Path
 
-from refactoring_benchmark.analyze.loader import (
-    discover_output_dirs,
-    load_all_results,
-    organize_data,
-    validate_analysis_data,
-)
+from refactoring_benchmark.analyze.config import PlotConfig
+from refactoring_benchmark.analyze.filters import (filter_results,
+                                                   filter_successful_only)
+from refactoring_benchmark.analyze.loader import (discover_output_dirs,
+                                                  load_all_results,
+                                                  organize_data,
+                                                  validate_analysis_data)
 from refactoring_benchmark.analyze.metrics import ALL_METRICS
 from refactoring_benchmark.analyze.plotting import create_plot, save_plot
-from refactoring_benchmark.analyze.config import PlotConfig
-from refactoring_benchmark.analyze.filters import (
-    filter_results,
-    filter_successful_only,
-)
-from refactoring_benchmark.analyze.statistics import print_finish_reason_table, print_statistics_table
+from refactoring_benchmark.analyze.statistics import (
+    print_finish_reason_table, print_statistics_table)
 from refactoring_benchmark.utils.common import load_instances_from_csv
 
 
@@ -300,7 +297,6 @@ Examples:
         try:
             if len(output_dirs) != 1:
                 max_mean = max([v.mean for k, v in data.data.items()])
-                min_mean = min([v.mean for k, v in data.data.items()])
                 max_ci = max([v.confidence_interval()[1] - v.mean for k, v in data.data.items()])
                 print(f"    Setting y-axis limit to {max_mean:.4f} for better visibility")
                 y_lim_min = 0

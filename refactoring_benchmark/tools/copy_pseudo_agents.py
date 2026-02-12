@@ -247,7 +247,7 @@ def main() -> int:
 
         except FileExistsError:
             print(f"  ✗ Skipped (exists): {relative_display}")
-            print(f"    Use --force to overwrite")
+            print("    Use --force to overwrite")
             error_count += 1
 
         except Exception as e:

@@ -2,20 +2,19 @@
 
 import json
 import os
+from functools import lru_cache
 from pathlib import Path
 from typing import Optional
-from functools import lru_cache
 
-from refactoring_benchmark.coverage.models import (
-    SARIFOpengrep,
-    PrecisionMetrics,
-    PrecisionMetricsResult,
-    InstanceAgentPrecision,
-)
+from joblib import Memory
+
+from refactoring_benchmark.coverage.models import (InstanceAgentPrecision,
+                                                   PrecisionMetrics,
+                                                   PrecisionMetricsResult,
+                                                   SARIFOpengrep)
 from refactoring_benchmark.coverage.parse import parse_diff, parse_sarif
 from refactoring_benchmark.evaluation.models import EvaluationResult
 from refactoring_benchmark.utils.models import ReducedInstanceRow
-from joblib import Memory
 
 cachedir = "./.cache_dir"
 memory = Memory(cachedir, verbose=1)

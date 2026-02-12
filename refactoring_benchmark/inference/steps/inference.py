@@ -4,16 +4,12 @@ import logging
 from pathlib import Path
 from typing import Optional
 
-from refactoring_benchmark.inference.models import (
-    ExecutionContext,
-    InferenceConfig,
-    InferenceMetadata,
-)
+from refactoring_benchmark.inference.models import (ExecutionContext,
+                                                    InferenceConfig,
+                                                    InferenceMetadata)
 from refactoring_benchmark.inference.steps.executor import ContainerExecutor
 from refactoring_benchmark.inference.utils import (
-    cleanup_temp_dir,
-    prepare_temp_task_description,
-)
+    cleanup_temp_dir, prepare_temp_task_description)
 from refactoring_benchmark.utils.models import InstanceRow
 
 

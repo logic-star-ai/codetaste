@@ -1,17 +1,16 @@
 """Container execution helper for inference steps."""
 
+import logging
 from pathlib import Path
 from typing import Optional
-import logging
 
 import podman
 from podman.domain.containers import Container as PodmanContainer
 
-from refactoring_benchmark.inference.models import ExecutionContext, InferenceConfig
+from refactoring_benchmark.inference.models import (ExecutionContext,
+                                                    InferenceConfig)
 from refactoring_benchmark.inference.utils import (
-    create_fallback_inference_metadata,
-    output_container_logs,
-)
+    create_fallback_inference_metadata, output_container_logs)
 from refactoring_benchmark.podman import utils as podman_utils
 from refactoring_benchmark.utils.models import InstanceRow
 

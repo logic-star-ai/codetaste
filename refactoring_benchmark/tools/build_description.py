@@ -26,7 +26,6 @@ import re
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-
 # Supported sections (normalized lowercase for matching)
 SUPPORTED_SECTIONS = ["title", "summary", "why", "scope"]
 
@@ -410,7 +409,7 @@ Supported sections:
         print(f"Error: descriptions directory not found at {args.descriptions_dir}")
         return 1
 
-    print(f"Building filtered descriptions...")
+    print("Building filtered descriptions...")
     print(f"  Sections: {', '.join(included_sections)}")
     print(f"  Output: {output_dir}")
     print()

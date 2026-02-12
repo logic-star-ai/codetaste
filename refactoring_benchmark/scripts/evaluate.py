@@ -6,8 +6,8 @@ from pathlib import Path
 from refactoring_benchmark.evaluation.cli import parse_args
 from refactoring_benchmark.evaluation.executor import EvaluationOrchestrator
 from refactoring_benchmark.evaluation.models import EvaluationConfig
-from refactoring_benchmark.utils.logger import get_logger, setup_logging
 from refactoring_benchmark.utils.common import load_instances_from_csv
+from refactoring_benchmark.utils.logger import get_logger, setup_logging
 
 
 def main():

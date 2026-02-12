@@ -1,5 +1,6 @@
 from typing import List, Optional, Set
-from pydantic import BaseModel, Field, ConfigDict
+
+from pydantic import BaseModel, ConfigDict, Field
 
 
 # Line

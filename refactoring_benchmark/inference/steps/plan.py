@@ -3,19 +3,13 @@
 from pathlib import Path
 from typing import Optional
 
-from refactoring_benchmark.inference.models import (
-    ExecutionContext,
-    InferenceConfig,
-    InferenceMetadata,
-)
+from refactoring_benchmark.inference.models import (ExecutionContext,
+                                                    InferenceConfig,
+                                                    InferenceMetadata)
 from refactoring_benchmark.inference.steps.executor import ContainerExecutor
 from refactoring_benchmark.inference.utils import (
-    build_context,
-    cleanup_temp_dir,
-    prepare_temp_plan_description,
-    create_fallback_inference_metadata,
-    finalize_step_metadata,
-)
+    build_context, cleanup_temp_dir, create_fallback_inference_metadata,
+    finalize_step_metadata, prepare_temp_plan_description)
 from refactoring_benchmark.utils.models import InstanceRow
 
 

@@ -9,7 +9,7 @@ from typing import Dict, List, Tuple
 import podman
 from podman.domain.containers import Container as PodmanContainer
 
-from refactoring_benchmark.utils.logger import setup_logging, get_logger
+from refactoring_benchmark.utils.logger import get_logger, setup_logging
 
 # --- CONFIGURATION ---
 PROJECT_ROOT = Path(__file__).parent.parent.parent
@@ -214,7 +214,7 @@ def verify_image(image_tag: str) -> Tuple[bool, List[str]]:
         }
 
         # Run common tests
-        logger.info(f"Running common tests...")
+        logger.info("Running common tests...")
         for test_name, command in common_tests.items():
             if not run_test(container, test_name, command):
                 failed_tests.append(test_name)

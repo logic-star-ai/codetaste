@@ -13,8 +13,6 @@ import csv
 import json
 from pathlib import Path
 
-from refactoring_benchmark.utils.models import InstanceRow
-
 
 def has_valid_execution_environment(owner: str, repo: str, commit_hash: str, instance_images_dir: Path) -> bool:
     """
@@ -122,7 +120,7 @@ def main():
         return 0
 
     print(f"Loaded {len(rows)} instances")
-    print(f"Checking for valid execution environments...")
+    print("Checking for valid execution environments...")
     print()
 
     # Filter instances with valid execution environments

@@ -1,3 +1,4 @@
+import re
 import subprocess
 import threading
 from typing import List, Optional, Tuple
@@ -31,10 +32,6 @@ def run_podman_command(args: list[str], timeout: int = 120) -> Tuple[int, Tuple[
 
         except subprocess.TimeoutExpired:
             return -1, ("", f"Command timed out after {timeout} seconds.")
-
-
-import re
-
 
 def podman_container_storage(container_id: str) -> Optional[dict]:
     """

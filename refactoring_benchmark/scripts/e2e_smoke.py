@@ -12,7 +12,6 @@ from pathlib import Path
 from refactoring_benchmark.inference.validation import sanitize_agent_id
 from refactoring_benchmark.utils.common import load_instances_from_csv
 
-
 DEFAULT_AGENT_DIR = Path("./agents/qwen-code/qwen3-coder-30b-a3b-instruct")
 DEFAULT_DESCRIPTION_TYPES = ["instructed", "open"]
 DEFAULT_MODES = ["direct", "plan", "multiplan"]

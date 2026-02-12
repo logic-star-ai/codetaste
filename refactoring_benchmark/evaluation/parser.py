@@ -1,6 +1,5 @@
 """Parsing utilities for evaluation outputs."""
 
-from collections import defaultdict
 import json
 from pathlib import Path
 from typing import Dict, Optional, Tuple
@@ -8,7 +7,9 @@ from typing import Dict, Optional, Tuple
 import yaml
 
 from refactoring_benchmark.bootstrap.models import ExecutionInstanceMetadata
-from refactoring_benchmark.evaluation.models import RuleMetrics, SingleRuleResult, TestMetrics
+from refactoring_benchmark.evaluation.models import (RuleMetrics,
+                                                     SingleRuleResult,
+                                                     TestMetrics)
 
 
 def parse_test_output(stdout: str) -> Optional[TestMetrics]:

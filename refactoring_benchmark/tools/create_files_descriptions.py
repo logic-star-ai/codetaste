@@ -14,7 +14,6 @@ from typing import List, Tuple
 
 from refactoring_benchmark.coverage.parse import parse_diff
 
-
 DESCRIPTION_TEMPLATE = """Autonomously identify and execute improvements to the **entire** codebase. Optimize structure, architecture, code quality and/or logic flow. Proceed directly to modifying the actual codebase; do not output analysis, plan, roadmap or similar files.
 Some of the files that look particularly concerning to me are the following:
 {file_list}"""
@@ -130,7 +129,7 @@ def create_files_descriptions(
                 print(f"✗ Error processing {owner}/{repo}/{short_hash}: {e}")
                 error_count += 1
 
-    print(f"\nSummary:")
+    print("\nSummary:")
     print(f"  Success: {success_count}")
     print(f"  Skipped: {skip_count}")
     print(f"  Errors: {error_count}")

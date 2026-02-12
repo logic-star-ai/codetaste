@@ -8,11 +8,11 @@ from typing import Optional
 import podman
 from podman.domain.containers import Container as PodmanContainer
 
-from refactoring_benchmark.bootstrap.models import BootstrapConfig
-from refactoring_benchmark.bootstrap.utils import validate_and_commit_container
-from refactoring_benchmark.bootstrap.models import ExecutionInstanceMetadata
-from refactoring_benchmark.utils.models import InstanceRow
 import refactoring_benchmark.podman.utils as podman_utils
+from refactoring_benchmark.bootstrap.models import (BootstrapConfig,
+                                                    ExecutionInstanceMetadata)
+from refactoring_benchmark.bootstrap.utils import validate_and_commit_container
+from refactoring_benchmark.utils.models import InstanceRow
 
 
 def bootstrap_runtime_phase(
@@ -93,7 +93,7 @@ def bootstrap_runtime_phase(
             exit_code, (stdout_bytes, stderr_bytes) = podman_utils.podman_timed_exec_bash_logged(
                 container, cmd, logger, timeout=300
             )
-        logger.info(f"🧠 Lobotomized git repository.")
+        logger.info("🧠 Lobotomized git repository.")
 
         podman_utils.podman_timed_exec_bash_logged(
             container,
