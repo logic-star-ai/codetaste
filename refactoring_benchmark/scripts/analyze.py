@@ -306,7 +306,12 @@ Examples:
                 min_mean = min([v.mean for k, v in data.data.items()])
                 max_ci = max([v.confidence_interval()[1] - v.mean for k, v in data.data.items()])
                 print(f"    Setting y-axis limit to {max_mean:.4f} for better visibility")
-                config = plot_config.model_copy(update={"ylim_max": max_mean + 1 * max_ci + 0.01, "ylim_min": 0})
+                y_lim_min = 0
+                y_lim_max = max_mean + 1 * max_ci + 0.01
+                ytick_step = 5
+                while (y_lim_max - y_lim_min) * 100 / ytick_step > 15:
+                    ytick_step += 5
+                config = plot_config.model_copy(update={"ylim_max": y_lim_max, "ylim_min": y_lim_min, "ytick_step": ytick_step})
             else:
                 config = plot_config
             fig = create_plot(data, metric_name, plot_type=args.plot_type, aggregation=args.aggregation, config=config)

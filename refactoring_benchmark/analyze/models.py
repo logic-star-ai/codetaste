@@ -216,6 +216,5 @@ def sort_type_mode_pairs(pairs: Iterable[tuple[str, str]]) -> list[tuple[str, st
 
 def format_type_mode_label(desc_type: str, mode: str, separator: str = " ") -> str:
     """Format a description_type/mode label using display names."""
-    desc_label = DESC_TYPE_LABELS.get(desc_type, desc_type)
     mode_label = MODE_LABELS.get(mode, mode)
-    return f"{desc_label}{separator}{mode_label}"
+    return f"{mode_label}"

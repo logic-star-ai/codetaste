@@ -105,9 +105,6 @@ def create_plot(
         _plot_scatter(ax, data, agents, type_mode_pairs, colors, aggregation, config, markers)
 
     # 3. Axis Configuration
-    if config.show_xlabel:
-        # ax.set_xlabel(r"\textbf{Description Type}", labelpad=8)
-        pass
     if config.show_ylabel:
         ax.set_ylabel(f"{display_metric}")
 

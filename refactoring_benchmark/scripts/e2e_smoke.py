@@ -80,7 +80,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--plot-type",
         type=str,
-        default="line",
+        default="bar",
         choices=["line", "bar", "scatter"],
         help="Plot type for analysis",
     )
@@ -266,9 +266,8 @@ def main() -> int:
         "--instances-csv",
         str(instances_csv),
     ]
-    for description_type in description_types:
-        for mode in modes:
-            analysis_cmd.extend(["--output-dir", str(output_root / description_type / mode)])
+    for mode in modes:
+        analysis_cmd.extend(["--output-dir", str(output_root / description_types[0] / mode)])
 
     print("\n== Analysis ==")
     run_cmd(analysis_cmd)
