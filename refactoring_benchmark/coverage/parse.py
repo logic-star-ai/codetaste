@@ -7,7 +7,6 @@ import whatthepatch
 
 from refactoring_benchmark.coverage.models import Line, SARIFOpengrep
 
-
 # Standard ignore directories across supported languages (<= 20).
 _IGNORE_DIR_NAMES = {
     ".venv",

@@ -3,15 +3,15 @@
 import argparse
 from pathlib import Path
 
-from refactoring_benchmark.analyze_instance.instance_analysis import (
-    organize_instance_data,
-    create_instance_plot,
-    save_instance_plot,
-)
-from refactoring_benchmark.analyze.loader import discover_output_dirs, load_all_results
-from refactoring_benchmark.analyze.metrics import ALL_METRICS
 from refactoring_benchmark.analyze.config import PlotConfig
 from refactoring_benchmark.analyze.filters import filter_successful_only
+from refactoring_benchmark.analyze.loader import discover_output_dirs, load_all_results
+from refactoring_benchmark.analyze.metrics import ALL_METRICS
+from refactoring_benchmark.analyze_instance.instance_analysis import (
+    create_instance_plot,
+    organize_instance_data,
+    save_instance_plot,
+)
 from refactoring_benchmark.utils.common import load_instances_from_csv
 
 

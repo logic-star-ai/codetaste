@@ -1,8 +1,9 @@
 """Pydantic models for data validation and type safety."""
 
 import os
+from typing import Literal, Optional
+
 from pydantic import BaseModel, ConfigDict
-from typing import Literal, Optional, Dict
 
 
 class InstanceRow(BaseModel):

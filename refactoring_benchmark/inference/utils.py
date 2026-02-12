@@ -2,17 +2,21 @@
 
 import json
 import logging
-import os
 import secrets
 import shutil
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
-import subprocess
 from typing import Optional
 
-from refactoring_benchmark.inference.models import ExecutionContext, InferenceConfig, InferenceMetadata
-from refactoring_benchmark.utils.models import InstanceRow
 from podman.domain.containers import Container as PodmanContainer
+
+from refactoring_benchmark.inference.models import (
+    ExecutionContext,
+    InferenceConfig,
+    InferenceMetadata,
+)
+from refactoring_benchmark.utils.models import InstanceRow
 
 DEFAULT_PREFIX = """Perform the task described below in it's ENTIRETY. You operate completely AUTONOMOUSLY in a sandboxed environment. DO NOT ASK FOR CLARIFICATIONS. You must EDIT the codebase DIRECTLY to complete the task. DO NOT create reports, plans or similar files.\n"""
 

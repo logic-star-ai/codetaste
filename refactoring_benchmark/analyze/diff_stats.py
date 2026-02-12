@@ -1,8 +1,8 @@
 import os
 from functools import lru_cache
 
-from pydantic import BaseModel
 from joblib import Memory
+from pydantic import BaseModel
 
 cachedir = "./.cache_dir"
 memory = Memory(cachedir, verbose=1)

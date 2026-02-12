@@ -13,12 +13,12 @@ from refactoring_benchmark.inference.models import (
 )
 from refactoring_benchmark.inference.steps.executor import ContainerExecutor
 from refactoring_benchmark.inference.utils import (
+    NUM_MULTIPLAN,
     build_context,
     cleanup_temp_dir,
-    prepare_temp_multiplan_description,
     create_fallback_inference_metadata,
     finalize_step_metadata,
-    NUM_MULTIPLAN,
+    prepare_temp_multiplan_description,
 )
 from refactoring_benchmark.utils.models import InstanceRow
 

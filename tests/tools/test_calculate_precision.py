@@ -5,8 +5,11 @@ from pathlib import Path
 
 import pytest
 
-from refactoring_benchmark.coverage.models import Line, SARIFOpengrep, PrecisionMetrics
-from refactoring_benchmark.coverage.precision import calculate_precision, _load_precision_data
+from refactoring_benchmark.coverage.models import PrecisionMetrics
+from refactoring_benchmark.coverage.precision import (
+    _load_precision_data,
+    calculate_precision,
+)
 from refactoring_benchmark.utils.models import InstanceRow
 
 

@@ -3,13 +3,11 @@
 import signal
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
-
 from typing import List
 
 from tqdm import tqdm
 
 from refactoring_benchmark.inference.models import InferenceConfig
-
 from refactoring_benchmark.inference.runner import InstanceInferenceRunner
 from refactoring_benchmark.podman import utils as podman_utils
 from refactoring_benchmark.utils.logger import get_logger
@@ -89,7 +87,6 @@ class InferenceOrchestrator:
         self.logger.info(f"Output directory: {self.config.output_dir}")
 
         results = {"success": 0, "failed": 0}
-        interrupted = False
 
         # Don't use context manager - we want manual control over shutdown
         executor = ThreadPoolExecutor(max_workers=self.config.nr_workers)

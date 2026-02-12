@@ -2,7 +2,7 @@
 
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Type, TypeVar, Dict, Union
+from typing import Dict, Optional, Type, TypeVar, Union
 
 from pydantic import BaseModel, Field, computed_field, model_validator
 

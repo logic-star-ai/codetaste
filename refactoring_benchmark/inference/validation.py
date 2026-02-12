@@ -97,10 +97,6 @@ def validate_agent_dir(agent_dir: Path) -> None:
         "run_agent": agent_dir / "run_agent",
     }
 
-    optional_files = {
-        "setup_system.sh": agent_dir / "setup_system.sh",
-    }
-
     missing = []
     for name, path in required_files.items():
         if not path.exists():

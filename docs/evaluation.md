@@ -9,11 +9,11 @@ python -m refactoring_benchmark.scripts.evaluate
 
 ## What it does
 1. **Locate outputs** for each instance + agent.
-2. **Test evaluation** (`entrypoint.sh eval_test`)
+2. **Test evaluation** (`refactoring_benchmark/bootstrap/entrypoint.sh eval_test`)
    - Apply `prediction.diff`.
    - Run the instance’s test script.
    - Parse test results from container output.
-3. **Rule evaluation** (`entrypoint.sh eval_rule`)
+3. **Rule evaluation** (`refactoring_benchmark/bootstrap/entrypoint.sh eval_rule`)
    - Apply `prediction.diff`.
    - Run opengrep with positive and negative rules.
    - Produce SARIF and YAML outputs.

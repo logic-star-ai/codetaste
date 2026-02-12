@@ -5,6 +5,7 @@ Parse Go test JSON output and produce a summary in the required format.
 import json
 import sys
 
+
 def parse_test_output(json_lines):
     """Parse JSON test output and count results."""
     tests = {}

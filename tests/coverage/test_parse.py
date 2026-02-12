@@ -2,8 +2,9 @@
 
 import json
 from pathlib import Path
-from refactoring_benchmark.coverage.parse import parse_diff, parse_sarif
+
 from refactoring_benchmark.coverage.models import SARIFOpengrep
+from refactoring_benchmark.coverage.parse import parse_diff, parse_sarif
 
 
 def test_parse_diff_line_count():

@@ -12,7 +12,6 @@ import argparse
 import csv
 import json
 from pathlib import Path
-from typing import Optional
 
 
 def get_instance_identifier(owner: str, repo: str, commit_hash: str) -> str:

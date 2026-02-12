@@ -5,10 +5,10 @@ import sys
 from pathlib import Path
 
 from refactoring_benchmark.bootstrap.cli import parse_args
-from refactoring_benchmark.bootstrap.models import BootstrapConfig
 from refactoring_benchmark.bootstrap.executor import BootstrapOrchestrator
-from refactoring_benchmark.utils.logger import get_logger, setup_logging
+from refactoring_benchmark.bootstrap.models import BootstrapConfig
 from refactoring_benchmark.utils.common import load_instances_from_csv
+from refactoring_benchmark.utils.logger import get_logger, setup_logging
 
 
 def main():

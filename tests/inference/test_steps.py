@@ -9,8 +9,8 @@ from refactoring_benchmark.inference.models import (
     AgentInfo,
     ExecutionContext,
     InferenceConfig,
-    MultiplanMetadata,
     ModelInfo,
+    MultiplanMetadata,
 )
 from refactoring_benchmark.inference.steps.inference import InferenceStep
 from refactoring_benchmark.inference.steps.multiplan import MultiplanStep

@@ -6,13 +6,10 @@ from typing import Optional
 
 import podman
 
-from refactoring_benchmark.inference.models import (
-    InferenceConfig,
-    InferenceMetadata,
-)
-from refactoring_benchmark.inference.steps.plan import PlanStep
-from refactoring_benchmark.inference.steps.multiplan import MultiplanStep
+from refactoring_benchmark.inference.models import InferenceConfig, InferenceMetadata
 from refactoring_benchmark.inference.steps.inference import InferenceStep
+from refactoring_benchmark.inference.steps.multiplan import MultiplanStep
+from refactoring_benchmark.inference.steps.plan import PlanStep
 from refactoring_benchmark.inference.utils import (
     build_context,
     copy_agent_config,
@@ -181,7 +178,9 @@ class InstanceInferenceRunner:
             step_entry = step_map.get(self.config.mode)
             if step_entry:
                 step_cls, payload_key = step_entry
-                step: PlanStep | MultiplanStep = step_cls(self.instance, self.config, self.output_dir, self.logger, self.client)
+                step: PlanStep | MultiplanStep = step_cls(
+                    self.instance, self.config, self.output_dir, self.logger, self.client
+                )
                 try:
                     payload = step.run()
                     if not payload:

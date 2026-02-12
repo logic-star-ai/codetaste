@@ -2,16 +2,21 @@
 
 import json
 import logging
+import shutil
 import signal
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-import time
 from typing import List
 
 from tqdm import tqdm
 
-from refactoring_benchmark.evaluation.models import EvaluationConfig, EvaluationResult
+from refactoring_benchmark.evaluation.models import (
+    EvaluationConfig,
+    EvaluationResult,
+    TestMetrics,
+)
 from refactoring_benchmark.evaluation.parser import (
     load_instance_metadata,
     parse_rule_evaluation,
@@ -28,6 +33,8 @@ from refactoring_benchmark.inference.validation import validate_agent_config
 from refactoring_benchmark.podman import utils as podman_utils
 from refactoring_benchmark.utils.logger import get_logger
 from refactoring_benchmark.utils.models import InstanceMetadata, InstanceRow
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 def get_evaluation_dir(instance: InstanceRow, agent_id: str, output_dir: Path) -> Path:
@@ -56,6 +63,23 @@ def evaluation_exists(eval_dir: Path) -> bool:
         True if evaluation_result.json exists
     """
     return (eval_dir / "evaluation_result.json").exists()
+
+
+def ensure_instance_metadata(
+    instance: InstanceRow, instance_metadata_path: Path, instance_logger: logging.Logger
+) -> bool:
+    if instance_metadata_path.exists():
+        return True
+    instance_metadata_src = PROJECT_ROOT / instance.instance_dir() / "instance_metadata.json"
+    if not instance_metadata_src.exists():
+        instance_logger.error(f"Instance metadata not found: {instance_metadata_src}")
+        return False
+    try:
+        shutil.copy2(instance_metadata_src, instance_metadata_path)
+        return True
+    except Exception as e:
+        instance_logger.error(f"Failed to copy instance metadata: {e}")
+        return False
 
 
 def load_metadata(
@@ -119,6 +143,10 @@ def evaluate_single_instance(instance: InstanceRow, agent_id: str, config: Evalu
         instance_logger.warning(f"Skipping {instance.id}, no prediction.diff found at {prediction_diff}")
         return False
 
+    eval_dir.mkdir(parents=True, exist_ok=True)
+    if not ensure_instance_metadata(instance, instance_metadata_path, instance_logger):
+        return False
+
     try:
         agent_config, instance_metadata, inference_metadata = load_metadata(
             agent_config_path, instance_metadata_path, inference_metadata_path, instance_logger
@@ -146,9 +174,6 @@ def evaluate_single_instance(instance: InstanceRow, agent_id: str, config: Evalu
             else:
                 instance_logger.info(f"Force re-evaluation enabled, proceeding with evaluation for {instance.id}")
 
-    # Create evaluation directory
-    eval_dir.mkdir(parents=True, exist_ok=True)
-
     instance_logger.info(f"Starting evaluation for {instance.display_path}")
     instance_logger.info(f"  Agent ID: {agent_id}")
     instance_logger.info(f"  Output: {eval_dir}")
@@ -158,20 +183,45 @@ def evaluate_single_instance(instance: InstanceRow, agent_id: str, config: Evalu
         instance_logger.error(f"Skipping {instance.id}: missing rules assets for evaluation")
         return False
 
+    def run_tests_with_retries(executor: ThreadPoolExecutor) -> TestMetrics | None:
+        test_metrics, test_stdout = executor.submit(
+            run_test_evaluation,
+            instance,
+            prediction_diff,
+            eval_dir,
+            config.timeout_test,
+            instance_logger,
+            rules_dir,
+        ).result()
+        (eval_dir / "test_output.txt").write_text(test_stdout)
+        if test_metrics is None:
+            test_metrics = parse_test_output(test_stdout)
+        if test_metrics is not None:
+            return test_metrics
+        for attempt in range(2, 5):
+            instance_logger.warning(f"Test metrics missing; retrying tests (attempt {attempt}/4)")
+            test_metrics, test_stdout = executor.submit(
+                run_test_evaluation,
+                instance,
+                prediction_diff,
+                eval_dir,
+                config.timeout_test,
+                instance_logger,
+                rules_dir,
+            ).result()
+            (eval_dir / "test_output.txt").write_text(test_stdout)
+            if test_metrics is None:
+                test_metrics = parse_test_output(test_stdout)
+            if test_metrics is not None:
+                return test_metrics
+        return None
+
     # Run test and rule evaluation in parallel
     try:
         with ThreadPoolExecutor(max_workers=2) as executor:
             # Submit both evaluations
             if not config.skip_tests:
-                test_future = executor.submit(
-                    run_test_evaluation,
-                    instance,
-                    prediction_diff,
-                    eval_dir,
-                    config.timeout_test,
-                    instance_logger,
-                    rules_dir,
-                )
+                test_future = executor.submit(run_tests_with_retries, executor)
 
             rule_future = executor.submit(
                 run_rule_evaluation,
@@ -187,10 +237,7 @@ def evaluate_single_instance(instance: InstanceRow, agent_id: str, config: Evalu
             rule_success, rule_stdout = rule_future.result()
             (eval_dir / "rule_output.txt").write_text(rule_stdout)
             if not config.skip_tests:
-                test_metrics, test_stdout = test_future.result()
-                (eval_dir / "test_output.txt").write_text(test_stdout)
-                if test_metrics is None:
-                    test_metrics = parse_test_output(test_stdout)
+                test_metrics = test_future.result()
             else:
                 test_metrics = evaluation_result.agent_test_metrics if evaluation_result else None
     finally:
@@ -221,7 +268,7 @@ def evaluate_single_instance(instance: InstanceRow, agent_id: str, config: Evalu
     with open(result_path, "w") as f:
         json.dump(evaluation_result.model_dump(mode="json"), f, indent=2)
 
-    instance_logger.info(f"Evaluation completed successfully")
+    instance_logger.info("Evaluation completed successfully")
     instance_logger.info(f"  Test metrics: {test_metrics.model_dump() if test_metrics else 'N/A'}")
     instance_logger.info(
         f"  Rule IFR: {rule_metrics.ifr:.3f} (pos: {rule_metrics.positive_ifr:.3f}, neg: {rule_metrics.negative_ifr:.3f})"
@@ -290,7 +337,6 @@ class EvaluationOrchestrator:
         self.logger.info(f"Using {self.config.nr_workers} parallel workers")
 
         results = {"success": 0, "failed": 0, "skipped": 0}
-        interrupted = False
 
         # Manual executor management for proper shutdown control
         executor = ThreadPoolExecutor(max_workers=self.config.nr_workers)

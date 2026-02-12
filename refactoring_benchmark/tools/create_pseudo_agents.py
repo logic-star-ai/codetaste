@@ -14,10 +14,14 @@ import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
-from refactoring_benchmark.inference.models import AgentConfig, AgentInfo, ModelInfo, InferenceMetadata
+from refactoring_benchmark.inference.models import (
+    AgentConfig,
+    AgentInfo,
+    InferenceMetadata,
+    ModelInfo,
+)
 from refactoring_benchmark.utils.common import load_instances_from_csv
 from refactoring_benchmark.utils.models import InstanceRow
-
 
 PSEUDO_AGENTS = {
     "golden": {

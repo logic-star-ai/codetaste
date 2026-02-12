@@ -1,15 +1,15 @@
 """Tests for podman utility functions."""
 
 import logging
-from io import BytesIO
 import tarfile
 import tempfile
+from io import BytesIO
 from pathlib import Path
+
 import pytest
 from podman.domain.containers import Container as PodmanContainer
 
 import refactoring_benchmark.podman.utils as podman_utils
-
 
 logger = logging.getLogger("test_podman_utils")
 

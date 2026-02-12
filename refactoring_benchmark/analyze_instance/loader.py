@@ -3,10 +3,14 @@
 from pathlib import Path
 from typing import List, Sequence
 
-from refactoring_benchmark.evaluation.models import EvaluationResult
-from refactoring_benchmark.analyze_instance.models import AnalysisData, InstanceData, AgentInstanceStats
-from refactoring_benchmark.analyze.validation import check_test_validity
 from refactoring_benchmark.analyze.filters import ResultFilter
+from refactoring_benchmark.analyze.validation import check_test_validity
+from refactoring_benchmark.analyze_instance.models import (
+    AgentInstanceStats,
+    AnalysisData,
+    InstanceData,
+)
+from refactoring_benchmark.evaluation.models import EvaluationResult
 from refactoring_benchmark.utils.models import InstanceRow, ReducedInstanceRow
 
 

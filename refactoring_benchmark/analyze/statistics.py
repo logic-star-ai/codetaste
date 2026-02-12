@@ -3,8 +3,8 @@
 from collections import defaultdict
 
 from refactoring_benchmark.analyze.models import (
-    AnalysisData,
     AgentDescriptionData,
+    AnalysisData,
     format_type_mode_label,
     sort_type_mode_pairs,
 )
@@ -99,7 +99,7 @@ def print_finish_reason_table(results: list[EvaluationResult], filter_desc: str 
     total_col_width = 10
 
     # Print header
-    title = f"\n  Finish Reason Statistics"
+    title = "\n  Finish Reason Statistics"
     if filter_desc:
         title += f" ({filter_desc})"
     print(title + ":")

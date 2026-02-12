@@ -44,7 +44,15 @@ python -m refactoring_benchmark.scripts.evaluate \
 
 ### 4) Analyze
 ```bash
-python -m refactoring_benchmark.scripts.analyze --metric ifr --plot-type line
+python -m refactoring_benchmark.scripts.analyze --metric ifr --plot-type bar
+```
+
+### E2E pipeline (small smoke test)
+Runs inference + evaluation across instructed/open and direct/plan/multiplan for a small slice, then generates plots.
+```bash
+python -m refactoring_benchmark.scripts.e2e_pipeline \
+  --instances 2 \
+  --agent-dir ./agents/qwen-code/qwen3-coder-30b-a3b-instruct
 ```
 
 ## Project layout
@@ -59,7 +67,7 @@ refactoring_benchmark/
   tools/            # Utilities for pseudo agents, descriptions, analysis
 assets/             # Rules, descriptions, diffs
 instance_images/    # Per-instance bootstrap artifacts
-entrypoint.sh       # Container entrypoint for inference/evaluation
+refactoring_benchmark/bootstrap/entrypoint.sh  # Container entrypoint for inference/evaluation
 instances.csv       # Benchmark instance definitions
 ```
 
@@ -75,7 +83,7 @@ instances.csv       # Benchmark instance definitions
 - **Inference**: `python -m refactoring_benchmark.scripts.inference`
 - **Evaluation**: `python -m refactoring_benchmark.scripts.evaluate`
 - **Analysis**: `python -m refactoring_benchmark.scripts.analyze`
-- **Pseudo agents**: `python -m refactoring_benchmark.tools.create_pseudo_agents`
+- **Golden and Null agents**: `python -m refactoring_benchmark.tools.create_pseudo_agents`
 
 ## Outputs (per instance + agent)
 ```
@@ -95,3 +103,4 @@ Detailed phase docs:
 - `docs/inference.md`
 - `docs/evaluation.md`
 - `docs/analysis.md`
+- `docs/benchmarking-your-agent.md`

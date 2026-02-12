@@ -1,8 +1,8 @@
 """Container execution helper for inference steps."""
 
+import logging
 from pathlib import Path
 from typing import Optional
-import logging
 
 import podman
 from podman.domain.containers import Container as PodmanContainer

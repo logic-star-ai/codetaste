@@ -5,14 +5,14 @@ import logging
 import os
 import tarfile
 import threading
-from io import BytesIO
 import time
+from io import BytesIO
 from typing import Any, List, Optional, cast
-from refactoring_benchmark.utils.logger import get_logger, setup_logging
+
 import podman
 from podman.domain.containers import Container as PodmanContainer
-from podman.errors import APIError, NotFound
-
+from podman.errors import APIError
+from refactoring_benchmark.utils.logger import get_logger
 
 utils_logger = get_logger("container_utils")
 
@@ -32,7 +32,7 @@ def is_image_existing(client: podman.PodmanClient, setup_image: str) -> bool:
     try:
         client.images.get(setup_image)
         return True
-    except Exception as e:
+    except Exception:
         return False
 
 
@@ -345,7 +345,7 @@ def get_container_storage(container: PodmanContainer) -> dict:
             utils_logger.debug(
                 f"Retrieved storage info for container {container.id[:12]}: SizeRw={data['SizeRw']}, SizeRootFs={data['SizeRootFs']}"
             )
-    except Exception as e:
+    except Exception:
         data = {}
 
     size_rw = data.get("SizeRw", 0)

@@ -1,10 +1,11 @@
 """Data models for analysis results."""
 
 from typing import Dict, Literal
-from pydantic import BaseModel, Field, computed_field
 
-from refactoring_benchmark.evaluation.models import RuleMetrics
+from pydantic import BaseModel, Field
+
 from refactoring_benchmark.analyze.validation import ValidityStatus
+from refactoring_benchmark.evaluation.models import RuleMetrics
 from refactoring_benchmark.utils.models import ReducedInstanceRow
 
 

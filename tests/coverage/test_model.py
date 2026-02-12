@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
+
 import pytest
+
 from refactoring_benchmark.coverage.models import SARIFOpengrep
 
 

@@ -88,7 +88,7 @@ def main():
     print(f"Calculating precision metrics for agents: {', '.join(args.agents)}")
     print(f"Output directory: {output_dir}")
     print(f"Null agent directory: {null_agent_dir}")
-    print(f"Using null_agent baseline for precision of deletions")
+    print("Using null_agent baseline for precision of deletions")
     print()
 
     # Calculate precision for all instance-agent pairs
@@ -102,7 +102,9 @@ def main():
             eval_dir = instance_agent_dir / "evaluation"
 
             # Use null_agent for baseline negative SARIF
-            null_agent_instance_dir = null_agent_dir / instance.owner / instance.repo / instance.short_hash / "null_agent"
+            null_agent_instance_dir = (
+                null_agent_dir / instance.owner / instance.repo / instance.short_hash / "null_agent"
+            )
             sarif_negative_path = null_agent_instance_dir / "evaluation" / "rules_negative.sarif"
             sarif_positive_path = eval_dir / "rules_positive.sarif"
             diff_path = instance_agent_dir / "prediction.diff"
@@ -138,7 +140,7 @@ def main():
 
         if not agent_results:
             print(f"{agent_name}:")
-            print(f"  No results (missing files for all instances)")
+            print("  No results (missing files for all instances)")
             print()
             continue
 
@@ -151,10 +153,10 @@ def main():
         print(f"  Instances: {len(agent_results)}/{len(instances)}")
         print()
         print(
-            f"  Precision of Additions: 'Of all the new lines the agent added, how many match the 'good' patterns we expected?'"
+            "  Precision of Additions: 'Of all the new lines the agent added, how many match the 'good' patterns we expected?'"
         )
         print(f"    (+ lines in {agent_name}/prediction.diff ∩ + lines matched by {agent_name}/rules_positive.sarif)")
-        print(f"    ────────────────────────────────────────────────────────────────────────────")
+        print("    ────────────────────────────────────────────────────────────────────────────")
         print(f"    (total + lines in {agent_name}/prediction.diff)")
         print()
         print(f"    Average: {sum(precision_added_scores) / len(precision_added_scores):.4f}")
@@ -162,20 +164,20 @@ def main():
         print(f"    Max: {max(precision_added_scores):.4f}")
         print()
         print(
-            f"  Precision of Deletions: 'Of all the lines the agent decided to delete, how many were actually 'bad' code?'"
+            "  Precision of Deletions: 'Of all the lines the agent decided to delete, how many were actually 'bad' code?'"
         )
         print(f"    (- lines in {agent_name}/prediction.diff ∩ - lines matched by null_agent/rules_negative.sarif)")
-        print(f"    ────────────────────────────────────────────────────────────────────────────")
+        print("    ────────────────────────────────────────────────────────────────────────────")
         print(f"    (total - lines in {agent_name}/prediction.diff)")
         print()
         print(f"    Average: {sum(precision_removed_scores) / len(precision_removed_scores):.4f}")
         print(f"    Min: {min(precision_removed_scores):.4f}")
         print(f"    Max: {max(precision_removed_scores):.4f}")
         print()
-        print(f"  Overall Precision (all changed lines):")
-        print(f"    (unique lines from both intersections)")
-        print(f"    ────────────────────────────────────────────────────────────────────────────")
-        print(f"    (total changed lines: - lines + + lines)")
+        print("  Overall Precision (all changed lines):")
+        print("    (unique lines from both intersections)")
+        print("    ────────────────────────────────────────────────────────────────────────────")
+        print("    (total changed lines: - lines + + lines)")
         print()
         print(f"    Average: {sum(precision_overall_scores) / len(precision_overall_scores):.4f}")
         print(f"    Min: {min(precision_overall_scores):.4f}")
@@ -183,7 +185,7 @@ def main():
         print()
 
         # Create histogram of overall precision
-        print(f"  Overall Precision Distribution (histogram):")
+        print("  Overall Precision Distribution (histogram):")
         buckets = [0] * 10  # 10 buckets: [0.0, 0.1), [0.1, 0.2), ..., [0.9, 1.0]
 
         for score in precision_overall_scores:

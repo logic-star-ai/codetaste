@@ -11,8 +11,8 @@ from refactoring_benchmark.inference.validation import (
     validate_agent_config,
     validate_agent_dir,
 )
-from refactoring_benchmark.utils.logger import get_logger, setup_logging
 from refactoring_benchmark.utils.common import load_instances_from_csv
+from refactoring_benchmark.utils.logger import get_logger, setup_logging
 
 
 def main():

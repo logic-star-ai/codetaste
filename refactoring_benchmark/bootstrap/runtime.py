@@ -8,11 +8,13 @@ from typing import Optional
 import podman
 from podman.domain.containers import Container as PodmanContainer
 
-from refactoring_benchmark.bootstrap.models import BootstrapConfig
-from refactoring_benchmark.bootstrap.utils import validate_and_commit_container
-from refactoring_benchmark.bootstrap.models import ExecutionInstanceMetadata
-from refactoring_benchmark.utils.models import InstanceRow
 import refactoring_benchmark.podman.utils as podman_utils
+from refactoring_benchmark.bootstrap.models import (
+    BootstrapConfig,
+    ExecutionInstanceMetadata,
+)
+from refactoring_benchmark.bootstrap.utils import validate_and_commit_container
+from refactoring_benchmark.utils.models import InstanceRow
 
 
 def bootstrap_runtime_phase(
@@ -60,7 +62,7 @@ def bootstrap_runtime_phase(
         )
 
         # 1. Inject Entrypoint
-        entrypoint_path = project_root / "entrypoint.sh"
+        entrypoint_path = project_root / "refactoring_benchmark" / "bootstrap" / "entrypoint.sh"
         with open(entrypoint_path, "rb") as f:
             podman_utils.copy_to_container(container, f.read(), "/usr/local/bin/entrypoint.sh")
         container.exec_run(["bash", "-c", "timeout 5m sudo chmod +x /usr/local/bin/entrypoint.sh"])
@@ -93,7 +95,7 @@ def bootstrap_runtime_phase(
             exit_code, (stdout_bytes, stderr_bytes) = podman_utils.podman_timed_exec_bash_logged(
                 container, cmd, logger, timeout=300
             )
-        logger.info(f"🧠 Lobotomized git repository.")
+        logger.info("🧠 Lobotomized git repository.")
 
         podman_utils.podman_timed_exec_bash_logged(
             container,

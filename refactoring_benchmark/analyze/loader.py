@@ -3,11 +3,10 @@
 from pathlib import Path
 from typing import Sequence
 
-from refactoring_benchmark.coverage import precision
-from refactoring_benchmark.evaluation.models import EvaluationResult
-from refactoring_benchmark.analyze.models import AnalysisData
-from refactoring_benchmark.analyze.metrics import get_metric_function
 from refactoring_benchmark.analyze.filters import ResultFilter
+from refactoring_benchmark.analyze.metrics import get_metric_function
+from refactoring_benchmark.analyze.models import AnalysisData
+from refactoring_benchmark.evaluation.models import EvaluationResult
 from refactoring_benchmark.utils.models import InstanceRow
 
 
@@ -113,11 +112,7 @@ def organize_data(
                 continue
         # Extract agent_id, description_type, and mode
         agent_id = result.agent_config.id
-        if (
-            result.inference_metadata
-            and result.inference_metadata.description_type
-            and result.inference_metadata.mode
-        ):
+        if result.inference_metadata and result.inference_metadata.description_type and result.inference_metadata.mode:
             description_type = result.inference_metadata.description_type
             mode = result.inference_metadata.mode
         else:
@@ -167,7 +162,6 @@ def validate_analysis_data(
     for agent_id in agent_ids:
         agent_data = [v for k, v in data.data.items() if k[0] == agent_id]
         if not agent_data:
-            available_agents = ", ".join(data.get_agent_ids())
             raise ValueError(f"Agent '{agent_id}' has no data.")
 
     # 1. Calculate the maximum count for EACH description type and mode across all agents

@@ -1,8 +1,8 @@
 """Configuration for description-type based analysis plotting."""
 
 from typing import Literal
-from pydantic import BaseModel, Field
 
+from pydantic import BaseModel, Field
 
 PlotType = Literal["line", "bar", "scatter"]
 

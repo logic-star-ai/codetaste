@@ -1,10 +1,9 @@
 """LLM judge module for selecting the best refactoring plan from multiple candidates."""
 
-import logging
 import os
 import re
 import time
-from typing import Dict, Tuple, Optional
+from typing import Dict, Optional, Tuple
 
 from refactoring_benchmark.utils.logger import get_logger
 

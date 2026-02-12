@@ -1,20 +1,20 @@
 """Bootstrap orchestration with ThreadPool execution."""
 
-import os
 import signal
 import sys
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, TimeoutError, as_completed
 from pathlib import Path
-from typing import List, Optional
-from concurrent.futures import TimeoutError
+from typing import List
 
 from tqdm import tqdm
 
-from refactoring_benchmark.bootstrap.models import BootstrapConfig
-from refactoring_benchmark.bootstrap.setup import bootstrap_setup_phase
+from refactoring_benchmark.bootstrap.models import (
+    BootstrapConfig,
+    ExecutionInstanceMetadata,
+)
 from refactoring_benchmark.bootstrap.runtime import bootstrap_runtime_phase
+from refactoring_benchmark.bootstrap.setup import bootstrap_setup_phase
 from refactoring_benchmark.bootstrap.utils import BootstrapError
-from refactoring_benchmark.bootstrap.models import ExecutionInstanceMetadata
 from refactoring_benchmark.podman import utils as podman_utils
 from refactoring_benchmark.utils.logger import get_logger
 from refactoring_benchmark.utils.models import InstanceRow
@@ -52,7 +52,7 @@ def bootstrap_single_instance(instance: InstanceRow, config: BootstrapConfig, is
     else:
         # New instance - can't use runtime-only or rerun-metrics flags
         if config.force_runtime_build or config.rerun_metrics:
-            instance_logger.error(f"Cannot use --force-runtime-build or --rerun-metrics without existing metadata")
+            instance_logger.error("Cannot use --force-runtime-build or --rerun-metrics without existing metadata")
             return False
 
         metadata = ExecutionInstanceMetadata(
@@ -112,7 +112,7 @@ def bootstrap_single_instance(instance: InstanceRow, config: BootstrapConfig, is
             instance_logger.info(f"✅ Successfully bootstrapped {instance.id}.")
 
         except (RuntimeError, TimeoutError, BootstrapError) as e:
-            raise e # If you want to allow instances without execution environment, remove this line.
+            raise e  # If you want to allow instances without execution environment, remove this line.
             instance_logger.error(f"Attempt failed for {instance.id} ({e}). Retrying with base image...")
             setup_img = bootstrap_setup_phase(client, instance, metadata, config, instance_logger, use_base_image=True)
             metadata.save_to_json(metadata_path)
