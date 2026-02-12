@@ -6,14 +6,20 @@ from pathlib import Path
 from typing import Optional
 
 from refactoring_benchmark.inference.judge import judge_best_plan
-from refactoring_benchmark.inference.models import (ExecutionContext,
-                                                    InferenceConfig,
-                                                    MultiplanMetadata)
+from refactoring_benchmark.inference.models import (
+    ExecutionContext,
+    InferenceConfig,
+    MultiplanMetadata,
+)
 from refactoring_benchmark.inference.steps.executor import ContainerExecutor
 from refactoring_benchmark.inference.utils import (
-    NUM_MULTIPLAN, build_context, cleanup_temp_dir,
-    create_fallback_inference_metadata, finalize_step_metadata,
-    prepare_temp_multiplan_description)
+    NUM_MULTIPLAN,
+    build_context,
+    cleanup_temp_dir,
+    create_fallback_inference_metadata,
+    finalize_step_metadata,
+    prepare_temp_multiplan_description,
+)
 from refactoring_benchmark.utils.models import InstanceRow
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]

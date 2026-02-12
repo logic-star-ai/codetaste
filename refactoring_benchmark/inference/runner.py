@@ -6,15 +6,16 @@ from typing import Optional
 
 import podman
 
-from refactoring_benchmark.inference.models import (InferenceConfig,
-                                                    InferenceMetadata)
+from refactoring_benchmark.inference.models import InferenceConfig, InferenceMetadata
 from refactoring_benchmark.inference.steps.inference import InferenceStep
 from refactoring_benchmark.inference.steps.multiplan import MultiplanStep
 from refactoring_benchmark.inference.steps.plan import PlanStep
-from refactoring_benchmark.inference.utils import (build_context,
-                                                   copy_agent_config,
-                                                   get_instance_output_dir,
-                                                   output_exists)
+from refactoring_benchmark.inference.utils import (
+    build_context,
+    copy_agent_config,
+    get_instance_output_dir,
+    output_exists,
+)
 from refactoring_benchmark.podman import utils as podman_utils
 from refactoring_benchmark.utils.logger import get_logger
 from refactoring_benchmark.utils.models import InstanceRow
@@ -110,8 +111,7 @@ class InstanceInferenceRunner:
                 plans_dir = self.output_dir / "refactoring_plans"
                 if multiplan_metadata_path.exists() and plans_dir.exists():
                     saved_multiplan_metadata = multiplan_metadata_path.read_text(encoding="utf-8")
-                    from refactoring_benchmark.inference.utils import \
-                        NUM_MULTIPLAN
+                    from refactoring_benchmark.inference.utils import NUM_MULTIPLAN
 
                     for i in range(NUM_MULTIPLAN):
                         plan_path = plans_dir / f"refactoring_plan{i}.md"

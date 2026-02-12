@@ -1,12 +1,11 @@
-import logging
 
+from refactoring_benchmark.inference import runner as runner_module
 from refactoring_benchmark.inference.models import (
     AgentConfig,
     AgentInfo,
     InferenceConfig,
     ModelInfo,
 )
-from refactoring_benchmark.inference import runner as runner_module
 from refactoring_benchmark.utils.models import InstanceRow
 
 

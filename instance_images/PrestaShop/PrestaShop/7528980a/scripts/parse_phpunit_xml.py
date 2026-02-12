@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Parse PHPUnit JUnit XML output and return JSON summary"""
+import json
 import sys
 import xml.etree.ElementTree as ET
-import json
+
 
 def parse_phpunit_xml(xml_file):
     """Parse PHPUnit JUnit XML file and extract test statistics"""

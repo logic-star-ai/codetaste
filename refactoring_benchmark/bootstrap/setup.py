@@ -11,11 +11,17 @@ import podman
 from podman.domain.containers import Container as PodmanContainer
 
 import refactoring_benchmark.podman.utils as podman_utils
-from refactoring_benchmark.bootstrap.models import (BootstrapConfig,
-                                                    ExecutionInstanceMetadata)
+from refactoring_benchmark.bootstrap.models import (
+    BootstrapConfig,
+    ExecutionInstanceMetadata,
+)
 from refactoring_benchmark.bootstrap.utils import (
-    BootstrapError, run_metrics, setup_testbed_container,
-    validate_and_commit_container, validate_container_size)
+    BootstrapError,
+    run_metrics,
+    setup_testbed_container,
+    validate_and_commit_container,
+    validate_container_size,
+)
 from refactoring_benchmark.utils.models import InstanceRow
 from refactoring_benchmark.utils.prompts import BOOTSTRAP_PROMPT
 

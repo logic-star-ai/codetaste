@@ -4,10 +4,11 @@ from pathlib import Path
 from typing import Callable
 
 from refactoring_benchmark.analyze.diff_stats import parse_diff_file
-from refactoring_benchmark.analyze.validation import (ValidityStatus,
-                                                      check_test_validity)
+from refactoring_benchmark.analyze.validation import ValidityStatus, check_test_validity
 from refactoring_benchmark.coverage.precision import (
-    InstanceAgentPrecision, calculate_precision_eval_result)
+    InstanceAgentPrecision,
+    calculate_precision_eval_result,
+)
 from refactoring_benchmark.evaluation.models import EvaluationResult
 
 # Type alias for metric functions

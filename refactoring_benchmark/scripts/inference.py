@@ -6,9 +6,11 @@ from pathlib import Path
 from refactoring_benchmark.inference.cli import parse_args
 from refactoring_benchmark.inference.executor import InferenceOrchestrator
 from refactoring_benchmark.inference.models import InferenceConfig
-from refactoring_benchmark.inference.validation import (sanitize_agent_id,
-                                                        validate_agent_config,
-                                                        validate_agent_dir)
+from refactoring_benchmark.inference.validation import (
+    sanitize_agent_id,
+    validate_agent_config,
+    validate_agent_dir,
+)
 from refactoring_benchmark.utils.common import load_instances_from_csv
 from refactoring_benchmark.utils.logger import get_logger, setup_logging
 

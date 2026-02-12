@@ -2,13 +2,11 @@
 
 import json
 from pathlib import Path
-from refactoring_benchmark.evaluation.parser import parse_rule_evaluation
 
-
-import json
 import pytest
-from pathlib import Path
+
 from refactoring_benchmark.evaluation.parser import parse_rule_evaluation
+
 
 @pytest.fixture
 def evaluation_assets():

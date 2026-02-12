@@ -1,12 +1,11 @@
+import argparse
+import json
 import os
 import subprocess
 import sys
-import json
-import argparse
-from pathlib import Path
 from datetime import datetime, timezone
-from time import sleep
-from typing import Dict, Any, Optional
+from pathlib import Path
+from typing import Any, Dict, Optional
 
 # --- Configuration ---
 MAX_BUDGET_USD = float(os.environ.get("MAX_BUDGET_USD", 11))
@@ -39,7 +38,7 @@ class SessionMonitor:
             if self.jsonl_path != latest_file:
                 self.jsonl_path = latest_file
                 self.last_pos = 0 # Reset if we switched to a newer session file
-        except Exception as e:
+        except Exception:
             pass
 
     def update(self):

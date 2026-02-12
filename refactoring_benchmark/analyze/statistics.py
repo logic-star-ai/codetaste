@@ -2,10 +2,12 @@
 
 from collections import defaultdict
 
-from refactoring_benchmark.analyze.models import (AgentDescriptionData,
-                                                  AnalysisData,
-                                                  format_type_mode_label,
-                                                  sort_type_mode_pairs)
+from refactoring_benchmark.analyze.models import (
+    AgentDescriptionData,
+    AnalysisData,
+    format_type_mode_label,
+    sort_type_mode_pairs,
+)
 from refactoring_benchmark.evaluation.models import EvaluationResult
 
 

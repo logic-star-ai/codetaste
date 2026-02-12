@@ -1,7 +1,7 @@
 """Pytest fixtures for testing."""
 
-import pytest
 import podman
+import pytest
 from podman.domain.containers import Container as PodmanContainer
 
 BASE_IMAGE = "benchmark/benchmark-base-all"

@@ -2,8 +2,7 @@
 
 from typing import Callable, Sequence
 
-from refactoring_benchmark.analyze.validation import (ValidityStatus,
-                                                      check_test_validity)
+from refactoring_benchmark.analyze.validation import ValidityStatus, check_test_validity
 from refactoring_benchmark.evaluation.models import EvaluationResult
 
 # Type alias for filter functions

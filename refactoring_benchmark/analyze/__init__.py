@@ -5,24 +5,45 @@
 from refactoring_benchmark.utils.common import load_instances_from_csv
 
 from .config import PlotConfig, PlotType
+
 # Filters (keeping existing filter functionality)
-from .filters import (ResultFilter, combine_filters, filter_by_agent_id,
-                      filter_by_finish_reason, filter_by_ifr_threshold,
-                      filter_by_owner, filter_by_repo,
+from .filters import (
+                      ResultFilter,
+                      combine_filters,
+                      filter_by_agent_id,
+                      filter_by_finish_reason,
+                      filter_by_ifr_threshold,
+                      filter_by_owner,
+                      filter_by_repo,
                       filter_by_validity_status,
-                      filter_has_execution_environment, filter_successful_only)
-from .loader import (discover_output_dirs, load_all_results, organize_data,
-                     validate_analysis_data)
+                      filter_has_execution_environment,
+                      filter_successful_only,
+)
+from .loader import (
+                      discover_output_dirs,
+                      load_all_results,
+                      organize_data,
+                      validate_analysis_data,
+)
+
 # Metrics
-from .metrics import (ALL_METRICS, METRICS, get_metric_function, metric_ifr,
-                      metric_test_success)
+from .metrics import (
+                      ALL_METRICS,
+                      METRICS,
+                      get_metric_function,
+                      metric_ifr,
+                      metric_test_success,
+)
+
 # Data models
-from .models import (AgentDescriptionData, AggregationType, AnalysisData,
-                     MetricPoint)
+from .models import AgentDescriptionData, AggregationType, AnalysisData, MetricPoint
+
 # Plotting
 from .plotting import create_plot, save_plot
+
 # Statistics
 from .statistics import print_finish_reason_table, print_statistics_table
+
 # Validation (keeping existing validation functionality)
 from .validation import ValidityStatus, check_test_validity
 

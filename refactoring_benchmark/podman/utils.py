@@ -12,7 +12,6 @@ from typing import Any, List, Optional, cast
 import podman
 from podman.domain.containers import Container as PodmanContainer
 from podman.errors import APIError
-
 from refactoring_benchmark.utils.logger import get_logger
 
 utils_logger = get_logger("container_utils")

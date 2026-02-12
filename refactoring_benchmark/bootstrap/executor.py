@@ -8,8 +8,10 @@ from typing import List
 
 from tqdm import tqdm
 
-from refactoring_benchmark.bootstrap.models import (BootstrapConfig,
-                                                    ExecutionInstanceMetadata)
+from refactoring_benchmark.bootstrap.models import (
+    BootstrapConfig,
+    ExecutionInstanceMetadata,
+)
 from refactoring_benchmark.bootstrap.runtime import bootstrap_runtime_phase
 from refactoring_benchmark.bootstrap.setup import bootstrap_setup_phase
 from refactoring_benchmark.bootstrap.utils import BootstrapError

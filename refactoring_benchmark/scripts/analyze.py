@@ -4,16 +4,19 @@ import argparse
 from pathlib import Path
 
 from refactoring_benchmark.analyze.config import PlotConfig
-from refactoring_benchmark.analyze.filters import (filter_results,
-                                                   filter_successful_only)
-from refactoring_benchmark.analyze.loader import (discover_output_dirs,
-                                                  load_all_results,
-                                                  organize_data,
-                                                  validate_analysis_data)
+from refactoring_benchmark.analyze.filters import filter_results, filter_successful_only
+from refactoring_benchmark.analyze.loader import (
+    discover_output_dirs,
+    load_all_results,
+    organize_data,
+    validate_analysis_data,
+)
 from refactoring_benchmark.analyze.metrics import ALL_METRICS
 from refactoring_benchmark.analyze.plotting import create_plot, save_plot
 from refactoring_benchmark.analyze.statistics import (
-    print_finish_reason_table, print_statistics_table)
+    print_finish_reason_table,
+    print_statistics_table,
+)
 from refactoring_benchmark.utils.common import load_instances_from_csv
 
 

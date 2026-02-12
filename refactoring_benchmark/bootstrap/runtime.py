@@ -9,8 +9,10 @@ import podman
 from podman.domain.containers import Container as PodmanContainer
 
 import refactoring_benchmark.podman.utils as podman_utils
-from refactoring_benchmark.bootstrap.models import (BootstrapConfig,
-                                                    ExecutionInstanceMetadata)
+from refactoring_benchmark.bootstrap.models import (
+    BootstrapConfig,
+    ExecutionInstanceMetadata,
+)
 from refactoring_benchmark.bootstrap.utils import validate_and_commit_container
 from refactoring_benchmark.utils.models import InstanceRow
 

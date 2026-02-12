@@ -5,8 +5,11 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 
-from refactoring_benchmark.analyze.config import (IFR_PLOT_DEFINITIONS,
-                                                  IFRMetricType, IFRPlotConfig)
+from refactoring_benchmark.analyze.config import (
+    IFR_PLOT_DEFINITIONS,
+    IFRMetricType,
+    IFRPlotConfig,
+)
 from refactoring_benchmark.analyze.validation import ValidityStatus
 from refactoring_benchmark.analyze_instance.models import AnalysisData
 

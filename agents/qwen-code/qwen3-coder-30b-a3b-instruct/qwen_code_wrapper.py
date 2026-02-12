@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 
-import sys
-import subprocess
 import json
 import os
+import subprocess
+import sys
 from datetime import datetime, timezone
 
 # Configuration
@@ -62,7 +62,6 @@ def main():
     total_output_tokens = 0
     budget_was_exceeded = False
     additional_info = {}
-    turns_till_tool_use = 5
     try:
         process = subprocess.Popen(
             cmd,
