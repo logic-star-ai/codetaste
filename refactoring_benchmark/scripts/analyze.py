@@ -126,11 +126,6 @@ Examples:
         help="Disable 95 percent confidence interval error bars",
     )
     parser.add_argument(
-        "--no-xlabel",
-        action="store_true",
-        help="Hide x-axis label",
-    )
-    parser.add_argument(
         "--no-ylabel",
         action="store_true",
         help="Hide y-axis label",
@@ -244,7 +239,6 @@ Examples:
     # Create plot configuration
     plot_config_kwargs = dict(
         show_error_bars=not args.no_error_bars,
-        show_xlabel=not args.no_xlabel,
         show_ylabel=not args.no_ylabel,
         show_legend=not args.no_legend,
         legend_position=args.legend_position,

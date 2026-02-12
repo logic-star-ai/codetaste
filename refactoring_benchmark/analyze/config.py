@@ -30,7 +30,6 @@ class PlotConfig(BaseModel):
     error_bar_alpha: float = Field(default=0.5, ge=0, le=1, description="Error bar transparency")
 
     # Text settings
-    show_xlabel: bool = Field(default=True, description="Show x-axis label")
     show_ylabel: bool = Field(default=True, description="Show y-axis label")
     show_legend: bool = Field(default=True, description="Show legend")
     legend_position: Literal["upper_left", "upper_right", "lower_left"] = Field(
