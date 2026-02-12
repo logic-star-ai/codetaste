@@ -36,41 +36,33 @@ run_group() {
   local -a output_dirs=("$@")
 
   for legend_variant in no_legend legend_upper_left legend_upper_right legend_lower_left; do
-    for xlabel_variant in xlabel no_xlabel; do
-      local -a legend_args=()
-      local -a xlabel_args=()
+    local -a legend_args=()
 
-      case "$legend_variant" in
-        no_legend)
-          legend_args+=(--no-legend)
-          ;;
-        legend_upper_left)
-          legend_args+=(--legend-position upper_left)
-          ;;
-        legend_upper_right)
-          legend_args+=(--legend-position upper_right)
-          ;;
-        legend_lower_left)
-          legend_args+=(--legend-position lower_left)
-          ;;
-      esac
+    case "$legend_variant" in
+      no_legend)
+        legend_args+=(--no-legend)
+        ;;
+      legend_upper_left)
+        legend_args+=(--legend-position upper_left)
+        ;;
+      legend_upper_right)
+        legend_args+=(--legend-position upper_right)
+        ;;
+      legend_lower_left)
+        legend_args+=(--legend-position lower_left)
+        ;;
+    esac
 
-      if [ "$xlabel_variant" == "no_xlabel" ]; then
-        xlabel_args+=(--no-xlabel)
-      fi
+    local plot_dir="plots/${group_name}/${legend_variant}"
+    mkdir -p "$plot_dir"
 
-      local plot_dir="plots/${group_name}/${legend_variant}/${xlabel_variant}"
-      mkdir -p "$plot_dir"
-
-      python -m refactoring_benchmark.scripts.analyze \
-        $(printf ' --metric %q' "${METRICS[@]}") \
-        $(printf ' --agent-id %q' "${AGENTS[@]}") \
-        $(printf ' --output-dir %q' "${output_dirs[@]}") \
-        "${COMMON_ARGS[@]}" \
-        "${legend_args[@]}" \
-        "${xlabel_args[@]}" \
-        --plots-dir "$plot_dir" | tee "$plot_dir/analysis.log"
-    done
+    python -m refactoring_benchmark.scripts.analyze \
+      $(printf ' --metric %q' "${METRICS[@]}") \
+      $(printf ' --agent-id %q' "${AGENTS[@]}") \
+      $(printf ' --output-dir %q' "${output_dirs[@]}") \
+      "${COMMON_ARGS[@]}" \
+      "${legend_args[@]}" \
+      --plots-dir "$plot_dir" | tee "$plot_dir/analysis.log"
   done
 }
 

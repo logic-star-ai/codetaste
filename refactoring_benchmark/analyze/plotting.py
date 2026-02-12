@@ -44,9 +44,9 @@ _apply_science_style()
 METRIC_LABELS = {
     "f1": r"F$_1$ Score",
     "ifr": r"\textsc{Ifr} (\%)",
-    "ifr_x_test_success": r"$\mathcal{A}$ (\%)",  # $(\Gamma, \hat{X})$
-    "ifr_added_x_test_success": r"\textsc{AddA} (\%)",  # $(\Gamma, \hat{X})$
-    "ifr_removed_x_test_success": r"\textsc{NegA} (\%)",  # $(\Gamma, \hat{X})$
+    "ifr_x_test_success": r"$\mathcal{A}$ (\%)",
+    "ifr_added_x_test_success": r"$\mathcal{A}^{+}$ (\%)",
+    "ifr_removed_x_test_success": r"$\mathcal{A}^{-}$ (\%)",
     "strict_ifr_x_test_success": "Strict Success Rate",
     "total_score": "Total Score",
     "ifr_added": r"\textsc{Ifr}$^{+}$ (\%)",
