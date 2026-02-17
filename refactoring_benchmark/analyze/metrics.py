@@ -31,16 +31,6 @@ def metric_ifr_removed(result: EvaluationResult) -> float:
     return result.agent_rule_metrics.negative_ifr
 
 
-def metric_ifr_ratio(result: EvaluationResult) -> float | None:
-    """Ratio of removed IFR to total IFR (0-1 range, None if no rules)."""
-    added_ifr = metric_ifr_added(result)
-    removed_ifr = metric_ifr_removed(result)
-    total = added_ifr + removed_ifr
-    if total == 0:
-        return 0.0
-    return removed_ifr / total
-
-
 def metric_diff_added_lines(result: EvaluationResult) -> int | None:
     try:
         diff_stat = parse_diff_file(Path(result.eval_dir.parent) / "prediction.diff")
@@ -108,7 +98,7 @@ def metric_f1_score(result: EvaluationResult) -> float | None:
     return None
 
 
-def metric_total_score(result: EvaluationResult) -> float | None:
+def metric_f1_score(result: EvaluationResult) -> float | None:
     f1 = metric_f1_score(result)
     is_success = metric_test_success(result)
     if f1 is None or is_success is None:
@@ -154,10 +144,9 @@ METRICS: dict[str, MetricFunction] = {
     "ifr_added_x_test_success": metric_ifr_added_x_test_success,
     "ifr_removed_x_test_success": metric_ifr_removed_x_test_success,
     "strict_ifr_x_test_success": metric_strict_ifr_x_test_success,
-    "total_score": metric_total_score,
+    "f1_score": metric_f1_score,
     "ifr_added": metric_ifr_added,
     "ifr_removed": metric_ifr_removed,
-    "ifr_ratio": metric_ifr_ratio,
     "diff_added_lines": metric_diff_added_lines,
     "diff_removed_lines": metric_diff_removed_lines,
     "diff_delta_lines": metric_diff_delta_lines,

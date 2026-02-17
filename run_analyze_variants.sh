@@ -12,10 +12,7 @@ METRICS=(
   precision_overall
   precision_added
   precision_removed
-  # strict_ifr_x_test_success
-  # cost
-  # ifr_ratio
-  # total_score
+  f1_score
 )
 
 AGENTS=(

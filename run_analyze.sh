@@ -15,7 +15,7 @@ METRICS=(
   precision_overall
   precision_added
   precision_removed
-  total_score
+  f1_score
 )
 
 AGENTS=(
