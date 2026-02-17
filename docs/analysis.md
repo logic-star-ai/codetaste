@@ -4,7 +4,7 @@ The analysis phase aggregates evaluation results across agents and description t
 
 ## Entry point
 ```bash
-python -m refactoring_benchmark.scripts.analyze
+python -m refactoring_benchmark.cli.analyze
 ```
 
 ## Output layout
@@ -23,19 +23,19 @@ outputs/<description_type>/<mode>/<owner>/<repo>/<hash>/<agent_id>/
 ## Common usage
 ```bash
 # Default plots (IFR + test success)
-python -m refactoring_benchmark.scripts.analyze
+python -m refactoring_benchmark.cli.analyze
 
 # Compare two agents
-python -m refactoring_benchmark.scripts.analyze --agent-id agentA --agent-id agentB
+python -m refactoring_benchmark.cli.analyze --agent-id agentA --agent-id agentB
 
 # Only successful inference runs
-python -m refactoring_benchmark.scripts.analyze --successful-only
+python -m refactoring_benchmark.cli.analyze --successful-only
 
 # Filter by mode
-python -m refactoring_benchmark.scripts.analyze --mode direct --mode plan
+python -m refactoring_benchmark.cli.analyze --mode direct --mode plan
 
 # Precision metrics (requires pseudo agents)
-python -m refactoring_benchmark.scripts.analyze --metric precision_overall
+python -m refactoring_benchmark.cli.analyze --metric precision_overall
 ```
 
 ## Outputs
@@ -47,6 +47,6 @@ Precision metrics require evaluated **pseudo agents** (`golden_agent` and `null_
 Use:
 ```bash
 python -m refactoring_benchmark.tools.create_pseudo_agents --agent golden --agent null
-python -m refactoring_benchmark.scripts.evaluate --agent-id golden_agent --output-dir outputs/pseudo_agents/direct
-python -m refactoring_benchmark.scripts.evaluate --agent-id null_agent --output-dir outputs/pseudo_agents/direct
+python -m refactoring_benchmark.cli.evaluate --agent-id golden_agent --output-dir outputs/pseudo_agents/direct
+python -m refactoring_benchmark.cli.evaluate --agent-id null_agent --output-dir outputs/pseudo_agents/direct
 ```

@@ -23,28 +23,28 @@ def main():
         epilog="""
 Examples:
   # Use default: auto-discover all 'output*' directories
-  python -m refactoring_benchmark.scripts.analyze_instance
+  python -m refactoring_benchmark.cli.analyze_instance
 
   # Specify output directories
-  python -m refactoring_benchmark.scripts.analyze_instance --output-dir outputs/instructed/direct --output-dir outputs/open/direct
+  python -m refactoring_benchmark.cli.analyze_instance --output-dir outputs/instructed/direct --output-dir outputs/open/direct
 
   # Filter by agent
-  python -m refactoring_benchmark.scripts.analyze_instance --agent-id agent1 --agent-id agent2
+  python -m refactoring_benchmark.cli.analyze_instance --agent-id agent1 --agent-id agent2
 
   # Generate specific metrics with heatmap
-  python -m refactoring_benchmark.scripts.analyze_instance --metric ifr --plot-type heatmap
+  python -m refactoring_benchmark.cli.analyze_instance --metric ifr --plot-type heatmap
 
   # Only successful inference runs
-  python -m refactoring_benchmark.scripts.analyze_instance --successful-only
+  python -m refactoring_benchmark.cli.analyze_instance --successful-only
 
   # Limit number of instances displayed
-  python -m refactoring_benchmark.scripts.analyze_instance --max-instances 20
+  python -m refactoring_benchmark.cli.analyze_instance --max-instances 20
 
   # Plot multiple metrics
-  python -m refactoring_benchmark.scripts.analyze_instance --metric ifr --metric test_success
+  python -m refactoring_benchmark.cli.analyze_instance --metric ifr --metric test_success
 
   # Custom instances CSV
-  python -m refactoring_benchmark.scripts.analyze_instance --instances-csv ./custom_instances.csv
+  python -m refactoring_benchmark.cli.analyze_instance --instances-csv ./custom_instances.csv
         """,
     )
     # Output directory arguments

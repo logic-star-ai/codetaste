@@ -22,14 +22,14 @@ export ANTHROPIC_API_KEY=...  # required for bootstrap and multiplan judge
 
 ### 1) Bootstrap instances
 ```bash
-python -m refactoring_benchmark.scripts.bootstrap \
+python -m refactoring_benchmark.cli.bootstrap \
   --instances 10 \
   --instances-csv ./instances.csv
 ```
 
 ### 2) Run inference
 ```bash
-python -m refactoring_benchmark.scripts.inference \
+python -m refactoring_benchmark.cli.inference \
   --instances 10 \
   --agent-dir ./agents/your-agent \
   --description-type instructed
@@ -37,14 +37,14 @@ python -m refactoring_benchmark.scripts.inference \
 
 ### 3) Evaluate outputs
 ```bash
-python -m refactoring_benchmark.scripts.evaluate \
+python -m refactoring_benchmark.cli.evaluate \
   --instances 10 \
   --agent-id your-agent-id
 ```
 
 ### 4) Analyze
 ```bash
-python -m refactoring_benchmark.scripts.analyze --metric ifr --plot-type bar
+python -m refactoring_benchmark.cli.analyze --metric ifr --plot-type bar
 ```
 
 ### Generate all plots + tables
@@ -55,7 +55,7 @@ python -m refactoring_benchmark.scripts.analyze --metric ifr --plot-type bar
 ### E2E pipeline (small smoke test)
 Runs inference + evaluation across instructed/open and direct/plan/multiplan for a small slice, then generates plots.
 ```bash
-python -m refactoring_benchmark.scripts.e2e_pipeline \
+python -m refactoring_benchmark.cli.e2e_pipeline \
   --instances 2 \
   --agent-dir ./agents/qwen-code/qwen3-coder-30b-a3b-instruct
 ```
@@ -83,11 +83,11 @@ instances.csv       # Benchmark instance definitions
 - **Description types**: Task detail level (`instructed` or `open`). Both can be used in direct, plan, or multiplan modes.
 - **Modes**: Execution strategy (`direct`, `plan`, or `multiplan`), tracked separately from description type.
 
-## Tools & scripts
-- **Bootstrap**: `python -m refactoring_benchmark.scripts.bootstrap`
-- **Inference**: `python -m refactoring_benchmark.scripts.inference`
-- **Evaluation**: `python -m refactoring_benchmark.scripts.evaluate`
-- **Analysis**: `python -m refactoring_benchmark.scripts.analyze`
+## Tools & CLI
+- **Bootstrap**: `python -m refactoring_benchmark.cli.bootstrap`
+- **Inference**: `python -m refactoring_benchmark.cli.inference`
+- **Evaluation**: `python -m refactoring_benchmark.cli.evaluate`
+- **Analysis**: `python -m refactoring_benchmark.cli.analyze`
 - **Golden and Null agents**: `python -m refactoring_benchmark.tools.create_pseudo_agents`
 
 ## Outputs (per instance + agent)

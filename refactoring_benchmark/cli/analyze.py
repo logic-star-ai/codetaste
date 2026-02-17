@@ -29,34 +29,34 @@ def main():
         epilog="""
 Examples:
   # Use default: auto-discover all outputs/*/* directories
-  python -m refactoring_benchmark.scripts.analyze
+  python -m refactoring_benchmark.cli.analyze
 
   # Specify output directories
-  python -m refactoring_benchmark.scripts.analyze --output-dir outputs/instructed/direct --output-dir outputs/open/direct
+  python -m refactoring_benchmark.cli.analyze --output-dir outputs/instructed/direct --output-dir outputs/open/direct
 
   # Filter by agent
-  python -m refactoring_benchmark.scripts.analyze --agent-id agent1 --agent-id agent2
+  python -m refactoring_benchmark.cli.analyze --agent-id agent1 --agent-id agent2
 
   # Filter by description type
-  python -m refactoring_benchmark.scripts.analyze --description-type instructed --description-type open
+  python -m refactoring_benchmark.cli.analyze --description-type instructed --description-type open
 
   # Filter by mode
-  python -m refactoring_benchmark.scripts.analyze --mode direct --mode plan
+  python -m refactoring_benchmark.cli.analyze --mode direct --mode plan
 
   # Generate specific metrics with bar chart
-  python -m refactoring_benchmark.scripts.analyze --metric ifr --plot-type bar
+  python -m refactoring_benchmark.cli.analyze --metric ifr --plot-type bar
 
   # Use median aggregation
-  python -m refactoring_benchmark.scripts.analyze --aggregation median
+  python -m refactoring_benchmark.cli.analyze --aggregation median
 
   # Only successful inference runs
-  python -m refactoring_benchmark.scripts.analyze --successful-only
+  python -m refactoring_benchmark.cli.analyze --successful-only
 
   # Plot precision metrics (requires null agent)
-  python -m refactoring_benchmark.scripts.analyze --metric precision_overall
+  python -m refactoring_benchmark.cli.analyze --metric precision_overall
 
   # Custom instances CSV
-  python -m refactoring_benchmark.scripts.analyze --instances-csv ./custom_instances.csv
+  python -m refactoring_benchmark.cli.analyze --instances-csv ./custom_instances.csv
         """,
     )
     # Output directory arguments

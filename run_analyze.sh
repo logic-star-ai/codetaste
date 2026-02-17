@@ -61,7 +61,7 @@ run_group() {
     local plot_dir="plots/${group_name}/${legend_variant}"
     mkdir -p "$plot_dir"
 
-    python -m refactoring_benchmark.scripts.analyze \
+    python -m refactoring_benchmark.cli.analyze \
       $(printf ' --metric %q' "${METRICS[@]}") \
       $(printf ' --agent-id %q' "${AGENTS[@]}") \
       $(printf ' --output-dir %q' "${output_dirs[@]}") \

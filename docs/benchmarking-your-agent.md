@@ -65,7 +65,7 @@ If present, `setup_system.sh` runs before network access is blocked. Use it to i
 
 Run inference:
 ```bash
-python -m refactoring_benchmark.scripts.inference \
+python -m refactoring_benchmark.cli.inference \
   --instances 10 \
   --agent-dir ./agents/your-agent/your-model \
   --description-type instructed
@@ -76,7 +76,7 @@ python -m refactoring_benchmark.scripts.inference \
 
 Evaluate:
 ```
-python -m refactoring_benchmark.scripts.evaluate \
+python -m refactoring_benchmark.cli.evaluate \
   --instances 10 \
   --agent-id your-agent-id \
   --output-dir ./outputs/instructed/direct  # change to ./outputs/<description_type>/<mode> if needed

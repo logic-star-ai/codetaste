@@ -47,7 +47,7 @@ echo "Task Type: $DESCRIPTION_TYPE -> Output: $OUTPUT_DIR"
 
 # 1. Inference Step
 # Note: Ensure your environment variables (ANTHROPIC_API_KEY, etc.) are exported in your shell
-python -m refactoring_benchmark.scripts.inference \
+python -m refactoring_benchmark.cli.inference \
     --instances "$NR_INSTANCES" \
     --nr-workers "$NR_INFERENCE_WORKERS" \
     --agent-dir "$AGENT_DIR" \
@@ -64,19 +64,19 @@ if [ $? -ne 0 ]; then
     echo "Inference step failed. Skipping evaluation."
 else 
     echo "Inference step completed successfully."
-    python -m refactoring_benchmark.scripts.evaluate \
+    python -m refactoring_benchmark.cli.evaluate \
         --instances "$NR_INSTANCES" \
         --nr-workers 5 \
         --agent-id "$AGENT_ID" \
         --output-dir "$OUTPUT_DIR" \
         $FORCE_EVALUATION
-    python -m refactoring_benchmark.scripts.evaluate \
+    python -m refactoring_benchmark.cli.evaluate \
         --instances "$NR_INSTANCES" \
         --nr-workers 5 \
         --agent-id "$AGENT_ID" \
         --output-dir "$OUTPUT_DIR" \
         --retry-null-tests
-    python -m refactoring_benchmark.scripts.evaluate \
+    python -m refactoring_benchmark.cli.evaluate \
         --instances "$NR_INSTANCES" \
         --nr-workers 5 \
         --agent-id "$AGENT_ID" \

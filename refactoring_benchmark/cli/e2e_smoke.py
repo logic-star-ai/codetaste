@@ -198,7 +198,7 @@ def main() -> int:
             cmd = [
                 sys.executable,
                 "-m",
-                "refactoring_benchmark.scripts.inference",
+                "refactoring_benchmark.cli.inference",
                 "--instances",
                 str(args.instances),
                 "--instances-csv",
@@ -230,7 +230,7 @@ def main() -> int:
             eval_cmd = [
                 sys.executable,
                 "-m",
-                "refactoring_benchmark.scripts.evaluate",
+                "refactoring_benchmark.cli.evaluate",
                 "--instances",
                 str(args.instances),
                 "--instances-csv",
@@ -253,7 +253,7 @@ def main() -> int:
     analysis_cmd = [
         sys.executable,
         "-m",
-        "refactoring_benchmark.scripts.analyze",
+        "refactoring_benchmark.cli.analyze",
         "--plots-dir",
         str(plots_dir),
         "--plot-type",

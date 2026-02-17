@@ -46,7 +46,7 @@ for agent_id in "${AGENT_IDS[@]}"; do
     output_dir="$(get_output_dir "$description_type" "$plan_flag")" || exit 1
 
     echo "Evaluating $agent_id | $description_type $plan_flag -> $output_dir"
-    if ! python -m refactoring_benchmark.scripts.evaluate \
+    if ! python -m refactoring_benchmark.cli.evaluate \
         --instances "$NR_INSTANCES" \
         --nr-workers "$NR_EVAL_WORKERS" \
         --agent-id "$agent_id" \
