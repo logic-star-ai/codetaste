@@ -90,20 +90,14 @@ def metric_f1_score(result: EvaluationResult) -> float | None:
     """Harmonic mean of precision and instruction following (recall)."""
     p = metric_precision_overall(result)
     r = metric_ifr(result)
-
+    passed = metric_test_success(result)
+    if not passed:
+        return 0.0
     if p is not None and r is not None:
         if (p + r) == 0:
             return 0.0
         return 2 * (p * r) / (p + r)
     return None
-
-
-def metric_f1_score(result: EvaluationResult) -> float | None:
-    f1 = metric_f1_score(result)
-    is_success = metric_test_success(result)
-    if f1 is None or is_success is None:
-        return None
-    return f1 * is_success
 
 
 def _calculate_precision(result: EvaluationResult) -> InstanceAgentPrecision | None:

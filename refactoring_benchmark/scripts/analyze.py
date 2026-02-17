@@ -14,6 +14,7 @@ from refactoring_benchmark.analyze.loader import (
 from refactoring_benchmark.analyze.metrics import ALL_METRICS
 from refactoring_benchmark.analyze.plotting import create_plot, save_plot
 from refactoring_benchmark.analyze.statistics import (
+    build_latex_metrics_table,
     print_finish_reason_table,
     print_statistics_table,
 )
@@ -194,6 +195,13 @@ Examples:
         for d in output_dirs:
             print(f"  - {d}")
 
+    # Include pseudo agent outputs when explicitly requested
+    if args.agent_ids and any(agent in {"golden_agent", "null_agent"} for agent in args.agent_ids):
+        pseudo_agents_dir = Path("./outputs/pseudo_agents/direct").resolve()
+        if pseudo_agents_dir.exists() and pseudo_agents_dir not in output_dirs:
+            output_dirs.append(pseudo_agents_dir)
+            print(f"Added pseudo agent output directory: {pseudo_agents_dir}")
+
     # Load instances from CSV
     instances_csv = args.instances_csv.resolve()
     if not instances_csv.exists():
@@ -256,6 +264,37 @@ Examples:
             modes=args.modes,
         )
         print_finish_reason_table(filtered_results, "Filtered by Description Type, Mode, and Agent ID")
+
+    # Generate LaTeX table for the requested metrics and agents
+    try:
+        latex_metrics_data = {}
+        for metric in metrics_to_plot:
+            metric_data = organize_data(results, metric, filters=filters if filters else None)
+            if args.agent_ids:
+                metric_data = metric_data.filter_agents(args.agent_ids)
+            if args.description_types:
+                metric_data = metric_data.filter_description_types(args.description_types)
+            if args.modes:
+                metric_data = metric_data.filter_modes(args.modes)
+            latex_metrics_data[metric] = metric_data
+
+        caption = "Results for selected metrics and agents in percents with 95 \\% confidence intervals."
+        label = "tab:metric-results"
+
+        latex_table = build_latex_metrics_table(
+            latex_metrics_data,
+            metrics=metrics_to_plot,
+            agent_ids=args.agent_ids,
+            caption=caption,
+            label=label,
+        )
+        if latex_table:
+            args.plots_dir.mkdir(parents=True, exist_ok=True)
+            latex_path = args.plots_dir / "metric_results.tex"
+            latex_path.write_text(latex_table)
+            print(f"Saved LaTeX table to {latex_path}")
+    except Exception as e:
+        print(f"Warning: Failed to generate LaTeX table: {e}")
 
     # Process each metric
     for metric_name in metrics_to_plot:

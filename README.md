@@ -47,6 +47,11 @@ python -m refactoring_benchmark.scripts.evaluate \
 python -m refactoring_benchmark.scripts.analyze --metric ifr --plot-type bar
 ```
 
+### Generate all plots + tables
+```bash
+./run_analyze.sh
+```
+
 ### E2E pipeline (small smoke test)
 Runs inference + evaluation across instructed/open and direct/plan/multiplan for a small slice, then generates plots.
 ```bash

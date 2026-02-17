@@ -115,6 +115,10 @@ def organize_data(
         if result.inference_metadata and result.inference_metadata.description_type and result.inference_metadata.mode:
             description_type = result.inference_metadata.description_type
             mode = result.inference_metadata.mode
+        elif agent_id in {"golden_agent", "null_agent"}:
+            # Pseudo agents may not have description_type/mode metadata; treat as open/direct baseline.
+            description_type = "open"
+            mode = "direct"
         else:
             continue
 
