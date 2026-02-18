@@ -17,7 +17,9 @@ A benchmarking framework for evaluating AI agents on real-world code refactoring
 
 ## Quickstart
 ```bash
-poetry install
+# deactivate any activated virtual environment
+
+poetry install # or /path/to/venv/with/poetry install ; this will create an in-project virtualenv
 
 # This repo uses an in-project virtualenv (see poetry.toml)
 source .venv/bin/activate
