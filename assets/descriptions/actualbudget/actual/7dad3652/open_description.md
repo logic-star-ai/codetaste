@@ -1,1 +1,0 @@
-Modernize Redux store setup

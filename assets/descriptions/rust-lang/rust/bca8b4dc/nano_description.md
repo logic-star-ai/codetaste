@@ -1,1 +1,0 @@
-Remove `HirId -> LocalDefId` map from HIR data structure

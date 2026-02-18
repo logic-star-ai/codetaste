@@ -1,1 +1,0 @@
-Refactor store iterators from polymorphism to std::variant

@@ -1,1 +1,0 @@
-Remove transparent tagging-only `ModifyPlan` implementations for Plugin Framework resources

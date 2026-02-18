@@ -1,1 +1,0 @@
-Clarify generics naming

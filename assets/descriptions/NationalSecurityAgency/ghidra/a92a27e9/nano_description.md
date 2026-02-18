@@ -1,1 +1,0 @@
-Refactor GUI theme management to use ThemeManager pattern

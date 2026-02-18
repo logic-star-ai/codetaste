@@ -1,1 +1,0 @@
-Remove global types from edgeless implementation

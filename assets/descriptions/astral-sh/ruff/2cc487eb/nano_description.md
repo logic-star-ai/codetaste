@@ -1,1 +1,0 @@
-Rename `SemanticModel::is_builtin` to `SemanticModel::has_builtin_binding`

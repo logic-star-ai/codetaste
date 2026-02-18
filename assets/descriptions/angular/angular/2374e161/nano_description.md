@@ -1,1 +1,0 @@
-Refactor: Extract HTTP module to top-level standalone package

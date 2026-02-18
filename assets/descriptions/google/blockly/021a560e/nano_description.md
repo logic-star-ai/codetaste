@@ -1,1 +1,0 @@
-Refactor generator modules to eliminate side effects

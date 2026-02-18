@@ -1,1 +1,0 @@
-Simplify class API usage.

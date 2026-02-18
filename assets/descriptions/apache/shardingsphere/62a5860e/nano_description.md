@@ -1,1 +1,0 @@
-Rename `TableRule` to `ShardingTable` for improved module identification

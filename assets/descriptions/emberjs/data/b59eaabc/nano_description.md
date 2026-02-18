@@ -1,1 +1,0 @@
-Consolidate @warp-drive/core-types and @ember-data/request into @warp-drive/core

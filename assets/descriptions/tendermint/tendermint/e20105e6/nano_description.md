@@ -1,1 +1,0 @@
-Refactor RPC lib folder structure and naming conventions

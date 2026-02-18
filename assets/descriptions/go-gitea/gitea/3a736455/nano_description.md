@@ -1,1 +1,0 @@
-Consolidate git command execution to use `Run(&RunOpts{})` pattern

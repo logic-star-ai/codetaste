@@ -1,1 +1,0 @@
-Refactor zeppelin-web file structure for scalability

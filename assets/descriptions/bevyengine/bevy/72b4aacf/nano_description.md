@@ -1,1 +1,0 @@
-Unify plugin registration API: deprecate `add_plugin`, enhance `add_plugins` to accept tuples

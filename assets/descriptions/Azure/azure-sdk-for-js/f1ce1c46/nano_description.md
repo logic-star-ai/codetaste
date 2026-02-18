@@ -1,1 +1,0 @@
-Migrate `@azure/microsoft-playwright-testing` to ESM/Vitest

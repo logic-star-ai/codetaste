@@ -1,1 +1,0 @@
-Refactor streaming multi-scan directory structure

@@ -1,1 +1,0 @@
-Remove `TLShapeDef` and simplify shape configuration

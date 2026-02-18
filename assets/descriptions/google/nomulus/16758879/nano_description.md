@@ -1,1 +1,0 @@
-Refactor / rename Billing object classes to match SQL schema

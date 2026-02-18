@@ -1,1 +1,0 @@
-Rename Peep properties to distinguish Actions from Animations

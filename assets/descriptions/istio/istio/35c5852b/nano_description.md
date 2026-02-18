@@ -1,1 +1,0 @@
-Refactor Galley Schema Model for Pilot/Galley Convergence

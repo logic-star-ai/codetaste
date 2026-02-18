@@ -1,1 +1,0 @@
-Complete salt.utils refactor by relocating remaining 30 functions to specialized modules

@@ -1,1 +1,0 @@
-Remove Rome Formatter - Complete Migration to Biome

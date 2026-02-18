@@ -1,1 +1,0 @@
-Rename `--security-checks` flag to `--scanners`

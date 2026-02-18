@@ -1,1 +1,0 @@
-Remove Python 2/3 compatibility flags from tests

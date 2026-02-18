@@ -1,1 +1,0 @@
-refactor(material/core): reduce mixin function boilerplate

@@ -1,1 +1,0 @@
-Remove old IE compatibility mode logic, switch to native types instead

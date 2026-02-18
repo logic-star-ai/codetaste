@@ -1,1 +1,0 @@
-Rename Ray SGD v2 to Ray Train

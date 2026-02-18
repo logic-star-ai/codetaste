@@ -1,1 +1,0 @@
-Rename "importers" & "workspace packages" terminology to "projects"

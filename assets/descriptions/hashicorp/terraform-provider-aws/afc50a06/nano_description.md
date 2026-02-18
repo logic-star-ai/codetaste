@@ -1,1 +1,0 @@
-Remove AWS SDK for Go v1 support from `internal/generate/tags` generator

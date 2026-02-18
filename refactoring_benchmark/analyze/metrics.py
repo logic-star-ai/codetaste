@@ -31,16 +31,6 @@ def metric_ifr_removed(result: EvaluationResult) -> float:
     return result.agent_rule_metrics.negative_ifr
 
 
-def metric_ifr_ratio(result: EvaluationResult) -> float | None:
-    """Ratio of removed IFR to total IFR (0-1 range, None if no rules)."""
-    added_ifr = metric_ifr_added(result)
-    removed_ifr = metric_ifr_removed(result)
-    total = added_ifr + removed_ifr
-    if total == 0:
-        return 0.0
-    return removed_ifr / total
-
-
 def metric_diff_added_lines(result: EvaluationResult) -> int | None:
     try:
         diff_stat = parse_diff_file(Path(result.eval_dir.parent) / "prediction.diff")
@@ -100,7 +90,9 @@ def metric_f1_score(result: EvaluationResult) -> float | None:
     """Harmonic mean of precision and instruction following (recall)."""
     p = metric_precision_overall(result)
     r = metric_ifr(result)
-
+    passed = metric_test_success(result)
+    if not passed:
+        return 0.0
     if p is not None and r is not None:
         if (p + r) == 0:
             return 0.0
@@ -108,33 +100,25 @@ def metric_f1_score(result: EvaluationResult) -> float | None:
     return None
 
 
-def metric_total_score(result: EvaluationResult) -> float | None:
-    f1 = metric_f1_score(result)
-    is_success = metric_test_success(result)
-    if f1 is None or is_success is None:
-        return None
-    return f1 * is_success
-
-
 def _calculate_precision(result: EvaluationResult) -> InstanceAgentPrecision | None:
-    """Helper to calculate precision metrics (requires ./outputs/pseudo_agents/direct/)."""
+    """Helper to calculate precision metrics (requires pseudo-agent outputs)."""
     return calculate_precision_eval_result(result)
 
 
 def metric_precision_added(result: EvaluationResult) -> float | None:
-    """Precision of added lines (requires ./outputs/pseudo_agents/direct/)."""
+    """Precision of added lines (requires pseudo-agent outputs)."""
     precision_result = _calculate_precision(result)
     return precision_result.metrics.precision_added if precision_result else None
 
 
 def metric_precision_removed(result: EvaluationResult) -> float | None:
-    """Precision of removed lines (requires ./outputs/pseudo_agents/direct/)."""
+    """Precision of removed lines (requires pseudo-agent outputs)."""
     precision_result = _calculate_precision(result)
     return precision_result.metrics.precision_removed if precision_result else None
 
 
 def metric_precision_overall(result: EvaluationResult) -> float | None:
-    """Overall precision (requires ./outputs/pseudo_agents/direct/)."""
+    """Overall precision (requires pseudo-agent outputs)."""
     precision_result = _calculate_precision(result)
     return precision_result.metrics.precision_overall if precision_result else None
 
@@ -154,10 +138,9 @@ METRICS: dict[str, MetricFunction] = {
     "ifr_added_x_test_success": metric_ifr_added_x_test_success,
     "ifr_removed_x_test_success": metric_ifr_removed_x_test_success,
     "strict_ifr_x_test_success": metric_strict_ifr_x_test_success,
-    "total_score": metric_total_score,
+    "f1_score": metric_f1_score,
     "ifr_added": metric_ifr_added,
     "ifr_removed": metric_ifr_removed,
-    "ifr_ratio": metric_ifr_ratio,
     "diff_added_lines": metric_diff_added_lines,
     "diff_removed_lines": metric_diff_removed_lines,
     "diff_delta_lines": metric_diff_delta_lines,

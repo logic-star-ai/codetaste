@@ -1,1 +1,0 @@
-Refactor ingest CLI to use subcommand architecture

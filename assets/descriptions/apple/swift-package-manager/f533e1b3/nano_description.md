@@ -1,1 +1,0 @@
-Rename `Swift*Tool` to `Swift*Command`

@@ -1,1 +1,0 @@
-Rename gRPC directories from public/private to external/internal

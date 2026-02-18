@@ -1,1 +1,0 @@
-Disentangle sort constants - move from centralized to component-specific

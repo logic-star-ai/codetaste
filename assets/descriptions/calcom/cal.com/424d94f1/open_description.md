@@ -1,1 +1,0 @@
-Refactor viewer router structure

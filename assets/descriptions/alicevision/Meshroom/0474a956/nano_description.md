@@ -1,1 +1,0 @@
-Simplify Node API: Better defaults for ChoiceParam and numeric range parameters

@@ -1,1 +1,0 @@
-Rename "room notification settings" to "room subscription settings"

@@ -1,1 +1,0 @@
-Simplify WASI internal implementations by removing generic wrapper types

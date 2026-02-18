@@ -1,1 +1,0 @@
-Refactor: Remove lifetime annotations from `Rpc` type

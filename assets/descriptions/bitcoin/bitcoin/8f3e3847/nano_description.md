@@ -1,1 +1,0 @@
-Remove `is_network_split` from functional test cases

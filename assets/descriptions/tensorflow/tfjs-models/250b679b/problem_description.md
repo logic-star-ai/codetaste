@@ -1,3 +1,0 @@
-Fully autonomously address the issue described in the following throughout the entire code base. Proceed directly to modifying the actual codebase; do not output analysis, plan, roadmap or similar files.
-
-The current `hand-detection` package name is misleading and inaccurate because it implies simple bounding box detection rather than the library's actual capability for full keypoint pose estimation.

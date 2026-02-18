@@ -1,1 +1,0 @@
-Migrate shared types from react-router and solid-router to router-core

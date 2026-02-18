@@ -1,1 +1,0 @@
-Inline goto targets and reduce variable scope in compiler

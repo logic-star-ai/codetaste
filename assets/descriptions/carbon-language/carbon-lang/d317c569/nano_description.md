@@ -1,1 +1,0 @@
-Move diagnostics into a namespace

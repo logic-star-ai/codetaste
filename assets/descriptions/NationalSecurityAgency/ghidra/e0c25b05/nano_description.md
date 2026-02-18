@@ -1,1 +1,0 @@
-Refactor JLabel → GLabel variants, JComboBox → GComboBox, update renderers

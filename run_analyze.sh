@@ -11,18 +11,23 @@ METRICS=(
   ifr_removed_x_test_success
   ifr_added
   ifr_removed
-  ifr_ratio
   precision_overall
   precision_added
   precision_removed
-  total_score
+  f1_score
 )
 
-AGENTS=(
+AGENTS_DEFAULT=(
   "codex-v0.77.0-gpt-5.1-codex-mini"
   "claude-code-v2.0.76-sonnet45"
   "codex-v0.77.0-gpt-5.2"
   "qwen-code-v0.6.2-qwen3-coder-30b-a3b-instruct"
+)
+
+AGENTS_COMBINED=(
+  "${AGENTS_DEFAULT[@]}"
+  "golden_agent"
+  "null_agent"
 )
 
 COMMON_ARGS=(
@@ -56,19 +61,19 @@ run_group() {
     local plot_dir="plots/${group_name}/${legend_variant}"
     mkdir -p "$plot_dir"
 
-    python -m refactoring_benchmark.scripts.analyze \
+    python -m refactoring_benchmark.cli.analyze \
       $(printf ' --metric %q' "${METRICS[@]}") \
       $(printf ' --agent-id %q' "${AGENTS[@]}") \
       $(printf ' --output-dir %q' "${output_dirs[@]}") \
+      $( [ "$group_name" == "instructed" ] && echo "--ytick-step 10" ) \
       "${COMMON_ARGS[@]}" \
       "${legend_args[@]}" \
       --plots-dir "$plot_dir" | tee "$plot_dir/analysis.log"
   done
 }
 
+AGENTS=("${AGENTS_DEFAULT[@]}")
 run_group "instructed" "./outputs/instructed/direct"
 run_group "open" "./outputs/open/direct" "./outputs/open/plan" "./outputs/open/multiplan"
-
-# Examples for other datasets:
-# run_group "standard_cp" "./outputs_legacy/output_cp"
-# run_group "abstract_cp" "./outputs_legacy/output_abstract_cp" "./outputs_legacy/output_abstract_plan_cp" "./outputs_legacy/output_abstract_multiplan_cp"
+AGENTS=("${AGENTS_COMBINED[@]}")
+run_group "combined" "./outputs/instructed/direct" "./outputs/open/direct" "./outputs/open/plan" "./outputs/open/multiplan"

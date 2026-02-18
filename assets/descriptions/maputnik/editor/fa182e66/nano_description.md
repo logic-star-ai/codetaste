@@ -1,1 +1,0 @@
-Continue JSX to TSX migration (batch 2)

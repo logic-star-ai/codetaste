@@ -1,1 +1,0 @@
-Migrate container, image, and storage types to dedicated packages

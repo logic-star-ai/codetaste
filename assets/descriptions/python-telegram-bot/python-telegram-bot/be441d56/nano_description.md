@@ -1,1 +1,0 @@
-Remove `__dict__` from `__slots__` and drop Python 3.6

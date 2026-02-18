@@ -1,1 +1,0 @@
-Consolidate @ember/object and @ember/object/observable from @ember/-internals/runtime

@@ -4,7 +4,7 @@ The bootstrap phase prepares **per‑instance container images** and baseline te
 
 ## Entry point
 ```bash
-python -m refactoring_benchmark.scripts.bootstrap
+python -m refactoring_benchmark.cli.bootstrap
 ```
 
 ## What it does

@@ -1,1 +1,0 @@
-Refactor database table view to decouple rendering from model

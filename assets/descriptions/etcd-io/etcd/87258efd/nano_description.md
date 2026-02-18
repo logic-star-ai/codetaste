@@ -1,1 +1,0 @@
-Refactor integration tests to use `BeforeTest(t)` pattern

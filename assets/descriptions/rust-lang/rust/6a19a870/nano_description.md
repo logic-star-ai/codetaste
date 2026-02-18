@@ -1,1 +1,0 @@
-Rename `FulfillmentErrorCode` and `ObligationCauseCode` variants to reduce redundancy

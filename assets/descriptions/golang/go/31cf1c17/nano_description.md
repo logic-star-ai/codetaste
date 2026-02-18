@@ -1,1 +1,0 @@
-Consolidate CPU architecture information into `cmd/internal/sys` package

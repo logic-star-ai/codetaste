@@ -1,1 +1,0 @@
-Add RuleIdentifier to decouple ShardingSphere Rule architecture

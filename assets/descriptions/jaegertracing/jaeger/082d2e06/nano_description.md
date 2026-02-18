@@ -1,1 +1,0 @@
-Refactor: Rename strategy store to sampling strategy provider

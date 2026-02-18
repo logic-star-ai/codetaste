@@ -1,1 +1,0 @@
-Remove global k8s client accessors in favor of explicit Clientset parameter

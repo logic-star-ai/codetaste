@@ -1,1 +1,0 @@
-Refactor field indexing type

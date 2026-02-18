@@ -1,1 +1,0 @@
-Simplify linter constructors with single-analyzer helper and fluent config API

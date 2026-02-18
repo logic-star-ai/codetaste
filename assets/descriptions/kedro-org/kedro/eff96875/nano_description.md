@@ -1,1 +1,0 @@
-Rename `KedroDataCatalog` to `DataCatalog`

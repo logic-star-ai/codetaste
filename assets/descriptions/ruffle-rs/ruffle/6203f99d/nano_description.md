@@ -1,1 +1,0 @@
-Simplify uses of `GcCell<'gc, Class<'gc>>` by introducing wrapper type

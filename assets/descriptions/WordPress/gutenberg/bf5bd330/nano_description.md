@@ -1,1 +1,0 @@
-Consolidate `ui/utils` into `utils` to remove `ui/` folder

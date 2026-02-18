@@ -1,1 +1,0 @@
-Rename "delegation" terminology to "stake" throughout framework

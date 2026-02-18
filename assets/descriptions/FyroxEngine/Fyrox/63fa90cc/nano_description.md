@@ -1,1 +1,0 @@
-Refactor resource system - consolidate metadata in ResourceHeader

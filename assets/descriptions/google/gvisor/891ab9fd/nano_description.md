@@ -1,1 +1,0 @@
-Move `//pkg/sentry/kernel/time` to `//pkg/sentry/ktime`

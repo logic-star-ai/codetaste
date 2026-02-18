@@ -1,1 +1,0 @@
-Refactor: Consolidate RBAC code into `@n8n/permissions` package with tests and documentation

@@ -1,1 +1,0 @@
-Rename `NativeAssetId` to `BaseAssetId`

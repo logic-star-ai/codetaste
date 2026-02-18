@@ -1,1 +1,0 @@
-Rename DWD to DelegationCredential

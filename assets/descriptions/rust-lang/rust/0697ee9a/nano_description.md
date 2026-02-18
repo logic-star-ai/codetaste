@@ -1,1 +1,0 @@
-Rename `ptr::from_exposed_addr` to `ptr::with_exposed_provenance`

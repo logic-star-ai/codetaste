@@ -1,1 +1,0 @@
-Refactor: Drop SciPy < 0.13 support and remove backport code

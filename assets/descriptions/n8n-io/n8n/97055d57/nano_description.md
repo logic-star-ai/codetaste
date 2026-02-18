@@ -1,1 +1,0 @@
-Split database-dependent types from `interfaces.ts` into `types-db.ts`

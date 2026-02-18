@@ -1,1 +1,0 @@
-Organize scattered global state

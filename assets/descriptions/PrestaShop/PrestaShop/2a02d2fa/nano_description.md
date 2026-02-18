@@ -1,1 +1,0 @@
-Migrate Functional Tests to `@prestashop-core/ui-testing` (Part 2)

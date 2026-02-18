@@ -1,1 +1,0 @@
-Refactor telemetry interfaces location

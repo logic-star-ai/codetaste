@@ -4,7 +4,7 @@ The evaluation phase applies an agent’s patch, runs tests, and executes rule c
 
 ## Entry point
 ```bash
-python -m refactoring_benchmark.scripts.evaluate
+python -m refactoring_benchmark.cli.evaluate
 ```
 
 ## What it does

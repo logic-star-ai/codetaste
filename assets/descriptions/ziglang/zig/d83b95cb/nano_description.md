@@ -1,1 +1,0 @@
-Remove deprecated APIs from 0.14 release cycle

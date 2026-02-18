@@ -1,1 +1,0 @@
-Replace Redux with Zustand for state management

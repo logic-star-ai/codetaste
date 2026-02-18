@@ -1,1 +1,0 @@
-Rename `@apollo/client/link/core` entrypoint to `@apollo/client/link`

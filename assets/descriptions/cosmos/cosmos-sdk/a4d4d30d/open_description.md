@@ -1,1 +1,0 @@
-Migrate store type references

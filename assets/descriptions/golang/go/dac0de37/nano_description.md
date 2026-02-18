@@ -1,1 +1,0 @@
-Split typechecking logic into separate `typecheck` package

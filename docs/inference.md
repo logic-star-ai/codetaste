@@ -4,7 +4,7 @@ This document summarizes how inference runs for a single instance.
 
 ## Entry point
 ```bash
-python -m refactoring_benchmark.scripts.inference
+python -m refactoring_benchmark.cli.inference
 ```
 
 ## Phases

@@ -1,1 +1,0 @@
-Reorganize internal package structure and rename core interfaces for better clarity

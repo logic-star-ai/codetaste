@@ -1,1 +1,0 @@
-Replace global logger instances with local logger parameter passing (Part 10)

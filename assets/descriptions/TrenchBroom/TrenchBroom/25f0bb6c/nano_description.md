@@ -1,1 +1,0 @@
-Refactor entity definition modeling to use `std::variant`

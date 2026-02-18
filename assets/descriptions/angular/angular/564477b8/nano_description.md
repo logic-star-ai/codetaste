@@ -1,1 +1,0 @@
-Rename View and Template concepts for clarity

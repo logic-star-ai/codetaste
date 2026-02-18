@@ -1,1 +1,0 @@
-Move migration tests to dedicated package

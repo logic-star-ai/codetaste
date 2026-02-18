@@ -1,1 +1,0 @@
-Refactor CLI clients to reduce duplication and improve code organization

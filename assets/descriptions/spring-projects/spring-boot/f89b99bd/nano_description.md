@@ -1,1 +1,0 @@
-Refactor ConfigData processing to clarify location vs resource concepts

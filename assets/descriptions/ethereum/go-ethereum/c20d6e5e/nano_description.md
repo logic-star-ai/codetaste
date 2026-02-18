@@ -1,1 +1,0 @@
-Rename `crypto.Sha3{,Hash}()` to `crypto.Keccak256{,Hash}()`

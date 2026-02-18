@@ -1,1 +1,0 @@
-Rename hand-detection package to hand-pose-detection

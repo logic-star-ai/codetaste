@@ -1,1 +1,0 @@
-Standardize binary naming with `llama-` prefix

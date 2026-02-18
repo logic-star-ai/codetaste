@@ -1,1 +1,0 @@
-Consolidate integration models to `sentry/integrations/models` directory

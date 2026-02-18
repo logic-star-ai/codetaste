@@ -1,1 +1,0 @@
-Revamp DNS codec for better extensibility and RFC compliance

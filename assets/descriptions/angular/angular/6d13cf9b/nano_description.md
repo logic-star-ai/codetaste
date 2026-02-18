@@ -1,1 +1,0 @@
-Consolidate public API exports to `angular2/core`
