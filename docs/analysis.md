@@ -46,7 +46,7 @@ python -m refactoring_benchmark.cli.analyze --metric precision_overall
 Precision metrics require evaluated **pseudo agents** (`golden_agent` and `null_agent`).
 Use:
 ```bash
-python -m refactoring_benchmark.tools.create_pseudo_agents --agent golden --agent null
+python -m refactoring_benchmark.cli.create_pseudo_agents --agent golden --agent null
 python -m refactoring_benchmark.cli.evaluate --agent-id golden_agent --output-dir outputs/pseudo_agents/direct
 python -m refactoring_benchmark.cli.evaluate --agent-id null_agent --output-dir outputs/pseudo_agents/direct
 ```

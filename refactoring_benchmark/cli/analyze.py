@@ -19,6 +19,7 @@ from refactoring_benchmark.analyze.statistics import (
     print_statistics_table,
 )
 from refactoring_benchmark.utils.common import load_instances_from_csv
+from refactoring_benchmark.utils.paths import PSEUDO_AGENTS_DIR
 
 
 def main():
@@ -197,7 +198,7 @@ Examples:
 
     # Include pseudo agent outputs when explicitly requested
     if args.agent_ids and any(agent in {"golden_agent", "null_agent"} for agent in args.agent_ids):
-        pseudo_agents_dir = Path("./outputs/pseudo_agents/direct").resolve()
+        pseudo_agents_dir = PSEUDO_AGENTS_DIR
         if pseudo_agents_dir.exists() and pseudo_agents_dir not in output_dirs:
             output_dirs.append(pseudo_agents_dir)
             print(f"Added pseudo agent output directory: {pseudo_agents_dir}")

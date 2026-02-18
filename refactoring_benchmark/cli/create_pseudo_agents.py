@@ -22,6 +22,7 @@ from refactoring_benchmark.inference.models import (
 )
 from refactoring_benchmark.utils.common import load_instances_from_csv
 from refactoring_benchmark.utils.models import InstanceRow
+from refactoring_benchmark.utils.paths import PSEUDO_AGENTS_DIR
 
 PSEUDO_AGENTS = {
     "golden": {
@@ -119,7 +120,7 @@ def main():
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path(__file__).parent.parent.parent / "outputs" / "pseudo_agents" / "direct",
+        default=PSEUDO_AGENTS_DIR,
         help="Base directory for pseudo agent outputs",
     )
 

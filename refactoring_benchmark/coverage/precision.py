@@ -17,6 +17,7 @@ from refactoring_benchmark.coverage.models import (
 from refactoring_benchmark.coverage.parse import parse_diff, parse_sarif
 from refactoring_benchmark.evaluation.models import EvaluationResult
 from refactoring_benchmark.utils.models import ReducedInstanceRow
+from refactoring_benchmark.utils.paths import PSEUDO_AGENTS_DIR
 
 cachedir = "./.cache_dir"
 memory = Memory(cachedir, verbose=1)
@@ -111,7 +112,7 @@ def _cached_calculate_precision(
 
 def calculate_precision_eval_result(
     result: EvaluationResult,
-    null_agent_dir: Path = Path("outputs/pseudo_agents/direct"),
+    null_agent_dir: Path = PSEUDO_AGENTS_DIR,
 ) -> Optional[InstanceAgentPrecision]:
     """
     Calculate precision metrics for a single instance-agent pair.
