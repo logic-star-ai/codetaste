@@ -1,1 +1,0 @@
-Migrate store methods to use `request.Context` instead of `context.Context`

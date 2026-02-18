@@ -1,1 +1,0 @@
-Store pointer to player's ConditionsStore in all ConditionSets to eliminate PlayerInfo passing

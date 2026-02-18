@@ -1,1 +1,0 @@
-Complete `RpcActor` → `Actor` rename and remove compatibility shim

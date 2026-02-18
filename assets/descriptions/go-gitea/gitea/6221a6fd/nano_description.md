@@ -1,1 +1,0 @@
-Refactor element visibility handling: standardize on `.gt-hidden` and helper functions

@@ -1,1 +1,0 @@
-Consolidate linting and formatting tools by migrating to ruff

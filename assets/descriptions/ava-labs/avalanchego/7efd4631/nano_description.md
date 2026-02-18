@@ -1,1 +1,0 @@
-Refactor mock generation to use local `//go:generate` directives

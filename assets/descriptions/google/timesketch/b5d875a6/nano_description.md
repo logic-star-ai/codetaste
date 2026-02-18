@@ -1,1 +1,0 @@
-Refactor: Align project structure with Angular 2 conventions

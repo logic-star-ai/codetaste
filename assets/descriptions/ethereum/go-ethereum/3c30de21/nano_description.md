@@ -1,1 +1,0 @@
-Move genesis alloc types from `core` to `core/types`

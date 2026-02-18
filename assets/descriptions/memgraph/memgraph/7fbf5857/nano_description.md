@@ -1,1 +1,0 @@
-Decouple pure replication state from storage

@@ -1,1 +1,0 @@
-Refactor template functions to accept explicit context parameter

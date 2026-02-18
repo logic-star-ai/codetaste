@@ -1,1 +1,0 @@
-Restructure `connlib` directory hierarchy for naming consistency

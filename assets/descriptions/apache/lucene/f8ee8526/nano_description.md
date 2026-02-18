@@ -1,1 +1,0 @@
-Replace BytesRef with byte[] in byte vectors API

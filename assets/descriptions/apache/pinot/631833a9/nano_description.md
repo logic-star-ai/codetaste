@@ -1,1 +1,0 @@
-Refactor query error handling with QueryErrorCode and QueryErrorMessage for improved clarity and consistency

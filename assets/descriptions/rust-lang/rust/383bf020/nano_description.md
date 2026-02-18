@@ -1,1 +1,0 @@
-Complete `RegionKind` renaming: `ReEarlyBound` → `ReEarlyParam`, `ReFree` → `ReLateParam`

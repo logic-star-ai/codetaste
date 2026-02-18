@@ -1,1 +1,0 @@
-Move app schema to SDK package

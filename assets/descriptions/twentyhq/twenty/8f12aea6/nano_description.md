@@ -1,1 +1,0 @@
-Refactor EntityBoard to RecordBoard

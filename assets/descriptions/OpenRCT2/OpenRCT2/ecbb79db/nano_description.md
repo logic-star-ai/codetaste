@@ -1,1 +1,0 @@
-Adopt existing namespaces into OpenRCT2 namespace hierarchy

@@ -1,1 +1,0 @@
-Refactor: Migrate host/v5 metadata payload to component architecture

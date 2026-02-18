@@ -1,1 +1,0 @@
-Refactor middleware and reducer loading to be explicit

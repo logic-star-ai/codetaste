@@ -1,1 +1,0 @@
-Refactor test initialization pattern

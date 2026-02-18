@@ -1,1 +1,0 @@
-Rename `Generics::params` to `Generics::own_params`

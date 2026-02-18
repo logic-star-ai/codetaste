@@ -1,1 +1,0 @@
-Introduce `vtenv` package to consolidate collation, parser & MySQL version dependencies

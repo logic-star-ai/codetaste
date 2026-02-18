@@ -1,1 +1,0 @@
-Refactor: Rename Tendermint to CometBFT

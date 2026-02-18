@@ -1,1 +1,0 @@
-Refactor `@modern-js/utils` package structure for better tree-shaking and maintainability

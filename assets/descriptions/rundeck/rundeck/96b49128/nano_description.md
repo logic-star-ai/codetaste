@@ -1,1 +1,0 @@
-Refactor CircleCI Pipeline for Java 11 Support

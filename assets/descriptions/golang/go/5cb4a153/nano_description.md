@@ -1,1 +1,0 @@
-Reorganize network-related packages into `net/` hierarchy

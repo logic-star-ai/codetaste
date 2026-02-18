@@ -1,1 +1,0 @@
-Core header refactor: consolidate struct definitions to break cross-header dependencies

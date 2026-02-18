@@ -1,1 +1,0 @@
-Refactor: Standardize /insights booking charts to use InsightsBookingService

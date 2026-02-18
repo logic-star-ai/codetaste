@@ -1,1 +1,0 @@
-Refactor terminology from Resume/Pause to Start/Stop

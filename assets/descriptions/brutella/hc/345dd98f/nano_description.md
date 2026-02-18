@@ -1,1 +1,0 @@
-Refactor: Consolidate `netio` into `hap` package and move public API to root

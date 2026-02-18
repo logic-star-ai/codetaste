@@ -1,1 +1,0 @@
-Refactor: Rename `Substs` to `GenericArgs` throughout compiler

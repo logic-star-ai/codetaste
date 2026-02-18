@@ -1,1 +1,0 @@
-Refactor application lifecycle management with SPI-based `ApplicationLifecycle` interface

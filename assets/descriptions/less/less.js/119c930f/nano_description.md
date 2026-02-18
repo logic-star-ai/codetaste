@@ -1,1 +1,0 @@
-Refactor: Eliminate circular dependencies and dependency injection pattern

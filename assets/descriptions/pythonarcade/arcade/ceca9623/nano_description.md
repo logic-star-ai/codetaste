@@ -1,1 +1,0 @@
-Integrate Rect and Vec types throughout library

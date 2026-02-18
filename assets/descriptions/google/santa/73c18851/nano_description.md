@@ -1,1 +1,0 @@
-Simplify namespace hierarchy for endpoint security logging components

@@ -1,1 +1,0 @@
-Rename `hir::Local` to `hir::LetStmt` for clarity

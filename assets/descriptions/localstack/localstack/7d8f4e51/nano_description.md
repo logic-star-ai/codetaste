@@ -1,1 +1,0 @@
-Consolidate project definition into `pyproject.toml`

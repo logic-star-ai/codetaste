@@ -1,1 +1,0 @@
-Refactor prompt template system to remove LangChain dependency and simplify interface

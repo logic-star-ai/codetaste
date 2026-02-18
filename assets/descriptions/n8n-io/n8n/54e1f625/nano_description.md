@@ -1,1 +1,0 @@
-Migrate from `$locale` global property to `i18n` composable

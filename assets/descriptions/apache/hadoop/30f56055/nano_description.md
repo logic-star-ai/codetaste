@@ -1,1 +1,0 @@
-Remove commons-logging dependency and migrate to SLF4J

@@ -1,1 +1,0 @@
-Migrate state management from Vuex to Pinia

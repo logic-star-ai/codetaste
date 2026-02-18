@@ -1,1 +1,0 @@
-Rename `trax.math` package to `trax.fastmath`

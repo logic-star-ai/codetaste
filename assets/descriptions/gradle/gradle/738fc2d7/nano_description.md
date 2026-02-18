@@ -1,1 +1,0 @@
-Restructure :build-cache subproject for reuse outside Gradle

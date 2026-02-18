@@ -1,1 +1,0 @@
-Refactor smoke UI automation into separate package

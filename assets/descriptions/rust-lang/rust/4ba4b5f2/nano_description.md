@@ -1,1 +1,0 @@
-Move `stable_mir` back to its own crate

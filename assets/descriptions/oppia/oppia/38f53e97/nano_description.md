@@ -1,1 +1,0 @@
-Refactor: Reorganize exploration editor files by tab structure

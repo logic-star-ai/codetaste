@@ -1,1 +1,0 @@
-Reorganize error hierarchy in `cli` package to inherit from `ApplicationError`

@@ -1,1 +1,0 @@
-Remove all Java 6/7 version checks and guards after Java 8 baseline bump

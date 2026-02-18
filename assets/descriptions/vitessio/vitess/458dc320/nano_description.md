@@ -1,1 +1,0 @@
-Replace deprecated `io/ioutil` with `io` and `os` packages

@@ -1,1 +1,0 @@
-Refactor: Extract common types and functions to `pkg/limatype`

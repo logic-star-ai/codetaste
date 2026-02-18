@@ -1,1 +1,0 @@
-Rename Generator to Coroutine

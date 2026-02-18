@@ -1,1 +1,0 @@
-Reorganize utils functions and migrate to ES6 import/export

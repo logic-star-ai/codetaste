@@ -1,1 +1,0 @@
-Refactor: Move avatar components to `components/core/avatar`

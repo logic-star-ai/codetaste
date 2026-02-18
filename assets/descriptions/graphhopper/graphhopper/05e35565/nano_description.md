@@ -1,1 +1,0 @@
-Remove GraphHopperStorage wrapper class

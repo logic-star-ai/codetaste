@@ -1,1 +1,0 @@
-Consolidate hybridcloud modules into canonical location

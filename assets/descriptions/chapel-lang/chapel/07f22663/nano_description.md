@@ -1,1 +1,0 @@
-Rename `Attributes` to `AttributeGroup` and move to `AstNode` base class

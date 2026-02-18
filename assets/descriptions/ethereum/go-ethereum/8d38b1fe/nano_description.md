@@ -1,1 +1,0 @@
-Refactor metrics package: split interfaces, clarify concurrency model

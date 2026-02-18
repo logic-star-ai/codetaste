@@ -1,1 +1,0 @@
-Rename `Input` to `ButtonInput`

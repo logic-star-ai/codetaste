@@ -1,1 +1,0 @@
-Remove `polars(_core)::export` module and make dependencies explicit

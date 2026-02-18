@@ -1,1 +1,0 @@
-Rename `Logger` to `LegacyLogger` to avoid naming conflict with BrowserKit

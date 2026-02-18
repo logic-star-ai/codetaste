@@ -1,1 +1,0 @@
-Refactor: Rename `pref` to `bareSpecifier`

@@ -1,1 +1,0 @@
-Rename `prql_compiler::ast` to `prql_compiler::ir`

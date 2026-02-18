@@ -1,1 +1,0 @@
-Rename `mixer/pkg/runtime2` to `mixer/pkg/runtime`

@@ -1,1 +1,0 @@
-Refactor geom2 internal representation from sides to outlines

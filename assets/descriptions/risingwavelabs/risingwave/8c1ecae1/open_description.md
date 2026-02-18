@@ -1,1 +1,0 @@
-Refactor executor trait design

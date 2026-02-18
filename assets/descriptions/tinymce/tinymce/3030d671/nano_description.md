@@ -1,1 +1,0 @@
-Rename TinyMCE core modules that conflict with native DOM names

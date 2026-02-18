@@ -1,1 +1,0 @@
-Rename NDirect → PInvoke throughout codebase

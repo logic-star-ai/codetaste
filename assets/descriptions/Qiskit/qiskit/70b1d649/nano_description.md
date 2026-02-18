@@ -1,1 +1,0 @@
-Refactor: Split quantum-info and synthesis functionality into separate crates

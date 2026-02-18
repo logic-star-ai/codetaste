@@ -1,1 +1,0 @@
-Refactor screaming enums to modern C++ naming conventions

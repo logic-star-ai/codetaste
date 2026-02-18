@@ -1,1 +1,0 @@
-Consolidate decorators, configuration, and validation logic into dedicated modules

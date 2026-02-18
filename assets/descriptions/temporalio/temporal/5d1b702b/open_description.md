@@ -1,1 +1,0 @@
-Separate interface from implementation.

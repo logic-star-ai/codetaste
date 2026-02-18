@@ -1,1 +1,0 @@
-Simplify config package structure by embedding template

@@ -1,1 +1,0 @@
-Rename `RPCProtocol.get` to `RPCProtocol.getProxy`

@@ -1,1 +1,0 @@
-Rename Legacy* Classes After Map Store Removal

@@ -1,1 +1,0 @@
-Refactor project identity structure
