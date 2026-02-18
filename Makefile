@@ -1,4 +1,4 @@
 lint:
-	ruff check --fix . --unsafe-fixes
-	isort .
-	black .
+	ruff check --fix ./refactoring_benchmark --unsafe-fixes
+	isort ./refactoring_benchmark
+	black ./refactoring_benchmark

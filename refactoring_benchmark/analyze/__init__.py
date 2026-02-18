@@ -8,31 +8,31 @@ from .config import PlotConfig, PlotType
 
 # Filters (keeping existing filter functionality)
 from .filters import (
-                      ResultFilter,
-                      combine_filters,
-                      filter_by_agent_id,
-                      filter_by_finish_reason,
-                      filter_by_ifr_threshold,
-                      filter_by_owner,
-                      filter_by_repo,
-                      filter_by_validity_status,
-                      filter_has_execution_environment,
-                      filter_successful_only,
+    ResultFilter,
+    combine_filters,
+    filter_by_agent_id,
+    filter_by_finish_reason,
+    filter_by_ifr_threshold,
+    filter_by_owner,
+    filter_by_repo,
+    filter_by_validity_status,
+    filter_has_execution_environment,
+    filter_successful_only,
 )
 from .loader import (
-                      discover_output_dirs,
-                      load_all_results,
-                      organize_data,
-                      validate_analysis_data,
+    discover_output_dirs,
+    load_all_results,
+    organize_data,
+    validate_analysis_data,
 )
 
 # Metrics
 from .metrics import (
-                      ALL_METRICS,
-                      METRICS,
-                      get_metric_function,
-                      metric_ifr,
-                      metric_test_success,
+    ALL_METRICS,
+    METRICS,
+    get_metric_function,
+    metric_ifr,
+    metric_test_success,
 )
 
 # Data models

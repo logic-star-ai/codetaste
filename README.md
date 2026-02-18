@@ -142,13 +142,15 @@ python -m refactoring_benchmark.cli.inference \
   # add one: --plan or --multiplan (omit both for direct)
   # output-dir options : ./outputs/<instructed|open>/<direct|plan|multiplan>
 ```
-3. Run evaluation for the corresponding outputs using the same instances. Example:
+3. Run evaluation for the corresponding outputs. Example:
 ```bash
 python -m refactoring_benchmark.cli.evaluate \
   --instances 100 \
   --agent-id <agent-id> \
   --output-dir ./outputs/<track>/<mode>
 ```
+*Note:* Explore the `--help` section to explore features, such as only re-evaluating based on rules.
+
 4. Regenerate plots and tables (requires evaluated `outputs/...` from steps 2-4):
 ```bash
 ./run_analyze.sh
