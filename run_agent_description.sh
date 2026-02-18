@@ -14,7 +14,7 @@ INSTANCES_CSV="./instances.csv"
 NR_INSTANCES=125
 # Inference
 # FORCE_INFERENCE in ["--force", "--force-unsuccessful", ""]; REUSE_PLAN_ON_FORCE in ["--reuse-successful-plan", ""]; PLAN in ["--multiplan", "--plan", ""]
-FORCE_INFERENCE="--force-unsuccessful"; REUSE_PLAN_ON_FORCE=""; PLAN="--plan"
+FORCE_INFERENCE=""; REUSE_PLAN_ON_FORCE=""; PLAN="--plan"
 # FORCE_INFERENCE="--force-unsuccessful"; REUSE_PLAN_ON_FORCE=""; PLAN="--plan"
 # FORCE_INFERENCE=""; REUSE_PLAN_ON_FORCE=""; PLAN=""
 

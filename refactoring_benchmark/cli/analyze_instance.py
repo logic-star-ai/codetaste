@@ -105,8 +105,8 @@ Examples:
     parser.add_argument(
         "--plots-dir",
         type=Path,
-        default=Path("./analyze_instance"),
-        help="Directory to save plots (default: ./analyze_instance)",
+        default=Path("./plots/instances/"),
+        help="Directory to save plots (default: ./plots/instances/)",
     )
     parser.add_argument(
         "--dpi",
