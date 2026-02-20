@@ -5,6 +5,11 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, ConfigDict
 
+from refactoring_benchmark.utils.images import (
+    instance_image_identifier,
+    instance_runtime_image,
+    instance_setup_image,
+)
 
 class InstanceRow(BaseModel):
     """Represents a single row from the instances CSV file."""
@@ -28,18 +33,18 @@ class InstanceRow(BaseModel):
 
     @property
     def image_identifier(self) -> str:
-        """Docker image base: localhost/benchmark/{id}"""
-        return f"localhost/benchmark/{self.id}"
+        """Docker image base: <repository>/{id}"""
+        return instance_image_identifier(self.id)
 
     @property
     def setup_image(self) -> str:
         """Setup image name: {image_identifier}__setup"""
-        return f"{self.image_identifier}__setup"
+        return instance_setup_image(self.id)
 
     @property
     def runtime_image(self) -> str:
         """Runtime image name: {image_identifier}__runtime"""
-        return f"{self.image_identifier}__runtime"
+        return instance_runtime_image(self.id)
 
     @property
     def display_path(self) -> str:
@@ -80,18 +85,18 @@ class ReducedInstanceRow(BaseModel):
 
     @property
     def image_identifier(self) -> str:
-        """Docker image base: localhost/benchmark/{id}"""
-        return f"localhost/benchmark/{self.id}"
+        """Docker image base: <repository>/{id}"""
+        return instance_image_identifier(self.id)
 
     @property
     def setup_image(self) -> str:
         """Setup image name: {image_identifier}__setup"""
-        return f"{self.image_identifier}__setup"
+        return instance_setup_image(self.id)
 
     @property
     def runtime_image(self) -> str:
         """Runtime image name: {image_identifier}__runtime"""
-        return f"{self.image_identifier}__runtime"
+        return instance_runtime_image(self.id)
 
     @property
     def display_path(self) -> str:

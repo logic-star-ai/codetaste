@@ -71,7 +71,7 @@ def bootstrap_single_instance(instance: InstanceRow, config: BootstrapConfig, is
         # Handle runtime-only rebuild (special case)
         if config.force_runtime_build:
             # Validate setup image exists
-            if not podman_utils.is_image_existing(client, metadata.setup_image):
+            if not podman_utils.ensure_image_exists(client, metadata.setup_image, pull=True):
                 instance_logger.error(f"Setup image missing: {metadata.setup_image}")
                 return False
 

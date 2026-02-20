@@ -109,7 +109,7 @@ def bootstrap_setup_phase(
     container: Optional[PodmanContainer] = None
 
     try:
-        image_exists = podman_utils.is_image_existing(client, setup_image)
+        image_exists = podman_utils.ensure_image_exists(client, setup_image, pull=not force_rebuild)
         if image_exists and not force_rebuild and not use_base_image:
             # Flow 1: Reuse existing image
             logger.info(f"Reusing existing setup image: {setup_image}")

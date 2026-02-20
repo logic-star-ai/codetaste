@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 import podman
-import podman.errors
 from podman.domain.containers import Container as PodmanContainer
 
 from refactoring_benchmark.evaluation.models import TestMetrics
@@ -102,10 +101,8 @@ def run_test_evaluation(
         return None, "Failed to connect to Podman daemon"
 
     try:
-        # Verify image exists
-        try:
-            client.images.get(instance.runtime_image)
-        except podman.errors.ImageNotFound:
+        # Verify image exists (pull if missing)
+        if not podman_utils.ensure_image_exists(client, instance.runtime_image, pull=True):
             return None, f"Runtime image not found: {instance.runtime_image}"
 
         # Run container
@@ -178,10 +175,8 @@ def run_rule_evaluation(
         return False, "Failed to connect to Podman daemon"
 
     try:
-        # Verify image exists
-        try:
-            client.images.get(instance.runtime_image)
-        except podman.errors.ImageNotFound:
+        # Verify image exists (pull if missing)
+        if not podman_utils.ensure_image_exists(client, instance.runtime_image, pull=True):
             return False, f"Runtime image not found: {instance.runtime_image}"
 
         # Run container

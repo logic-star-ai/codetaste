@@ -22,8 +22,8 @@ python -m refactoring_benchmark.cli.bootstrap
 ## Outputs
 - `instance_images/<owner>/<repo>/<hash>/instance_metadata.json`
 - Podman images:
-  - `localhost/benchmark/<id>__setup`
-  - `localhost/benchmark/<id>__runtime`
+  - `ghcr.io/logic-star-ai/codetaste/<id>__setup`
+  - `ghcr.io/logic-star-ai/codetaste/<id>__runtime`
 
 ## Key flags
 - `--force-full-build`: rebuild setup + runtime from scratch.
