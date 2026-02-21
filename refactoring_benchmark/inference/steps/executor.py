@@ -1,6 +1,7 @@
 """Container execution helper for inference steps."""
 
 import logging
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -76,8 +77,11 @@ class ContainerExecutor:
                     str(self.output_dir): {"bind": "/output", "mode": "rw"},
                     str(temp_dir): {
                         "bind": "/task_description",
-                        "mode": "rw",
-                        "extended_mode": ["U", "z"],
+                        "extended_mode": ["rw","z"],
+                    },
+                    os.path.abspath("./entrypoint.sh"): {
+                        "bind": "/usr/local/bin/entrypoint.sh",
+                        "extended_mode": ["ro", "z"], 
                     },
                 },
                 network_mode="host",
@@ -135,5 +139,11 @@ class ContainerExecutor:
             except Exception as e:
                 self.logger.warning(
                     f"Failed to remove container [{self.instance.id}]. Probably already removed. Error: {e}"
+                )
+            try:
+                podman_utils.reset_output_ownership(self.output_dir)
+            except Exception as e:
+                self.logger.warning(
+                    f"Failed to reset output ownership for {self.output_dir}. Error: {e}"
                 )
             self.container = None

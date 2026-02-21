@@ -129,9 +129,7 @@ def run_test_evaluation(
             return None, f"Error while waiting ({timeout}s) for container."
 
         logger.debug(f"Container {container.id} exited with code {exit_code}.")
-        raw_logs = container.logs(stream=False, follow=False)
-        raw_logs = b"".join(raw_logs) if not isinstance(raw_logs, bytes) else raw_logs
-        stdout = raw_logs.decode("utf-8", errors="replace")
+        stdout = podman_utils.collect_container_logs(container)
         return None, stdout
 
     except Exception as e:
@@ -145,6 +143,10 @@ def run_test_evaluation(
                 container.remove(force=True)
             except Exception as e:
                 logger.error(f"Failed to remove container: {e}")
+            try:
+                podman_utils.reset_output_ownership(eval_dir)
+            except Exception as e:
+                logger.warning(f"Failed to reset output ownership for {eval_dir}: {e}")
         client.close()
 
 
@@ -201,9 +203,7 @@ def run_rule_evaluation(
             return False, f"Error while waiting ({timeout}s) for container."
         logger.debug(f"Container {container.id} exited with code {exit_code}.")
 
-        raw_logs = container.logs(stream=False, follow=False)
-        raw_logs = b"".join(raw_logs) if not isinstance(raw_logs, bytes) else raw_logs
-        stdout = raw_logs.decode("utf-8", errors="replace")
+        stdout = podman_utils.collect_container_logs(container)
 
         return exit_code == 0, stdout
 
@@ -218,4 +218,8 @@ def run_rule_evaluation(
                 container.remove(force=True)
             except Exception as e:
                 logger.error(f"Failed to remove container: {e}")
+            try:
+                podman_utils.reset_output_ownership(eval_dir)
+            except Exception as e:
+                logger.warning(f"Failed to reset output ownership for {eval_dir}: {e}")
         client.close()
