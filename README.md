@@ -11,7 +11,7 @@ A benchmarking framework for evaluating AI agents on real-world code refactoring
 
 ## Outputs (per instance + agent)
 ```
-outputs/<description_type>/<mode>/<owner>/<repo>/<hash>/<agent_id>/
+outputs/<description_type>/<mode>/<owner>/<repo>/<hash8>/<agent_id>/
   prediction.diff # the patch
   inference_metadata.json # contains data from the inference, such as finish_reason, cost, ...
   evaluation/
@@ -43,16 +43,25 @@ poetry install # poetry version >=2.0.0
 # This repo uses an in-project virtualenv (see poetry.toml)
 source .venv/bin/activate
 
-# Download benchmark artifacts (assets/, instance_images/, plots/, outputs/pseudo_agents/)
+# Download benchmark artifacts (assets/, instance_images/, outputs/pseudo_agents/direct/)
 curl -L -o codetaste100.zip "https://github.com/logic-star-ai/refactoring-benchmark/releases/download/v0/codetaste100.zip"
 unzip -o codetaste100.zip -d .
 rm codetaste100.zip
 
 # Optional: download precomputed inference/evaluation outputs (outputs/)
-curl -L -O "https://github.com/logic-star-ai/refactoring-benchmark/releases/download/v0/outputs.zip.a{a,b,c,d}"
-cat outputs.zip.a* > outputs.zip
-unzip -o outputs.zip -d .
-rm outputs.zip outputs.zip.a*
+curl -fL -O "https://github.com/logic-star-ai/refactoring-benchmark/releases/download/v0/outputs.zip"
+# Download split parts if present (outputs.z01, outputs.z02, ...).
+for i in $(seq -w 1 99); do
+  part="outputs.z${i}"
+  url="https://github.com/logic-star-ai/refactoring-benchmark/releases/download/v0/${part}"
+  if ! curl -fL -o "${part}" "${url}"; then
+    rm -f "${part}"
+    break
+  fi
+done
+zip -s 0 outputs.zip --out combined.zip
+unzip -o combined.zip -d .
+rm -f outputs.zip outputs.z* combined.zip
 
 chmod +x ./entrypoint.sh
 ```
@@ -134,7 +143,7 @@ Two paths:
 2) Build runtime images yourself via bootstrap (slower; non guaranteed to lead to the same images)
 
 ### Path A: Use released artifacts (recommended)
-The `codetaste100.zip` release artifact contains `assets/`, `instance_images/` and `outputs/pseudo_agents`. Extract it into the repo root:
+The `codetaste100.zip` release artifact contains `assets/`, `instance_images/` and `outputs/pseudo_agents/direct` (for the instances in `instances.csv`). Extract it into the repo root:
 ```bash
 curl -L -o codetaste100.zip https://github.com/logic-star-ai/refactoring-benchmark/releases/download/v0/codetaste100.zip
 unzip -o codetaste100.zip -d .
