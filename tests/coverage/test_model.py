@@ -9,9 +9,7 @@ from refactoring_benchmark.coverage.models import SARIFOpengrep
 @pytest.fixture
 def sarif_file_path():
     """Path to a sample SARIF file for testing."""
-    return Path(
-        "./outputs/pseudo_agents/direct/tektoncd/pipeline/e115fb61/golden_agent/evaluation/rules_positive.sarif"
-    )
+    return Path("tests/coverage/rules_positive.sarif")
 
 
 def test_sarif_opengrep_model_loads_and_preserves_structure(sarif_file_path):

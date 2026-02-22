@@ -38,12 +38,12 @@ def test_parse_diff_line_count():
 def test_parse_sarif_extracts_lines():
     """Test that parse_sarif correctly extracts lines from SARIF results."""
     # Load SARIF file
-    sarif_path = Path("outputs/pseudo_agents/direct/apache/arrow/e434536e/golden_agent/evaluation/rules_positive.sarif")
+    sarif_path = Path("tests/coverage/rules_positive.sarif")
     with open(sarif_path) as f:
         raw_data = json.load(f)
 
     sarif = SARIFOpengrep.model_validate(raw_data)
-    lines = parse_sarif(sarif, "e434536e")
+    lines = parse_sarif(sarif, "5c40c6b9")
 
     # Verify lines were extracted
     assert len(lines) > 0, "Should extract at least one line from SARIF"
@@ -51,7 +51,7 @@ def test_parse_sarif_extracts_lines():
     # Verify Line structure
     first_line = next(iter(lines))
     assert first_line.uri, "Line should have a URI"
-    assert first_line.commit == "e434536e", "Line should have correct commit"
+    assert first_line.commit == "5c40c6b9", "Line should have correct commit"
     assert first_line.line_number > 0, "Line should have positive line number"
 
     # Verify all lines have valid structure
@@ -64,17 +64,17 @@ def test_parse_sarif_extracts_lines():
 def test_parse_sarif_negative_and_diff_intersection():
     """Test computing intersection between SARIF negative results and diff lines."""
     # Load SARIF negative results
-    sarif_path = Path("outputs/pseudo_agents/direct/apache/arrow/e434536e/null_agent/evaluation/rules_negative.sarif")
+    sarif_path = Path("tests/coverage/rules_negative.sarif")
     with open(sarif_path) as f:
         sarif_data = json.load(f)
 
     sarif = SARIFOpengrep.model_validate(sarif_data)
-    sarif_lines = parse_sarif(sarif, "e434536e")
+    sarif_lines = parse_sarif(sarif, "5c40c6b9")
 
     # Load diff
-    diff_path = Path("outputs/pseudo_agents/direct/apache/arrow/e434536e/golden_agent/prediction.diff")
+    diff_path = Path("tests/coverage/prediction.diff")
     diff_content = diff_path.read_text()
-    _, golden_lines = parse_diff(diff_content, "e434536e", "predicted")
+    _, golden_lines = parse_diff(diff_content, "5c40c6b9", "predicted")
 
     # Compute intersection with golden lines (added/modified lines in prediction)
     intersection = sarif_lines & golden_lines

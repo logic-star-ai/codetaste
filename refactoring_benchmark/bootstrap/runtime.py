@@ -43,7 +43,7 @@ def bootstrap_runtime_phase(
     """
     runtime_image = row.runtime_image
 
-    if podman_utils.is_image_existing(client, runtime_image) and not force:
+    if podman_utils.ensure_image_exists(client, runtime_image, pull=not force) and not force:
         logger.info(f"⏭️  SKIPPING: Runtime image already exists: {runtime_image}")
         return runtime_image
 

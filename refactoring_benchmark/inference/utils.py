@@ -16,6 +16,7 @@ from refactoring_benchmark.inference.models import (
     InferenceConfig,
     InferenceMetadata,
 )
+from refactoring_benchmark.podman import utils as podman_utils
 from refactoring_benchmark.utils.models import InstanceRow
 
 DEFAULT_PREFIX = """Perform the task described below in it's ENTIRETY. You operate completely AUTONOMOUSLY in a sandboxed environment. DO NOT ASK FOR CLARIFICATIONS. You must EDIT the codebase DIRECTLY to complete the task. DO NOT create reports, plans or similar files.\n"""
@@ -209,9 +210,7 @@ def output_exists(output_dir: Path) -> bool:
 
 def output_container_logs(container: PodmanContainer, output_path: Path, instance_logger: logging.Logger) -> None:
     """Helper to output container logs to file and logger."""
-    raw_logs = container.logs(stream=False, follow=False)
-    raw_logs = b"".join(raw_logs) if not isinstance(raw_logs, bytes) else raw_logs
-    stdout = raw_logs.decode("utf-8", errors="replace")
+    stdout = podman_utils.collect_container_logs(container)
     instance_logger.info(stdout)
     output_path.write_text(stdout, encoding="utf-8")
 

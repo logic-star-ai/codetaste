@@ -5,6 +5,8 @@ from typing import Optional, Type, TypeVar
 
 from pydantic import BaseModel, Field
 
+from refactoring_benchmark.utils.images import base_image_all
+
 T = TypeVar("T", bound="ExecutionInstanceMetadata")
 
 
@@ -17,7 +19,7 @@ class BootstrapConfig(BaseModel):
     rerun_metrics: bool = False
     force_full_build: bool = False
     api_key: str
-    base_image: str = "benchmark/benchmark-base-all"
+    base_image: str = Field(default_factory=base_image_all)
     timeout_bootstrap: int = Field(gt=0, default=7200)  # 2 hours
     supported_languages: list[str] = Field(default_factory=lambda: ["python", "javascript", "java", "c", "go", "rust"])
 

@@ -3,13 +3,15 @@
 import json
 import logging
 import os
+import subprocess
 import tarfile
 import threading
 import time
 from io import BytesIO
-from typing import Any, List, Optional, cast
+from typing import Any, Iterable, List, Optional, cast
 
 import podman
+import podman.errors
 from podman.domain.containers import Container as PodmanContainer
 from podman.errors import APIError
 
@@ -21,11 +23,39 @@ _active_containers: set[PodmanContainer] = set()
 _containers_lock = threading.RLock()
 
 
+def reset_output_ownership(path: os.PathLike | str) -> None:
+    """Reset output directory ownership to root after container cleanup."""
+    subprocess.run(
+        ["podman", "unshare", "chown", "-R", "0:0", os.fspath(path)],
+        check=True,
+    )
+
+
 def get_local_client(timeout: int = 4000) -> Optional[podman.PodmanClient]:
     """Each process needs its own Podman client connection."""
     c = podman.from_env(timeout=timeout)
     c.ping()
     return c
+
+
+def collect_container_logs(container: PodmanContainer) -> str:
+    """
+    Collect container logs as text, preserving newlines even when Podman returns
+    newline-stripped chunks.
+    """
+    raw_logs = container.logs(stream=False, follow=False)
+    raw_logs_bytes: bytes
+    if isinstance(raw_logs, bytes):
+        raw_logs_bytes = raw_logs.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    else:
+        chunks = list(raw_logs)
+        # Podman sometimes returns newline-stripped chunks; rejoin with newlines if needed.
+        assert all(isinstance(chunk, bytes) for chunk in chunks), "Expected all log chunks to be bytes"
+        chunks = cast(Iterable[bytes], chunks)
+        def ensure_newline(b: bytes) -> bytes:
+            return b if b.endswith(b"\n") else b + b"\n"
+        raw_logs_bytes = b"".join(ensure_newline(c) for c in chunks)
+    return raw_logs_bytes.decode("utf-8", errors="replace")
 
 
 def is_image_existing(client: podman.PodmanClient, setup_image: str) -> bool:
@@ -37,15 +67,63 @@ def is_image_existing(client: podman.PodmanClient, setup_image: str) -> bool:
         return False
 
 
+def _split_image_ref(image: str) -> tuple[str, Optional[str]]:
+    last_slash = image.rfind("/")
+    last_colon = image.rfind(":")
+    if last_colon > last_slash:
+        return image[:last_colon], image[last_colon + 1 :]
+    return image, None
+
+
+def _pull_auth_config_from_env() -> Optional[dict[str, str]]:
+    username = os.getenv("GITHUB_USERNAME") or os.getenv("GHCR_USERNAME")
+    password = os.getenv("GITHUB_TOKEN") or os.getenv("GHCR_TOKEN")
+    if username and password:
+        return {"username": username, "password": password}
+    return None
+
+
+def ensure_image_exists(client: podman.PodmanClient, image: str, pull: bool = True) -> bool:
+    """Ensure a Podman image exists locally, optionally pulling from registry."""
+    if is_image_existing(client, image):
+        return True
+    if not pull:
+        return False
+    try:
+        repo, tag = _split_image_ref(image)
+        auth_config = _pull_auth_config_from_env()
+        utils_logger.info(f"Pulling image: {repo}{':' + tag if tag else ''}")
+        stream = client.images.pull(repo, tag=tag, auth_config=auth_config, stream=True, decode=True)
+        for item in stream:
+            if isinstance(item, dict) and item.get("error"):
+                utils_logger.error(f"Image pull error: {item.get('error')}")
+                return False
+        is_existing = is_image_existing(client, image)
+        utils_logger.info(f"Image pull {'succeeded' if is_existing else 'failed'}: {image}")
+        return is_existing
+    except Exception as exc:
+        utils_logger.error(f"Failed to pull image {image}: {exc}")
+        return False
+
+
 def safe_container_run(client: podman.PodmanClient, image, **kwargs) -> PodmanContainer:
     """Retries container creation to handle 'POST operation failed' socket errors."""
+    pulled = False
+    print(f"Running container with image: {image}")
     for i in range(1, 5):
         try:
             remove = kwargs.pop("remove", True)
             container: PodmanContainer = client.containers.run(image, remove=remove, **kwargs)
             register_container(container)
             return container
+        except (podman.errors.ImageNotFound, APIError) as e:
+            print(f"Container run failed with error: {e}")
+            if not pulled and ensure_image_exists(client, image, pull=True):
+                pulled = True
+                continue
+            raise e
         except Exception as e:
+            print(f"Container run attempt {i} failed with error: {e}")
             if i == 4:
                 raise e
             utils_logger.warning(f"Podman containers.run on {image} failed ({e}), retrying in {2**i}s...")
@@ -192,7 +270,7 @@ def stop_container(container: PodmanContainer, force: bool = True, auto_unregist
                 container.stop(timeout=2)
                 utils_logger.info(f"Stopped container {container.id[:12]}.")
             except (APIError, Exception) as e:
-                utils_logger.warning(f"Error stopping {container.id[:12]}: {e}")
+                utils_logger.warning(f"Error stopping {container.id[:12]}: {e}. Probably already stopped.")
             finally:
                 if auto_unregister:
                     _active_containers.discard(container)

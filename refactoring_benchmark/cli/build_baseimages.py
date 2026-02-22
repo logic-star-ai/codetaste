@@ -10,6 +10,7 @@ import podman
 from podman.domain.containers import Container as PodmanContainer
 
 from refactoring_benchmark.utils.logger import get_logger, setup_logging
+from refactoring_benchmark.utils.images import base_image_name
 
 # --- CONFIGURATION ---
 PROJECT_ROOT = Path(__file__).parent.parent.parent
@@ -59,7 +60,7 @@ def build_image(language: str, dockerfile_path: Path, force_rebuild: bool = Fals
     Returns:
         Tuple of (success, image_tag)
     """
-    image_tag = f"localhost/benchmark/benchmark-base-{language}"
+    image_tag = base_image_name(language)
 
     logger.info(f"Building {image_tag} from {dockerfile_path.name}...")
 
@@ -131,6 +132,15 @@ def run_test(container: PodmanContainer, test_name: str, command: str) -> bool:
         return True
 
 
+def _language_from_image_tag(image_tag: str) -> str:
+    name = image_tag.rsplit("/", 1)[-1]
+    name = name.split(":", 1)[0]
+    prefix = "benchmark-base-"
+    if name.startswith(prefix):
+        return name[len(prefix) :]
+    return name.split("-")[-1]
+
+
 def verify_image(image_tag: str) -> Tuple[bool, List[str]]:
     """
     Verify that a base image has all required tools installed.
@@ -147,7 +157,7 @@ def verify_image(image_tag: str) -> Tuple[bool, List[str]]:
     failed_tests = []
 
     # Determine which language this image is for
-    language = image_tag.split("-")[-1]  # Extract from 'benchmark-base-{language}'
+    language = _language_from_image_tag(image_tag)  # Extract from 'benchmark-base-{language}'
     is_all = language == "all"
 
     try:
