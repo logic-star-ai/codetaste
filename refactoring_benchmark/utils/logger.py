@@ -1,0 +1,99 @@
+"""Logger configuration for the benchmark infrastructure."""
+
+import logging
+import os
+import sys
+import threading
+from typing import Optional
+
+_LOG_DIR: Optional[str] = None
+_logger_lock = threading.Lock()
+
+
+def setup_logging(log_dir: str = "logs") -> None:
+    """
+    Initialize the logging infrastructure by creating the log directory.
+
+    Args:
+        log_dir: Directory where log files will be stored
+
+    Example:
+        setup_logging("logs")
+        logger = get_logger("my_module")
+    """
+    global _LOG_DIR
+    _LOG_DIR = log_dir
+    if not os.path.exists(log_dir):
+        os.makedirs(log_dir)
+
+
+if _LOG_DIR is None:
+    setup_logging()
+
+
+def get_logger(
+    name: str,
+    use_file: bool = True,
+    use_stdout: bool = True,
+    level: int = logging.DEBUG,
+    log_subdir: Optional[str] = None,
+) -> logging.Logger:
+    """
+    Get or create a logger with the specified configuration.
+    Thread-safe for parallel execution.
+
+    Args:
+        name: Name of the logger (typically module name or component name)
+        use_file: Whether to add a file handler (default: True)
+        level: Logging level (default: INFO)
+        log_subdir: Optional subdirectory within log directory for organizing logs
+
+    Returns:
+        Configured logger instance
+
+    Raises:
+        RuntimeError: If setup_logging() has not been called first
+
+    Example:
+        logger = get_logger("bootstrap", use_file=True, level=logging.DEBUG)
+        logger.info("Starting bootstrap process")
+    """
+    if _LOG_DIR is None:
+        raise RuntimeError("setup_logging() must be called before get_logger()")
+
+    # Thread-safe logger configuration
+    with _logger_lock:
+        logger = logging.getLogger(name)
+        logger.setLevel(level)
+
+        logger.propagate = False
+        if logger.handlers:
+            for handler in logger.handlers[:]:
+                logger.removeHandler(handler)
+
+        file_fmt = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+        console_fmt = logging.Formatter("%(levelname)s: %(message)s")
+
+        # Console Handler (always added)
+        if use_stdout:
+            ch = logging.StreamHandler(sys.stdout)
+            ch.setFormatter(console_fmt)
+            ch.setLevel(level)
+            logger.addHandler(ch)
+
+        # File Handler (optional)
+        if use_file:
+            if log_subdir:
+                log_file_dir = os.path.join(_LOG_DIR, log_subdir)
+                os.makedirs(log_file_dir, exist_ok=True)
+                log_file = os.path.join(log_file_dir, f"{name}.log")
+            else:
+                log_file = os.path.join(_LOG_DIR, f"{name}.log")
+            fh = logging.FileHandler(log_file)
+            fh.setFormatter(file_fmt)
+            fh.setLevel(level)
+            logger.addHandler(fh)
+            if level == logging.DEBUG:
+                logger.debug(f"File logging enabled. Log file: {log_file}")
+
+    return logger
