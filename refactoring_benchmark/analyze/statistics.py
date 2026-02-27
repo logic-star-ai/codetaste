@@ -201,18 +201,23 @@ def _sorted_agent_ids(agent_ids: set[str]) -> list[str]:
 
 
 def _format_metric_cell(
-    data: AgentDescriptionData | None, *, bold: bool = False, include_ci: bool = True
-) -> str:
+    data: AgentDescriptionData | None,
+    *,
+    metric_name: str | None = None,
+    include_ci: bool = True,
+) -> tuple[str, str]:
     if data is None or data.count == 0:
-        return "--"
-    mean = data.mean * 100
+        return "--", "{}"
+    scale = 1.0 if (metric_name in LATEX_NON_PERCENT_METRICS) else 100.0
+    mean = data.mean * scale
     mean_str = f"{mean:.1f}"
-    if bold:
-        mean_str = f"\\textbf{{{mean_str}}}"
     if not include_ci:
-        return mean_str
+        return mean_str, "{}"
     ci_low, ci_high = data.confidence_interval()
-    return f"{mean_str} {{\\tiny [{ci_low * 100:.1f}, {ci_high * 100:.1f}]}}"
+    ci_low *= scale
+    ci_high *= scale
+    delta = max(mean - ci_low, ci_high - mean)
+    return mean_str, rf"{{\tiny $\pm$ {delta:.1f}}}"
 
 
 def _format_desc_label(desc_type: str) -> str:
@@ -236,9 +241,13 @@ LATEX_METRIC_LABELS = {
     "precision_added": r"\textsc{Prec}$^{+}$",
     "precision_removed": r"\textsc{Prec}$^{-}$",
     "precision_overall": r"\textsc{Prec}",
+    "diff_added_lines": r"$|L_{\hat{X}}^{+}|$",
+    "diff_removed_lines": r"$|L_{\hat{X}}^{-}|$",
+    "diff_size": r"$|L_{\hat{X}}|$",
 }
 
-LATEX_TABLE_EXCLUDED_METRICS = {"diff_added_lines", "diff_removed_lines", "diff_delta_lines", "cost"}
+LATEX_TABLE_EXCLUDED_METRICS = {"diff_delta_lines", "cost"}
+LATEX_NON_PERCENT_METRICS = {"diff_added_lines", "diff_removed_lines", "diff_delta_lines", "diff_size", "cost"}
 
 
 def _default_metrics() -> list[str]:
@@ -249,12 +258,23 @@ def _default_metrics() -> list[str]:
 
 def get_table_metrics() -> list[str]:
     """Return ordered metrics suitable for the wide LaTeX table."""
-    return _default_metrics()
+    metrics = _default_metrics()
+    diff_metrics = ["diff_size", "diff_added_lines", "diff_removed_lines"]
+    diff_indices = [metrics.index(m) for m in diff_metrics if m in metrics]
+    if not diff_indices:
+        return metrics
+    first_diff = min(diff_indices)
+    prefix = metrics[:first_diff]
+    suffix = [m for m in metrics[first_diff:] if m not in diff_metrics]
+    ordered_diffs = [m for m in diff_metrics if m in metrics]
+    return prefix + ordered_diffs + suffix
 
 
 def _format_metric_header(metric_name: str) -> str:
     label = LATEX_METRIC_LABELS.get(metric_name, metric_name.replace("_", " ").title())
-    return f"{label} (\\%) [CI]"
+    if metric_name in LATEX_NON_PERCENT_METRICS:
+        return f"{label}"
+    return f"{label} (\\%)"
 
 
 def build_latex_metrics_table(
@@ -294,8 +314,14 @@ def build_latex_metrics_table(
     for desc_type, mode in type_mode_pairs:
         desc_to_modes.setdefault(desc_type, []).append(mode)
 
-    column_spec = "l" + "c" * (1 + len(metrics))
-    header_cells = " & ".join(_format_metric_header(metric) for metric in metrics)
+    column_spec_parts = ["ll"]
+    for idx, _metric in enumerate(metrics):
+        if idx == 0:
+            column_spec_parts.append(r"r@{\hspace{.5mm}}l")
+        else:
+            column_spec_parts.append(r"r@{}l")
+    column_spec = "".join(column_spec_parts)
+    header_cells = " & ".join(rf"\multicolumn{{2}}{{c}}{{{_format_metric_header(metric)}}}" for metric in metrics)
 
     if caption is None:
         caption = "Full experimental results across all tracks, models, and metrics in percents with 95 \\% confidence intervals."
@@ -303,66 +329,77 @@ def build_latex_metrics_table(
         label = "tab:full-metric-results-wide"
 
     lines = [
-        r"\begin{table}[p]",
+        r"\begin{table}[H]",
         rf"  \caption{{{caption}}}",
         rf"  \label{{{label}}}",
         r"  \begin{center}",
         r"    \begin{small}",
-        r"    \resizebox{\textwidth}{!}{%",
-        rf"        \begin{{tabular}}{{{column_spec}}}",
-        r"          \toprule",
-        rf"           & {{}} & {header_cells} \\",
-        r"          \midrule",
+        rf"      \begin{{tabular}}{{{column_spec}}}",
+        r"        \toprule",
+        rf"         & {{}} & {header_cells} \\",
+        r"        \midrule",
     ]
 
     for agent_id in agents:
         agent_label = LATEX_AGENT_NAME_MAPPING.get(agent_id, agent_id)
         combined_cells = []
-        for metric in metrics:
-            combined_data = _combine_agent_data(metric_data_map.get(metric, AnalysisData()), agent_id)
-            combined_cells.append(_format_metric_cell(combined_data, bold=True, include_ci=False))
+        if agent_id in LATEX_SUMMARY_ONLY_AGENTS:
+            for metric in metrics:
+                combined_data = _combine_agent_data(metric_data_map.get(metric, AnalysisData()), agent_id)
+                combined_cells.extend(_format_metric_cell(combined_data, metric_name=metric, include_ci=False))
+        else:
+            for _metric in metrics:
+                combined_cells.extend(["{}", "{}"])
 
-        lines.append(f"          \\textbf{{{agent_label}}} & {{}} & " + " & ".join(combined_cells) + r" \\")
+        lines.append(f"        {agent_label} & {{}} & " + " & ".join(combined_cells) + r" \\")
 
         if agent_id in LATEX_SUMMARY_ONLY_AGENTS:
-            lines.append(r"          \midrule")
+            lines.append(r"        \midrule")
             continue
 
         for desc_type, modes in desc_to_modes.items():
             desc_label = _format_desc_label(desc_type)
             if len(modes) == 1:
                 mode = modes[0]
-                row_label = rf"\hspace{{1em}} $\llcorner$ {desc_label}"
+                row_label = rf"\hspace{{1em}} {desc_label}"
                 row_cells = []
                 for metric in metrics:
                     data = metric_data_map.get(metric)
                     desc_data = data.get_data(agent_id, desc_type, mode) if data else None
-                    row_cells.append(
-                        _format_metric_cell(desc_data, include_ci=agent_id not in LATEX_SUMMARY_ONLY_AGENTS)
+                    row_cells.extend(
+                        _format_metric_cell(
+                            desc_data,
+                            metric_name=metric,
+                            include_ci=agent_id not in LATEX_SUMMARY_ONLY_AGENTS,
+                        )
                     )
-                lines.append(f"          {row_label} & {{}} & " + " & ".join(row_cells) + r" \\")
+                lines.append(f"        {row_label} & {{}} & " + " & ".join(row_cells) + r" \\")
             else:
                 for mode in modes:
-                    row_label = rf"\hspace{{1em}} $\llcorner$ {desc_label}"
+                    row_label = rf"\hspace{{1em}} {desc_label}"
                     mode_label = _format_mode_label(mode)
                     row_cells = []
                     for metric in metrics:
                         data = metric_data_map.get(metric)
                         desc_data = data.get_data(agent_id, desc_type, mode) if data else None
-                        row_cells.append(
-                            _format_metric_cell(desc_data, include_ci=agent_id not in LATEX_SUMMARY_ONLY_AGENTS)
+                        row_cells.extend(
+                            _format_metric_cell(
+                                desc_data,
+                                metric_name=metric,
+                                include_ci=agent_id not in LATEX_SUMMARY_ONLY_AGENTS,
+                            )
                         )
-                    lines.append(f"          {row_label} & {mode_label} & " + " & ".join(row_cells) + r" \\")
+                    lines.append(f"        {row_label} & {mode_label} & " + " & ".join(row_cells) + r" \\")
 
-        lines.append(r"          \midrule")
+        lines.append(r"        \midrule")
 
-    if lines[-1] == r"          \midrule":
+    if lines[-1] == r"        \midrule":
         lines.pop()
 
     lines.extend(
         [
-            r"          \bottomrule",
-            r"        \end{tabular}}",
+            r"        \bottomrule",
+            r"      \end{tabular}",
             r"    \end{small}",
             r"  \end{center}",
             r"  \vskip -0.1in",

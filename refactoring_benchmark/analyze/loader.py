@@ -8,6 +8,7 @@ from refactoring_benchmark.analyze.metrics import get_metric_function
 from refactoring_benchmark.analyze.models import AnalysisData
 from refactoring_benchmark.evaluation.models import EvaluationResult
 from refactoring_benchmark.utils.models import InstanceRow
+from refactoring_benchmark.utils.paths import PSEUDO_AGENTS_DIR
 
 
 def discover_output_dirs(cwd: Path = Path.cwd()) -> list[Path]:
@@ -57,12 +58,15 @@ def load_all_results(
 
     # Load from all output directories
     for output_dir in output_dirs:
+        is_pseudo_dir = output_dir.resolve() == PSEUDO_AGENTS_DIR.resolve()
         for instance in instances:
             instance_dir = Path(instance.instance_dir(output_dir))
             if not instance_dir.exists():
                 continue
 
             for agent_id in agent_ids:
+                if agent_id in {"golden_agent", "null_agent"} and not is_pseudo_dir:
+                    continue
                 instance_agent_dir = instance_dir / agent_id / "evaluation"
                 json_path = instance_agent_dir / "evaluation_result.json"
                 if not json_path.is_file():

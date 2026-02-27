@@ -1,11 +1,17 @@
 """Parse and analyze git diffs and SARIF results."""
 
-from pathlib import PurePosixPath
+import os
+from pathlib import Path, PurePosixPath
 from typing import Set, Tuple
 
 import whatthepatch
+from joblib import Memory
 
 from refactoring_benchmark.coverage.models import Line, SARIFOpengrep
+
+# Cache derived diff metadata to avoid re-reading large files.
+cachedir = "./.cache_dir"
+memory = Memory(cachedir, verbose=1)
 
 # Standard ignore directories across supported languages (<= 20).
 _IGNORE_DIR_NAMES = {
@@ -29,6 +35,8 @@ _IGNORE_DIR_NAMES = {
     "vendor",
     ".cache",
     "coverage",
+    ".cargo-home",
+    "package-lock.json"
 }
 
 
@@ -62,6 +70,30 @@ def parse_diff(diff_content: str, base_commit: str, golden_commit: str) -> Tuple
                 golden_lines.add(Line(uri=new_path, commit=golden_commit, line_number=new_no, content=text))
 
     return base_lines, golden_lines
+
+
+def parse_diff_file(diff_path, base_commit: str, golden_commit: str) -> Tuple[Set[Line], Set[Line]]:
+    """Parse a diff file (no caching)."""
+    diff_content = Path(diff_path).read_text(errors="replace")
+    return parse_diff(diff_content, base_commit, golden_commit)
+
+
+def parse_diff_line_counts_file(diff_path, base_commit: str, golden_commit: str) -> Tuple[int, int]:
+    """Parse a diff file and return (removed_count, added_count), cached by path + mtime."""
+    path_str = str(diff_path)
+    mtime = os.path.getmtime(diff_path)
+    nr_lines_removed, nr_lines_added = _cached_parse_diff_line_counts_file(path_str, mtime, base_commit, golden_commit)
+    if nr_lines_removed + nr_lines_added > 50000:
+        print(f"Warning: Diff file {diff_path} has {nr_lines_removed} removed and {nr_lines_added} added lines, which may indicate an unusually large change or a parsing issue.")
+    return nr_lines_removed, nr_lines_added
+
+
+@memory.cache
+def _cached_parse_diff_line_counts_file(
+    path_str: str, mtime: float, base_commit: str, golden_commit: str
+) -> Tuple[int, int]:
+    lines_removed, lines_added = parse_diff_file(path_str, base_commit, golden_commit)
+    return len(lines_removed), len(lines_added)
 
 
 def _lines_from_locations(locations: list, commit: str) -> Set[Line]:

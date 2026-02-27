@@ -5,6 +5,7 @@ from typing import Callable
 
 from refactoring_benchmark.analyze.diff_stats import parse_diff_file
 from refactoring_benchmark.analyze.validation import ValidityStatus, check_test_validity
+from refactoring_benchmark.coverage.parse import parse_diff_line_counts_file
 from refactoring_benchmark.coverage.precision import (
     InstanceAgentPrecision,
     calculate_precision_eval_result,
@@ -32,19 +33,21 @@ def metric_ifr_removed(result: EvaluationResult) -> float:
 
 
 def metric_diff_added_lines(result: EvaluationResult) -> int | None:
+    diff_path = Path(result.eval_dir.parent) / "prediction.diff"
     try:
-        diff_stat = parse_diff_file(Path(result.eval_dir.parent) / "prediction.diff")
+        _, lines_added = parse_diff_line_counts_file(diff_path, "base", "predicted")
     except FileNotFoundError:
         return None
-    return diff_stat.added_lines
+    return lines_added
 
 
 def metric_diff_removed_lines(result: EvaluationResult) -> int | None:
+    diff_path = Path(result.eval_dir.parent) / "prediction.diff"
     try:
-        diff_stat = parse_diff_file(Path(result.eval_dir.parent) / "prediction.diff")
+        lines_removed, _ = parse_diff_line_counts_file(diff_path, "base", "predicted")
     except FileNotFoundError:
         return None
-    return diff_stat.removed_lines
+    return lines_removed
 
 
 def metric_diff_delta_lines(result: EvaluationResult) -> int | None:
@@ -53,6 +56,16 @@ def metric_diff_delta_lines(result: EvaluationResult) -> int | None:
     except FileNotFoundError:
         return None
     return diff_stat.added_lines - diff_stat.removed_lines
+
+
+def metric_diff_size(result: EvaluationResult) -> int | None:
+    """Total diff size (added + removed lines), with precision-style exclusions."""
+    diff_path = Path(result.eval_dir.parent) / "prediction.diff"
+    try:
+        lines_removed, lines_added = parse_diff_line_counts_file(diff_path, "base", "predicted")
+    except FileNotFoundError:
+        return None
+    return lines_added + lines_removed
 
 
 def metric_test_success(result: EvaluationResult) -> float:
@@ -144,6 +157,7 @@ METRICS: dict[str, MetricFunction] = {
     "diff_added_lines": metric_diff_added_lines,
     "diff_removed_lines": metric_diff_removed_lines,
     "diff_delta_lines": metric_diff_delta_lines,
+    "diff_size": metric_diff_size,
     "test_success": metric_test_success,
     "precision_added": metric_precision_added,
     "precision_removed": metric_precision_removed,

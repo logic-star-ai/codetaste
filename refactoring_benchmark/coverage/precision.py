@@ -14,7 +14,7 @@ from refactoring_benchmark.coverage.models import (
     PrecisionMetricsResult,
     SARIFOpengrep,
 )
-from refactoring_benchmark.coverage.parse import parse_diff, parse_sarif
+from refactoring_benchmark.coverage.parse import parse_diff_file, parse_sarif
 from refactoring_benchmark.evaluation.models import EvaluationResult
 from refactoring_benchmark.utils.models import ReducedInstanceRow
 from refactoring_benchmark.utils.paths import PSEUDO_AGENTS_DIR
@@ -49,9 +49,8 @@ def _load_precision_data(
     lines_matched_by_removal_rules = parse_sarif(sarif_neg, "base")
     lines_matched_by_addition_rules = parse_sarif(sarif_pos, "predicted")
 
-    # Load and parse diff
-    diff_content = diff_path.read_text(errors="replace")
-    lines_removed, lines_added = parse_diff(diff_content, "base", "predicted")
+    # Load and parse diff (cached)
+    lines_removed, lines_added = parse_diff_file(diff_path, "base", "predicted")
 
     # Create PrecisionMetrics object for computation
     return PrecisionMetrics(

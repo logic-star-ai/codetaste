@@ -51,9 +51,10 @@ METRIC_LABELS = {
     "f1_score": r"$\textsc{F1}$ Score",
     "ifr_added": r"\textsc{Ifr}$^{+}$ (\%)",
     "ifr_removed": r"\textsc{Ifr}$^{-}$ (\%)",
-    "diff_added_lines": "Lines Added",
-    "diff_removed_lines": "Lines Removed",
+    "diff_added_lines": r"$|L_{\hat{X}}^{+}|$",
+    "diff_removed_lines": r"$|L_{\hat{X}}^{-}|$",
     "diff_delta_lines": r"$\Delta$ Lines",
+    "diff_size": r"$|L_{\hat{X}}|$",
     "test_success": r"\textsc{Pass} (\%)",
     "precision_added": r"\textsc{Prec}$^{+}$ (\%)",
     "precision_removed": r"\textsc{Prec}$^{-}$ (\%)",
@@ -61,6 +62,7 @@ METRIC_LABELS = {
     "cost": "Cost (USD)",
 }
 
+NON_PERCENT_METRICS = {"diff_added_lines", "diff_removed_lines", "diff_delta_lines", "diff_size", "cost"}
 AGENT_NAME_MAPPING = {
     "claude-code-v2.0.76-sonnet45": "Sonnet 4.5",
     "codex-v0.77.0-gpt-5.1-codex-mini": "GPT-5.1 M",
@@ -90,17 +92,18 @@ def create_plot(
 
     # 1. Labels and Colors
     display_metric = METRIC_LABELS.get(metric_name, metric_name.replace("_", " ").title())
+    scale = 1.0 if metric_name in NON_PERCENT_METRICS else 100.0
     # Using 'turbo' for a bright, high-contrast spectrum
     colors = sns.color_palette("pastel", len(agents))
     markers = ["o", "s", "^", "D", "v", "p", "*", "h"]
 
     # 2. Plotting logic
     if plot_type == "line":
-        _plot_line(ax, data, agents, type_mode_pairs, colors, aggregation, config, markers)
+        _plot_line(ax, data, agents, type_mode_pairs, colors, aggregation, config, markers, scale=scale)
     elif plot_type == "bar":
-        _plot_bar(ax, data, agents, type_mode_pairs, colors, aggregation, config, markers)
+        _plot_bar(ax, data, agents, type_mode_pairs, colors, aggregation, config, markers, scale=scale)
     elif plot_type == "scatter":
-        _plot_scatter(ax, data, agents, type_mode_pairs, colors, aggregation, config, markers)
+        _plot_scatter(ax, data, agents, type_mode_pairs, colors, aggregation, config, markers, scale=scale)
 
     # 3. Axis Configuration
     if config.show_ylabel:
@@ -133,9 +136,13 @@ def create_plot(
         ax.legend(**legend_kwargs)
 
     # 5. Ticks and Limits
-    ylim_max = config.ylim_max * 100 if config.ylim_max else 100
-    ax.set_ylim(config.ylim_min * 100, ylim_max)
-    ax.set_yticks(np.arange(0, ylim_max + 1, config.ytick_step))
+    ylim_max = config.ylim_max * scale if config.ylim_max else (100 if scale == 100 else None)
+    if ylim_max is not None:
+        ax.set_ylim(config.ylim_min * scale, ylim_max)
+        ax.set_yticks(np.arange(0, ylim_max + 1, config.ytick_step))
+    else:
+        ax.set_ylim(config.ylim_min * scale, None)
+        ax.set_yticks(np.arange(0, ylim_max + 1, (ylim_max + 1) // 5))
 
     n_agents = len(agents)
     x_indices = np.arange(len(mapped_labels))
@@ -166,6 +173,8 @@ def _plot_line(
     aggregation: AggregationType,
     config: PlotConfig,
     markers: list[str],
+    *,
+    scale: float,
 ) -> None:
     x = np.arange(len(type_mode_pairs))
 
@@ -179,10 +188,10 @@ def _plot_line(
             agent_desc_data = data.get_data(agent_id, desc_type, mode)
             if agent_desc_data and agent_desc_data.count > 0:
                 val = agent_desc_data.mean if aggregation == "mean" else agent_desc_data.median
-                values.append(val * 100)
+                values.append(val * scale)
                 if config.show_error_bars and aggregation == "mean":
                     low, _ = agent_desc_data.confidence_interval()
-                    margins.append((val - low) * 100)
+                    margins.append((val - low) * scale)
                 else:
                     margins.append(0.0)
             else:
@@ -224,6 +233,8 @@ def _plot_bar(
     aggregation: AggregationType,
     config: PlotConfig,
     markers: list[str],
+    *,
+    scale: float,
 ) -> None:
     x = np.arange(len(type_mode_pairs))
     width = config.bar_width / len(agents)
@@ -236,10 +247,10 @@ def _plot_bar(
             agent_desc_data = data.get_data(agent_id, desc_type, mode)
             if agent_desc_data and agent_desc_data.count > 0:
                 val = agent_desc_data.mean if aggregation == "mean" else agent_desc_data.median
-                values.append(val * 100)
+                values.append(val * scale)
                 if config.show_error_bars and aggregation == "mean":
                     low, _ = agent_desc_data.confidence_interval()
-                    margins.append((val - low) * 100)
+                    margins.append((val - low) * scale)
                 else:
                     margins.append(0.0)
             else:
@@ -272,6 +283,8 @@ def _plot_scatter(
     aggregation: AggregationType,
     config: PlotConfig,
     markers: list[str],
+    *,
+    scale: float,
 ) -> None:
     x = np.arange(len(type_mode_pairs))
 
@@ -281,10 +294,10 @@ def _plot_scatter(
             agent_desc_data = data.get_data(agent_id, desc_type, mode)
             if agent_desc_data and agent_desc_data.count > 0:
                 val = agent_desc_data.mean if aggregation == "mean" else agent_desc_data.median
-                values.append(val * 100)
+                values.append(val * scale)
                 if config.show_error_bars and aggregation == "mean":
                     low, _ = agent_desc_data.confidence_interval()
-                    margins.append((val - low) * 100)
+                    margins.append((val - low) * scale)
                 else:
                     margins.append(0.0)
             else:
