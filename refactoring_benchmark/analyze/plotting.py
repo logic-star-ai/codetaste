@@ -128,6 +128,8 @@ def create_plot(
 
         if config.legend_position == "upper_right":
             legend_kwargs.update({"loc": "upper right"})
+        elif config.legend_position == "lower_right":
+            legend_kwargs.update({"loc": "lower right"})
         elif config.legend_position == "lower_left":
             legend_kwargs.update({"loc": "lower left"})
         else:
@@ -136,13 +138,13 @@ def create_plot(
         ax.legend(**legend_kwargs)
 
     # 5. Ticks and Limits
-    ylim_max = config.ylim_max * scale if config.ylim_max else (100 if scale == 100 else None)
-    if ylim_max is not None:
-        ax.set_ylim(config.ylim_min * scale, ylim_max)
-        ax.set_yticks(np.arange(0, ylim_max + 1, config.ytick_step))
-    else:
-        ax.set_ylim(config.ylim_min * scale, None)
-        ax.set_yticks(np.arange(0, ylim_max + 1, (ylim_max + 1) // 5))
+    ytick_step = config.ytick_step * scale / 100.0
+    ylim_max = config.ylim_max * scale
+    if ytick_step > 0:
+        # Ensure the upper y-limit lands on a tick.
+        ylim_max = np.ceil(ylim_max / ytick_step) * ytick_step
+    ax.set_ylim(config.ylim_min * scale, ylim_max)
+    ax.set_yticks(np.arange(0, ylim_max + (ytick_step * 0.5), ytick_step))
 
     n_agents = len(agents)
     x_indices = np.arange(len(mapped_labels))

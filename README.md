@@ -1,6 +1,6 @@
-# Refactoring Benchmark
+# CodeTaste
 
-A benchmarking framework for evaluating AI agents on real-world code refactoring tasks. It builds per‑instance execution environments, runs agents in locked‑down containers, evaluates outputs with tests + static rules, and aggregates results into plots and tables.
+CodeTaste is a benchmark for evaluating AI agents on real-world code refactoring tasks and measure their alignment with human choices. It builds per‑instance execution environments, runs agents in locked‑down containers, evaluates their performance with tests and static analysis rules, and aggregates results into plots and tables.
 
 ## Core concepts
 - **Instance**: A specific repo + commit pair with rules and descriptions.

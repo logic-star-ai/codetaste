@@ -32,8 +32,8 @@ class PlotConfig(BaseModel):
     # Text settings
     show_ylabel: bool = Field(default=True, description="Show y-axis label")
     show_legend: bool = Field(default=True, description="Show legend")
-    legend_position: Literal["upper_left", "upper_right", "lower_left"] = Field(
-        default="upper_left", description="Legend position (upper_left, upper_right, lower_left)"
+    legend_position: Literal["upper_left", "upper_right", "lower_left", "lower_right"] = Field(
+        default="upper_left", description="Legend position (upper_left, upper_right, lower_left, lower_right)"
     )
     xlabel_fontsize: int = Field(default=21, ge=1, description="X-axis label font size")
     ylabel_fontsize: int = Field(default=20, ge=1, description="Y-axis label font size")

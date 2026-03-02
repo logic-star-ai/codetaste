@@ -12,7 +12,11 @@ from refactoring_benchmark.analyze.loader import (
     validate_analysis_data,
 )
 from refactoring_benchmark.analyze.metrics import ALL_METRICS
-from refactoring_benchmark.analyze.plotting import create_plot, save_plot
+from refactoring_benchmark.analyze.plotting import (
+    NON_PERCENT_METRICS,
+    create_plot,
+    save_plot,
+)
 from refactoring_benchmark.analyze.statistics import (
     build_latex_metrics_table,
     print_finish_reason_table,
@@ -141,8 +145,8 @@ Examples:
         "--legend-position",
         type=str,
         default="upper_left",
-        choices=["upper_left", "upper_right", "lower_left"],
-        help="Legend position (upper_left, upper_right, lower_left). Default: upper_left",
+        choices=["upper_left", "upper_right", "lower_left", "lower_right"],
+        help="Legend position (upper_left, upper_right, lower_left, lower_right). Default: upper_left",
     )
     parser.add_argument(
         "--ytick-step",
@@ -332,14 +336,14 @@ Examples:
         # Generate plot
         print(f"  Generating {args.plot_type} plot with {args.aggregation} aggregation...")
         try:
-            if len(output_dirs) != 1:
+            if len(output_dirs) != 1 or metric_name in NON_PERCENT_METRICS:
                 max_mean = max([v.mean for k, v in data.data.items()])
                 max_ci = max([v.confidence_interval()[1] - v.mean for k, v in data.data.items()])
-                print(f"    Setting y-axis limit to {max_mean:.4f} for better visibility")
                 y_lim_min = 0
                 y_lim_max = max_mean + 1 * max_ci + 0.01
-                ytick_step = 5
-                while (y_lim_max - y_lim_min) * 100 / ytick_step > 15:
+                good_multiples = set([0, 1, 2, 3, 4] + [5 * i for i in range(1, int(y_lim_max) // 1)])
+                ytick_step = (y_lim_max - y_lim_min) * 100 / 11 // 5 * 5
+                while (y_lim_max - y_lim_min) * 100 / ytick_step > 11 or ytick_step // 5 not in good_multiples:
                     ytick_step += 5
                 config = plot_config.model_copy(
                     update={"ylim_max": y_lim_max, "ylim_min": y_lim_min, "ytick_step": ytick_step}

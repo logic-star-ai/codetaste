@@ -15,7 +15,7 @@ class ValidityStatus(str, Enum):
     NO_TEST_RESULTS = "no_test_results"
 
 
-def check_test_validity(result: EvaluationResult) -> ValidityStatus:
+def check_test_validity(result: EvaluationResult, alpha: float = 0.1) -> ValidityStatus:
     """
     Check if agent test results are valid.
 
@@ -25,6 +25,9 @@ def check_test_validity(result: EvaluationResult) -> ValidityStatus:
         - NO_EXEC_ENV: No execution environment available (tests not applicable)
         - INVALID_TESTS: Test results are outside the expected base/golden range
     """
+    if not 0 <= alpha <= 1:
+        raise ValueError(f"alpha must be in [0, 1], got {alpha}")
+
     # If no execution environment, we don't care about test results
     if not result.instance_metadata.has_execution_environment:
         return ValidityStatus.NO_EXEC_ENV
@@ -56,7 +59,7 @@ def check_test_validity(result: EvaluationResult) -> ValidityStatus:
         return ValidityStatus.VALID
     elif result.agent_test_metrics is None:
         return ValidityStatus.NO_TEST_RESULTS
-    elif 0.9 * min_passed <= agent_passed <= 1.1 * max_passed and agent_failed <= max_failed:
+    elif (1 - alpha) * min_passed <= agent_passed <= (1 + alpha) * max_passed and agent_failed <= max_failed:
         return ValidityStatus.VALID
     else:
         return ValidityStatus.INVALID_TESTS
