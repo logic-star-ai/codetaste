@@ -1,4 +1,4 @@
-# Evaluation Phase
+# ✅ Evaluation Phase
 
 The evaluation phase applies an agent’s patch, runs tests, and executes rule checks to compute IFR.
 
@@ -18,6 +18,10 @@ python -m refactoring_benchmark.cli.evaluate
    - Run opengrep with positive and negative rules.
    - Produce SARIF and YAML outputs.
 4. **Persist results** in `evaluation/evaluation_result.json`.
+
+## Prerequisites
+- `outputs/<description_type>/<mode>/...` from inference.
+- `instance_images/<owner>/<repo>/<hash>/instance_metadata.json` (from `codetaste100.zip` or bootstrap).
 
 ## Outputs
 ```

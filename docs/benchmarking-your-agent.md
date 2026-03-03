@@ -1,4 +1,4 @@
-# Benchmarking Your Own Agent
+# 🧪 Benchmarking Your Own Agent
 
 This guide focuses on what you (the user) need to provide to add an agent and run it in the benchmark.
 
@@ -81,6 +81,9 @@ python -m refactoring_benchmark.cli.evaluate \
   --agent-id your-agent-id \
   --output-dir ./outputs/instructed/direct  # change to ./outputs/<description_type>/<mode> if needed
 ```
+
+## Helper Script
+You can use `run_agent_description.sh` to run inference + evaluation with automatic output directory mapping for a given description type and mode. Update the agent settings at the top of the script.
 
 ## Evaluation outputs and layout
 Evaluation writes under the agent output directory:

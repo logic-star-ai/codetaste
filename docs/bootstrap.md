@@ -1,4 +1,4 @@
-# Bootstrap Phase
+# 🚀 Bootstrap Phase
 
 The bootstrap phase prepares **per‑instance container images** and baseline test metrics. It produces two images per instance: a setup image and a runtime image.
 
@@ -24,6 +24,12 @@ python -m refactoring_benchmark.cli.bootstrap
 - Podman images:
   - `ghcr.io/logic-star-ai/codetaste/<id>__setup`
   - `ghcr.io/logic-star-ai/codetaste/<id>__runtime`
+
+## Image Registry Override
+By default, images are pulled from `ghcr.io/logic-star-ai/codetaste`. Override with:
+```bash
+export CODETASTE_IMAGE_REPOSITORY=ghcr.io/logic-star-ai/codetaste
+```
 
 ## Key flags
 - `--force-full-build`: rebuild setup + runtime from scratch.

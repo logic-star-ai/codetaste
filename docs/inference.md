@@ -1,6 +1,9 @@
-# Inference Phase
+# 🔄 Inference Phase
 
 This document summarizes how inference runs for a single instance.
+
+## Prerequisites
+- `assets/` and `instance_images/` must be present (from `codetaste100.zip` or bootstrap).
 
 ## Entry point
 ```bash
