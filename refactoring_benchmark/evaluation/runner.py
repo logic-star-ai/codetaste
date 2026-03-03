@@ -15,6 +15,8 @@ from refactoring_benchmark.podman import utils as podman_utils
 from refactoring_benchmark.utils.models import InstanceRow
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+SCRIPTS_DIRNAME = "scripts"
+ENTRYPOINT_PATH = PROJECT_ROOT / "entrypoint.sh"
 
 
 def prepare_temp_rules_dir(instance: InstanceRow, logger: logging.Logger) -> Optional[Path]:
@@ -74,6 +76,48 @@ def cleanup_temp_rules_dir(temp_dir: Optional[Path], logger: logging.Logger) -> 
             logger.warning(f"Failed to remove temp rules dir {temp_dir}: {exc}")
 
 
+def prepare_temp_scripts_dir(instance: InstanceRow, logger: logging.Logger) -> Optional[Path]:
+    """Build a temporary scripts directory for evaluation and return its path."""
+    scripts_src = PROJECT_ROOT / instance.instance_dir() / SCRIPTS_DIRNAME
+    if not scripts_src.exists():
+        logger.error(f"Scripts directory not found: {scripts_src}")
+        return None
+    if not scripts_src.is_dir():
+        logger.error(f"Scripts path is not a directory: {scripts_src}")
+        return None
+
+    temp_dir = Path(tempfile.mkdtemp(prefix=f"scripts-{instance.id}-"))
+    try:
+        shutil.copytree(scripts_src, temp_dir, dirs_exist_ok=True)
+        for path in temp_dir.rglob("*"):
+            try:
+                path.chmod(0o755)
+            except Exception:
+                pass
+        return temp_dir
+    except Exception as exc:
+        logger.error(f"Failed to prepare temp scripts dir: {exc}")
+        cleanup_temp_scripts_dir(temp_dir, logger)
+        return None
+
+
+def cleanup_temp_scripts_dir(temp_dir: Optional[Path], logger: logging.Logger) -> None:
+    """Remove a temporary scripts directory."""
+    if temp_dir and temp_dir.exists():
+        try:
+            shutil.rmtree(temp_dir)
+        except Exception as exc:
+            logger.warning(f"Failed to remove temp scripts dir {temp_dir}: {exc}")
+
+
+def _scripts_volume(scripts_dir: Path) -> dict:
+    return {str(scripts_dir): {"bind": "/scripts", "mode": "ro"}}
+
+
+def _entrypoint_volume(logger: logging.Logger) -> Optional[dict]:
+    return {str(ENTRYPOINT_PATH): {"bind": "/usr/local/bin/entrypoint.sh", "mode": "ro"}}
+
+
 def run_test_evaluation(
     instance: InstanceRow,
     prediction_diff: Path,
@@ -101,21 +145,31 @@ def run_test_evaluation(
         return None, "Failed to connect to Podman daemon"
 
     try:
+        scripts_dir = prepare_temp_scripts_dir(instance, logger)
+        if scripts_dir is None:
+            return None, f"Scripts directory missing for instance {instance.id}"
+        entrypoint_volume = _entrypoint_volume(logger)
+        if entrypoint_volume is None:
+            return None, "Entrypoint missing for evaluation"
+
         # Verify image exists (pull if missing)
         if not podman_utils.ensure_image_exists(client, instance.runtime_image, pull=True):
             return None, f"Runtime image not found: {instance.runtime_image}"
 
         # Run container
+        volumes = {
+            str(prediction_diff): {"bind": "/input/patch.diff", "mode": "ro"},
+            str(eval_dir): {"bind": "/output", "mode": "rw"},
+            str(rules_dir): {"bind": "/rules", "mode": "rw", "extended_mode": ["U", "z"]},
+        }
+        volumes.update(_scripts_volume(scripts_dir))
+        volumes.update(entrypoint_volume)
         container = podman_utils.safe_container_run(
             client,
             instance.runtime_image,
             command=["eval_test"],
             detach=True,
-            volumes={
-                str(prediction_diff): {"bind": "/input/patch.diff", "mode": "ro"},
-                str(eval_dir): {"bind": "/output", "mode": "rw"},
-                str(rules_dir): {"bind": "/rules", "mode": "rw", "extended_mode": ["U", "z"]},
-            },
+            volumes=volumes,
             remove=False,
             nano_cpus=int(16e9),
         )
@@ -137,6 +191,7 @@ def run_test_evaluation(
         return None, f"Test evaluation failed: {e}"
 
     finally:
+        cleanup_temp_scripts_dir(scripts_dir , logger)
         if container is not None:
             podman_utils.stop_container(container)
             try:
@@ -171,27 +226,38 @@ def run_rule_evaluation(
         Tuple of (success: bool, stdout: str)
     """
     container: Optional[PodmanContainer] = None
+    scripts_dir = None
     client = podman_utils.get_local_client(timeout=timeout)
 
     if not client:
         return False, "Failed to connect to Podman daemon"
 
     try:
+        scripts_dir = prepare_temp_scripts_dir(instance, logger)
+        if scripts_dir is None:
+            return False, f"Scripts directory missing for instance {instance.id}"
+        entrypoint_volume = _entrypoint_volume(logger)
+        if entrypoint_volume is None:
+            return False, "Entrypoint missing for evaluation"
+
         # Verify image exists (pull if missing)
         if not podman_utils.ensure_image_exists(client, instance.runtime_image, pull=True):
             return False, f"Runtime image not found: {instance.runtime_image}"
 
         # Run container
+        volumes = {
+            str(prediction_diff): {"bind": "/input/patch.diff", "mode": "ro"},
+            str(eval_dir): {"bind": "/output", "mode": "rw"},
+            str(rules_dir): {"bind": "/rules", "mode": "rw", "extended_mode": ["U", "z"]},
+        }
+        volumes.update(_scripts_volume(scripts_dir))
+        volumes.update(entrypoint_volume)
         container = podman_utils.safe_container_run(
             client,
             instance.runtime_image,
             command=["eval_rule"],
             detach=True,
-            volumes={
-                str(prediction_diff): {"bind": "/input/patch.diff", "mode": "ro"},
-                str(eval_dir): {"bind": "/output", "mode": "rw"},
-                str(rules_dir): {"bind": "/rules", "mode": "rw", "extended_mode": ["U", "z"]},
-            },
+            volumes=volumes,
             remove=False,
             nano_cpus=int(4e9),
         )
@@ -212,6 +278,7 @@ def run_rule_evaluation(
         return False, f"Rule evaluation failed: {e}"
 
     finally:
+        cleanup_temp_scripts_dir(scripts_dir, logger)
         if container is not None:
             podman_utils.stop_container(container)
             try:

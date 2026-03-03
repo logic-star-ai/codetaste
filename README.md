@@ -1,6 +1,6 @@
 # CodeTaste
 
-CodeTaste is a benchmark for evaluating AI agents on real-world code refactoring tasks and measure their alignment with human choices. It builds per‑instance execution environments, runs agents in locked‑down containers, evaluates their performance with tests and static analysis rules, and aggregates results into plots and tables.
+CodeTaste is a benchmark for evaluating AI agents on real-world code refactoring tasks and measure their alignment with human developer choices. It builds per‑instance execution environments, runs agents in locked‑down containers, evaluates their performance with tests and static analysis rules, and aggregates results into plots and tables.
 
 ## Core concepts
 - **Instance**: A specific repo + commit pair with rules and descriptions.
@@ -19,6 +19,13 @@ outputs/<description_type>/<mode>/<owner>/<repo>/<hash8>/<agent_id>/
     rules_positive.sarif
     rules_negative.sarif
     test_output.txt
+```
+
+## Baseline results
+Baseline test runs are stored under `baseline_results/<owner>/<repo>/<hash8>/` as JSONL files (one run per line) and are used to validate pass results. For reproducibility, regenerate baselines on your platform to account for environment-specific discrepancies.
+Populate baselines with:
+```bash
+python -m refactoring_benchmark.cli.baseline_results --runs 5 --instances 100
 ```
 
 ## What this repo provides

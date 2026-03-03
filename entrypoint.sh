@@ -64,7 +64,6 @@ preserve_env
 # Permissions
 if [ -d "/output" ]; then sudo chmod -R 777 "/output"; fi
 if [ -d "/agent" ]; then sudo chmod -R 755 "/agent"; fi
-if [ -d "/scripts" ]; then sudo chmod -R 755 "/scripts"; fi
 if [ -d "/task_description" ]; then sudo chmod -R 755 "/task_description"; fi
 sudo chmod -R 700 /rules
 

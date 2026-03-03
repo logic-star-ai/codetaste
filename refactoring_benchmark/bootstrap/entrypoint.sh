@@ -48,11 +48,15 @@ function block_network() {
     echo "127.0.0.1 www.github.com"            | sudo tee -a /etc/hosts > /dev/null
 }
 
-function create_restricted_user() {
-    if ! id "agent_user" &>/dev/null; then
-        echo "-> [Security] Creating restricted 'agent_user'..."
-        sudo useradd -m -s /bin/bash agent_user
-    fi
+function revoke_sudo() {
+    echo "-> [Security] Revoking sudo access for benchmarker..."
+    # Secure the rules directory so the agent cannot read it
+    sudo chown -R root:root /rules
+    sudo chmod -R 700 /rules
+    # Remove the sudo privilege line added in the Dockerfile
+    sudo sed -i '/benchmarker ALL=(ALL) NOPASSWD:ALL/d' /etc/sudoers
+    # Clear any cached sudo credentials
+    sudo -k
 }
 
 preserve_env
@@ -60,7 +64,6 @@ preserve_env
 # Permissions
 if [ -d "/output" ]; then sudo chmod -R 777 "/output"; fi
 if [ -d "/agent" ]; then sudo chmod -R 755 "/agent"; fi
-if [ -d "/scripts" ]; then sudo chmod -R 755 "/scripts"; fi
 if [ -d "/task_description" ]; then sudo chmod -R 755 "/task_description"; fi
 sudo chmod -R 700 /rules
 
@@ -83,21 +86,17 @@ case "$1" in
             exit 1
         fi
 
-        create_restricted_user
-        # Agent System Setup Script Can Still Use Github
+        # Agent System Setup Script Can Still Use Github via sudo
         if [ -f "$AGENT_SYSTEM_SETUP_SCRIPT" ]; then
             echo "=== Running Agent System Setup Script ==="
             sudo bash "$AGENT_SYSTEM_SETUP_SCRIPT"
         fi
+        
         block_network
+        revoke_sudo
         
-
-        echo "[Security] Transferring repo ownership to agent_user..."
-        sudo chown -R agent_user:agent_user "$REPO_ROOT"
-        sudo chown -R agent_user:agent_user /tmp
-        
-        # Restricted Execution
-        if sudo -E -u agent_user bash -c "
+        # Restricted Execution (Runs as benchmarker, no sudo available)
+        if bash -c "
             [ -f /scripts/setup_shell.sh ] && source /scripts/setup_shell.sh
             bash \"$AGENT_SCRIPT\"
         "; then
@@ -106,16 +105,15 @@ case "$1" in
             echo "=== Agent failed with exit code $? ==="
             exit $?
         fi
+        
         # Harvest Results
         echo "=== Extracting Diff ==="
-        sudo chown -R benchmarker:benchmarker "$REPO_ROOT"
         cd "$REPO_ROOT"
         git config --global --add safe.directory "$REPO_ROOT"
         git add -A
         git diff --cached --binary "$PRE_AGENT_HASH" > "$DIFF_OUTPUT"
         
         echo "Diff saved to $DIFF_OUTPUT"
-        if [ -d /output ]; then sudo chmod -R 777 /output || true; fi
         ;;
 
     "plan")
@@ -130,20 +128,17 @@ case "$1" in
             exit 1
         fi
 
-        create_restricted_user
         # Agent System Setup Script Can Still Use Github
         if [ -f "$AGENT_SYSTEM_SETUP_SCRIPT" ]; then
             echo "=== Running Agent System Setup Script ==="
             sudo bash "$AGENT_SYSTEM_SETUP_SCRIPT"
         fi
-        block_network
         
-        echo "[Security] Transferring repo ownership to agent_user..."
-        sudo chown -R agent_user:agent_user "$REPO_ROOT"
-        sudo chown -R agent_user:agent_user /tmp
+        block_network
+        revoke_sudo
         
         # Restricted Execution
-        if sudo -E -u agent_user bash -c "
+        if bash -c "
             [ -f /scripts/setup_shell.sh ] && source /scripts/setup_shell.sh
             bash \"$AGENT_SCRIPT\"
         "; then
@@ -152,7 +147,7 @@ case "$1" in
             echo "=== Agent failed with exit code $? ==="
             exit $?
         fi
-        if [ -d /output ]; then sudo chmod -R 777 /output || true; fi
+        
         if [ ! -f "/output/refactoring_plan.md" ]; then
             echo "Error: Agent did not produce a refactoring_plan.md in /output"
             exit 1
@@ -171,20 +166,17 @@ case "$1" in
             exit 1
         fi
 
-        create_restricted_user
         # Agent System Setup Script Can Still Use Github
         if [ -f "$AGENT_SYSTEM_SETUP_SCRIPT" ]; then
             echo "=== Running Agent System Setup Script ==="
             sudo bash "$AGENT_SYSTEM_SETUP_SCRIPT"
         fi
+        
         block_network
-
-        echo "[Security] Transferring repo ownership to agent_user..."
-        sudo chown -R agent_user:agent_user "$REPO_ROOT"
-        sudo chown -R agent_user:agent_user /tmp
+        revoke_sudo
 
         # Restricted Execution
-        if sudo -E -u agent_user bash -c "
+        if bash -c "
             [ -f /scripts/setup_shell.sh ] && source /scripts/setup_shell.sh
             bash \"$AGENT_SCRIPT\"
         "; then
@@ -193,7 +185,7 @@ case "$1" in
             echo "=== Agent failed with exit code $? ==="
             exit $?
         fi
-        if [ -d /output ]; then sudo chmod -R 777 /output || true; fi
+        
 
         # Validate that plans were generated
         PLANS_DIR="/output/refactoring_plans"
@@ -287,7 +279,7 @@ case "$1" in
         ;;
 
     *)
-        echo "Usage: $0 {inference|plan|eval_test|eval_rule}"
+        echo "Usage: $0 {inference|plan|multiplan|eval_test|eval_rule}"
         exit 1
         ;;
 esac

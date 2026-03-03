@@ -42,6 +42,14 @@ python -m refactoring_benchmark.cli.analyze --metric precision_overall
 - Plots saved to `./analyze/` (configurable via `--plots-dir`).
 - Optional statistics table (`--statistics`).
 
+## Baseline test results
+Test success validation uses baseline test results from `baseline_results/<owner>/<repo>/<hash>/`.
+Populate baselines with:
+```bash
+python -m refactoring_benchmark.cli.baseline_results --runs 5
+```
+Baseline files are JSONL, one line per run, and may include `null` for missing test metrics.
+
 ## Precision metrics
 Precision metrics require evaluated **pseudo agents** (`golden_agent` and `null_agent`).
 Use:

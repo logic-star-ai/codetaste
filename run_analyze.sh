@@ -15,6 +15,9 @@ METRICS=(
   precision_added
   precision_removed
   f1_score
+  diff_added_lines
+  diff_removed_lines
+  diff_size
 )
 
 AGENTS_DEFAULT=(

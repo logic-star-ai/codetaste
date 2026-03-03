@@ -68,17 +68,22 @@ def metric_diff_size(result: EvaluationResult) -> int | None:
     return lines_added + lines_removed
 
 
-def metric_test_success(result: EvaluationResult) -> float:
-    """Test success metric (1.0 if valid, 0.0 otherwise, None if no test data)."""
+def metric_test_success(result: EvaluationResult) -> float | None:
+    """Test success metric (1.0 if valid, 0.0 otherwise, None if we cannot determine validity)."""
     if check_test_validity(result) == ValidityStatus.VALID:
         return 1.0
+    elif check_test_validity(result) in {ValidityStatus.NO_EXEC_ENV, ValidityStatus.NO_BASELINE}:
+        return None
     else:
         return 0.0
 
 
 def metric_strict_ifr_x_test_success(result: EvaluationResult) -> float | None:
     """Strict IFR x Test Success metric (1.0 only if both IFR and test success are perfect)."""
-    if metric_ifr(result) == 1.0 and metric_test_success(result) == 1.0:
+    is_test_success = metric_test_success(result)
+    if is_test_success is None:
+        return None
+    if metric_ifr(result) == 1.0 and is_test_success == 1.0:
         return 1.0
     else:
         return 0.0
@@ -86,17 +91,26 @@ def metric_strict_ifr_x_test_success(result: EvaluationResult) -> float | None:
 
 def metric_ifr_x_test_success(result: EvaluationResult) -> float | None:
     """Combined IFR x Test Success metric."""
-    return metric_ifr(result) * metric_test_success(result)
+    test_success = metric_test_success(result)
+    if test_success is None:
+        return None
+    return metric_ifr(result) * test_success
 
 
 def metric_ifr_added_x_test_success(result: EvaluationResult) -> float | None:
     """Combined IFR Added x Test Success metric."""
-    return metric_ifr_added(result) * metric_test_success(result)
+    test_success = metric_test_success(result)
+    if test_success is None:
+        return None
+    return metric_ifr_added(result) * test_success
 
 
 def metric_ifr_removed_x_test_success(result: EvaluationResult) -> float | None:
     """Combined IFR Removed x Test Success metric."""
-    return metric_ifr_removed(result) * metric_test_success(result)
+    test_success = metric_test_success(result)
+    if test_success is None:
+        return None
+    return metric_ifr_removed(result) * test_success
 
 
 def metric_f1_score(result: EvaluationResult) -> float | None:
@@ -104,6 +118,8 @@ def metric_f1_score(result: EvaluationResult) -> float | None:
     p = metric_precision_overall(result)
     r = metric_ifr(result)
     passed = metric_test_success(result)
+    if passed is None:
+        return None
     if not passed:
         return 0.0
     if p is not None and r is not None:
