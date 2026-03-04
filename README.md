@@ -87,7 +87,7 @@ python -m refactoring_benchmark.cli.inference \
 
 **Handling Inference Errors:** We do a full restart of the inference for an instance (i.e. deletion of the corresponding instance output directory `outputs/<description_type>/<mode>/<owner>/<repo>/<hash>/<agent_id>/` and rerunning inference) if either (1) the agent doesn't produce results, due to an unexpected error (e.g. LLM Provider cannot be reached) or (2) the agent fails to place plan(s) under the expected path.
 
-### 2. Evaluation (Testing & IFR)
+### 2. Evaluation (Run Test Suite and Static Analysis Checks on Generated Patches)
 
 Applies the generated `prediction.diff`, calculates static analysis rules, and runs the test suite up to 5x to account for flakiness.
 
