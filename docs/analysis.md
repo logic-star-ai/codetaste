@@ -62,7 +62,7 @@ python -m refactoring_benchmark.cli.evaluate --agent-id null_agent --output-dir 
 **Pseudo-agents meaning:**
 * `null_agent` represents the base commit $R$.
 * `golden_agent` represents the golden commit $R \circ X^{*}$.
-They are materialized as pseudo-agent outputs so they can be evaluated with the same pipeline.
+They are materialized as pseudo-agent outputs so they can be evaluated with the same pipeline as regular agents.
 
 ## Alignment Metric
 The paper’s “Alignment Score” is reported as `ifr_x_test_success` in analysis.

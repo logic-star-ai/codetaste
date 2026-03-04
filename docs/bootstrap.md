@@ -15,8 +15,7 @@ python -m refactoring_benchmark.cli.bootstrap
    - Run tests on **golden** and **base** commits and record metrics.
    - Commit the container as the **setup image**.
 3. **Runtime phase** (`bootstrap/runtime.py`)
-   - Inject `refactoring_benchmark/bootstrap/entrypoint.sh` and rule assets.
-   - Apply security hardening and prepare for agent execution.
+   - Remove the git commit history and remote origins to prevent leakage of golden commits.
    - Commit the container as the **runtime image**.
 
 ## Outputs
