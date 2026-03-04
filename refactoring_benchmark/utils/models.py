@@ -11,6 +11,7 @@ from refactoring_benchmark.utils.images import (
     instance_setup_image,
 )
 
+
 class InstanceRow(BaseModel):
     """Represents a single row from the instances CSV file."""
 

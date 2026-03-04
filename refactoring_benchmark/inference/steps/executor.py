@@ -77,11 +77,11 @@ class ContainerExecutor:
                     str(self.output_dir): {"bind": "/output", "mode": "rw"},
                     str(temp_dir): {
                         "bind": "/task_description",
-                        "extended_mode": ["rw","z"],
+                        "extended_mode": ["rw", "z"],
                     },
                     os.path.abspath("./entrypoint.sh"): {
                         "bind": "/usr/local/bin/entrypoint.sh",
-                        "extended_mode": ["ro", "z"], 
+                        "extended_mode": ["ro", "z"],
                     },
                 },
                 network_mode="host",
@@ -143,7 +143,5 @@ class ContainerExecutor:
             try:
                 podman_utils.reset_output_ownership(self.output_dir)
             except Exception as e:
-                self.logger.warning(
-                    f"Failed to reset output ownership for {self.output_dir}. Error: {e}"
-                )
+                self.logger.warning(f"Failed to reset output ownership for {self.output_dir}. Error: {e}")
             self.container = None

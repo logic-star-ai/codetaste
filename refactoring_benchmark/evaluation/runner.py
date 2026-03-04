@@ -7,7 +7,6 @@ import tempfile
 from pathlib import Path
 from typing import Optional, Tuple
 
-import podman
 from podman.domain.containers import Container as PodmanContainer
 
 from refactoring_benchmark.evaluation.models import TestMetrics
@@ -191,7 +190,7 @@ def run_test_evaluation(
         return None, f"Test evaluation failed: {e}"
 
     finally:
-        cleanup_temp_scripts_dir(scripts_dir , logger)
+        cleanup_temp_scripts_dir(scripts_dir, logger)
         if container is not None:
             podman_utils.stop_container(container)
             try:

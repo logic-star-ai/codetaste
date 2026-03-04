@@ -9,8 +9,8 @@ from typing import Dict, List, Tuple
 import podman
 from podman.domain.containers import Container as PodmanContainer
 
-from refactoring_benchmark.utils.logger import get_logger, setup_logging
 from refactoring_benchmark.utils.images import base_image_name
+from refactoring_benchmark.utils.logger import get_logger, setup_logging
 
 # --- CONFIGURATION ---
 PROJECT_ROOT = Path(__file__).parent.parent.parent

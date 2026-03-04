@@ -52,8 +52,10 @@ def collect_container_logs(container: PodmanContainer) -> str:
         # Podman sometimes returns newline-stripped chunks; rejoin with newlines if needed.
         assert all(isinstance(chunk, bytes) for chunk in chunks), "Expected all log chunks to be bytes"
         chunks = cast(Iterable[bytes], chunks)
+
         def ensure_newline(b: bytes) -> bytes:
             return b if b.endswith(b"\n") else b + b"\n"
+
         raw_logs_bytes = b"".join(ensure_newline(c) for c in chunks)
     return raw_logs_bytes.decode("utf-8", errors="replace")
 

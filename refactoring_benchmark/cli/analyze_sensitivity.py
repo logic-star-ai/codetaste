@@ -127,9 +127,7 @@ Examples:
     if args.successful_only:
         success_filter = filter_successful_only()
         filtered_results = [result for result in filtered_results if success_filter(result)]
-    filtered_results = [
-        result for result in filtered_results if result.agent_config.id not in {"null_agent"}
-    ]
+    filtered_results = [result for result in filtered_results if result.agent_config.id not in {"null_agent"}]
     print(f"Using {len(filtered_results)} filtered evaluation results")
     if not filtered_results:
         print("No filtered evaluation results found")

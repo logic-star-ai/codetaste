@@ -36,7 +36,7 @@ _IGNORE_DIR_NAMES = {
     ".cache",
     "coverage",
     ".cargo-home",
-    "package-lock.json"
+    "package-lock.json",
 }
 
 
@@ -84,7 +84,9 @@ def parse_diff_line_counts_file(diff_path, base_commit: str, golden_commit: str)
     mtime = os.path.getmtime(diff_path)
     nr_lines_removed, nr_lines_added = _cached_parse_diff_line_counts_file(path_str, mtime, base_commit, golden_commit)
     if nr_lines_removed + nr_lines_added > 50000:
-        print(f"Warning: Diff file {diff_path} has {nr_lines_removed} removed and {nr_lines_added} added lines, which may indicate an unusually large change or a parsing issue.")
+        print(
+            f"Warning: Diff file {diff_path} has {nr_lines_removed} removed and {nr_lines_added} added lines, which may indicate an unusually large change or a parsing issue."
+        )
     return nr_lines_removed, nr_lines_added
 
 
