@@ -19,7 +19,6 @@ CodeTaste is a benchmark for evaluating AI agents on real-world code refactoring
 
 > Check out our Paper for more details: [CodeTaste: Can LLMs Generate Human-Level Code Refactorings?](https://arxiv.org/abs/XXXX.XXXXX).
 
----
 
 ## 🚀 Setup
 
@@ -65,7 +64,6 @@ podman pull ghcr.io/logic-star-ai/codetaste/benchmark-base-all:latest
 pytest
 ```
 
----
 
 ## 🔄 The Pipeline
 
@@ -141,7 +139,6 @@ If you want independent verification of the results, we also require the `agent/
 
 > The inclusion in the leaderboard will be performed on a best effort basis, but we can not guarantee inclusion or timely processing of your requests.
 
----
 
 ### 📈 Reproducing the Paper's Results
 
@@ -162,7 +159,6 @@ chmod +x run_analyze.sh
 ./run_analyze.sh
 ```
 
----
 
 ## 📖 Additional Documentation
 
@@ -174,13 +170,11 @@ For detailed guides on specific phases of the pipeline, refer to our documentati
 * [`docs/analysis.md`](https://github.com/logic-star-ai/codetaste/blob/main/docs/analysis.md) - Aggregating metrics and generating plots.
 * [`docs/benchmarking-your-agent.md`](https://github.com/logic-star-ai/codetaste/blob/main/docs/benchmarking-your-agent.md) - Guide to testing your own custom agent.
 
----
 
 ## 💫 Contributions
 
 We would love to hear from the broader NLP, Machine Learning, and Software Engineering research communities, and welcome contributions to CodeTaste! If you have suggestions for improvements, new features, or want to report issues, please open an issue or submit a pull request on our GitHub repository.
 
----
 
 ## ✍️ Citation
 
@@ -194,7 +188,6 @@ We would love to hear from the broader NLP, Machine Learning, and Software Engin
 }
 ```
 
----
 
 ## ⚖️ License
 
