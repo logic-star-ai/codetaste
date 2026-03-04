@@ -1,50 +1,34 @@
-# 🧑‍🍳 CodeTaste
+<div align="center">
+  <img src="https://codetaste.logicstar.ai/static/images/codetaste_logo.svg" width="250" alt="CodeTaste Logo">
+  <h1>CodeTaste</h1>
+  <a href="https://arxiv.org/abs/XXXX.XXXXX">
+    <img src="https://img.shields.io/badge/Paper-arXiv:XXXX.XXXXX-b31b1b.svg" alt="Paper Badge">
+  </a>
+  <a href="https://codetaste.logicstar.ai/">
+    <img src="https://img.shields.io/badge/Website-CodeTaste-blue.svg" alt="Website Badge">
+  </a>
+  <!-- License MIT -->
+  <a href="https://opensource.org/license/MIT">
+    <img src="https://img.shields.io/badge/License-MIT-green.svg" alt="License Badge">
+  </a>
+</div>
 
-[![Paper](https://img.shields.io/badge/Paper-arXiv:XXXX.XXXXX-b31b1b.svg)](https://arxiv.org/abs/XXXX.XXXXX) 
-[![Website](https://img.shields.io/badge/Website-CodeTaste-blue)](https://codetaste.logicstar.ai/)
+## 📖 Overview
 
-CodeTaste is a benchmark for evaluating AI agents on real-world code refactoring tasks and measuring their alignment with human developer choices. It builds per‑instance execution environments, runs agents in locked‑down containers, evaluates their performance with tests and static analysis rules, and aggregates results into plots and tables.
+CodeTaste is a benchmark for evaluating AI agents on real-world code refactoring tasks and measuring their alignment with human developer choices. It builds per‑instance execution environments, runs agents in locked‑down containers, evaluates their performance with tests and static analysis rules.
 
----
-
-## 🚀 Core Concepts
-
-* **Instance**: A specific repo + commit pair combined with rules ($\Gamma$) and descriptions.
-* **Track (Description Type)**: The level of detail provided to the agent. Reflected as `description-type` in the CLI.
-    * *Instructed Track:* Detailed blueprints specifying exact transformations.
-    * *Open Track:* High-level focus areas where the agent must recover human architectural choices.
-* **Mode**: The agent's execution strategy (`direct`, `plan`, or `multiplan`).
-
----
-
-## 📊 Metrics Explained
-
-CodeTaste evaluates agents strictly on functional correctness and adherence to refactoring intent.
-
-* **Functional Correctness ($\text{Pass}$):** Ensures the predicted patch ($\hat{X}$) does not degrade the test suite beyond empirical bounds established by $k=5$ runs on the original and golden codebases:
-  $$\text{Pass}(\hat{X}) = \mathbb{1} \Big[ F_{\hat{X}} \leq \max_i \{F_R^{(i)}, F^{*,(i)}\} \land P_{\hat{X}} \geq \min_i \{P_R^{(i)}, P^{*,(i)}\} \Big]$$
-  In practice, bounds are computed from baseline runs of the `null_agent` and `golden_agent` pseudo-agents.
-* **Instruction Following Rate ($\text{IFR}$):** Measures recall of additive ($\Gamma^+$) and reductive ($\Gamma^-$) static analysis rules:
-  $$\text{IFR}(\Gamma, \hat{X}) = \frac{|\Gamma^-|}{|\Gamma|} \text{IFR}^-(\Gamma, \hat{X}) + \frac{|\Gamma^+|}{|\Gamma|} \text{IFR}^+(\Gamma, \hat{X})$$
-* **Alignment Score ($\mathcal{A}$):** Reported as `ifr_x_test_success` in analysis. It only rewards instruction adherence when tests are valid:
-  $$\mathcal{A}(\Gamma, \hat{X}) = \text{pass}(\hat{X}) \times \text{IFR}(\Gamma, \hat{X})$$
-* **Change Precision ($\text{Prec}$):** Measures the extent to which a patch avoids unrelated changes outside the scope of the rule set. Requires evaluated pseudo-agents (see below).
-
-**Pseudo-agents:** The benchmark uses two special agents to compute baselines and precision:
-* **`null_agent`** represents the base commit $R$.
-* **`golden_agent`** represents the golden commit $R \circ X^{*}$.
-These are materialized as pseudo-agent outputs so they can be evaluated by the same pipeline as real agents.
+> Check out our Paper for more details: [CodeTaste: Can LLMs Generate Human-Level Code Refactorings?](https://arxiv.org/abs/XXXX.XXXXX).
 
 ---
 
 ## 🛠 Prerequisites & Hardware
 
 * **Python:** >= 3.10 (managed via [Poetry](https://python-poetry.org/) >= 2.0.0).
-* **Containerization:** [Podman](https://podman.io/) (for secure, isolated execution).
-* **Hardware:** Execution scripts use multi-processing by default (configurable workers). Ensure sufficient RAM/CPU.
+* **Containerization:** [Podman](https://podman.io/) (for secure and reproducible executions).
+* **Hardware:** Execution scripts multiple parralel containers by default (configurable workers). Ensure that you have sufficient RAM, CPU and storage. We recommend running the evaluation and inference harness on a `x86_64` machine having 16 CPU cores and 32GB of RAM per parallel worker. You should have at least 500GB of free disk space to accommodate the base images, instance-specific runtime images, and outputs.
 * **Utilities:** `unzip` (for `codetaste100.zip`) and `zip` (for combining split `outputs.zip` parts).
 * **API Keys:**
-    * **Anthropic:** Set via `ANTHROPIC_API_KEY`. Required by default for the setup agent (`bootstrap`) and the judge (`multiplan` inference). *Note: Can be overridden by editing the judge/setup source files.*
+    * **Anthropic:** Set via `ANTHROPIC_API_KEY`. Required by default for the agent used for environment creation (`bootstrap`) and the judge (`multiplan` inference). *Note: Can be overridden by editing the judge/bootstrap source files.*
     * **Your Agent's Key:** Set via `API_KEY_PASSED_TO_AGENT` for inference.
 
 ### Podman Setup (Required)
@@ -62,11 +46,12 @@ export CODETASTE_IMAGE_REPOSITORY=ghcr.io/logic-star-ai/codetaste
 
 ---
 
-## 📥 Quickstart
+## 🚀 Setup
 
 ```bash
 # 0. Deactivate any existing virtual environment to enable in-project .venv creation
 # 1. Install dependencies
+git clone git@github.com:logic-star-ai/codetaste.git && cd codetaste
 poetry install && source .venv/bin/activate
 
 # 2. Download benchmark artifacts (assets, instance_images, metadata, pseudo-agents)
@@ -75,6 +60,9 @@ unzip -o codetaste100.zip -d . && rm codetaste100.zip
 
 # 3. Pull the base container image
 podman pull ghcr.io/logic-star-ai/codetaste/benchmark-base-all:latest
+
+# 4. Verify that you can run tests
+pytest
 ```
 
 ---
@@ -83,13 +71,13 @@ podman pull ghcr.io/logic-star-ai/codetaste/benchmark-base-all:latest
 
 ### 1. Inference (Generating Patches)
 
-Run your agent against the benchmark. Results are cached by default in `outputs/`.
+Run your agent against the benchmark. Results are outputted and cached by default in `outputs/`.
 
 ```bash
 chmod +x ./entrypoint.sh # Required for runtime images
 
 python -m refactoring_benchmark.cli.inference \
-  --instances 10 \
+  --instances 100 \
   --agent-dir ./agents/your-agent \
   --description-type instructed \
   --output-dir ./outputs/instructed/direct \
@@ -97,7 +85,7 @@ python -m refactoring_benchmark.cli.inference \
   # Optional: append --plan or --multiplan
 ```
 
-**Handling Inference Errors:** If you choose to rerun inference from scratch, note that we perform a full restart of an instance run if an agent fails due to unexpected API errors or if it incorrectly places plans in `plan`/`multiplan` modes. However, runs that hit the monetary budget limit (e.g., $11 per task) are evaluated using whatever output is available.
+**Handling Inference Errors:** We do a full restart of the inference for an instance (i.e. deletion of the corresponding instance output directory `outputs/<description_type>/<mode>/<owner>/<repo>/<hash>/<agent_id>/` and rerunning inference) if either (1) the agent doesn't produce results, due to an unexpected error (e.g. LLM Provider cannot be reached) or (2) the agent fails to place plan(s) under the expected path.
 
 ### 2. Evaluation (Testing & IFR)
 
@@ -105,17 +93,18 @@ Applies the generated `prediction.diff`, calculates static analysis rules, and r
 
 ```bash
 python -m refactoring_benchmark.cli.evaluate \
-  --instances 10 \
+  --instances 100 \
   --agent-id <your-agent-id> \
   --output-dir ./outputs/instructed/direct
 ```
+
+**Adjust and run `run_agent_description.sh`** to run both inference and evaluation in one go.
 
 ### 3. Analysis (Visualizing Results)
 
 Generate the plots and tables used in the CodeTaste paper.
 
 ```bash
-# Generate all plots
 chmod +x run_analyze.sh
 ./run_analyze.sh
 ```
@@ -124,20 +113,20 @@ chmod +x run_analyze.sh
 
 ## 📈 Reproducing the Paper's Results
 
-To reproduce the exact plots and tables found in the CodeTaste paper without rerunning the expensive inference pipeline, you can use our precomputed outputs.
+To reproduce the exact plots and tables found in the CodeTaste paper without rerunning the inference pipeline, you can use our precomputed outputs.
 
 1. **Download Precomputed Outputs:**
-Run the included script to download and extract the evaluation data into the `outputs/` directory, or rerun inference and evaluation from scratch for all instances, agents, description types and modes.
+Run the included script to download and extract the evaluation data into the `outputs/` directory, or download the `outputs.{zip,z01,z02,z03}` from our [Github Releases](https://github.com/logic-star-ai/codetaste/releases) and extract them manually.
 
 ```bash
 chmod +x download_outputs.sh
 ./download_outputs.sh
 ```
 
-
 2. **Generate Plots and Tables:**
-Instantly regenerate all analytical charts.
+Regenerate all analytical charts.
 ```bash
+chmod +x run_analyze.sh
 ./run_analyze.sh
 ```
 
@@ -162,11 +151,20 @@ outputs/
 
 ---
 
+## Submitting Results to the leaderboard
+
+We list top performing agentic systems on our [leaderboard](https://codetaste.logicstar.ai/). If you want your results included, please share a brief description of your approach, the corresponding `outputs/` (with traces) and `plots/` directories, and a link to the project's homepage. Please contact us at [alex@logicstar.ai](mailto:alex@logicstar.ai) for submissions.
+If you want independent verification of the results, we also require the `agent/` directory containing the exact agent implementation used for inference.
+
+> The inclusion in the leaderboard will be performed on a best effort basis, but we can not guarantee inclusion or timely processing of your requests.
+
+---
+
 ## 📖 Documentation
 
 For detailed guides on specific phases of the pipeline, refer to our documentation:
 
-* [`docs/bootstrap.md`](https://github.com/logic-star-ai/codetaste/blob/main/docs/bootstrap.md) - Building per-instance runtime images.
+* [`docs/bootstrap.md`](https://github.com/logic-star-ai/codetaste/blob/main/docs/bootstrap.md) - Building runtime images.
 * [`docs/inference.md`](https://github.com/logic-star-ai/codetaste/blob/main/docs/inference.md) - Running agents to generate patches.
 * [`docs/evaluation.md`](https://github.com/logic-star-ai/codetaste/blob/main/docs/evaluation.md) - Applying patches, running tests, and computing IFR.
 * [`docs/analysis.md`](https://github.com/logic-star-ai/codetaste/blob/main/docs/analysis.md) - Aggregating metrics and generating plots.

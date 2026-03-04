@@ -70,17 +70,5 @@ else
         --agent-id "$AGENT_ID" \
         --output-dir "$OUTPUT_DIR" \
         $FORCE_EVALUATION
-    python -m refactoring_benchmark.cli.evaluate \
-        --instances "$NR_INSTANCES" \
-        --nr-workers 5 \
-        --agent-id "$AGENT_ID" \
-        --output-dir "$OUTPUT_DIR" \
-        --retry-null-tests
-    python -m refactoring_benchmark.cli.evaluate \
-        --instances "$NR_INSTANCES" \
-        --nr-workers 5 \
-        --agent-id "$AGENT_ID" \
-        --output-dir "$OUTPUT_DIR" \
-        --retry-null-tests
     echo "Process completed successfully."
 fi
