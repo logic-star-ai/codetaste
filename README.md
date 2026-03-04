@@ -102,7 +102,7 @@ python -m refactoring_benchmark.cli.evaluate \
 
 #### 📂 Output Directory Structure
 
-After this step. the `outputs/` directory will be populated with the results of the inference and evaluation.
+After this step the `outputs/` directory will be populated with the results of the inference and evaluation.
 
 ```text
 outputs/
@@ -128,7 +128,11 @@ chmod +x run_analyze.sh
 ./run_analyze.sh
 ```
 
-The metrics come in 4 main categories: (1) Pass: Checks whether the model's patch preserves functional integrity, using the repository's test suite. (2) IFR: Measures whether the patch follows the intended refactoring using static analysis checks. (3) Alignment:  A combined score that only rewards rule compliance when tests are valid, and (4) Change Precision: Measures how well the patch avoids unrelated changes outside the intended refactoring scope. The golden commit reference solutions achieve 57.5%.
+There are 4 core metrics we evaluate: 
+1) Pass: Checks whether the model's patch preserves functional integrity, using the repository's test suite. 
+2) IFR: Measures whether the patch follows the intended refactoring using static analysis checks
+3) Alignment:  A combined score that only rewards rule compliance when tests are valid, and 
+4) Change Precision: Measures how well the patch avoids unrelated changes outside the intended refactoring scope. The golden commit reference solutions achieve 57.5%.
 
 ### Submitting Results to the leaderboard
 
