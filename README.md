@@ -21,7 +21,9 @@ CodeTaste is a benchmark for evaluating AI agents on real-world code refactoring
 
 ---
 
-## 🛠 Prerequisites & Hardware
+## 🚀 Setup
+
+### 🛠 Prerequisites & Hardware
 
 * **Python:** >= 3.10 (managed via [Poetry](https://python-poetry.org/) >= 2.0.0).
 * **Containerization:** [Podman](https://podman.io/) (for secure and reproducible executions).
@@ -31,22 +33,20 @@ CodeTaste is a benchmark for evaluating AI agents on real-world code refactoring
     * **Anthropic:** Set via `ANTHROPIC_API_KEY`. Required by default for the agent used for environment creation (`bootstrap`) and the judge (`multiplan` inference). *Note: Can be overridden by editing the judge/bootstrap source files.*
     * **Your Agent's Key:** Set via `API_KEY_PASSED_TO_AGENT` for inference.
 
-### Podman Setup (Required)
+#### Podman Setup (Required)
 Ensure the user socket is enabled so the Python client can communicate with the daemon:
 ```bash
 systemctl --user enable --now podman.socket
 export DOCKER_HOST=unix:///run/user/$(id -u)/podman/podman.sock
 ```
 
-### Image Registry Override (Optional)
+#### Image Registry Override (Optional)
 By default, images are pulled from `ghcr.io/logic-star-ai/codetaste`. Override with:
 ```bash
 export CODETASTE_IMAGE_REPOSITORY=ghcr.io/logic-star-ai/codetaste
 ```
 
----
-
-## 🚀 Setup
+### 💽 Installation
 
 ```bash
 # 0. Deactivate any existing virtual environment to enable in-project .venv creation
@@ -100,6 +100,25 @@ python -m refactoring_benchmark.cli.evaluate \
 
 **Adjust and run `run_agent_description.sh`** to run both inference and evaluation in one go.
 
+#### 📂 Output Directory Structure
+
+After this step. the `outputs/` directory will be populated with the results of the inference and evaluation.
+
+```text
+outputs/
+└── <description_type>/   # instructed | open
+    └── <mode>/           # direct | plan | multiplan
+        └── <owner>/<repo>/<hash8>/<agent_id>/
+            ├── prediction.diff           # The generated patch
+            ├── inference_metadata.json   # Cost, finish reasons, etc.
+            └── evaluation/
+                ├── evaluation_result.json
+                ├── rules_positive.sarif  # IFR+ data
+                ├── rules_negative.sarif  # IFR- data
+                ├── test_output.txt       # Raw test logs
+                └── rule_output.txt       # Raw rule logs
+```
+
 ### 3. Analysis (Visualizing Results)
 
 Generate the plots and tables used in the CodeTaste paper.
@@ -109,9 +128,18 @@ chmod +x run_analyze.sh
 ./run_analyze.sh
 ```
 
+The metrics come in 4 main categories: (1) Pass: Checks whether the model's patch preserves functional integrity, using the repository's test suite. (2) IFR: Measures whether the patch follows the intended refactoring using static analysis checks. (3) Alignment:  A combined score that only rewards rule compliance when tests are valid, and (4) Change Precision: Measures how well the patch avoids unrelated changes outside the intended refactoring scope. The golden commit reference solutions achieve 57.5%.
+
+### Submitting Results to the leaderboard
+
+We list top performing agentic systems on our [leaderboard](https://codetaste.logicstar.ai/). If you want your results included, please share a brief description of your approach, the corresponding `outputs/` (with traces) and `plots/` directories, and a link to the project's homepage. Please contact us at [alex@logicstar.ai](mailto:alex@logicstar.ai) for submissions.
+If you want independent verification of the results, we also require the `agent/` directory containing the exact agent implementation used for inference.
+
+> The inclusion in the leaderboard will be performed on a best effort basis, but we can not guarantee inclusion or timely processing of your requests.
+
 ---
 
-## 📈 Reproducing the Paper's Results
+### 📈 Reproducing the Paper's Results
 
 To reproduce the exact plots and tables found in the CodeTaste paper without rerunning the inference pipeline, you can use our precomputed outputs.
 
@@ -132,35 +160,7 @@ chmod +x run_analyze.sh
 
 ---
 
-## 📂 Output Directory Structure
-
-```text
-outputs/
-└── <description_type>/   # instructed | open
-    └── <mode>/           # direct | plan | multiplan
-        └── <owner>/<repo>/<hash8>/<agent_id>/
-            ├── prediction.diff           # The generated patch
-            ├── inference_metadata.json   # Cost, finish reasons, etc.
-            └── evaluation/
-                ├── evaluation_result.json
-                ├── rules_positive.sarif  # IFR+ data
-                ├── rules_negative.sarif  # IFR- data
-                ├── test_output.txt       # Raw test logs
-                └── rule_output.txt       # Raw rule logs
-```
-
----
-
-## Submitting Results to the leaderboard
-
-We list top performing agentic systems on our [leaderboard](https://codetaste.logicstar.ai/). If you want your results included, please share a brief description of your approach, the corresponding `outputs/` (with traces) and `plots/` directories, and a link to the project's homepage. Please contact us at [alex@logicstar.ai](mailto:alex@logicstar.ai) for submissions.
-If you want independent verification of the results, we also require the `agent/` directory containing the exact agent implementation used for inference.
-
-> The inclusion in the leaderboard will be performed on a best effort basis, but we can not guarantee inclusion or timely processing of your requests.
-
----
-
-## 📖 Documentation
+## 📖 Additional Documentation
 
 For detailed guides on specific phases of the pipeline, refer to our documentation:
 
@@ -169,3 +169,29 @@ For detailed guides on specific phases of the pipeline, refer to our documentati
 * [`docs/evaluation.md`](https://github.com/logic-star-ai/codetaste/blob/main/docs/evaluation.md) - Applying patches, running tests, and computing IFR.
 * [`docs/analysis.md`](https://github.com/logic-star-ai/codetaste/blob/main/docs/analysis.md) - Aggregating metrics and generating plots.
 * [`docs/benchmarking-your-agent.md`](https://github.com/logic-star-ai/codetaste/blob/main/docs/benchmarking-your-agent.md) - Guide to testing your own custom agent.
+
+---
+
+## 💫 Contributions
+
+We would love to hear from the broader NLP, Machine Learning, and Software Engineering research communities, and welcome contributions to CodeTaste! If you have suggestions for improvements, new features, or want to report issues, please open an issue or submit a pull request on our GitHub repository.
+
+---
+
+## ✍️ Citation
+
+```
+@article{codetaste2026,
+  title={CodeTaste: Can LLMs Generate Human-Level Code Refactorings?},
+  author={Alex Thillen and Niels Mündler and Veselin Raychev and Martin Vechev},
+  year={2026},
+  eprint={TBD},
+  archivePrefix={arXiv}
+}
+```
+
+---
+
+## ⚖️ License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
