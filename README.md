@@ -148,8 +148,8 @@ To reproduce the exact plots and tables found in the CodeTaste paper without rer
 Run the included script to download and extract the evaluation data into the `outputs/` directory, or download the `outputs.{zip,z01,z02,z03}` from our [Github Releases](https://github.com/logic-star-ai/codetaste/releases) and extract them manually.
 
 ```bash
-chmod +x download_outputs.sh
-./download_outputs.sh
+chmod +x .github/download_outputs.sh
+./.github/download_outputs.sh
 ```
 
 2. **Generate Plots and Tables:**
