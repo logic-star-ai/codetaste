@@ -49,6 +49,7 @@ class InferenceConfig(BaseModel):
     description_type: str = "instructed"
     mode: Literal["direct", "plan", "multiplan"] = "direct"
     plan_timeout: int = Field(gt=0, default=1800)
+    plan_step_max_attempts: int = Field(gt=0, default=3)
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 

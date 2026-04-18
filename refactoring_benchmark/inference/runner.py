@@ -40,6 +40,7 @@ class InstanceInferenceRunner:
             use_stdout=False,
             log_subdir=f"{config.sanitized_agent_id}",
         )
+        self.main_logger = get_logger("inference")
         self.output_dir = get_instance_output_dir(instance, config.sanitized_agent_id, config.output_dir)
         self.client: Optional[podman.PodmanClient] = None
 
@@ -150,6 +151,35 @@ class InstanceInferenceRunner:
         if self.client:
             self.client.close()
 
+    def _reset_plan_artifacts(self, mode: str) -> None:
+        """Remove plan/multiplan artifacts from previous failed attempts."""
+        if mode == "plan":
+            paths = [
+                self.output_dir / "refactoring_plan.md",
+                self.output_dir / "plan_metadata.json",
+                self.output_dir / "inference_metadata.json",
+                self.output_dir / "plan.out",
+            ]
+            for path in paths:
+                if path.exists():
+                    path.unlink()
+            return
+
+        if mode == "multiplan":
+            plans_dir = self.output_dir / "refactoring_plans"
+            if plans_dir.exists():
+                shutil.rmtree(plans_dir)
+            paths = [
+                self.output_dir / "inference_metadata.json",
+                self.output_dir / "multiplan_generation_metadata.json",
+                self.output_dir / "multiplan_metadata.json",
+                self.output_dir / "multiplan.out",
+                self.output_dir / "judge.out",
+            ]
+            for path in paths:
+                if path.exists():
+                    path.unlink()
+
     def run(self) -> bool:
         """
         Execute all phases in order: Plan or Multiplan -> Inference.
@@ -178,19 +208,42 @@ class InstanceInferenceRunner:
             step_entry = step_map.get(self.config.mode)
             if step_entry:
                 step_cls, payload_key = step_entry
-                step: PlanStep | MultiplanStep = step_cls(
-                    self.instance, self.config, self.output_dir, self.logger, self.client
-                )
-                try:
-                    payload = step.run()
-                    if not payload:
-                        return False
-                    if payload_key == "plan_path":
-                        plan_path = payload
-                    else:
-                        plan_content = payload
-                finally:
-                    step.cleanup_temp_dir()
+                payload = None
+                for attempt in range(1, self.config.plan_step_max_attempts + 1):
+                    if attempt > 1:
+                        self._reset_plan_artifacts(self.config.mode)
+
+                    self.main_logger.info(
+                        f"[{self.instance.id}] {self.config.mode} attempt "
+                        f"{attempt}/{self.config.plan_step_max_attempts}"
+                    )
+
+                    step: PlanStep | MultiplanStep = step_cls(
+                        self.instance, self.config, self.output_dir, self.logger, self.client
+                    )
+                    try:
+                        payload = step.run()
+                    finally:
+                        step.cleanup_temp_dir()
+
+                    if payload:
+                        break
+
+                    if attempt < self.config.plan_step_max_attempts:
+                        self.main_logger.warning(
+                            f"[{self.instance.id}] {self.config.mode} attempt {attempt} failed; retrying"
+                        )
+
+                if not payload:
+                    self.main_logger.error(
+                        f"[{self.instance.id}] {self.config.mode} failed after {self.config.plan_step_max_attempts} attempts"
+                    )
+                    return False
+
+                if payload_key == "plan_path":
+                    plan_path = payload
+                else:
+                    plan_content = payload
 
             # Phase 4: Inference step (always executed)
             if plan_content:

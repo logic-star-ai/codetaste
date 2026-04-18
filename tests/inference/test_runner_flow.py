@@ -250,3 +250,178 @@ def test_runner_skips_when_output_exists(tmp_path, monkeypatch):
 
     runner = runner_module.InstanceInferenceRunner(instance, config)
     assert runner.run() is True
+
+
+def test_runner_retries_plan_step_until_success(tmp_path, monkeypatch):
+    """Runner retries plan step up to 3 attempts and proceeds when later attempt succeeds."""
+    config = _make_config(tmp_path)
+    config.mode = "plan"
+    instance = _make_instance()
+
+    monkeypatch.setattr(
+        "refactoring_benchmark.inference.runner.output_exists",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        "refactoring_benchmark.inference.runner.get_instance_output_dir",
+        lambda *_args, **_kwargs: tmp_path / "outputs",
+    )
+    monkeypatch.setattr(
+        "refactoring_benchmark.inference.runner.copy_agent_config",
+        lambda *_args, **_kwargs: None,
+    )
+
+    class FakeClient:
+        def close(self):
+            return None
+
+    monkeypatch.setattr(
+        "refactoring_benchmark.inference.runner.podman_utils.get_local_client",
+        lambda *_args, **_kwargs: FakeClient(),
+    )
+
+    attempts = {"count": 0}
+
+    class FakePlanStep:
+        def __init__(self, *args, **kwargs):
+            return None
+
+        def run(self):
+            attempts["count"] += 1
+            if attempts["count"] < 3:
+                return None
+            return tmp_path / "outputs" / "refactoring_plan.md"
+
+        def cleanup_temp_dir(self):
+            return None
+
+    class FakeInferenceStep:
+        def __init__(self, *args, **kwargs):
+            return None
+
+        def run(self, _context):
+            return True
+
+        def cleanup_temp_dir(self):
+            return None
+
+    monkeypatch.setattr(runner_module, "PlanStep", FakePlanStep)
+    monkeypatch.setattr(runner_module, "InferenceStep", FakeInferenceStep)
+
+    runner = runner_module.InstanceInferenceRunner(instance, config)
+    assert runner.run() is True
+    assert attempts["count"] == 3
+
+
+def test_runner_stops_after_three_failed_plan_attempts(tmp_path, monkeypatch):
+    """Runner aborts after 3 failed plan attempts and does not run inference."""
+    config = _make_config(tmp_path)
+    config.mode = "plan"
+    instance = _make_instance()
+
+    monkeypatch.setattr(
+        "refactoring_benchmark.inference.runner.output_exists",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        "refactoring_benchmark.inference.runner.get_instance_output_dir",
+        lambda *_args, **_kwargs: tmp_path / "outputs",
+    )
+    monkeypatch.setattr(
+        "refactoring_benchmark.inference.runner.copy_agent_config",
+        lambda *_args, **_kwargs: None,
+    )
+
+    class FakeClient:
+        def close(self):
+            return None
+
+    monkeypatch.setattr(
+        "refactoring_benchmark.inference.runner.podman_utils.get_local_client",
+        lambda *_args, **_kwargs: FakeClient(),
+    )
+
+    attempts = {"count": 0}
+
+    class FakePlanStep:
+        def __init__(self, *args, **kwargs):
+            return None
+
+        def run(self):
+            attempts["count"] += 1
+            return None
+
+        def cleanup_temp_dir(self):
+            return None
+
+    class FailInferenceStep:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("Inference step should not be constructed")
+
+    monkeypatch.setattr(runner_module, "PlanStep", FakePlanStep)
+    monkeypatch.setattr(runner_module, "InferenceStep", FailInferenceStep)
+
+    runner = runner_module.InstanceInferenceRunner(instance, config)
+    assert runner.run() is False
+    assert attempts["count"] == 3
+
+
+def test_runner_retries_multiplan_step_until_success(tmp_path, monkeypatch):
+    """Runner retries multiplan step and proceeds when a later attempt succeeds."""
+    config = _make_config(tmp_path)
+    config.mode = "multiplan"
+    instance = _make_instance()
+
+    monkeypatch.setattr(
+        "refactoring_benchmark.inference.runner.output_exists",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        "refactoring_benchmark.inference.runner.get_instance_output_dir",
+        lambda *_args, **_kwargs: tmp_path / "outputs",
+    )
+    monkeypatch.setattr(
+        "refactoring_benchmark.inference.runner.copy_agent_config",
+        lambda *_args, **_kwargs: None,
+    )
+
+    class FakeClient:
+        def close(self):
+            return None
+
+    monkeypatch.setattr(
+        "refactoring_benchmark.inference.runner.podman_utils.get_local_client",
+        lambda *_args, **_kwargs: FakeClient(),
+    )
+
+    attempts = {"count": 0}
+
+    class FakeMultiplanStep:
+        def __init__(self, *args, **kwargs):
+            return None
+
+        def run(self):
+            attempts["count"] += 1
+            if attempts["count"] < 2:
+                return None
+            return "selected plan content"
+
+        def cleanup_temp_dir(self):
+            return None
+
+    class FakeInferenceStep:
+        def __init__(self, *args, **kwargs):
+            return None
+
+        def run(self, context):
+            return context.plan_content == "selected plan content"
+
+        def cleanup_temp_dir(self):
+            return None
+
+    monkeypatch.setattr(runner_module, "MultiplanStep", FakeMultiplanStep)
+    monkeypatch.setattr(runner_module, "InferenceStep", FakeInferenceStep)
+
+    runner = runner_module.InstanceInferenceRunner(instance, config)
+    assert runner.run() is True
+    assert attempts["count"] == 2

@@ -1,0 +1,115 @@
+#!/bin/bash
+
+echo "$PATH"
+
+source /opt/nvm/nvm.sh
+nvm use 22
+
+: "${BIFROST_API_KEY:? 'Error: BIFROST_API_KEY was empty or unset.'}"
+
+export ANTHROPIC_AUTH_TOKEN="$BIFROST_API_KEY"
+export ANTHROPIC_BASE_URL='https://srlx.inf.ethz.ch/anthropic'
+
+mkdir -p "$HOME/.claude"
+cat > "$HOME/.claude/settings.json" <<'JSON'
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "allow": ["*"],
+    "additionalDirectories": ["/"]
+  },
+  "model": "sonnet",
+  "availableModels": ["sonnet", "haiku"],
+
+  "modelOverrides": {
+    "claude-opus-4-6": "openrouter/minimax/minimax-m2.7",
+    "claude-sonnet-4-6": "openrouter/minimax/minimax-m2.7",
+    "claude-haiku-4-5": "openrouter/minimax/minimax-m2.7"
+  },
+
+  "env": {
+    "ANTHROPIC_BASE_URL": "https://srlx.inf.ethz.ch/anthropic",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "openrouter/minimax/minimax-m2.7",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "openrouter/minimax/minimax-m2.7",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "openrouter/minimax/minimax-m2.7",
+    "CLAUDE_CODE_SUBAGENT_MODEL": "openrouter/minimax/minimax-m2.7"
+  }
+}
+JSON
+
+[[ "$(claude --version)" =~ "2.1.71" ]] || { echo "Error: Version 2.1.71 not found"; exit 1; }
+
+inference_timeout="${TIMEOUT}"
+if ! [[ "$inference_timeout" =~ ^[0-9]+$ ]]; then
+  echo "ERROR: Invalid inference timeout value."
+  exit 1
+fi
+
+# Keep a safety buffer so metadata writing and teardown can still complete.
+timeout_buffer_seconds=$((10 * 60))
+claude_timeout_seconds=$((inference_timeout - timeout_buffer_seconds))
+if [ "$claude_timeout_seconds" -lt 1 ]; then
+  echo "ERROR: Claude timeout is invalid."
+  exit 1
+fi
+
+start_time=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+echo "The following is the prompt being sent to Claude:"
+cat /task_description/description.md
+
+set -o pipefail
+timeout --signal=TERM --kill-after=30 "${claude_timeout_seconds}s" \
+  claude -p \
+  --dangerously-skip-permissions \
+  --verbose \
+  --output-format stream-json \
+  --model openrouter/minimax/minimax-m2.7 \
+  --effort high \
+  --max-budget-usd 35 \
+  < /task_description/description.md 2>&1 | tee /tmp/output_log.json
+claude_exit_code=${PIPESTATUS[1]}
+set +o pipefail
+
+if [ "$claude_exit_code" -eq 124 ]; then
+  jq -n \
+    --arg start_time "$start_time" \
+    --arg timeout_seconds "$claude_timeout_seconds" \
+    --arg total_timeout_seconds "$inference_timeout" \
+    '
+    {
+      cost_usd: null,
+      start_time: $start_time,
+      finish_time: (now | strftime("%Y-%m-%dT%H:%M:%SZ")),
+      finish_reason: "timeout",
+      additional: {
+        error: ("Claude CLI timed out after " + $timeout_seconds + " seconds."),
+        claude_timeout_seconds: ($timeout_seconds | tonumber),
+        container_timeout_seconds: ($total_timeout_seconds | tonumber)
+      }
+    }
+    ' > /output/inference_metadata.json
+else
+  jq -s --arg start_time "$start_time" --arg exit_code "$claude_exit_code" '
+    (map(select(.type == "result")) | last) as $result
+    | {
+        cost_usd: ($result.total_cost_usd // null),
+        start_time: $start_time,
+        finish_time: (now | strftime("%Y-%m-%dT%H:%M:%SZ")),
+        additional: null
+      }
+      + {
+          finish_reason: (
+            if $result == null then
+              (if ($exit_code | tonumber) == 0 then "unknown" else "error" end)
+            elif $result.is_error then "error"
+            elif $result.subtype == "error_max_budget_usd" then "budget_exceeded"
+            elif $result.subtype == "error_during_execution" then "execution_error"
+            else $result.subtype
+            end
+          )
+        }
+  ' /tmp/output_log.json > /output/inference_metadata.json
+fi
+
+chmod 666 /output/inference_metadata.json || true

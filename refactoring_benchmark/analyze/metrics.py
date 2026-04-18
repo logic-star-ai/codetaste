@@ -11,6 +11,7 @@ from refactoring_benchmark.coverage.precision import (
     calculate_precision_eval_result,
 )
 from refactoring_benchmark.evaluation.models import EvaluationResult
+from refactoring_benchmark.inference.models import InferenceMetadata, MultiplanMetadata
 
 # Type alias for metric functions
 # Returns float value in [0, 1] range, or None if metric cannot be computed
@@ -153,10 +154,53 @@ def metric_precision_overall(result: EvaluationResult) -> float | None:
 
 
 def metric_cost(result: EvaluationResult) -> float | None:
-    """Cost in USD (None if not available)."""
+    """Total cost in USD across all available phases."""
     if result.inference_metadata is None:
         return None
-    return result.inference_metadata.cost_usd
+
+    total_cost = 0.0
+    has_any_cost = False
+
+    def _add_cost(cost: float | None) -> None:
+        nonlocal total_cost, has_any_cost
+        if cost is None or cost < 0:
+            return
+        total_cost += cost
+        has_any_cost = True
+
+    _add_cost(result.inference_metadata.cost_usd)
+
+    eval_dir = Path(result.eval_dir) if result.eval_dir else None
+    if eval_dir is None:
+        return total_cost if has_any_cost else None
+
+    run_dir = eval_dir.parent
+
+    plan_metadata_path = run_dir / "plan_metadata.json"
+    if plan_metadata_path.exists():
+        try:
+            plan_metadata: InferenceMetadata = InferenceMetadata.load_from_json(plan_metadata_path)
+            _add_cost(plan_metadata.cost_usd)
+        except Exception:
+            pass
+
+    multiplan_generation_metadata_path = run_dir / "multiplan_generation_metadata.json"
+    if multiplan_generation_metadata_path.exists():
+        try:
+            multiplan_generation_metadata: InferenceMetadata = InferenceMetadata.load_from_json(multiplan_generation_metadata_path)
+            _add_cost(multiplan_generation_metadata.cost_usd)
+        except Exception:
+            pass
+
+    multiplan_metadata_path = run_dir / "multiplan_metadata.json"
+    if multiplan_metadata_path.exists():
+        try:
+            multiplan_metadata = MultiplanMetadata.load_from_json(multiplan_metadata_path)
+            _add_cost(multiplan_metadata.judge_cost_usd)
+        except Exception:
+            pass
+
+    return total_cost if has_any_cost else None
 
 
 # Registry of available metrics

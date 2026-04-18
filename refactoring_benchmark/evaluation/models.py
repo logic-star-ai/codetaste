@@ -30,12 +30,8 @@ class TestMetrics(BaseModel):
     @computed_field
     @property
     def is_valid(self) -> bool:
-        """Tests ran without crashing and have reasonable coverage."""
-        return (
-            self.failed != -1  # Didn't crash
-            and self.total >= 10  # Minimum test suite size
-            and self.total < 10000  # Sanity check
-        )
+        """At least 10 tests, at least 30% passed, and no explicit error."""
+        return self.error is None and self.total >= 10 and (self.passed / self.total) >= 0.3
 
 
 class RuleMetrics(BaseModel):
