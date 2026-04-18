@@ -53,7 +53,7 @@ git clone git@github.com:logic-star-ai/codetaste.git && cd codetaste
 poetry install && source .venv/bin/activate
 
 # 2. Download benchmark artifacts (assets, instance_images, metadata, pseudo-agents)
-curl -L -o codetaste100.zip "https://github.com/logic-star-ai/refactoring-benchmark/releases/download/v0/codetaste100.zip"
+curl -L -o codetaste100.zip "https://github.com/logic-star-ai/refactoring-benchmark/releases/download/v1.0.0/codetaste100.zip"
 unzip -o codetaste100.zip -d . && rm codetaste100.zip
 
 # 3. Pull the base container image

@@ -1,8 +1,8 @@
-curl -fL -O "https://github.com/logic-star-ai/refactoring-benchmark/releases/download/v0/outputs.zip"
+curl -fL -O "https://github.com/logic-star-ai/refactoring-benchmark/releases/download/v1.0.0/outputs.zip"
 
 for i in $(seq -w 1 99); do
   part="outputs.z${i}"
-  url="https://github.com/logic-star-ai/refactoring-benchmark/releases/download/v0/${part}"
+  url="https://github.com/logic-star-ai/refactoring-benchmark/releases/download/v1.0.0/${part}"
   if ! curl -fL -o "${part}" "${url}"; then
     rm -f "${part}"
     break

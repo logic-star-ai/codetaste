@@ -150,7 +150,7 @@ def bootstrap_setup_phase(
 
         validate_container_size(container, metadata=metadata)
         # 4. Final Validation
-        if metadata.golden_metrics.is_valid or metadata.base_metrics.is_valid:
+        if metadata.golden_metrics.is_valid and metadata.base_metrics.is_valid:
             metadata.has_execution_environment = True
             metadata_json = metadata.model_dump_json(indent=2).encode("utf-8")
             podman_utils.copy_to_container(container, metadata_json, "/rules/instance_metadata.json")

@@ -58,10 +58,12 @@ def main():
     if args.mode == "plan":
         logger.info("Plan Mode: ENABLED (two-step inference)")
         logger.info(f"  Step 1: Planning phase (timeout: {args.plan_timeout}s)")
+        logger.info(f"  Step 1: Planning retries: {args.plan_step_max_attempts} attempts")
         logger.info(f"  Step 2: Execution phase (timeout: {args.timeout}s)")
     elif args.mode == "multiplan":
         logger.info("Multiplan Mode: ENABLED (multi-plan inference)")
         logger.info(f"  Step 1: Multiplan generation (timeout: {args.plan_timeout}s)")
+        logger.info(f"  Step 1: Multiplan retries: {args.plan_step_max_attempts} attempts")
         logger.info(f"  Step 2: Execution phase (timeout: {args.timeout}s)")
     # Sanitize agent ID for filesystem use
     try:
@@ -113,6 +115,7 @@ def main():
         reuse_successful_plan=args.reuse_successful_plan,
         mode=args.mode,
         plan_timeout=args.plan_timeout,
+        plan_step_max_attempts=args.plan_step_max_attempts,
     )
 
     # Create and run orchestrator

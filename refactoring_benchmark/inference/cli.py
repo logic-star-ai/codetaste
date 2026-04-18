@@ -106,6 +106,13 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument(
+        "--plan-step-max-attempts",
+        type=int,
+        default=3,
+        help="Maximum number of attempts for plan/multiplan step retries",
+    )
+
+    parser.add_argument(
         "--multiplan",
         action="store_true",
         help="Enable multi-plan inference: generate 5 different plans, use LLM to select best, then execute it (mutually exclusive with --plan)",
@@ -114,6 +121,8 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if args.plan and args.multiplan:
         parser.error("Cannot enable both --plan and --multiplan simultaneously")
+    if args.plan_step_max_attempts <= 0:
+        parser.error("--plan-step-max-attempts must be > 0")
 
     # Convert paths to absolute
     if args.output_dir is None:
