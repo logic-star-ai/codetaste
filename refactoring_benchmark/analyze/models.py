@@ -116,9 +116,10 @@ class AnalysisData(BaseModel):
             "codex-v0.77.0-gpt-5.2": 0,
             "codex-v0.77.0-gpt-5.1-codex-mini": 1,
             "claude-code-v2.0.76-sonnet45": 2,
-            "qwen-code-v0.6.2-qwen3-coder-30b-a3b-instruct": 3,
-            "golden_agent": 4,
-            "null_agent": 5,
+            "claude-code-v2.1.71-minimax-m2.7": 3,
+            "qwen-code-v0.6.2-qwen3-coder-30b-a3b-instruct": 4,
+            "golden_agent": 5,
+            "null_agent": 6,
         }
         agents = set(k[0] for k in self.data.keys())
         return sorted(agents, key=lambda x: agent_order.get(x, 999))

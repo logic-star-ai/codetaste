@@ -23,6 +23,7 @@ METRICS=(
 AGENTS_DEFAULT=(
   "codex-v0.77.0-gpt-5.1-codex-mini"
   "claude-code-v2.0.76-sonnet45"
+  "claude-code-v2.1.71-minimax-m2.7"
   "codex-v0.77.0-gpt-5.2"
   "qwen-code-v0.6.2-qwen3-coder-30b-a3b-instruct"
 )

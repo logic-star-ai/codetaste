@@ -4,7 +4,12 @@ import json
 from pathlib import Path
 
 from refactoring_benchmark.coverage.models import SARIFOpengrep
-from refactoring_benchmark.coverage.parse import parse_diff, parse_sarif
+from refactoring_benchmark.coverage.parse import (
+    parse_diff,
+    parse_diff_line_counts_file,
+    parse_precision_diff_line_counts_file,
+    parse_sarif,
+)
 
 
 def test_parse_diff_line_count():
@@ -93,3 +98,27 @@ def test_parse_sarif_negative_and_diff_intersection():
         print("\nSample intersection lines:")
         for line in sample:
             print(f"  {line.uri}:{line.line_number}")
+
+
+def test_parse_precision_diff_line_counts_filters_noise(tmp_path):
+    """Precision diff counts should exclude whitespace and comment-only lines."""
+    diff_path = tmp_path / "prediction.diff"
+    diff_path.write_text(
+        """diff --git a/file.py b/file.py
+index 1234567..abcdefg 100644
+--- a/file.py
++++ b/file.py
+@@ -0,0 +1,3 @@
++print("hello")
++
++# comment
+"""
+    )
+
+    raw_removed, raw_added = parse_diff_line_counts_file(diff_path, "base", "predicted")
+    filtered_removed, filtered_added = parse_precision_diff_line_counts_file(diff_path, "base", "predicted")
+
+    assert raw_removed == 0
+    assert raw_added == 3
+    assert filtered_removed == 0
+    assert filtered_added == 1

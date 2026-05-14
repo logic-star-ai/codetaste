@@ -157,6 +157,7 @@ LATEX_AGENT_NAME_MAPPING = {
     "codex-v0.77.0-gpt-5.2": "GPT-5.2",
     "codex-v0.77.0-gpt-5.1-codex-mini": "GPT-5.1 Codex Mini",
     "claude-code-v2.0.76-sonnet45": "Claude Sonnet 4.5",
+    "claude-code-v2.1.71-minimax-m2.7": "MiniMax M2.7",
     "qwen-code-v0.6.2-qwen3-coder-30b-a3b-instruct": "Qwen3",
     "golden_agent": "Golden Patch",
     "null_agent": "Base Commit",
@@ -193,9 +194,10 @@ def _sorted_agent_ids(agent_ids: set[str]) -> list[str]:
         "codex-v0.77.0-gpt-5.2": 0,
         "codex-v0.77.0-gpt-5.1-codex-mini": 1,
         "claude-code-v2.0.76-sonnet45": 2,
-        "qwen-code-v0.6.2-qwen3-coder-30b-a3b-instruct": 3,
-        "golden_agent": 4,
-        "null_agent": 5,
+        "claude-code-v2.1.71-minimax-m2.7": 3,
+        "qwen-code-v0.6.2-qwen3-coder-30b-a3b-instruct": 4,
+        "golden_agent": 5,
+        "null_agent": 6,
     }
     return sorted(agent_ids, key=lambda x: agent_order.get(x, 999))
 

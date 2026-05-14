@@ -55,12 +55,14 @@ def main():
         logger.info(f"Evaluating all {len(instances_to_run)} instances")
 
     logger.info(f"Agent ID: {args.agent_id}")
+    logger.info(f"Rules directory: {args.rules_dir}")
 
     # Create evaluation configuration
     eval_config = EvaluationConfig(
         instances_csv=args.instances_csv,
         agent_id=args.agent_id,
         output_dir=args.output_dir,
+        rules_dir=args.rules_dir,
         nr_workers=args.nr_workers,
         timeout_test=args.timeout_test,
         timeout_rule=args.timeout_rule,

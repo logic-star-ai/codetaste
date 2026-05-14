@@ -2,7 +2,7 @@
 
 import os
 from pathlib import Path, PurePosixPath
-from typing import Set, Tuple
+from typing import Callable, Set, Tuple
 
 import whatthepatch
 from joblib import Memory
@@ -39,6 +39,33 @@ _IGNORE_DIR_NAMES = {
     "package-lock.json",
 }
 
+DOC_EXTENSIONS = {".md", ".rst", ".txt"}
+CONFIG_EXTENSIONS = {".json", ".yaml", ".yml", ".toml"}
+HASH_COMMENT_EXTENSIONS = {".py", ".rb", ".sh", ".yaml", ".yml", ".toml"}
+SLASH_COMMENT_EXTENSIONS = {
+    ".c",
+    ".cc",
+    ".cpp",
+    ".cs",
+    ".go",
+    ".groovy",
+    ".h",
+    ".hpp",
+    ".java",
+    ".js",
+    ".jsx",
+    ".kt",
+    ".mjs",
+    ".rs",
+    ".scala",
+    ".swift",
+    ".ts",
+    ".tsx",
+    ".zig",
+}
+
+ChangedLineFilter = Callable[[str, str | None], bool]
+
 
 def _normalize_path(path: str) -> str:
     return path.replace("\\", "/")
@@ -49,7 +76,52 @@ def _should_ignore_path(path: str) -> bool:
     return any(part in _IGNORE_DIR_NAMES for part in parts)
 
 
-def parse_diff(diff_content: str, base_commit: str, golden_commit: str) -> Tuple[Set[Line], Set[Line]]:
+def _is_precision_ignored_path(path: str) -> bool:
+    return Path(path).suffix.lower() in DOC_EXTENSIONS | CONFIG_EXTENSIONS
+
+
+def _is_comment_only_line(path: str, content: str | None) -> bool:
+    if content is None:
+        return False
+    stripped = content.strip()
+    if not stripped:
+        return False
+
+    suffix = Path(path).suffix.lower()
+    if suffix in HASH_COMMENT_EXTENSIONS:
+        return stripped.startswith("#")
+    if suffix in SLASH_COMMENT_EXTENSIONS:
+        return (
+            stripped.startswith("//")
+            or stripped.startswith("/*")
+            or stripped.startswith("*")
+            or stripped.startswith("*/")
+        )
+    return False
+
+
+def _should_keep_precision_line(path: str, content: str | None) -> bool:
+    if _is_precision_ignored_path(path):
+        return False
+
+    if content is None:
+        return True
+
+    if content.strip() == "":
+        return False
+
+    if _is_comment_only_line(path, content):
+        return False
+
+    return True
+
+
+def _parse_diff(
+    diff_content: str,
+    base_commit: str,
+    golden_commit: str,
+    keep_changed_line: ChangedLineFilter,
+) -> Tuple[Set[Line], Set[Line]]:
     base_lines: Set[Line] = set()
     golden_lines: Set[Line] = set()
     for diff in whatthepatch.parse_patch(diff_content):
@@ -65,17 +137,33 @@ def parse_diff(diff_content: str, base_commit: str, golden_commit: str) -> Tuple
             if isinstance(text, bytes):
                 text = text.decode("utf-8", errors="ignore")
             if old_no is not None and new_no is None:
-                base_lines.add(Line(uri=old_path, commit=base_commit, line_number=old_no, content=text))
+                if keep_changed_line(old_path, text):
+                    base_lines.add(Line(uri=old_path, commit=base_commit, line_number=old_no, content=text))
             elif new_no is not None and old_no is None:
-                golden_lines.add(Line(uri=new_path, commit=golden_commit, line_number=new_no, content=text))
+                if keep_changed_line(new_path, text):
+                    golden_lines.add(Line(uri=new_path, commit=golden_commit, line_number=new_no, content=text))
 
     return base_lines, golden_lines
+
+
+def parse_diff(diff_content: str, base_commit: str, golden_commit: str) -> Tuple[Set[Line], Set[Line]]:
+    return _parse_diff(diff_content, base_commit, golden_commit, keep_changed_line=lambda _path, _content: True)
+
+
+def parse_precision_diff(diff_content: str, base_commit: str, golden_commit: str) -> Tuple[Set[Line], Set[Line]]:
+    return _parse_diff(diff_content, base_commit, golden_commit, keep_changed_line=_should_keep_precision_line)
 
 
 def parse_diff_file(diff_path, base_commit: str, golden_commit: str) -> Tuple[Set[Line], Set[Line]]:
     """Parse a diff file (no caching)."""
     diff_content = Path(diff_path).read_text(errors="replace")
     return parse_diff(diff_content, base_commit, golden_commit)
+
+
+def parse_precision_diff_file(diff_path, base_commit: str, golden_commit: str) -> Tuple[Set[Line], Set[Line]]:
+    """Parse a diff file using the canonical PREC exclusions."""
+    diff_content = Path(diff_path).read_text(errors="replace")
+    return parse_precision_diff(diff_content, base_commit, golden_commit)
 
 
 def parse_diff_line_counts_file(diff_path, base_commit: str, golden_commit: str) -> Tuple[int, int]:
@@ -90,11 +178,32 @@ def parse_diff_line_counts_file(diff_path, base_commit: str, golden_commit: str)
     return nr_lines_removed, nr_lines_added
 
 
+def parse_precision_diff_line_counts_file(diff_path, base_commit: str, golden_commit: str) -> Tuple[int, int]:
+    """Parse a diff file and return filtered (removed_count, added_count), cached by path + mtime."""
+    path_str = str(diff_path)
+    mtime = os.path.getmtime(diff_path)
+    return _cached_parse_precision_diff_line_counts_file(path_str, mtime, base_commit, golden_commit)
+
+
 @memory.cache
 def _cached_parse_diff_line_counts_file(
-    path_str: str, mtime: float, base_commit: str, golden_commit: str
+    path_str: str,
+    mtime: float,
+    base_commit: str,
+    golden_commit: str,
 ) -> Tuple[int, int]:
     lines_removed, lines_added = parse_diff_file(path_str, base_commit, golden_commit)
+    return len(lines_removed), len(lines_added)
+
+
+@memory.cache
+def _cached_parse_precision_diff_line_counts_file(
+    path_str: str,
+    mtime: float,
+    base_commit: str,
+    golden_commit: str,
+) -> Tuple[int, int]:
+    lines_removed, lines_added = parse_precision_diff_file(path_str, base_commit, golden_commit)
     return len(lines_removed), len(lines_added)
 
 

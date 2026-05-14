@@ -44,14 +44,14 @@ class RuleMetrics(BaseModel):
 
     @computed_field
     @property
-    def ifr(self) -> float:
+    def ifr(self) -> float | None:
         """Instruction Following Rate.
 
         IFR = (positive_matched + negative_avoided) / total_rules
         """
         total = self.total_positive_rules + self.total_negative_rules
         if total == 0:
-            return 1.0
+            return None
 
         # Count successes: positive rules matched + negative rules avoided
         followed = self.positive_rules_matched + (self.total_negative_rules - self.negative_rules_matched)
@@ -59,18 +59,18 @@ class RuleMetrics(BaseModel):
 
     @computed_field
     @property
-    def positive_ifr(self) -> float:
+    def positive_ifr(self) -> float | None:
         """Instruction following rate for positive rules only."""
         if self.total_positive_rules == 0:
-            return 1.0
+            return None
         return self.positive_rules_matched / self.total_positive_rules
 
     @computed_field
     @property
-    def negative_ifr(self) -> float:
+    def negative_ifr(self) -> float | None:
         """Instruction following rate for negative rules only (avoiding bad patterns)."""
         if self.total_negative_rules == 0:
-            return 1.0
+            return None
         avoided = self.total_negative_rules - self.negative_rules_matched
         return avoided / self.total_negative_rules
 
@@ -109,6 +109,7 @@ class EvaluationConfig(BaseModel):
 
     instances_csv: Path
     agent_id: str
+    rules_dir: Path
     output_dir: Path = Path("./outputs/instructed/direct")
     nr_workers: int = Field(gt=0, default=4)
     timeout_test: int = Field(gt=0, default=1200)  # 20 minutes

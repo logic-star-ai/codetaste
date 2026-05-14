@@ -14,10 +14,9 @@ from refactoring_benchmark.coverage.models import (
     PrecisionMetricsResult,
     SARIFOpengrep,
 )
-from refactoring_benchmark.coverage.parse import parse_diff_file, parse_sarif
+from refactoring_benchmark.coverage.parse import parse_precision_diff_file, parse_sarif
 from refactoring_benchmark.evaluation.models import EvaluationResult
 from refactoring_benchmark.utils.models import ReducedInstanceRow
-from refactoring_benchmark.utils.paths import PSEUDO_AGENTS_DIR
 
 cachedir = "./.cache_dir"
 memory = Memory(cachedir, verbose=1)
@@ -45,12 +44,18 @@ def _load_precision_data(
     with open(sarif_positive_path) as f:
         sarif_pos = SARIFOpengrep.model_validate(json.load(f))
 
-    # Parse SARIF to extract lines (commit values are placeholders)
+    # Parse SARIF to extract lines (commit values are placeholders). Normalization is
+    # defined on the diff side; intersection with filtered diff lines determines
+    # which findings count.
     lines_matched_by_removal_rules = parse_sarif(sarif_neg, "base")
     lines_matched_by_addition_rules = parse_sarif(sarif_pos, "predicted")
 
     # Load and parse diff (cached)
-    lines_removed, lines_added = parse_diff_file(diff_path, "base", "predicted")
+    lines_removed, lines_added = parse_precision_diff_file(
+        diff_path,
+        "base",
+        "predicted",
+    )
 
     # Create PrecisionMetrics object for computation
     return PrecisionMetrics(
@@ -95,7 +100,11 @@ def _cached_calculate_precision(
     diff_path = Path(paths_str[2])
 
     # Load and parse data
-    metrics = _load_precision_data(sarif_negative_path, sarif_positive_path, diff_path)
+    metrics = _load_precision_data(
+        sarif_negative_path,
+        sarif_positive_path,
+        diff_path,
+    )
 
     # Convert to result cachable format
     return PrecisionMetricsResult(
@@ -111,7 +120,7 @@ def _cached_calculate_precision(
 
 def calculate_precision_eval_result(
     result: EvaluationResult,
-    null_agent_dir: Path = PSEUDO_AGENTS_DIR,
+    null_agent_dir: Path,
 ) -> Optional[InstanceAgentPrecision]:
     """
     Calculate precision metrics for a single instance-agent pair.

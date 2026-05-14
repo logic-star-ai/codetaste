@@ -16,7 +16,7 @@ outputs/<description_type>/<mode>/<owner>/<repo>/<hash>/<agent_id>/
 ## What it does
 1. **Discover output directories** (defaults to all `outputs/<description_type>/<mode>` directories).
 2. **Load evaluation results** and attach inference metadata when available.
-3. **Filter** by agent ID, description type, mode, or success status.
+3. **Filter** by agent ID, description type, mode, language, or success status.
 4. **Compute metrics** (IFR, test success, precision, cost, etc.).
 5. **Generate plots** and optional summary tables.
 
@@ -31,6 +31,10 @@ python -m refactoring_benchmark.cli.analyze --agent-id agentA --agent-id agentB
 # Only successful inference runs
 python -m refactoring_benchmark.cli.analyze --successful-only
 
+# Restrict analysis to specific languages
+python -m refactoring_benchmark.cli.analyze --language python
+python -m refactoring_benchmark.cli.analyze --language js --language ts
+
 # Filter by mode
 python -m refactoring_benchmark.cli.analyze --mode direct --mode plan
 
@@ -41,6 +45,9 @@ python -m refactoring_benchmark.cli.analyze --metric precision_overall
 ## Outputs
 - Plots saved to `./analyze/` (configurable via `--plots-dir`).
 - Optional statistics table (`--statistics`).
+- Language-filtered runs append a `_lang_<language>...` suffix to generated files.
+- Language-filtered plots annotate the selected language(s) in the plot title.
+- Use `--force-ylim-100` to keep percentage plots capped exactly at `100%`.
 
 ## Baseline Test Results
 Test success validation uses baseline test results from `baseline_results/<owner>/<repo>/<hash>/`.

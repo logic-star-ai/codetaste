@@ -59,6 +59,45 @@ function revoke_sudo() {
     sudo -k
 }
 
+function rule_count() {
+    local rules_file="$1"
+    python -c 'import sys, yaml; data = yaml.safe_load(open(sys.argv[1])) or {}; rules = data.get("rules") if isinstance(data, dict) else []; print(len(rules or []))' "$rules_file" 2>/dev/null || awk '
+        /^[[:space:]]*rules:[[:space:]]*\[[[:space:]]*\][[:space:]]*$/ { print 0; found = 1; exit }
+        /^[[:space:]]*-[[:space:]]*id:/ { count++ }
+        END { if (!found) print count + 0 }
+    ' "$rules_file"
+}
+
+function write_empty_sarif() {
+    local sarif_output="$1"
+    printf '%s\n' '{"$schema":"https://docs.oasis-open.org/sarif/sarif/v2.1.0/os/schemas/sarif-schema-2.1.0.json","version":"2.1.0","runs":[{"invocations":[{"executionSuccessful":true,"toolExecutionNotifications":[]}],"results":[],"tool":{"driver":{"name":"Opengrep OSS","rules":[]}}}]}' > "$sarif_output"
+    sudo chown benchmarker:benchmarker "$sarif_output"
+}
+
+function run_opengrep_rules() {
+    local label="$1"
+    local rules_file="$2"
+    local sarif_output="$3"
+    local rules_output="$4"
+
+    if [ -f "$rules_file" ]; then
+        cat "$rules_file" > "$rules_output"
+        local count
+        count="$(rule_count "$rules_file")"
+        if [ "$count" -gt 0 ]; then
+            echo "-> Scanning with $label rules: $rules_file"
+            opengrep scan --timeout-threshold 0 --timeout 0 --max-memory 0 -f "$rules_file" --sarif-output "$sarif_output" .
+            sudo chown benchmarker:benchmarker "$sarif_output"
+            echo "-> ${label^} SARIF output saved to $sarif_output"
+        else
+            write_empty_sarif "$sarif_output"
+            echo "-> No $label rules; wrote empty SARIF output to $sarif_output"
+        fi
+    else
+        echo "-> Warning: ${label^} rules not found at $rules_file"
+    fi
+}
+
 preserve_env
 
 # Permissions
@@ -253,27 +292,9 @@ case "$1" in
         cat /rules/default.semgrepignore > /testbed/.semgrepignore
         echo "-> Applied default .semgrepignore to /testbed"
 
-        # Scan with positive rules
-        if [ -f "$RULES_POSITIVE" ]; then
-            echo "-> Scanning with positive rules: $RULES_POSITIVE"
-            opengrep scan --timeout-threshold 0 --timeout 0 --max-memory 0 -f "$RULES_POSITIVE" --sarif-output "$SARIF_OUTPUT_POSITIVE" .
-            sudo chown benchmarker:benchmarker "$SARIF_OUTPUT_POSITIVE"
-            cat "$RULES_POSITIVE" > "$RULES_OUTPUT_POSITIVE"
-            echo "-> Positive SARIF output saved to $SARIF_OUTPUT_POSITIVE"
-        else
-            echo "-> Warning: Positive rules not found at $RULES_POSITIVE"
-        fi
-
-        # Scan with negative rules
-        if [ -f "$RULES_NEGATIVE" ]; then
-            echo "-> Scanning with negative rules: $RULES_NEGATIVE"
-            opengrep scan --timeout-threshold 0 --timeout 0 --max-memory 0 -f "$RULES_NEGATIVE" --sarif-output "$SARIF_OUTPUT_NEGATIVE" .
-            sudo chown benchmarker:benchmarker "$SARIF_OUTPUT_NEGATIVE"
-            cat "$RULES_NEGATIVE" > "$RULES_OUTPUT_NEGATIVE"
-            echo "-> Negative SARIF output saved to $SARIF_OUTPUT_NEGATIVE"
-        else
-            echo "-> Warning: Negative rules not found at $RULES_NEGATIVE"
-        fi
+        # Scan with positive and negative rules when present.
+        run_opengrep_rules "positive" "$RULES_POSITIVE" "$SARIF_OUTPUT_POSITIVE" "$RULES_OUTPUT_POSITIVE"
+        run_opengrep_rules "negative" "$RULES_NEGATIVE" "$SARIF_OUTPUT_NEGATIVE" "$RULES_OUTPUT_NEGATIVE"
 
         echo "=== Static analysis complete ==="
         ;;
