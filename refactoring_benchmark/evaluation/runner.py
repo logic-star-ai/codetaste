@@ -18,16 +18,16 @@ SCRIPTS_DIRNAME = "scripts"
 ENTRYPOINT_PATH = PROJECT_ROOT / "entrypoint.sh"
 
 
-def prepare_temp_rules_dir(instance: InstanceRow, logger: logging.Logger) -> Optional[Path]:
+def prepare_temp_rules_dir(instance: InstanceRow, rules_root: Path, logger: logging.Logger) -> Optional[Path]:
     """
     Build a temporary rules directory for evaluation and return its path.
 
     Copies:
-      - assets/rules/<owner>/<repo>/<hash>/*
+      - <rules_root>/<owner>/<repo>/<hash>/*
       - instance_images/<owner>/<repo>/<hash>/instance_metadata.json
       - assets/default.semgrepignore
     """
-    rules_src = PROJECT_ROOT / instance.asset_dir("rules")
+    rules_src = rules_root / instance.owner / instance.repo / instance.short_hash
     if not rules_src.exists():
         logger.error(f"Rules directory not found: {rules_src}")
         return None

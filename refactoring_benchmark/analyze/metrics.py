@@ -5,30 +5,31 @@ from typing import Callable
 
 from refactoring_benchmark.analyze.diff_stats import parse_diff_file
 from refactoring_benchmark.analyze.validation import ValidityStatus, check_test_validity
-from refactoring_benchmark.coverage.parse import parse_diff_line_counts_file
+from refactoring_benchmark.coverage.parse import parse_precision_diff_line_counts_file
 from refactoring_benchmark.coverage.precision import (
     InstanceAgentPrecision,
     calculate_precision_eval_result,
 )
 from refactoring_benchmark.evaluation.models import EvaluationResult
 from refactoring_benchmark.inference.models import InferenceMetadata, MultiplanMetadata
+from refactoring_benchmark.utils.paths import PSEUDO_AGENTS_DIR
 
 # Type alias for metric functions
 # Returns float value in [0, 1] range, or None if metric cannot be computed
 MetricFunction = Callable[[EvaluationResult], float | None]
 
 
-def metric_ifr(result: EvaluationResult) -> float:
+def metric_ifr(result: EvaluationResult) -> float | None:
     """Total IFR metric (0-1 range)."""
     return result.agent_rule_metrics.ifr
 
 
-def metric_ifr_added(result: EvaluationResult) -> float:
+def metric_ifr_added(result: EvaluationResult) -> float | None:
     """IFR for added lines only (0-1 range)."""
     return result.agent_rule_metrics.positive_ifr
 
 
-def metric_ifr_removed(result: EvaluationResult) -> float:
+def metric_ifr_removed(result: EvaluationResult) -> float | None:
     """IFR for removed lines only (0-1 range)."""
     return result.agent_rule_metrics.negative_ifr
 
@@ -36,7 +37,7 @@ def metric_ifr_removed(result: EvaluationResult) -> float:
 def metric_diff_added_lines(result: EvaluationResult) -> int | None:
     diff_path = Path(result.eval_dir.parent) / "prediction.diff"
     try:
-        _, lines_added = parse_diff_line_counts_file(diff_path, "base", "predicted")
+        _, lines_added = parse_precision_diff_line_counts_file(diff_path, "base", "predicted")
     except FileNotFoundError:
         return None
     return lines_added
@@ -45,7 +46,7 @@ def metric_diff_added_lines(result: EvaluationResult) -> int | None:
 def metric_diff_removed_lines(result: EvaluationResult) -> int | None:
     diff_path = Path(result.eval_dir.parent) / "prediction.diff"
     try:
-        lines_removed, _ = parse_diff_line_counts_file(diff_path, "base", "predicted")
+        lines_removed, _ = parse_precision_diff_line_counts_file(diff_path, "base", "predicted")
     except FileNotFoundError:
         return None
     return lines_removed
@@ -63,7 +64,7 @@ def metric_diff_size(result: EvaluationResult) -> int | None:
     """Total diff size (added + removed lines), with precision-style exclusions."""
     diff_path = Path(result.eval_dir.parent) / "prediction.diff"
     try:
-        lines_removed, lines_added = parse_diff_line_counts_file(diff_path, "base", "predicted")
+        lines_removed, lines_added = parse_precision_diff_line_counts_file(diff_path, "base", "predicted")
     except FileNotFoundError:
         return None
     return lines_added + lines_removed
@@ -84,7 +85,10 @@ def metric_strict_ifr_x_test_success(result: EvaluationResult) -> float | None:
     is_test_success = metric_test_success(result)
     if is_test_success is None:
         return None
-    if metric_ifr(result) == 1.0 and is_test_success == 1.0:
+    ifr = metric_ifr(result)
+    if ifr is None:
+        return None
+    if ifr == 1.0 and is_test_success == 1.0:
         return 1.0
     else:
         return 0.0
@@ -95,7 +99,10 @@ def metric_ifr_x_test_success(result: EvaluationResult) -> float | None:
     test_success = metric_test_success(result)
     if test_success is None:
         return None
-    return metric_ifr(result) * test_success
+    ifr = metric_ifr(result)
+    if ifr is None:
+        return None
+    return ifr * test_success
 
 
 def metric_ifr_added_x_test_success(result: EvaluationResult) -> float | None:
@@ -103,7 +110,10 @@ def metric_ifr_added_x_test_success(result: EvaluationResult) -> float | None:
     test_success = metric_test_success(result)
     if test_success is None:
         return None
-    return metric_ifr_added(result) * test_success
+    ifr_added = metric_ifr_added(result)
+    if ifr_added is None:
+        return None
+    return ifr_added * test_success
 
 
 def metric_ifr_removed_x_test_success(result: EvaluationResult) -> float | None:
@@ -111,7 +121,10 @@ def metric_ifr_removed_x_test_success(result: EvaluationResult) -> float | None:
     test_success = metric_test_success(result)
     if test_success is None:
         return None
-    return metric_ifr_removed(result) * test_success
+    ifr_removed = metric_ifr_removed(result)
+    if ifr_removed is None:
+        return None
+    return ifr_removed * test_success
 
 
 def metric_f1_score(result: EvaluationResult) -> float | None:
@@ -132,7 +145,7 @@ def metric_f1_score(result: EvaluationResult) -> float | None:
 
 def _calculate_precision(result: EvaluationResult) -> InstanceAgentPrecision | None:
     """Helper to calculate precision metrics (requires pseudo-agent outputs)."""
-    return calculate_precision_eval_result(result)
+    return calculate_precision_eval_result(result, null_agent_dir=PSEUDO_AGENTS_DIR)
 
 
 def metric_precision_added(result: EvaluationResult) -> float | None:

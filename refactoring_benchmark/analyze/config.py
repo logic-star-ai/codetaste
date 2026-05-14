@@ -49,6 +49,10 @@ class PlotConfig(BaseModel):
     ylim_min: float = Field(default=0.0, description="Y-axis minimum")
     ylim_max: float = Field(default=1.0, description="Y-axis maximum")
     ytick_step: int = Field(default=5, ge=1, description="Y-axis tick step (percent)")
+    force_percent_ylim_100: bool = Field(
+        default=False,
+        description="Force percent-based plots to use an exact upper y-limit of 100",
+    )
 
     class Config:
         frozen = True  # Make immutable

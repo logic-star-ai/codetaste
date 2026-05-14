@@ -62,6 +62,12 @@ def parse_args() -> argparse.Namespace:
         help="Directory to store baseline test results",
     )
     parser.add_argument(
+        "--rules-dir",
+        type=Path,
+        default=Path("./assets/rules"),
+        help="Root directory containing per-instance rule files",
+    )
+    parser.add_argument(
         "--timeout-test",
         type=int,
         default=1200,
@@ -89,6 +95,7 @@ def parse_args() -> argparse.Namespace:
     args.instances_csv = args.instances_csv.resolve()
     args.output_dir = args.output_dir.resolve()
     args.baseline_dir = args.baseline_dir.resolve()
+    args.rules_dir = args.rules_dir.resolve()
     return args
 
 
@@ -135,7 +142,7 @@ def _run_single_test(
 
 
 def populate_instance_baseline(instance, args, logger) -> bool:
-    rules_dir = prepare_temp_rules_dir(instance, logger)
+    rules_dir = prepare_temp_rules_dir(instance, args.rules_dir, logger)
     if rules_dir is None:
         logger.error(f"Skipping {instance.id}: missing rules assets for evaluation")
         return False

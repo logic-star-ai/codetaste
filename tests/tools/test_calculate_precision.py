@@ -283,6 +283,68 @@ index 1234567..abcdefg 100644
     assert abs(metrics.precision_overall - (1.0 / 3.0)) < 0.001
 
 
+def test_calculate_precision_defaults_to_fully_normalized_prec(tmp_path):
+    """Default precision should ignore whitespace, comments, docs, and configs."""
+    empty_sarif = {"version": "2.1.0", "runs": []}
+    positive_sarif = {
+        "version": "2.1.0",
+        "runs": [
+            {
+                "results": [
+                    {
+                        "locations": [
+                            {
+                                "physicalLocation": {
+                                    "artifactLocation": {"uri": "file1.py"},
+                                    "region": {"startLine": 1, "endLine": 1},
+                                }
+                            }
+                        ]
+                    }
+                ]
+            }
+        ],
+    }
+
+    sarif_neg_path = tmp_path / "rules_negative.sarif"
+    sarif_pos_path = tmp_path / "rules_positive.sarif"
+    with open(sarif_neg_path, "w") as f:
+        json.dump(empty_sarif, f)
+    with open(sarif_pos_path, "w") as f:
+        json.dump(positive_sarif, f)
+
+    diff_path = tmp_path / "prediction.diff"
+    diff_path.write_text(
+        """diff --git a/file1.py b/file1.py
+index 1234567..abcdefg 100644
+--- a/file1.py
++++ b/file1.py
+@@ -0,0 +1,3 @@
++print("kept")
++print("not captured") # comment
++
++# comment-only noise
+diff --git a/README.md b/README.md
+index 1234567..abcdefg 100644
+--- a/README.md
++++ b/README.md
+@@ -0,0 +1,1 @@
++Documentation-only noise
+diff --git a/config.json b/config.json
+index 1234567..abcdefg 100644
+--- a/config.json
++++ b/config.json
+@@ -0,0 +1,1 @@
++{"noise": true}
+"""
+    )
+
+    metrics = calculate_precision(sarif_neg_path, sarif_pos_path, diff_path)
+
+    assert metrics.precision_overall == pytest.approx(0.5)
+    assert metrics.lines_added_count == 2
+
+
 def test_instance_row_short_hash():
     """Test that InstanceRow correctly extracts short hash."""
     instance = InstanceRow(

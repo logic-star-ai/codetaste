@@ -22,6 +22,7 @@ python -m refactoring_benchmark.cli.evaluate
 ## Prerequisites
 - `outputs/<description_type>/<mode>/...` from inference.
 - `instance_images/<owner>/<repo>/<hash>/instance_metadata.json` (from `codetaste100.zip` or bootstrap).
+- Rule files under `assets/rules/<owner>/<repo>/<hash>/` by default. Use `--rules-dir` to evaluate with an alternate root such as `assets/rules-curated`.
 
 ## Outputs
 ```
@@ -35,6 +36,7 @@ outputs/<description_type>/<mode>/<owner>/<repo>/<hash>/<agent_id>/evaluation/
 
 ## Key flags
 - `--agent-id`: which agent directory to evaluate (required).
+- `--rules-dir`: root directory containing per-instance `rules_positive.yml` and `rules_negative.yml`.
 - `--timeout-test`: test run timeout in seconds.
 - `--timeout-rule`: rule run timeout in seconds.
 - `--force`: re-run evaluation even if results already exist.

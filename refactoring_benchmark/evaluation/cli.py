@@ -52,6 +52,13 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument(
+        "--rules-dir",
+        type=Path,
+        default=Path("./assets/rules"),
+        help="Root directory containing per-instance rule files",
+    )
+
+    parser.add_argument(
         "--timeout-test",
         type=int,
         default=1200,
@@ -94,5 +101,6 @@ def parse_args() -> argparse.Namespace:
     # Convert paths to absolute
     args.instances_csv = args.instances_csv.resolve()
     args.output_dir = args.output_dir.resolve()
+    args.rules_dir = args.rules_dir.resolve()
 
     return args

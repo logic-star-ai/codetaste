@@ -65,6 +65,7 @@ METRIC_LABELS = {
 NON_PERCENT_METRICS = {"diff_added_lines", "diff_removed_lines", "diff_delta_lines", "diff_size", "cost"}
 AGENT_NAME_MAPPING = {
     "claude-code-v2.0.76-sonnet45": "Sonnet 4.5",
+    "claude-code-v2.1.71-minimax-m2.7": "M2.7",
     "codex-v0.77.0-gpt-5.1-codex-mini": "GPT-5.1 M",
     "codex-v0.77.0-gpt-5.2": "GPT-5.2",
     "golden_agent": "Golden",
@@ -73,12 +74,30 @@ AGENT_NAME_MAPPING = {
 }
 
 
+def _resolve_y_axis(metric_name: str, config: PlotConfig) -> tuple[float, np.ndarray]:
+    """Compute y-axis limits and ticks for a plot."""
+    scale = 1.0 if metric_name in NON_PERCENT_METRICS else 100.0
+    ytick_step = config.ytick_step * scale / 100.0
+    ylim_max = config.ylim_max * scale
+
+    if metric_name not in NON_PERCENT_METRICS:
+        ylim_max = min(ylim_max, 100.0)
+        if config.force_percent_ylim_100:
+            ylim_max = 100.0
+
+    if ytick_step > 0 and not (config.force_percent_ylim_100 and metric_name not in NON_PERCENT_METRICS):
+        ylim_max = np.ceil(ylim_max / ytick_step) * ytick_step
+
+    return ylim_max, np.arange(0, ylim_max + (ytick_step * 0.5), ytick_step)
+
+
 def create_plot(
     data: AnalysisData,
     metric_name: str,
     plot_type: PlotType = "line",
     aggregation: AggregationType = "mean",
     config: PlotConfig = PlotConfig(),
+    title: str | None = None,
 ) -> plt.Figure:
     agents = data.get_agent_ids()
     type_mode_pairs, mapped_labels = data.get_type_mode_pairs_with_labels()
@@ -108,6 +127,8 @@ def create_plot(
     # 3. Axis Configuration
     if config.show_ylabel:
         ax.set_ylabel(f"{display_metric}")
+    if title:
+        ax.set_title(title, fontsize=config.title_fontsize)
 
     # 4. Legend with Mapped Names
     if config.show_legend:
@@ -138,13 +159,9 @@ def create_plot(
         ax.legend(**legend_kwargs)
 
     # 5. Ticks and Limits
-    ytick_step = config.ytick_step * scale / 100.0
-    ylim_max = config.ylim_max * scale
-    if ytick_step > 0:
-        # Ensure the upper y-limit lands on a tick.
-        ylim_max = np.ceil(ylim_max / ytick_step) * ytick_step
+    ylim_max, y_ticks = _resolve_y_axis(metric_name, config)
     ax.set_ylim(config.ylim_min * scale, ylim_max)
-    ax.set_yticks(np.arange(0, ylim_max + (ytick_step * 0.5), ytick_step))
+    ax.set_yticks(y_ticks)
 
     n_agents = len(agents)
     x_indices = np.arange(len(mapped_labels))

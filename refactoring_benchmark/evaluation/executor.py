@@ -37,6 +37,10 @@ from refactoring_benchmark.utils.models import InstanceMetadata, InstanceRow
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
+def format_optional_metric(value: float | None) -> str:
+    return "N/A" if value is None else f"{value:.3f}"
+
+
 def get_evaluation_dir(instance: InstanceRow, agent_id: str, output_dir: Path) -> Path:
     """
     Get evaluation directory path for an instance and agent.
@@ -178,7 +182,7 @@ def evaluate_single_instance(instance: InstanceRow, agent_id: str, config: Evalu
     instance_logger.info(f"  Agent ID: {agent_id}")
     instance_logger.info(f"  Output: {eval_dir}")
 
-    rules_dir = prepare_temp_rules_dir(instance, instance_logger)
+    rules_dir = prepare_temp_rules_dir(instance, config.rules_dir, instance_logger)
     if rules_dir is None:
         instance_logger.error(f"Skipping {instance.id}: missing rules assets for evaluation")
         return False
@@ -271,10 +275,15 @@ def evaluate_single_instance(instance: InstanceRow, agent_id: str, config: Evalu
     instance_logger.info("Evaluation completed successfully")
     instance_logger.info(f"  Test metrics: {test_metrics.model_dump() if test_metrics else 'N/A'}")
     instance_logger.info(
-        f"  Rule IFR: {rule_metrics.ifr:.3f} (pos: {rule_metrics.positive_ifr:.3f}, neg: {rule_metrics.negative_ifr:.3f})"
+        f"  Rule IFR: {format_optional_metric(rule_metrics.ifr)} "
+        f"(pos: {format_optional_metric(rule_metrics.positive_ifr)}, "
+        f"neg: {format_optional_metric(rule_metrics.negative_ifr)})"
     )
     print(
-        f"✅ [{instance.id}] : Rule IFR: {rule_metrics.ifr:.3f} (pos: {rule_metrics.positive_ifr:.3f}, neg: {rule_metrics.negative_ifr:.3f}), Test Metrics: {test_metrics.model_dump() if test_metrics else 'N/A'}"
+        f"✅ [{instance.id}] : Rule IFR: {format_optional_metric(rule_metrics.ifr)} "
+        f"(pos: {format_optional_metric(rule_metrics.positive_ifr)}, "
+        f"neg: {format_optional_metric(rule_metrics.negative_ifr)}), "
+        f"Test Metrics: {test_metrics.model_dump() if test_metrics else 'N/A'}"
     )
 
     return True

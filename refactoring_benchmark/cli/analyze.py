@@ -23,7 +23,60 @@ from refactoring_benchmark.analyze.statistics import (
     print_statistics_table,
 )
 from refactoring_benchmark.utils.common import load_instances_from_csv
+from refactoring_benchmark.utils.models import InstanceRow
 from refactoring_benchmark.utils.paths import PSEUDO_AGENTS_DIR
+
+LANGUAGE_ALIASES = {
+    "c": "c",
+    "c++": "c",
+    "cpp": "c",
+    "go": "go",
+    "java": "java",
+    "javascript": "javascript",
+    "js": "javascript",
+    "python": "python",
+    "rust": "rust",
+    "ts": "javascript",
+    "typescript": "javascript",
+}
+
+LANGUAGE_DISPLAY_NAMES = {
+    "c": "C/C++",
+    "go": "Go",
+    "java": "Java",
+    "javascript": "JavaScript/TypeScript",
+    "python": "Python",
+    "rust": "Rust",
+}
+
+
+def normalize_languages(languages: list[str]) -> list[str]:
+    """Normalize requested language filters to canonical dataset values."""
+    normalized = {LANGUAGE_ALIASES.get(language.strip().lower(), language.strip().lower()) for language in languages}
+    return sorted(normalized)
+
+
+def filter_instances_by_languages(instances: list[InstanceRow], languages: list[str]) -> list[InstanceRow]:
+    """Filter instances to the requested languages."""
+    if not languages:
+        return instances
+    return [instance for instance in instances if instance.language.lower() in languages]
+
+
+def language_output_suffix(languages: list[str]) -> str:
+    """Build a stable file suffix for language-filtered outputs."""
+    if not languages:
+        return ""
+    return "_lang_" + "_".join(languages)
+
+
+def language_plot_title(languages: list[str]) -> str | None:
+    """Build a human-readable plot title for language-filtered runs."""
+    if not languages:
+        return None
+    labels = [LANGUAGE_DISPLAY_NAMES.get(language, language.title()) for language in languages]
+    prefix = "Language" if len(labels) == 1 else "Languages"
+    return f"{prefix}: {', '.join(labels)}"
 
 
 def main():
@@ -56,6 +109,10 @@ Examples:
 
   # Only successful inference runs
   python -m refactoring_benchmark.cli.analyze --successful-only
+
+  # Restrict analysis to specific languages
+  python -m refactoring_benchmark.cli.analyze --language python
+  python -m refactoring_benchmark.cli.analyze --language js --language ts
 
   # Plot precision metrics (requires null agent)
   python -m refactoring_benchmark.cli.analyze --metric precision_overall
@@ -98,6 +155,12 @@ Examples:
         "--successful-only",
         action="store_true",
         help="Only include inference runs with finish_reason='success'",
+    )
+    parser.add_argument(
+        "--language",
+        action="append",
+        dest="languages",
+        help="Filter by instance language. Repeatable. Supported values include: python, javascript/js/ts, java, go, rust, c/cpp/c++.",
     )
 
     # Metric arguments
@@ -153,6 +216,11 @@ Examples:
         type=int,
         default=None,
         help="Y-axis tick step in percent (default: 5)",
+    )
+    parser.add_argument(
+        "--force-ylim-100",
+        action="store_true",
+        help="Force percent-based plots to use an exact upper y-limit of 100",
     )
 
     # Other arguments
@@ -224,6 +292,18 @@ Examples:
         print("Error: No instances found in CSV")
         return
 
+    languages = normalize_languages(args.languages or [])
+    if args.languages:
+        print(f"Requested languages: {', '.join(args.languages)}")
+        instances = filter_instances_by_languages(instances, languages)
+        if not instances:
+            print(f"Error: No instances found for languages: {', '.join(languages)}")
+            return
+        print(f"Filtered to {len(instances)} instances for languages: {', '.join(languages)}")
+
+    output_suffix = language_output_suffix(languages)
+    plot_title = language_plot_title(languages)
+
     # Determine metrics to plot (default: non-precision metrics only)
     if args.metrics:
         metrics_to_plot = args.metrics
@@ -255,6 +335,7 @@ Examples:
         show_ylabel=not args.no_ylabel,
         show_legend=not args.no_legend,
         legend_position=args.legend_position,
+        force_percent_ylim_100=args.force_ylim_100,
     )
     if args.ytick_step is not None:
         plot_config_kwargs["ytick_step"] = args.ytick_step
@@ -295,7 +376,7 @@ Examples:
         )
         if latex_table:
             args.plots_dir.mkdir(parents=True, exist_ok=True)
-            latex_path = args.plots_dir / "metric_results.tex"
+            latex_path = args.plots_dir / f"metric_results{output_suffix}.tex"
             latex_path.write_text(latex_table)
             print(f"Saved LaTeX table to {latex_path}")
     except Exception as e:
@@ -345,19 +426,29 @@ Examples:
                 ytick_step = (y_lim_max - y_lim_min) * 100 / 11 // 5 * 5
                 while (y_lim_max - y_lim_min) * 100 / ytick_step > 11 or ytick_step // 5 not in good_multiples:
                     ytick_step += 5
+                if metric_name not in NON_PERCENT_METRICS:
+                    y_lim_max = 1.0 if args.force_ylim_100 else min(y_lim_max, 1.0)
+                    ytick_step = min(ytick_step, 10.0)
                 config = plot_config.model_copy(
                     update={"ylim_max": y_lim_max, "ylim_min": y_lim_min, "ytick_step": ytick_step}
                 )
             else:
                 config = plot_config
-            fig = create_plot(data, metric_name, plot_type=args.plot_type, aggregation=args.aggregation, config=config)
+            fig = create_plot(
+                data,
+                metric_name,
+                plot_type=args.plot_type,
+                aggregation=args.aggregation,
+                config=config,
+                title=plot_title,
+            )
 
             # Print statistics table if requested
             if args.statistics:
                 print_statistics_table(data, metric_name, args.aggregation)
 
             # Save plot
-            output_filename = f"{metric_name}_{args.plot_type}_{args.aggregation}.pdf"
+            output_filename = f"{metric_name}_{args.plot_type}_{args.aggregation}{output_suffix}.pdf"
             output_path = args.plots_dir / output_filename
             save_plot(fig, output_path, dpi=args.dpi)
             print(f"  Saved plot to {output_path}")
